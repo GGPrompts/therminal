@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Regex-based URL detection for terminal cells.
 //!
 //! Scans visible cells for http(s) URLs that don't already have an OSC 8
@@ -50,8 +52,7 @@ pub(crate) fn detect_urls_in_cells(cells: &mut [RenderCell], screen_lines: usize
             let url = mat.as_str();
 
             // Strip common trailing punctuation that's not part of the URL.
-            let url =
-                url.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+            let url = url.trim_end_matches(['.', ',', ';', ':', '!', '?']);
             if url.len() < 10 {
                 // Too short to be a real URL (at minimum "http://x.y")
                 continue;

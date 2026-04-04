@@ -146,13 +146,12 @@ impl App {
             .create_surface(window.clone())
             .expect("failed to create wgpu surface");
 
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            }))
-            .expect("no suitable GPU adapter found");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .expect("no suitable GPU adapter found");
 
         info!(
             "wgpu adapter: {} ({:?})",
@@ -216,16 +215,13 @@ impl App {
         info!("Terminal created: {cols}x{rows}");
 
         // ── PTY ──────────────────────────────────────────────────────────
-        let (pty_master, _child) =
-            therminal_terminal::pty::spawn_shell(cols as u16, rows as u16)
-                .expect("failed to spawn shell");
+        let (pty_master, _child) = therminal_terminal::pty::spawn_shell(cols as u16, rows as u16)
+            .expect("failed to spawn shell");
 
         let pty_reader = pty_master
             .try_clone_reader()
             .expect("failed to clone PTY reader");
-        let pty_writer = pty_master
-            .take_writer()
-            .expect("failed to get PTY writer");
+        let pty_writer = pty_master.take_writer().expect("failed to get PTY writer");
 
         // ── Spawn PTY reader thread ──────────────────────────────────────
         let term_for_reader = Arc::clone(&term);

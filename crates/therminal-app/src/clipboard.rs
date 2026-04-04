@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Clipboard support: arboard wrapper + OSC 52 parsing.
 ///
 /// OSC 52 sequence format: `\x1b]52;c;{base64-encoded-text}\a`

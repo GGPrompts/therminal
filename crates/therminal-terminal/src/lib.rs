@@ -5,6 +5,6 @@ pub use therminal_protocol as protocol;
 pub mod event_log;
 pub mod input;
 pub mod osc633;
-pub mod state_inference;
 pub mod pty;
+pub mod state_inference;
 pub mod terminal;

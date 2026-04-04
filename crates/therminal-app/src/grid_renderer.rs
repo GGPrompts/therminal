@@ -11,8 +11,8 @@ use std::time::Instant;
 
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
-use alacritty_terminal::term::RenderableCursor;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::RenderableCursor;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape};
 
 use glyphon::{
@@ -70,7 +70,6 @@ impl FontConfig {
             font_size,
             line_height: font_size * LINE_HEIGHT_RATIO,
             default_font_size: font_size,
-            ..Default::default()
         }
     }
 
@@ -89,10 +88,12 @@ impl FontConfig {
 pub(crate) const TERM_BG: [f32; 4] = [10.0 / 255.0, 0.0, 16.0 / 255.0, 1.0]; // #0a0010
 
 /// Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+#[allow(dead_code)]
 const BG_OPACITY: f32 = 0.92;
 
 /// Return TERM_BG with reduced alpha for compositor transparency.
 /// `pre_multiplied`: true for PreMultiplied/Inherit, false for PostMultiplied/Auto.
+#[allow(dead_code)]
 pub fn clear_color_for_mode(pre_multiplied: bool) -> [f32; 4] {
     if pre_multiplied {
         [
@@ -205,7 +206,7 @@ fn rect_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 ///
 /// Renders the alacritty_terminal grid via glyphon text + colored rect pipeline
 /// for backgrounds and cursor.
-
+///
 /// How many frames between atlas trim operations (~16s at 60fps).
 const ATLAS_TRIM_INTERVAL: u64 = 1000;
 
@@ -226,6 +227,7 @@ pub struct GridRenderer {
     // to avoid clobbering the cell text vertex buffer when prepare() is called
     // multiple times within the same frame.
     pub(crate) overlay_atlas: TextAtlas,
+    #[allow(dead_code)]
     pub(crate) overlay_text_renderer: TextRenderer,
 
     // Rect pipeline for backgrounds and cursor
@@ -1003,7 +1005,7 @@ impl GridRenderer {
 
         // Trim atlas periodically to free unused glyphs.
         self.frame_count += 1;
-        if self.frame_count % ATLAS_TRIM_INTERVAL == 0 {
+        if self.frame_count.is_multiple_of(ATLAS_TRIM_INTERVAL) {
             self.atlas.trim();
             self.overlay_atlas.trim();
         }
@@ -1027,7 +1029,7 @@ impl GridRenderer {
             );
         }
 
-        if self.frame_count % 100 == 0 {
+        if self.frame_count.is_multiple_of(100) {
             let n = self.frame_times_us.len() as u64;
             let avg_us = self.frame_time_sum / n;
             debug!(
@@ -1045,7 +1047,10 @@ mod tests {
 
     #[test]
     fn cell_display_text_preserves_zero_width_codepoints() {
-        assert_eq!(cell_display_text('\u{2699}', Some(&['\u{fe0f}'])), "\u{2699}\u{fe0f}");
+        assert_eq!(
+            cell_display_text('\u{2699}', Some(&['\u{fe0f}'])),
+            "\u{2699}\u{fe0f}"
+        );
         assert_eq!(cell_display_text('a', Some(&['\u{0301}'])), "a\u{0301}");
     }
 

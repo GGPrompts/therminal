@@ -293,9 +293,6 @@ mod tests {
         // On macOS config == data, so we only check cache differs from config.
         let config = config_dir();
         let cache = cache_dir();
-        assert_ne!(
-            config, cache,
-            "config and cache dirs should differ"
-        );
+        assert_ne!(config, cache, "config and cache dirs should differ");
     }
 }

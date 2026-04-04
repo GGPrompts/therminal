@@ -244,6 +244,8 @@ pub(crate) fn f32_to_glyph_color(c: [f32; 4]) -> GlyphColor {
 ///
 /// The rectangle is `thickness` pixels wide, oriented along the line direction.
 /// Returns vertices in NDC for the rect pipeline.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn line_to_rect_verts(
     x0: f32,
     y0: f32,

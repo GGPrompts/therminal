@@ -5,6 +5,9 @@
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
 
+/// Result of spawning a shell in a new PTY.
+pub type SpawnResult = (Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>);
+
 #[derive(Debug, Error)]
 pub enum PtyError {
     #[error("failed to open PTY pair: {0}")]
@@ -20,10 +23,7 @@ pub enum PtyError {
 /// Spawn the user's default shell in a new PTY of the given size.
 ///
 /// Returns the master side of the PTY (for reading/writing) and the child process handle.
-pub fn spawn_shell(
-    cols: u16,
-    rows: u16,
-) -> Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>), PtyError> {
+pub fn spawn_shell(cols: u16, rows: u16) -> Result<SpawnResult, PtyError> {
     let pty_system = portable_pty::native_pty_system();
 
     let size = PtySize {

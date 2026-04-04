@@ -32,9 +32,10 @@ pub enum TaskStateV1 {
 }
 
 /// Status of an agent session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeStatusV1 {
+    #[default]
     Idle,
     Processing,
     ToolUse,
@@ -162,12 +163,6 @@ pub type ConductorConfig = ConductorConfigV1;
 pub type PaneInfo = PaneInfoV1;
 
 // ── Default impls ────────────────────────────────────────────────────────────
-
-impl Default for ClaudeStatus {
-    fn default() -> Self {
-        ClaudeStatusV1::Idle
-    }
-}
 
 impl Default for SessionState {
     fn default() -> Self {

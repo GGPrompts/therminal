@@ -81,7 +81,11 @@ impl EventLog {
             .metadata()
             .map(|m| {
                 let size = m.len();
-                if size == 0 { 0 } else { (size / 150) as usize }
+                if size == 0 {
+                    0
+                } else {
+                    (size / 150) as usize
+                }
             })
             .unwrap_or(0);
         debug!(path = %path.display(), existing_estimate = existing, "Opened event log");

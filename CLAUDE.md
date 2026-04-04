@@ -28,6 +28,22 @@ crates/
 - **Wire protocol**: MessagePack framing
 - **Language**: Rust
 
+## Building & Testing
+
+Run `./scripts/ci.sh` before committing code changes. This runs the same checks as GitHub Actions CI:
+
+```bash
+./scripts/ci.sh        # fmt check, clippy, build, test — all workspace
+```
+
+Individual steps if needed:
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace -- -D warnings
+cargo build --workspace
+cargo test --workspace
+```
+
 ## Key Docs
 
 | Doc | Purpose |
