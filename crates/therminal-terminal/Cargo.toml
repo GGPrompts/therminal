@@ -11,3 +11,6 @@ therminal-protocol = { workspace = true }
 alacritty_terminal = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }

@@ -1,3 +1,8 @@
+mod color_mapping;
+mod grid_renderer;
+
+pub use grid_renderer::{FontConfig, GridRenderer, RenderCell};
+
 use anyhow::Result;
 use clap::Parser;
 
