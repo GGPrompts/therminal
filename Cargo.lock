@@ -1525,6 +1525,7 @@ dependencies = [
  "glyphon",
  "pollster",
  "serde",
+ "serde_json",
  "therminal-protocol",
  "thiserror 2.0.18",
  "tracing",

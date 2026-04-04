@@ -15,6 +15,8 @@ use glyphon::{
 };
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
+use crate::font::{self, FontConfig};
+
 /// All glyphon state bundled into a single, reusable struct.
 ///
 /// Create one of these per rendering surface and share it across draw calls.
@@ -43,19 +45,23 @@ impl TherminalTextRenderer {
     /// glyphon 0.7 depends on).
     ///
     /// # Arguments
-    /// * `device`  — wgpu 23 `Device`
-    /// * `queue`   — wgpu 23 `Queue`
-    /// * `format`  — `TextureFormat` of the render target
-    /// * `width`   — surface width in physical pixels
-    /// * `height`  — surface height in physical pixels
+    /// * `device`      — wgpu 23 `Device`
+    /// * `queue`       — wgpu 23 `Queue`
+    /// * `format`      — `TextureFormat` of the render target
+    /// * `width`       — surface width in physical pixels
+    /// * `height`      — surface height in physical pixels
+    /// * `font_config` — optional [`FontConfig`]; when `None` uses platform defaults
     pub fn new(
         device: &Device,
         queue: &Queue,
         format: TextureFormat,
         width: u32,
         height: u32,
+        font_config: Option<&FontConfig>,
     ) -> Self {
-        let font_system = FontSystem::new();
+        let default_cfg = FontConfig::default();
+        let cfg = font_config.unwrap_or(&default_cfg);
+        let font_system = font::build_font_system(cfg);
         let swash_cache = SwashCache::new();
 
         // glyphon 0.7: Cache must be created before TextAtlas / Viewport.
@@ -119,7 +125,7 @@ impl TherminalTextRenderer {
         // `buffer.set_size` to wrap at a specific width.
         buffer.set_size(&mut self.font_system, None, None);
 
-        let attrs = Attrs::new().color(color).family(Family::SansSerif);
+        let attrs = Attrs::new().color(color).family(Family::Monospace);
         buffer.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);
 

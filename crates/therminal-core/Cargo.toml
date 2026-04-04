@@ -16,3 +16,4 @@ cosmic-text = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }

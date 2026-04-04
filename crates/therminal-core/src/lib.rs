@@ -1,5 +1,6 @@
-//! Color palette, wgpu context, text renderer, and geometry primitives.
+//! Color palette, wgpu context, text renderer, font discovery, and geometry primitives.
 
+pub mod font;
 pub mod geometry;
 pub mod palette;
 pub mod text;
