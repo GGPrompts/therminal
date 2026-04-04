@@ -35,9 +35,39 @@ crates/
 | `PLAN.md` | Full project plan, competitive analysis, architecture |
 | `CLAUDE.md` | This file — development instructions |
 
+## Scope Boundary: Terminal vs Integration
+
+The core architectural decision: **"Does this need bytes-in-flight, or can it work from stored state?"**
+
+If it needs the live PTY stream or GPU surface, it belongs in the terminal. If it works from stored/structured data, it's an external tool that connects via MCP, CLI, or daemon IPC.
+
+### In the terminal (needs live PTY stream or GPU surface)
+- Terminal emulation and rendering
+- PTY parsing, OSC sequence interception, agent state detection
+- Semantic region tagging as bytes flow through
+- Daemon, session persistence, multiplexing
+- MCP server exposing live pane state
+- GPU overlays (agent status, thinking indicators, tool call cards)
+- Hotspot detection and rendering (clickable file paths, URLs, errors)
+- Geometry-aware tiling and auto-tiling for swarms
+
+### Outside the terminal (consumes structured data via MCP or files)
+- Session history viewer/search (TUI or web UI reading SQLite/JSONL)
+- Agent coordination dashboard (logic separate, could render in WebView pane)
+- Trust tier configuration UI
+- Session analytics (token usage, cost tracking)
+- Any tool that operates on stored state after the fact
+
+### Gray zone (terminal hosts it but doesn't implement the logic)
+- Semantic scrollback navigation: tagging is in-terminal, but rich search/filter UI may be better as a TUI connecting via MCP
+- JSONL session viewer: hosted as a WebView pane, but the viewer itself is separate
+- Agent-to-agent messaging: daemon provides the bus, protocol/tooling is separate
+
+**Therminal is the platform, not the monolith.** It stays fast and focused on its privileged position — the live PTY stream and GPU surface — while the ecosystem grows around the MCP interface.
+
 ## Task Tracking
 
-Issue tracking via beads (prefix: `therm` — shared with thermal-desktop during extraction).
+Issue tracking via beads (prefix: `tn`).
 
 ## Related Projects
 
