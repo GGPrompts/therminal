@@ -137,8 +137,14 @@ impl App {
     /// Initialize wgpu, grid renderer, terminal, and PTY.
     fn init_gpu(&mut self, window: Arc<Window>) {
         let size = window.inner_size();
+        let backends = if cfg!(target_os = "linux") {
+            wgpu::Backends::VULKAN
+        } else {
+            wgpu::Backends::all()
+        };
+        info!("wgpu backends: {:?}", backends);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
@@ -182,10 +188,21 @@ impl App {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode: *surface_caps
+                .alpha_modes
+                .iter()
+                .find(|m| **m == wgpu::AlphaMode::Opaque)
+                .or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .iter()
+                        .find(|m| **m == wgpu::AlphaMode::Auto)
+                })
+                .unwrap_or(&surface_caps.alpha_modes[0]),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        info!("wgpu alpha_mode: {:?}", config.alpha_mode);
         surface.configure(&device, &config);
 
         // ── Grid renderer ────────────────────────────────────────────────
