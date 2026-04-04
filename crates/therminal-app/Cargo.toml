@@ -1,0 +1,21 @@
+[package]
+name = "therminal-app"
+description = "Window, grid renderer, overlays, and tiling for Therminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "therminal"
+path = "src/main.rs"
+
+[dependencies]
+therminal-protocol = { workspace = true }
+therminal-core = { workspace = true }
+therminal-runtime = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

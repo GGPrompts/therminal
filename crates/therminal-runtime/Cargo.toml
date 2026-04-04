@@ -1,0 +1,12 @@
+[package]
+name = "therminal-runtime"
+description = "Cross-platform IPC, locks, and paths for Therminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

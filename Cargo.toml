@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/therminal-protocol",
+    "crates/therminal-terminal",
+    "crates/therminal-core",
+    "crates/therminal-runtime",
+    "crates/therminal-daemon",
+    "crates/therminal-app",
+]
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/GGPrompts/therminal"
+
+[workspace.dependencies]
+# Workspace crates
+therminal-protocol = { path = "crates/therminal-protocol" }
+therminal-terminal = { path = "crates/therminal-terminal" }
+therminal-core = { path = "crates/therminal-core" }
+therminal-runtime = { path = "crates/therminal-runtime" }
+therminal-daemon = { path = "crates/therminal-daemon" }
+therminal-app = { path = "crates/therminal-app" }
+
+# GPU Rendering
+wgpu = "23"
+glyphon = "0.7"
+cosmic-text = "0.12"
+
+# Windowing
+winit = "0.30"
+
+# Terminal
+alacritty_terminal = "0.25"
+vte = "0.14"
+
+# IPC
+interprocess = "2"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Text processing
+regex = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Misc
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+pollster = "0.3"
+tempfile = "3"

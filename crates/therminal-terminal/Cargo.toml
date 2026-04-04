@@ -1,0 +1,12 @@
+[package]
+name = "therminal-terminal"
+description = "PTY management, OSC 633, and state inference engine for Therminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+therminal-protocol = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
