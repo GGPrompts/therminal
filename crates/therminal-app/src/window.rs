@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -118,6 +119,9 @@ pub struct App {
 
     /// Current modifiers state from winit.
     modifiers: Modifiers,
+
+    /// Last resize timestamp for debouncing rapid resize events.
+    last_resize: Option<Instant>,
 }
 
 impl App {
@@ -131,6 +135,7 @@ impl App {
             _pty_master: None,
             event_proxy,
             modifiers: Modifiers::default(),
+            last_resize: None,
         }
     }
 
@@ -285,7 +290,13 @@ impl App {
 
         gpu.config.width = new_size.width;
         gpu.config.height = new_size.height;
-        gpu.surface.configure(&gpu.device, &gpu.config);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gpu.surface.configure(&gpu.device, &gpu.config);
+        }));
+        if let Err(e) = result {
+            warn!("Surface configure panicked during resize: {:?}", e);
+            return;
+        }
 
         // Resize grid renderer.
         if let Some(renderer) = self.grid_renderer.as_mut() {
@@ -581,9 +592,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::Resized(new_size) => {
-                self.resize(new_size);
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
+                let now = Instant::now();
+                let should_resize = self
+                    .last_resize
+                    .map(|t| now.duration_since(t).as_millis() > 16)
+                    .unwrap_or(true);
+                if should_resize {
+                    self.last_resize = Some(now);
+                    self.resize(new_size);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
 
@@ -664,6 +683,11 @@ fn pty_reader_loop(
 
 /// Create the event loop, set control flow to Wait, and run the app.
 pub fn run() -> Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("Therminal panic: {info}");
+        eprintln!("Backtrace: {:?}", std::backtrace::Backtrace::capture());
+    }));
+
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
