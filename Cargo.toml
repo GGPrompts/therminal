@@ -35,7 +35,7 @@ winit = "0.30"
 
 # Terminal
 alacritty_terminal = "0.25"
-vte = "0.14"
+vte = "0.15"
 
 # IPC
 interprocess = "2"
@@ -67,3 +67,8 @@ bytemuck = { version = "1", features = ["derive"] }
 raw-window-handle = "0.6"
 pollster = "0.3"
 tempfile = "3"
+dirs = "5"
+
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
+vte = { path = "vendor/vte" }

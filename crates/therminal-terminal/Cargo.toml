@@ -8,5 +8,6 @@ repository.workspace = true
 
 [dependencies]
 therminal-protocol = { workspace = true }
+alacritty_terminal = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
