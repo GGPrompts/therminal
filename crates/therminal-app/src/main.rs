@@ -1,5 +1,7 @@
+mod clipboard;
 mod color_mapping;
 mod grid_renderer;
+mod url_detection;
 mod window;
 
 pub use grid_renderer::{FontConfig, GridRenderer, RenderCell};
