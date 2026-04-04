@@ -12,9 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 therminal-protocol = { workspace = true }
+therminal-terminal = { workspace = true }
 therminal-core = { workspace = true }
 therminal-runtime = { workspace = true }
 alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
