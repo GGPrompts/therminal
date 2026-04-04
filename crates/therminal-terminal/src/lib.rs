@@ -6,4 +6,5 @@ pub mod event_log;
 pub mod input;
 pub mod osc633;
 pub mod state_inference;
+pub mod pty;
 pub mod terminal;

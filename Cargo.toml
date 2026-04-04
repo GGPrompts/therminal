@@ -36,6 +36,7 @@ winit = "0.30"
 # Terminal
 alacritty_terminal = "0.25"
 vte = "0.15"
+portable-pty = "0.8"
 
 # IPC
 interprocess = "2"
