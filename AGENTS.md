@@ -1,49 +1,40 @@
-# Therminal
+# Agent Instructions
 
-The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the era of AI agents.
+This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
-## Status
+## Quick Reference
 
-Early planning phase. Core technology exists in [thermal-desktop](../thermal-desktop/) and will be extracted and made cross-platform.
-
-## Architecture
-
-Cargo workspace with crates extracted from thermal-desktop:
-
-```
-crates/
-├── therminal-protocol/    # Wire types, MCP schema, semantic events
-├── therminal-terminal/    # PTY management, OSC 633, state inference engine
-├── therminal-core/        # Color palette, wgpu context, text renderer
-├── therminal-runtime/     # Cross-platform IPC (interprocess), locks, paths
-├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server
-└── therminal-app/         # winit window, grid renderer, overlays, tiling
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work atomically
+bd close <id>         # Complete work
+bd dolt push          # Push beads data to remote
 ```
 
-### Core Stack
-- **GPU rendering**: wgpu + glyphon + cosmic-text
-- **Terminal emulation**: alacritty_terminal (vendored)
-- **Windowing**: winit (cross-platform)
-- **IPC**: interprocess crate (Unix sockets / named pipes)
-- **Wire protocol**: MessagePack framing
-- **Language**: Rust
+## Non-Interactive Shell Commands
 
-## Key Docs
+**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
 
-| Doc | Purpose |
-|-----|---------|
-| `PLAN.md` | Full project plan, competitive analysis, architecture |
-| `CLAUDE.md` | This file — development instructions |
+Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
 
-## Task Tracking
+**Use these forms instead:**
+```bash
+# Force overwrite without prompting
+cp -f source dest           # NOT: cp source dest
+mv -f source dest           # NOT: mv source dest
+rm -f file                  # NOT: rm file
 
-Issue tracking via beads (prefix: `therm` — shared with thermal-desktop during extraction).
+# For recursive operations
+rm -rf directory            # NOT: rm -r directory
+cp -rf source dest          # NOT: cp -r source dest
+```
 
-## Related Projects
-
-- **thermal-desktop** — Linux Hyprland shell, will consume therminal as a dependency
-- **TabzChrome** — Browser MCP tools, paired with therminal for complete agent workspace
-
+**Other commands that may prompt:**
+- `scp` - use `-o BatchMode=yes` for non-interactive
+- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
+- `apt-get` - use `-y` flag
+- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
