@@ -1,5 +1,6 @@
 mod color_mapping;
 mod grid_renderer;
+mod window;
 
 pub use grid_renderer::{FontConfig, GridRenderer, RenderCell};
 
@@ -14,8 +15,7 @@ struct Cli {
     verbose: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -23,5 +23,5 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("therminal starting");
-    Ok(())
+    window::run()
 }

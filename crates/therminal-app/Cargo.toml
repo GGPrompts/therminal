@@ -15,7 +15,9 @@ therminal-protocol = { workspace = true }
 therminal-core = { workspace = true }
 therminal-runtime = { workspace = true }
 alacritty_terminal = { workspace = true }
+winit = { workspace = true }
 wgpu = { workspace = true }
+pollster = { workspace = true }
 glyphon = { workspace = true }
 bytemuck = { workspace = true }
 tokio = { workspace = true }
