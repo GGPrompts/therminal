@@ -191,12 +191,12 @@ impl App {
             alpha_mode: *surface_caps
                 .alpha_modes
                 .iter()
-                .find(|m| **m == wgpu::AlphaMode::Opaque)
+                .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
                 .or_else(|| {
                     surface_caps
                         .alpha_modes
                         .iter()
-                        .find(|m| **m == wgpu::AlphaMode::Auto)
+                        .find(|m| **m == wgpu::CompositeAlphaMode::Auto)
                 })
                 .unwrap_or(&surface_caps.alpha_modes[0]),
             view_formats: vec![],
