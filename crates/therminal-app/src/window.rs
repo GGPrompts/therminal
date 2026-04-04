@@ -189,7 +189,16 @@ impl App {
         surface.configure(&device, &config);
 
         // ── Grid renderer ────────────────────────────────────────────────
-        let font_config = FontConfig::default();
+        let scale = window.scale_factor() as f32;
+        let mut font_config = FontConfig::default();
+        // Scale font size to physical pixels so glyphs fill the correct cell area.
+        font_config.font_size *= scale;
+        font_config.line_height = font_config.font_size * 1.4;
+        info!(
+            scale,
+            font_size = font_config.font_size,
+            "Applying DPI scale to font"
+        );
         let grid_renderer = GridRenderer::new(
             &device,
             &queue,
