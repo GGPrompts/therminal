@@ -13,5 +13,4 @@ logs/
 # bd worktrees (top-level only)
 /region-index/
 /shell-integration/
-# bd worktree
-agent-detection/
+.beads/metadata.json
