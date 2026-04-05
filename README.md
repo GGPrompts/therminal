@@ -4,25 +4,43 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-**Active development — Phase 0, 1, and 2 complete.**
+**Active development — Phases 0–2 complete, Phase 3 in progress.**
 
-What works today:
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | GPU rendering + shell | Complete |
+| 1 | OSC parsing, shell integration, agent detection | Complete |
+| 2 | Daemon, IPC, multiplexing, config, pane chrome | Complete |
+| 3 | AI Detection + Hotspots + UX | In Progress |
+
+### What's implemented
+
+**GPU rendering & input**
 - GPU-accelerated terminal rendering (wgpu + glyphon + cosmic-text)
-- Full keyboard input (including Kitty protocol) and mouse input (scroll, click, SGR 1006)
+- Full keyboard input (Kitty protocol) and mouse input (scroll, click, SGR 1006)
+- Clipboard via arboard + OSC 52
+
+**Shell integration & AI awareness**
 - Shell integration scripts (bash, zsh, fish, PowerShell) emitting OSC 133 semantic marks
 - SequenceInterceptor — AI-aware OSC parsing between VTE and terminal handler
 - Semantic region index — typed regions (Prompt, Command, Output, Error, ToolCall, Thinking)
 - Process tree agent detection via sysinfo (Claude Code, Codex, Aider, Copilot)
 - Output cadence analysis — distinguishes human typing from agent output
-- Clipboard via arboard + OSC 52
-- URL detection and cross-platform runtime paths
+
+**Daemon & multiplexing**
 - Session daemon with socket-as-lock lifecycle and zero-downtime handoff
 - IPC protocol (MessagePack framing, multiplexed request/response, event streaming)
-- Split panes with binary layout tree and keyboard shortcuts
+- Session → Window → Pane hierarchy with persistent PTY workers
+- Attach/detach with state snapshots — no byte replay needed
+
+**Pane management & UX**
+- Split panes with binary layout tree and keyboard/shortcut controls
+- Batch close and restore with layout snapshots
+- GPU-rendered right-click context menus
+- Keybinding help overlay (Ctrl+Shift+?)
+- Auto-tiled pane spawn (Alt+Enter)
 - TOML config with hot-reload via file watcher
 - Control mode (tmux -CC style machine-readable protocol)
-
-Next: Phase 3 (AI Detection + Hotspots).
 
 ## Building
 
@@ -86,9 +104,9 @@ Cargo workspace with six crates:
 crates/
   therminal-protocol/    Wire types, MCP schema, semantic events
   therminal-terminal/    PTY, OSC parsing, state inference, agent detection, region index
-  therminal-core/        Color palette, wgpu context, text renderer
+  therminal-core/        Color palette, wgpu context, text renderer, TOML config, hot-reload
   therminal-runtime/     Cross-platform paths, runtime dir management
-  therminal-daemon/      Session manager, event bus, multiplexer, MCP server (stub)
+  therminal-daemon/      Session manager, event bus, multiplexer, IPC server, MCP server (stub)
   therminal-app/         winit window, grid renderer, mouse input, PTY wiring
 vendor/
   alacritty_terminal/    Vendored v0.25.1
