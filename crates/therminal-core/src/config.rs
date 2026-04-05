@@ -596,6 +596,10 @@ impl Default for KeybindingsConfig {
                     key: "ctrl+shift+enter".to_string(),
                     action: KeyAction::SplitAuto,
                 },
+                Keybinding {
+                    key: "alt+enter".to_string(),
+                    action: KeyAction::SplitAuto,
+                },
                 // Pane management
                 Keybinding {
                     key: "ctrl+shift+w".to_string(),
@@ -1121,6 +1125,16 @@ allowed_tools = ["read_file", "write_file"]
     fn parse_binding_invalid_returns_none() {
         assert!(parse_binding("").is_none());
         assert!(parse_binding("ctrl+shift+foobar").is_none());
+    }
+
+    #[test]
+    fn parse_binding_alt_enter() {
+        let (mods, key) = parse_binding("alt+enter").unwrap();
+        assert!(!mods.ctrl);
+        assert!(!mods.shift);
+        assert!(mods.alt);
+        assert!(!mods.super_key);
+        assert_eq!(key, ParsedKey::Named(ParsedNamedKey::Enter));
     }
 
     #[test]
