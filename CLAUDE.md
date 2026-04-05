@@ -80,6 +80,26 @@ The daemon exposes a multiplexed IPC protocol over Unix domain sockets with leng
 
 Protocol types live in `therminal-protocol/src/daemon.rs`. Server/client in `therminal-daemon/src/{server,client}.rs`.
 
+### Session Manager
+
+The daemon provides persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy managed by `SessionManager` in `therminal-daemon/src/session.rs`.
+
+**Hierarchy**: `SessionManager` owns a `HashMap<SessionId, Session>`. Each `Session` contains `Vec<Window>`, each `Window` contains `Vec<Pane>`. A new session gets one default window with one pane.
+
+**Pane PTY workers**: Each `Pane` spawns a shell via `therminal_terminal::pty::spawn_shell()` and owns:
+- A `portable_pty::MasterPty` (kept alive to prevent PTY close)
+- A `Box<dyn Write>` for forwarding client keystrokes to the PTY
+- An `Arc<FairMutex<alacritty_terminal::Term>>` with a headless `EventListener` -- no GPU, just terminal state
+- A dedicated reader thread that reads PTY output, feeds it through `vte::ansi::Processor` into the `Term`, and broadcasts `DaemonEvent::PaneOutput` to subscribed clients
+
+**Attach/detach protocol**: On attach, the daemon takes a `PaneSnapshot` from each pane's `Term` state -- grid content (chars + bold flags), cursor position, and dimensions. This is a state snapshot, not a byte replay. The client renders this snapshot to immediately show the current terminal state.
+
+**Session CRUD via IPC**: `CreateSession` spawns a real PTY and returns the session ID. `ListSessions`, `GetSession`, `DestroySession` operate on the session map. Session count is synced to the `Lifecycle` for idle-exit tracking.
+
+**Keystroke forwarding**: Client sends input bytes via IPC, dispatched through `SessionManager::write_to_pane()` to the pane's PTY writer.
+
+**Graceful shutdown**: `IpcServer::run()` calls `SessionManager::shutdown()` on exit, which destroys all sessions (dropping PTY masters, causing reader threads to get EOF and exit).
+
 ## Configuration System
 
 TOML-based config with hot-reload, implemented in `therminal-core`.

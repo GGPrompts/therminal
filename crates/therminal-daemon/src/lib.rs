@@ -26,10 +26,12 @@ pub mod ensure;
 pub mod handoff;
 pub mod lifecycle;
 pub mod server;
+pub mod session;
 
 pub use ensure::{ensure_daemon, EnsureResult, BUILD_HASH, VERSION};
 pub use lifecycle::{Lifecycle, LifecycleConfig};
 pub use server::IpcServer;
+pub use session::SessionManager;
 
 pub use therminal_protocol as protocol;
 pub use therminal_runtime as runtime;

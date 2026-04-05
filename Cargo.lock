@@ -2826,8 +2826,10 @@ dependencies = [
 name = "therminal-daemon"
 version = "0.1.0"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "clap",
+ "portable-pty",
  "rmp-serde",
  "serde",
  "therminal-protocol",

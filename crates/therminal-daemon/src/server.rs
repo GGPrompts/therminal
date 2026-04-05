@@ -21,6 +21,7 @@ use therminal_protocol::daemon::{
 };
 
 use crate::lifecycle::Lifecycle;
+use crate::session::SessionManager;
 
 /// Capacity of the event broadcast channel.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -39,6 +40,8 @@ pub struct IpcServer {
     event_tx: broadcast::Sender<DaemonEvent>,
     /// Monotonically increasing connection ID for logging.
     next_conn_id: AtomicU64,
+    /// Session manager shared across all connection handlers.
+    session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
 }
 
 impl IpcServer {
@@ -73,6 +76,10 @@ impl IpcServer {
 
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(SessionManager::new(
+            event_tx.clone(),
+        )));
+
         info!(path = %socket_path.display(), "daemon socket bound");
         Ok(Self {
             listener,
@@ -82,12 +89,18 @@ impl IpcServer {
             version,
             event_tx,
             next_conn_id: AtomicU64::new(1),
+            session_mgr,
         })
     }
 
     /// Get a sender handle for broadcasting events to subscribed clients.
     pub fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
         self.event_tx.clone()
+    }
+
+    /// Get a handle to the session manager.
+    pub fn session_manager(&self) -> Arc<tokio::sync::Mutex<SessionManager>> {
+        Arc::clone(&self.session_mgr)
     }
 
     /// Run the server accept loop until the lifecycle transitions to Stopped.
@@ -97,6 +110,7 @@ impl IpcServer {
         let build_hash = self.build_hash.clone();
         let version = self.version.clone();
         let event_tx = self.event_tx.clone();
+        let session_mgr = Arc::clone(&self.session_mgr);
 
         loop {
             tokio::select! {
@@ -108,8 +122,9 @@ impl IpcServer {
                             let bh = build_hash.clone();
                             let ver = version.clone();
                             let etx = event_tx.clone();
+                            let sm = Arc::clone(&session_mgr);
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, lc, bh, ver, etx, conn_id).await {
+                                if let Err(e) = handle_connection(stream, lc, bh, ver, etx, sm, conn_id).await {
                                     debug!(conn_id, error = %e, "connection handler error");
                                 }
                             });
@@ -125,6 +140,12 @@ impl IpcServer {
                     break;
                 }
             }
+        }
+
+        // Graceful shutdown: destroy all sessions
+        {
+            let mut mgr = self.session_mgr.lock().await;
+            mgr.shutdown();
         }
 
         // Clean up socket
@@ -207,6 +228,7 @@ async fn handle_connection(
     build_hash: String,
     version: String,
     event_tx: broadcast::Sender<DaemonEvent>,
+    session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     conn_id: u64,
 ) -> Result<()> {
     // Read first frame
@@ -224,6 +246,7 @@ async fn handle_connection(
             build_hash,
             version,
             event_tx,
+            session_mgr,
             conn_id,
             ipc_msg,
         )
@@ -267,12 +290,14 @@ async fn dispatch_legacy(
 }
 
 /// Handle a full IPC connection (multiple frames, event streaming).
+#[allow(clippy::too_many_arguments)]
 async fn handle_ipc_connection(
     stream: &mut UnixStream,
     lifecycle: Arc<Lifecycle>,
     build_hash: String,
     version: String,
     event_tx: broadcast::Sender<DaemonEvent>,
+    session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     conn_id: u64,
     first_msg: IpcMessage,
 ) -> Result<()> {
@@ -287,6 +312,7 @@ async fn handle_ipc_connection(
         &build_hash,
         &version,
         &event_tx,
+        &session_mgr,
         &mut subscribed_kinds,
         &mut event_rx,
         conn_id,
@@ -305,7 +331,8 @@ async fn handle_ipc_connection(
                             let msg = decode_ipc(&data).context("failed to decode IPC message")?;
                             process_ipc_message(
                                 stream, &msg, &lifecycle, &build_hash, &version,
-                                &event_tx, &mut subscribed_kinds, &mut event_rx, conn_id,
+                                &event_tx, &session_mgr, &mut subscribed_kinds,
+                                &mut event_rx, conn_id,
                             ).await?;
                         }
                         None => break, // Clean disconnect
@@ -339,6 +366,7 @@ async fn handle_ipc_connection(
                         &build_hash,
                         &version,
                         &event_tx,
+                        &session_mgr,
                         &mut subscribed_kinds,
                         &mut event_rx,
                         conn_id,
@@ -363,6 +391,7 @@ async fn process_ipc_message(
     build_hash: &str,
     version: &str,
     event_tx: &broadcast::Sender<DaemonEvent>,
+    session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -378,10 +407,12 @@ async fn process_ipc_message(
                 build_hash,
                 version,
                 event_tx,
+                session_mgr,
                 subscribed_kinds,
                 event_rx,
                 conn_id,
-            );
+            )
+            .await;
             let resp_msg = IpcMessage::Response {
                 request_id: *request_id,
                 payload: response,
@@ -401,23 +432,27 @@ async fn process_ipc_message(
 
 /// Dispatch an IPC request and return the response.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_ipc(
+async fn dispatch_ipc(
     request: &IpcRequest,
     lifecycle: &Arc<Lifecycle>,
     build_hash: &str,
     version: &str,
     event_tx: &broadcast::Sender<DaemonEvent>,
+    session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
 ) -> IpcResponse {
     match request {
-        IpcRequest::Ping => IpcResponse::Pong {
-            build_hash: build_hash.to_string(),
-            uptime_secs: lifecycle.uptime_secs(),
-            sessions: lifecycle.session_count(),
-            version: version.to_string(),
-        },
+        IpcRequest::Ping => {
+            let mgr = session_mgr.lock().await;
+            IpcResponse::Pong {
+                build_hash: build_hash.to_string(),
+                uptime_secs: lifecycle.uptime_secs(),
+                sessions: mgr.session_count(),
+                version: version.to_string(),
+            }
+        }
         IpcRequest::GracefulShutdown => {
             let lc = Arc::clone(lifecycle);
             tokio::spawn(async move {
@@ -444,27 +479,51 @@ fn dispatch_ipc(
         IpcRequest::GetState => IpcResponse::State {
             state: lifecycle.state(),
         },
-        // Session management stubs — will be implemented when the session manager lands
-        IpcRequest::ListSessions => IpcResponse::Sessions {
-            session_ids: vec![],
-        },
-        IpcRequest::GetSession { session_id } => IpcResponse::Error {
-            message: format!("session not found: {session_id}"),
-        },
-        IpcRequest::CreateSession { name: _ } => {
-            // TODO: wire to session manager
-            let session_id = format!(
-                "sess-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            );
-            IpcResponse::SessionCreated { session_id }
+        IpcRequest::ListSessions => {
+            let mgr = session_mgr.lock().await;
+            IpcResponse::Sessions {
+                session_ids: mgr.list_sessions(),
+            }
         }
-        IpcRequest::DestroySession { session_id } => IpcResponse::Error {
-            message: format!("session not found: {session_id}"),
-        },
+        IpcRequest::GetSession { session_id } => {
+            let mgr = session_mgr.lock().await;
+            match mgr.get_session_info(session_id) {
+                Some((id, name, created_at_secs)) => IpcResponse::SessionInfo {
+                    session_id: id,
+                    name,
+                    created_at_secs,
+                },
+                None => IpcResponse::Error {
+                    message: format!("session not found: {session_id}"),
+                },
+            }
+        }
+        IpcRequest::CreateSession { name } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.create_session(name.clone()) {
+                Ok(session_id) => {
+                    // Update lifecycle session count
+                    lifecycle.set_session_count(mgr.session_count());
+                    IpcResponse::SessionCreated { session_id }
+                }
+                Err(e) => IpcResponse::Error {
+                    message: format!("failed to create session: {e}"),
+                },
+            }
+        }
+        IpcRequest::DestroySession { session_id } => {
+            let mut mgr = session_mgr.lock().await;
+            if mgr.destroy_session(session_id) {
+                lifecycle.set_session_count(mgr.session_count());
+                IpcResponse::SessionDestroyed {
+                    session_id: session_id.clone(),
+                }
+            } else {
+                IpcResponse::Error {
+                    message: format!("session not found: {session_id}"),
+                }
+            }
+        }
     }
 }
 
