@@ -139,10 +139,16 @@ impl Pane {
         // Spawn PTY
         let (pty_master, _child) = therminal_terminal::pty::spawn_shell(cols, rows)?;
 
-        let pty_reader = pty_master
-            .try_clone_reader()
-            .expect("failed to clone PTY reader");
-        let pty_writer = pty_master.take_writer().expect("failed to get PTY writer");
+        let pty_reader = pty_master.try_clone_reader().map_err(|e| {
+            therminal_terminal::pty::PtyError::Open(anyhow::anyhow!(
+                "failed to clone PTY reader: {e}"
+            ))
+        })?;
+        let pty_writer = pty_master.take_writer().map_err(|e| {
+            therminal_terminal::pty::PtyError::Open(anyhow::anyhow!(
+                "failed to get PTY writer: {e}"
+            ))
+        })?;
 
         // Spawn reader thread
         let term_for_reader = Arc::clone(&term);
@@ -153,7 +159,11 @@ impl Pane {
             .spawn(move || {
                 pane_reader_loop(pty_reader, term_for_reader, event_tx, sess_id, pane_id);
             })
-            .expect("failed to spawn PTY reader thread");
+            .map_err(|e| {
+                therminal_terminal::pty::PtyError::Open(anyhow::anyhow!(
+                    "failed to spawn PTY reader thread: {e}"
+                ))
+            })?;
 
         Ok(Self {
             id,

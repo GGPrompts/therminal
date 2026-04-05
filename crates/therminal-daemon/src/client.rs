@@ -65,7 +65,7 @@ pub async fn send_request_with_timeout(
             .context("failed to read response length")?;
         let msg_len = u32::from_be_bytes(len_buf) as usize;
 
-        if msg_len > 1024 * 64 {
+        if msg_len > MAX_FRAME_SIZE {
             anyhow::bail!("response too large: {msg_len} bytes");
         }
 

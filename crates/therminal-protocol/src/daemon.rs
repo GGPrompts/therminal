@@ -240,9 +240,50 @@ impl DaemonEvent {
 
 // ── Framing helpers ───────────────────────────────────────────────────────
 
+/// Error type for frame encoding operations.
+#[derive(Debug)]
+pub enum EncodeFrameError {
+    /// MessagePack serialization failed.
+    Serialize(rmp_serde::encode::Error),
+    /// Payload exceeds `MAX_FRAME_SIZE`.
+    FrameTooLarge(usize),
+}
+
+impl std::fmt::Display for EncodeFrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(e) => write!(f, "serialization error: {e}"),
+            Self::FrameTooLarge(size) => {
+                write!(
+                    f,
+                    "frame payload too large: {size} bytes (max {MAX_FRAME_SIZE})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for EncodeFrameError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialize(e) => Some(e),
+            Self::FrameTooLarge(_) => None,
+        }
+    }
+}
+
+impl From<rmp_serde::encode::Error> for EncodeFrameError {
+    fn from(e: rmp_serde::encode::Error) -> Self {
+        Self::Serialize(e)
+    }
+}
+
 /// Serialize a daemon request to MessagePack bytes with a 4-byte length prefix.
-pub fn encode_request(req: &DaemonRequest) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+pub fn encode_request(req: &DaemonRequest) -> Result<Vec<u8>, EncodeFrameError> {
     let payload = rmp_serde::to_vec(req)?;
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(EncodeFrameError::FrameTooLarge(payload.len()));
+    }
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     buf.extend_from_slice(&payload);
@@ -250,8 +291,11 @@ pub fn encode_request(req: &DaemonRequest) -> Result<Vec<u8>, rmp_serde::encode:
 }
 
 /// Serialize a daemon response to MessagePack bytes with a 4-byte length prefix.
-pub fn encode_response(resp: &DaemonResponse) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+pub fn encode_response(resp: &DaemonResponse) -> Result<Vec<u8>, EncodeFrameError> {
     let payload = rmp_serde::to_vec(resp)?;
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(EncodeFrameError::FrameTooLarge(payload.len()));
+    }
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     buf.extend_from_slice(&payload);
@@ -271,8 +315,11 @@ pub fn decode_response(data: &[u8]) -> Result<DaemonResponse, rmp_serde::decode:
 // ── IPC frame helpers ─────────────────────────────────────────────────────
 
 /// Encode an `IpcMessage` into a length-prefixed frame (4-byte BE length + MessagePack payload).
-pub fn encode_ipc(msg: &IpcMessage) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+pub fn encode_ipc(msg: &IpcMessage) -> Result<Vec<u8>, EncodeFrameError> {
     let payload = rmp_serde::to_vec(msg)?;
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(EncodeFrameError::FrameTooLarge(payload.len()));
+    }
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     buf.extend_from_slice(&payload);

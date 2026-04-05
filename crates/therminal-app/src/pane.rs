@@ -224,7 +224,7 @@ impl LayoutNode {
         spawn_fn: F,
     ) -> Option<PaneId>
     where
-        F: FnOnce(Rect) -> PaneState,
+        F: FnOnce(Rect) -> Option<PaneState>,
     {
         let mut slot = Some(spawn_fn);
         self.split_pane_impl(target_id, direction, &mut slot)
@@ -237,7 +237,7 @@ impl LayoutNode {
         spawn_fn: &mut Option<F>,
     ) -> Option<PaneId>
     where
-        F: FnOnce(Rect) -> PaneState,
+        F: FnOnce(Rect) -> Option<PaneState>,
     {
         match self {
             LayoutNode::Leaf(pane) if pane.id == target_id => {
@@ -248,7 +248,7 @@ impl LayoutNode {
                     SplitDirection::Vertical => rect.split_vertical_ratio(0.5, SEPARATOR_GAP),
                 };
 
-                let new_pane = factory(r2);
+                let new_pane = factory(r2)?;
                 let new_id = new_pane.id;
 
                 // Take self out via dummy, then replace with the Split node.
@@ -487,7 +487,7 @@ pub fn spawn_pane<F>(
     renderer: &GridRenderer,
     scrollback_lines: usize,
     proxy_fn: F,
-) -> PaneState
+) -> Result<PaneState, anyhow::Error>
 where
     F: FnOnce(PaneId) -> Box<dyn Fn() + Send + 'static>,
 {
@@ -508,14 +508,14 @@ where
     let term = Arc::new(FairMutex::new(term));
 
     let (pty_master, _child) = therminal_terminal::pty::spawn_shell(cols as u16, rows as u16)
-        .expect("failed to spawn shell for pane");
+        .map_err(|e| anyhow::anyhow!("failed to spawn shell for pane: {e}"))?;
 
     let pty_reader = pty_master
         .try_clone_reader()
-        .expect("failed to clone PTY reader for pane");
+        .map_err(|e| anyhow::anyhow!("failed to clone PTY reader for pane: {e}"))?;
     let pty_writer = pty_master
         .take_writer()
-        .expect("failed to get PTY writer for pane");
+        .map_err(|e| anyhow::anyhow!("failed to get PTY writer for pane: {e}"))?;
 
     // Spawn PTY reader thread for this pane.
     let term_for_reader = Arc::clone(&term);
@@ -525,18 +525,18 @@ where
         .spawn(move || {
             pane_pty_reader_loop(pty_reader, term_for_reader, wake);
         })
-        .expect("failed to spawn pane PTY reader thread");
+        .map_err(|e| anyhow::anyhow!("failed to spawn pane PTY reader thread: {e}"))?;
 
     info!(pane_id = id, cols, rows, "Pane spawned");
 
-    PaneState {
+    Ok(PaneState {
         id,
         term,
         pty_writer,
         pty_master,
         viewport,
         scrollback_lines,
-    }
+    })
 }
 
 /// PTY reader loop for a single pane.
@@ -636,7 +636,7 @@ mod tests {
                 })
                 .unwrap();
             let writer = pair.master.take_writer().unwrap();
-            PaneState {
+            Some(PaneState {
                 id: 2,
                 term: Arc::new(FairMutex::new(Term::new(
                     TermConfig::default(),
@@ -650,7 +650,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
-            }
+            })
         });
 
         assert_eq!(new_id, Some(2));

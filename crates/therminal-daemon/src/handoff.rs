@@ -95,6 +95,13 @@ pub async fn perform_handoff(socket_path: &Path) -> Result<()> {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            // Ping one more time before force-removing — the daemon may have recovered.
+            if client::ping(socket_path).await.is_ok() {
+                anyhow::bail!(
+                    "handoff timeout but old daemon is still responding on {}",
+                    socket_path.display()
+                );
+            }
             warn!("handoff timeout — forcibly removing old socket");
             std::fs::remove_file(socket_path).with_context(|| {
                 format!(

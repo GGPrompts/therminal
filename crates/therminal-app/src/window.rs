@@ -278,12 +278,19 @@ impl App {
         let full_rect = Rect::new(0.0, 0.0, config.width as f32, config.height as f32);
         let scrollback = self.config.general.scrollback_lines;
         let proxy = self.event_proxy.clone();
-        let pane = crate::pane::spawn_pane(full_rect, &grid_renderer, scrollback, |_pane_id| {
-            let p = proxy.clone();
-            Box::new(move || {
-                let _ = p.send_event(UserEvent::PtyOutput);
-            })
-        });
+        let pane =
+            match crate::pane::spawn_pane(full_rect, &grid_renderer, scrollback, |_pane_id| {
+                let p = proxy.clone();
+                Box::new(move || {
+                    let _ = p.send_event(UserEvent::PtyOutput);
+                })
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to spawn initial pane");
+                    return;
+                }
+            };
         let pane_id = pane.id;
         let layout = LayoutNode::Leaf(pane);
 
@@ -495,14 +502,22 @@ impl App {
         let scrollback = self.config.general.scrollback_lines;
         let proxy = self.event_proxy.clone();
 
-        let new_id = layout.split_pane(focused, direction, |viewport| {
-            crate::pane::spawn_pane(viewport, renderer, scrollback, |_pane_id| {
+        let new_id = layout.split_pane(
+            focused,
+            direction,
+            |viewport| match crate::pane::spawn_pane(viewport, renderer, scrollback, |_pane_id| {
                 let p = proxy.clone();
                 Box::new(move || {
                     let _ = p.send_event(UserEvent::PtyOutput);
                 })
-            })
-        });
+            }) {
+                Ok(pane) => Some(pane),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to spawn pane for split");
+                    None
+                }
+            },
+        );
 
         if let Some(new_id) = new_id {
             info!("Split pane {focused} {:?} -> new pane {new_id}", direction);

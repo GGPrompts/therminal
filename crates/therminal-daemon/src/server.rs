@@ -56,12 +56,16 @@ impl IpcServer {
         build_hash: String,
         version: String,
     ) -> Result<Self> {
-        // Clean stale socket if it exists but no daemon is listening
-        if socket_path.exists() {
-            debug!(path = %socket_path.display(), "removing stale socket");
-            std::fs::remove_file(&socket_path).with_context(|| {
-                format!("failed to remove stale socket: {}", socket_path.display())
-            })?;
+        // Clean stale socket unconditionally — avoids TOCTOU race between exists() and remove().
+        match std::fs::remove_file(&socket_path) {
+            Ok(()) => debug!(path = %socket_path.display(), "removed stale socket"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to remove stale socket {}: {e}",
+                    socket_path.display()
+                ));
+            }
         }
 
         let listener = UnixListener::bind(&socket_path)
