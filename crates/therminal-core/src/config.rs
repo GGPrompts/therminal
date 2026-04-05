@@ -273,6 +273,9 @@ impl TherminalConfig {
         );
         out.push_str("# [keybindings] — Key-action bindings merged on top of built-in defaults.\n");
         out.push_str("# Actions: copy | paste | font_size_up | font_size_down | font_size_reset\n");
+        out.push_str("#          split_horizontal | split_vertical | split_auto | close_pane\n");
+        out.push_str("#          resize_grow | resize_shrink | focus_next | focus_prev\n");
+        out.push_str("#          focus_up | focus_down | focus_left | focus_right | zoom_pane\n");
         out.push_str(
             "# ─────────────────────────────────────────────────────────────────────────\n",
         );
@@ -496,7 +499,7 @@ impl ColorsConfig {
 // ── Section: Keybindings ─────────────────────────────────────────────────
 
 /// Typed action for a keybinding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyAction {
     /// Copy selected text to the clipboard.
@@ -509,6 +512,32 @@ pub enum KeyAction {
     FontSizeDown,
     /// Reset the font size to the configured default.
     FontSizeReset,
+    /// Split the focused pane horizontally (side-by-side).
+    SplitHorizontal,
+    /// Split the focused pane vertically (top/bottom).
+    SplitVertical,
+    /// Split the focused pane in auto-detected direction.
+    SplitAuto,
+    /// Close the currently focused pane.
+    ClosePane,
+    /// Grow the focused pane's split ratio.
+    ResizeGrow,
+    /// Shrink the focused pane's split ratio.
+    ResizeShrink,
+    /// Move focus to the next pane.
+    FocusNext,
+    /// Move focus to the previous pane.
+    FocusPrev,
+    /// Move focus up.
+    FocusUp,
+    /// Move focus down.
+    FocusDown,
+    /// Move focus left.
+    FocusLeft,
+    /// Move focus right.
+    FocusRight,
+    /// Toggle focused pane fullscreen (zoom).
+    ZoomPane,
 }
 
 /// A single keybinding entry.
@@ -532,6 +561,7 @@ impl Default for KeybindingsConfig {
     fn default() -> Self {
         Self {
             bindings: vec![
+                // Clipboard
                 Keybinding {
                     key: "ctrl+shift+c".to_string(),
                     action: KeyAction::Copy,
@@ -540,6 +570,7 @@ impl Default for KeybindingsConfig {
                     key: "ctrl+shift+v".to_string(),
                     action: KeyAction::Paste,
                 },
+                // Font sizing
                 Keybinding {
                     key: "ctrl+plus".to_string(),
                     action: KeyAction::FontSizeUp,
@@ -552,9 +583,218 @@ impl Default for KeybindingsConfig {
                     key: "ctrl+0".to_string(),
                     action: KeyAction::FontSizeReset,
                 },
+                // Pane splits
+                Keybinding {
+                    key: "ctrl+shift+h".to_string(),
+                    action: KeyAction::SplitHorizontal,
+                },
+                Keybinding {
+                    key: "ctrl+shift+d".to_string(),
+                    action: KeyAction::SplitVertical,
+                },
+                Keybinding {
+                    key: "ctrl+shift+enter".to_string(),
+                    action: KeyAction::SplitAuto,
+                },
+                // Pane management
+                Keybinding {
+                    key: "ctrl+shift+w".to_string(),
+                    action: KeyAction::ClosePane,
+                },
+                Keybinding {
+                    key: "ctrl+shift+=".to_string(),
+                    action: KeyAction::ResizeGrow,
+                },
+                Keybinding {
+                    key: "ctrl+shift+-".to_string(),
+                    action: KeyAction::ResizeShrink,
+                },
+                // Focus movement (directional arrows)
+                Keybinding {
+                    key: "ctrl+shift+up".to_string(),
+                    action: KeyAction::FocusUp,
+                },
+                Keybinding {
+                    key: "ctrl+shift+down".to_string(),
+                    action: KeyAction::FocusDown,
+                },
+                Keybinding {
+                    key: "ctrl+shift+left".to_string(),
+                    action: KeyAction::FocusLeft,
+                },
+                Keybinding {
+                    key: "ctrl+shift+right".to_string(),
+                    action: KeyAction::FocusRight,
+                },
+                // Focus cycling
+                Keybinding {
+                    key: "ctrl+shift+n".to_string(),
+                    action: KeyAction::FocusNext,
+                },
+                Keybinding {
+                    key: "ctrl+shift+p".to_string(),
+                    action: KeyAction::FocusPrev,
+                },
+                // Zoom
+                Keybinding {
+                    key: "ctrl+shift+z".to_string(),
+                    action: KeyAction::ZoomPane,
+                },
             ],
         }
     }
+}
+
+// ── Binding parser ──────────────────────────────────────────────────────
+
+/// Modifier flags produced by [`parse_binding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ParsedModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub super_key: bool,
+}
+
+/// Key identifier produced by [`parse_binding`].
+///
+/// This is a platform-independent representation that maps 1:1 to
+/// `winit::keyboard::Key` variants.  The conversion happens in the app
+/// crate so that `therminal-core` stays free of windowing dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ParsedKey {
+    /// A single printable character (a-z, 0-9, punctuation).
+    Character(String),
+    /// A named key (Enter, Tab, Escape, Arrow*, F1-F12, etc.).
+    Named(ParsedNamedKey),
+}
+
+/// Named (non-character) keys recognized by the binding parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParsedNamedKey {
+    Enter,
+    Tab,
+    Escape,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Space,
+}
+
+/// Parse a keybinding string like `"ctrl+shift+h"` into modifiers and key.
+///
+/// Returns `None` (and logs a warning) if the binding string is invalid.
+///
+/// Supported modifier names: `ctrl`, `shift`, `alt`, `super`.
+/// Supported key names: `a`-`z`, `0`-`9`, `f1`-`f12`, arrow keys,
+/// `enter`, `tab`, `escape`, `backspace`, `delete`, `insert`, `home`,
+/// `end`, `pageup`, `pagedown`, `space`, and single-character
+/// punctuation (`+`, `-`, `=`, `[`, `]`, `\`, `;`, `'`, `,`, `.`, `/`).
+///
+/// The special token `plus` is treated as the `+` character key, and
+/// `minus` as the `-` character key, so they can coexist with the `+`
+/// separator.
+pub fn parse_binding(binding: &str) -> Option<(ParsedModifiers, ParsedKey)> {
+    let parts: Vec<&str> = binding.split('+').collect();
+    if parts.is_empty() {
+        warn!(binding, "empty keybinding string");
+        return None;
+    }
+
+    let mut mods = ParsedModifiers::default();
+    let mut key_string: Option<String> = None;
+
+    for (i, part) in parts.iter().enumerate() {
+        let lower = part.trim().to_lowercase();
+        match lower.as_str() {
+            "ctrl" | "control" => mods.ctrl = true,
+            "shift" => mods.shift = true,
+            "alt" | "option" => mods.alt = true,
+            "super" | "meta" | "cmd" | "win" => mods.super_key = true,
+            _ => {
+                // Must be the key component — should be the last part.
+                if i != parts.len() - 1 {
+                    // There are more parts after this non-modifier.
+                    // Join everything from here with '+' (handles e.g.
+                    // accidental extra '+' in the binding string).
+                    key_string = Some(parts[i..].join("+"));
+                    break;
+                }
+                key_string = Some(part.trim().to_string());
+            }
+        }
+    }
+
+    let key_str = match key_string.as_deref() {
+        Some(k) if !k.is_empty() => k,
+        _ => {
+            warn!(binding, "keybinding has no key component");
+            return None;
+        }
+    };
+
+    let key_lower = key_str.to_lowercase();
+    let parsed_key = match key_lower.as_str() {
+        // Named keys
+        "enter" | "return" => ParsedKey::Named(ParsedNamedKey::Enter),
+        "tab" => ParsedKey::Named(ParsedNamedKey::Tab),
+        "escape" | "esc" => ParsedKey::Named(ParsedNamedKey::Escape),
+        "backspace" => ParsedKey::Named(ParsedNamedKey::Backspace),
+        "delete" | "del" => ParsedKey::Named(ParsedNamedKey::Delete),
+        "insert" | "ins" => ParsedKey::Named(ParsedNamedKey::Insert),
+        "home" => ParsedKey::Named(ParsedNamedKey::Home),
+        "end" => ParsedKey::Named(ParsedNamedKey::End),
+        "pageup" | "page_up" => ParsedKey::Named(ParsedNamedKey::PageUp),
+        "pagedown" | "page_down" => ParsedKey::Named(ParsedNamedKey::PageDown),
+        "up" | "arrowup" => ParsedKey::Named(ParsedNamedKey::ArrowUp),
+        "down" | "arrowdown" => ParsedKey::Named(ParsedNamedKey::ArrowDown),
+        "left" | "arrowleft" => ParsedKey::Named(ParsedNamedKey::ArrowLeft),
+        "right" | "arrowright" => ParsedKey::Named(ParsedNamedKey::ArrowRight),
+        "space" => ParsedKey::Named(ParsedNamedKey::Space),
+        "f1" => ParsedKey::Named(ParsedNamedKey::F1),
+        "f2" => ParsedKey::Named(ParsedNamedKey::F2),
+        "f3" => ParsedKey::Named(ParsedNamedKey::F3),
+        "f4" => ParsedKey::Named(ParsedNamedKey::F4),
+        "f5" => ParsedKey::Named(ParsedNamedKey::F5),
+        "f6" => ParsedKey::Named(ParsedNamedKey::F6),
+        "f7" => ParsedKey::Named(ParsedNamedKey::F7),
+        "f8" => ParsedKey::Named(ParsedNamedKey::F8),
+        "f9" => ParsedKey::Named(ParsedNamedKey::F9),
+        "f10" => ParsedKey::Named(ParsedNamedKey::F10),
+        "f11" => ParsedKey::Named(ParsedNamedKey::F11),
+        "f12" => ParsedKey::Named(ParsedNamedKey::F12),
+        // Aliases for punctuation that conflicts with the '+' separator
+        "plus" => ParsedKey::Character("+".to_string()),
+        "minus" => ParsedKey::Character("-".to_string()),
+        // Single-character keys (letters, digits, punctuation)
+        s if s.len() == 1 => ParsedKey::Character(s.to_string()),
+        _ => {
+            warn!(binding, key = key_str, "unrecognized key in keybinding");
+            return None;
+        }
+    };
+
+    Some((mods, parsed_key))
 }
 
 // ── Section: Profiles ────────────────────────────────────────────────────
@@ -807,6 +1047,107 @@ allowed_tools = ["read_file", "write_file"]
         let kb = KeybindingsConfig::default();
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::Copy));
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::Paste));
+    }
+
+    #[test]
+    fn keybindings_default_has_pane_actions() {
+        let kb = KeybindingsConfig::default();
+        assert!(kb
+            .bindings
+            .iter()
+            .any(|b| b.action == KeyAction::SplitHorizontal));
+        assert!(kb.bindings.iter().any(|b| b.action == KeyAction::ClosePane));
+        assert!(kb.bindings.iter().any(|b| b.action == KeyAction::ZoomPane));
+        assert!(kb.bindings.iter().any(|b| b.action == KeyAction::FocusNext));
+    }
+
+    #[test]
+    fn parse_binding_ctrl_shift_h() {
+        let (mods, key) = parse_binding("ctrl+shift+h").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert!(!mods.alt);
+        assert!(!mods.super_key);
+        assert_eq!(key, ParsedKey::Character("h".to_string()));
+    }
+
+    #[test]
+    fn parse_binding_ctrl_plus() {
+        let (mods, key) = parse_binding("ctrl+plus").unwrap();
+        assert!(mods.ctrl);
+        assert!(!mods.shift);
+        assert_eq!(key, ParsedKey::Character("+".to_string()));
+    }
+
+    #[test]
+    fn parse_binding_ctrl_shift_enter() {
+        let (mods, key) = parse_binding("ctrl+shift+enter").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert_eq!(key, ParsedKey::Named(ParsedNamedKey::Enter));
+    }
+
+    #[test]
+    fn parse_binding_arrow_keys() {
+        let (mods, key) = parse_binding("ctrl+shift+up").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert_eq!(key, ParsedKey::Named(ParsedNamedKey::ArrowUp));
+    }
+
+    #[test]
+    fn parse_binding_function_keys() {
+        let (_, key) = parse_binding("f12").unwrap();
+        assert_eq!(key, ParsedKey::Named(ParsedNamedKey::F12));
+    }
+
+    #[test]
+    fn parse_binding_equals_sign() {
+        let (mods, key) = parse_binding("ctrl+shift+=").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert_eq!(key, ParsedKey::Character("=".to_string()));
+    }
+
+    #[test]
+    fn parse_binding_minus_sign() {
+        let (mods, key) = parse_binding("ctrl+shift+-").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert_eq!(key, ParsedKey::Character("-".to_string()));
+    }
+
+    #[test]
+    fn parse_binding_invalid_returns_none() {
+        assert!(parse_binding("").is_none());
+        assert!(parse_binding("ctrl+shift+foobar").is_none());
+    }
+
+    #[test]
+    fn parse_binding_alt_super() {
+        let (mods, key) = parse_binding("alt+super+a").unwrap();
+        assert!(!mods.ctrl);
+        assert!(!mods.shift);
+        assert!(mods.alt);
+        assert!(mods.super_key);
+        assert_eq!(key, ParsedKey::Character("a".to_string()));
+    }
+
+    #[test]
+    fn new_key_actions_round_trip_through_toml() {
+        let config = TherminalConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert!(decoded
+            .keybindings
+            .bindings
+            .iter()
+            .any(|b| b.action == KeyAction::SplitHorizontal));
+        assert!(decoded
+            .keybindings
+            .bindings
+            .iter()
+            .any(|b| b.action == KeyAction::ZoomPane));
     }
 
     #[test]

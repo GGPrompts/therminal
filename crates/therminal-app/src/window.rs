@@ -6,15 +6,14 @@
 //!   Damage -> grid_renderer.render() per pane -> wgpu surface -> winit window
 //!   Resize -> recalculate layout tree -> resize all pane PTYs + Terms
 //!
-//! Keyboard shortcuts (all Ctrl+Shift):
-//!   H  -- split focused pane horizontally (side-by-side)
-//!   V  -- split focused pane vertically (top/bottom)
-//!   ArrowLeft / ArrowRight -- move focus prev / next
-//!   W  -- close focused pane
-//!   =  -- grow focused pane's split ratio
-//!   -  -- shrink focused pane's split ratio
+//! Keyboard shortcuts are config-driven via `[keybindings]` in therminal.toml.
+//! Default bindings (all Ctrl+Shift):
+//!   H  -- split horizontal   D  -- split vertical   Enter -- auto split
+//!   W  -- close pane         = -- grow ratio         - -- shrink ratio
+//!   Arrows -- move focus     N/P -- focus next/prev  Z -- zoom pane
+//!   C -- copy                V -- paste
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::thread;
@@ -36,7 +35,9 @@ use winit::window::{Window, WindowId};
 use crate::grid_renderer::{cell_display_text, ColorVertex, FontConfig, GridRenderer, RenderCell};
 use crate::pane::{FocusDirection, LayoutNode, PaneId, PaneState, SplitDirection};
 use alacritty_terminal::grid::Dimensions;
-use therminal_core::config::TherminalConfig;
+use therminal_core::config::{
+    parse_binding, KeyAction, ParsedKey, ParsedNamedKey, TherminalConfig,
+};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
 use therminal_core::geometry::Rect;
 use therminal_core::palette::Color as PaletteColor;
@@ -131,6 +132,110 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
 }
 
+// ── Keybinding map ──────────────────────────────────────────────────────
+
+/// A lookup key for the binding map: (modifiers, key).
+///
+/// The key is stored as a `BindingKey` which mirrors winit's `Key` enum
+/// closely enough to look up incoming key events in O(1).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BindingKey {
+    /// A single character (lowercase for case-insensitive matching with
+    /// shift accounted for separately).
+    Character(String),
+    /// A named key (Enter, arrows, function keys, etc.).
+    Named(NamedKey),
+}
+
+/// Full lookup key: modifiers + key.
+type BindingLookup = (bool, bool, bool, bool, BindingKey);
+
+/// Convert a parsed named key to winit's `NamedKey`.
+fn to_winit_named(k: &ParsedNamedKey) -> NamedKey {
+    match k {
+        ParsedNamedKey::Enter => NamedKey::Enter,
+        ParsedNamedKey::Tab => NamedKey::Tab,
+        ParsedNamedKey::Escape => NamedKey::Escape,
+        ParsedNamedKey::Backspace => NamedKey::Backspace,
+        ParsedNamedKey::Delete => NamedKey::Delete,
+        ParsedNamedKey::Insert => NamedKey::Insert,
+        ParsedNamedKey::Home => NamedKey::Home,
+        ParsedNamedKey::End => NamedKey::End,
+        ParsedNamedKey::PageUp => NamedKey::PageUp,
+        ParsedNamedKey::PageDown => NamedKey::PageDown,
+        ParsedNamedKey::ArrowUp => NamedKey::ArrowUp,
+        ParsedNamedKey::ArrowDown => NamedKey::ArrowDown,
+        ParsedNamedKey::ArrowLeft => NamedKey::ArrowLeft,
+        ParsedNamedKey::ArrowRight => NamedKey::ArrowRight,
+        ParsedNamedKey::Space => NamedKey::Space,
+        ParsedNamedKey::F1 => NamedKey::F1,
+        ParsedNamedKey::F2 => NamedKey::F2,
+        ParsedNamedKey::F3 => NamedKey::F3,
+        ParsedNamedKey::F4 => NamedKey::F4,
+        ParsedNamedKey::F5 => NamedKey::F5,
+        ParsedNamedKey::F6 => NamedKey::F6,
+        ParsedNamedKey::F7 => NamedKey::F7,
+        ParsedNamedKey::F8 => NamedKey::F8,
+        ParsedNamedKey::F9 => NamedKey::F9,
+        ParsedNamedKey::F10 => NamedKey::F10,
+        ParsedNamedKey::F11 => NamedKey::F11,
+        ParsedNamedKey::F12 => NamedKey::F12,
+    }
+}
+
+/// Build a binding lookup map from the config's keybinding list.
+///
+/// Invalid bindings are logged and skipped.
+fn build_binding_map(config: &TherminalConfig) -> HashMap<BindingLookup, KeyAction> {
+    let mut map = HashMap::new();
+    for binding in &config.keybindings.bindings {
+        match parse_binding(&binding.key) {
+            Some((mods, parsed_key)) => {
+                let bk = match &parsed_key {
+                    ParsedKey::Character(c) => BindingKey::Character(c.clone()),
+                    ParsedKey::Named(n) => BindingKey::Named(to_winit_named(n)),
+                };
+                let lookup = (mods.ctrl, mods.shift, mods.alt, mods.super_key, bk);
+                map.insert(lookup, binding.action.clone());
+            }
+            None => {
+                warn!(
+                    key = %binding.key,
+                    action = ?binding.action,
+                    "skipping invalid keybinding"
+                );
+            }
+        }
+    }
+    map
+}
+
+/// Look up a winit key event in the binding map.
+fn lookup_binding(
+    map: &HashMap<BindingLookup, KeyAction>,
+    modifiers: &Modifiers,
+    key_event: &KeyEvent,
+) -> Option<KeyAction> {
+    let state = modifiers.state();
+    let ctrl = state.control_key();
+    let shift = state.shift_key();
+    let alt = state.alt_key();
+    let super_key = state.super_key();
+
+    let bk = match &key_event.logical_key {
+        Key::Character(s) => {
+            // Normalize: winit reports uppercase when Shift is held.
+            // The binding map stores lowercase characters.
+            BindingKey::Character(s.to_lowercase().to_string())
+        }
+        Key::Named(n) => BindingKey::Named(*n),
+        _ => return None,
+    };
+
+    let lookup = (ctrl, shift, alt, super_key, bk);
+    map.get(&lookup).cloned()
+}
+
 // ── Main application ─────────────────────────────────────────────────────
 
 /// Main application struct implementing winit's `ApplicationHandler`.
@@ -166,6 +271,9 @@ pub struct App {
 
     /// Current loaded configuration.
     config: TherminalConfig,
+
+    /// Parsed keybinding lookup map (rebuilt on config reload).
+    binding_map: HashMap<BindingLookup, KeyAction>,
 
     /// Config file watcher handle (kept alive).
     _config_watcher: Option<ConfigWatcher>,
@@ -207,6 +315,8 @@ impl App {
             }
         };
 
+        let binding_map = build_binding_map(&config);
+
         Self {
             window: None,
             gpu: None,
@@ -221,6 +331,7 @@ impl App {
             mouse_left_held: false,
             mouse_drag_pane: None,
             config,
+            binding_map,
             _config_watcher: config_watcher,
             last_split_direction: SplitDirection::Horizontal,
         }
@@ -542,56 +653,53 @@ impl App {
         output.present();
     }
 
-    /// Check if this key event is a pane management shortcut (Ctrl+Shift+...).
+    /// Check if this key event matches a configured keybinding.
     /// Returns true if the event was consumed.
-    fn handle_pane_shortcut(&mut self, key_event: &KeyEvent) -> bool {
-        let state = self.modifiers.state();
-        if !state.control_key() || !state.shift_key() {
-            return false;
-        }
+    fn handle_keybinding(&mut self, key_event: &KeyEvent) -> bool {
+        let action = match lookup_binding(&self.binding_map, &self.modifiers, key_event) {
+            Some(a) => a,
+            None => return false,
+        };
 
-        match &key_event.logical_key {
-            // Ctrl+Shift+Enter -> auto-direction split
-            Key::Named(NamedKey::Enter) => {
-                self.split_focused_pane_auto();
-                true
-            }
-            // Ctrl+Shift+H -> horizontal split
-            Key::Character(s) if s.as_str() == "H" => {
-                self.split_focused_pane(SplitDirection::Horizontal);
-                true
-            }
-            // Ctrl+Shift+V -> vertical split (note: may conflict with paste on some systems)
-            Key::Character(s) if s.as_str() == "V" => {
-                self.split_focused_pane(SplitDirection::Vertical);
-                true
-            }
-            // Ctrl+Shift+W -> close focused pane
-            Key::Character(s) if s.as_str() == "W" => {
-                self.close_focused_pane();
-                true
-            }
-            // Ctrl+Shift+= -> grow ratio
-            Key::Character(s) if s.as_str() == "+" || s.as_str() == "=" => {
-                self.adjust_focused_ratio(0.05);
-                true
-            }
-            // Ctrl+Shift+- -> shrink ratio
-            Key::Character(s) if s.as_str() == "_" || s.as_str() == "-" => {
-                self.adjust_focused_ratio(-0.05);
-                true
-            }
-            // Ctrl+Shift+Arrow -> move focus
-            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
+        match action {
+            KeyAction::SplitHorizontal => self.split_focused_pane(SplitDirection::Horizontal),
+            KeyAction::SplitVertical => self.split_focused_pane(SplitDirection::Vertical),
+            KeyAction::SplitAuto => self.split_focused_pane_auto(),
+            KeyAction::ClosePane => self.close_focused_pane(),
+            KeyAction::ResizeGrow => self.adjust_focused_ratio(0.05),
+            KeyAction::ResizeShrink => self.adjust_focused_ratio(-0.05),
+            KeyAction::FocusNext | KeyAction::FocusRight | KeyAction::FocusDown => {
                 self.move_focus(FocusDirection::Next);
-                true
             }
-            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
+            KeyAction::FocusPrev | KeyAction::FocusLeft | KeyAction::FocusUp => {
                 self.move_focus(FocusDirection::Prev);
-                true
             }
-            _ => false,
+            KeyAction::ZoomPane => {
+                // TODO: implement pane zoom toggle (tn-oxa)
+                info!("zoom pane: not yet implemented");
+            }
+            KeyAction::Copy => {
+                // TODO: implement clipboard copy (tn-oxa)
+                info!("copy: not yet implemented");
+            }
+            KeyAction::Paste => {
+                // TODO: implement clipboard paste (tn-oxa)
+                info!("paste: not yet implemented");
+            }
+            KeyAction::FontSizeUp => {
+                // TODO: implement font size up
+                info!("font size up: not yet implemented");
+            }
+            KeyAction::FontSizeDown => {
+                // TODO: implement font size down
+                info!("font size down: not yet implemented");
+            }
+            KeyAction::FontSizeReset => {
+                // TODO: implement font size reset
+                info!("font size reset: not yet implemented");
+            }
         }
+        true
     }
 
     /// Split the currently focused pane with auto-detected direction.
@@ -1124,6 +1232,13 @@ impl App {
     /// Apply a new configuration.
     fn apply_config(&mut self, new_config: TherminalConfig) {
         let old_config = std::mem::replace(&mut self.config, new_config);
+
+        // ── Keybinding hot-reload ──────────────────────────────────────
+        self.binding_map = build_binding_map(&self.config);
+        info!(
+            "keybinding map rebuilt ({} bindings)",
+            self.binding_map.len()
+        );
 
         if self.config.general.title != old_config.general.title {
             if let Some(w) = self.window.as_ref() {
@@ -2168,8 +2283,8 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                 ..
             } => {
-                // Check pane management shortcuts first.
-                if !self.handle_pane_shortcut(key_event) {
+                // Check configured keybindings first.
+                if !self.handle_keybinding(key_event) {
                     self.handle_key_input(key_event);
                 }
             }
