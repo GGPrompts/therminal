@@ -297,6 +297,17 @@ impl GridRenderer {
 
         // ── Glyphon setup ────────────────────────────────────────────────
         let mut font_system = FontSystem::new();
+        let total_fonts = font_system.db().faces().count();
+        let primary_found = font_system
+            .db()
+            .faces()
+            .any(|f| f.families.iter().any(|(name, _)| name == &font_family));
+        tracing::info!(
+            total_fonts,
+            primary_found,
+            family = %font_family,
+            "Font system initialized"
+        );
         font_system.db_mut().set_monospace_family(&font_family);
         for fb in &font_config.fallback_families {
             let found = font_system
