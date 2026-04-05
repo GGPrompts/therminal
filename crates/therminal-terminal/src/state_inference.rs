@@ -71,6 +71,7 @@ pub enum AgentType {
     Claude,
     Codex,
     Copilot,
+    Aider,
 }
 
 impl AgentType {
@@ -80,6 +81,7 @@ impl AgentType {
             AgentType::Claude => "/tmp/claude-code-state",
             AgentType::Codex => "/tmp/codex-state",
             AgentType::Copilot => "/tmp/copilot-state",
+            AgentType::Aider => "/tmp/aider-state",
         }
     }
 
@@ -115,6 +117,8 @@ impl AgentType {
             .any(|token| token == "codex" || token.starts_with("codex-"))
         {
             Some(AgentType::Codex)
+        } else if tokens.iter().any(|token| token.contains("aider")) {
+            Some(AgentType::Aider)
         } else {
             None
         }
@@ -126,6 +130,7 @@ impl AgentType {
             AgentType::Claude => "claude",
             AgentType::Codex => "codex",
             AgentType::Copilot => "copilot",
+            AgentType::Aider => "aider",
         }
     }
 }

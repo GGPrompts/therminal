@@ -17,3 +17,4 @@ serde_json = { workspace = true }
 regex = { workspace = true }
 portable-pty = { workspace = true }
 anyhow = { workspace = true }
+sysinfo = { workspace = true }

@@ -67,6 +67,9 @@ anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
 
+# Process inspection
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
 # Misc
 bytemuck = { version = "1", features = ["derive"] }
 raw-window-handle = "0.6"

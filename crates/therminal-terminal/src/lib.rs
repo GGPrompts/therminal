@@ -6,6 +6,7 @@ pub mod event_log;
 pub mod input;
 pub mod interceptor;
 pub mod osc633;
+pub mod process_detector;
 pub mod pty;
 pub mod region_index;
 pub mod state_inference;
