@@ -133,30 +133,35 @@ fn prepare_zsh_zdotdir() -> Result<PathBuf, PtyError> {
         .map_err(|e| PtyError::Integration(format!("create zsh ZDOTDIR: {e}")))?;
 
     // .zshenv — sourced first for ALL zsh invocations.
-    // Restore the real ZDOTDIR so subsequent config files are found.
+    // We keep ZDOTDIR pointing at our overlay so zsh finds our .zshrc/.zprofile.
+    // But we source the user's real .zshenv via the saved original path.
     let zshenv_content = r#"# Therminal zsh integration — auto-generated, do not edit.
-# Restore original ZDOTDIR so user config is found.
-if [ -n "${_THERMINAL_ORIG_ZDOTDIR+x}" ]; then
-    ZDOTDIR="$_THERMINAL_ORIG_ZDOTDIR"
-    unset _THERMINAL_ORIG_ZDOTDIR
-else
-    unset ZDOTDIR
+# Source the real .zshenv (using saved original ZDOTDIR) without restoring
+# ZDOTDIR yet — we need zsh to keep reading our overlay for .zshrc/.zprofile.
+_therminal_real_zdotdir="${_THERMINAL_ORIG_ZDOTDIR:-$HOME}"
+if [ -f "${_therminal_real_zdotdir}/.zshenv" ]; then
+    . "${_therminal_real_zdotdir}/.zshenv"
 fi
-
-# Source the real .zshenv if it exists.
-if [ -f "${ZDOTDIR:-$HOME}/.zshenv" ]; then
-    . "${ZDOTDIR:-$HOME}/.zshenv"
-fi
+unset _therminal_real_zdotdir
 "#;
     std::fs::write(zdotdir.join(".zshenv"), zshenv_content)
         .map_err(|e| PtyError::Integration(format!("write .zshenv: {e}")))?;
 
     // .zshrc — sourced for interactive shells.
+    // Source integration script, THEN restore ZDOTDIR, THEN source user's .zshrc.
     let zshrc_content = format!(
         r#"# Therminal zsh integration — auto-generated, do not edit.
-# Source integration script first.
+# Source integration script first (while ZDOTDIR still points here).
 if [ -f {integration:?} ]; then
     . {integration:?}
+fi
+
+# NOW restore original ZDOTDIR so user config and future shells work normally.
+if [ -n "${{_THERMINAL_ORIG_ZDOTDIR+x}}" ]; then
+    ZDOTDIR="${{_THERMINAL_ORIG_ZDOTDIR}}"
+    unset _THERMINAL_ORIG_ZDOTDIR
+else
+    unset ZDOTDIR
 fi
 
 # Source the real .zshrc if it exists.
@@ -255,7 +260,7 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
         }
         ShellType::Fish => {
             let integration_script = integration_dir.join("therminal.fish");
-            let source_cmd = format!("source {}", integration_script.display());
+            let source_cmd = format!("source '{}'", integration_script.display());
             let mut cmd = CommandBuilder::new(shell);
             // --login for login behavior, --init-command to source integration.
             cmd.args(["--login", "--init-command", &source_cmd]);
@@ -276,11 +281,12 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
             Ok(cmd)
         }
         ShellType::Unknown => {
-            // Best-effort: set ENV (POSIX sh reads $ENV for interactive shells)
-            // and BASH_ENV. If the shell doesn't support these, integration
-            // won't auto-source, but nothing breaks.
+            // Best-effort: use the configured shell (not default_prog) and set
+            // ENV (POSIX sh reads $ENV for interactive shells) and BASH_ENV.
+            // If the shell doesn't support these, integration won't auto-source,
+            // but nothing breaks.
             let integration_script = integration_dir.join("therminal.bash");
-            let mut cmd = CommandBuilder::new_default_prog();
+            let mut cmd = CommandBuilder::new(shell);
             set_common_env(&mut cmd);
             if integration_script.exists() {
                 cmd.env("ENV", &integration_script);
@@ -446,7 +452,7 @@ mod tests {
         let env_content = std::fs::read_to_string(&zshenv).unwrap();
         assert!(
             env_content.contains("_THERMINAL_ORIG_ZDOTDIR"),
-            ".zshenv should restore original ZDOTDIR"
+            ".zshenv should reference original ZDOTDIR for sourcing user's .zshenv"
         );
 
         let zshrc = zdotdir.join(".zshrc");
@@ -470,13 +476,13 @@ mod tests {
     }
 
     #[test]
-    fn build_shell_command_unknown_falls_back() {
+    fn build_shell_command_unknown_uses_configured_shell() {
         let cmd = build_shell_command("/bin/sh", ShellType::Unknown)
             .expect("failed to build unknown shell command");
-        // Unknown shell uses default_prog as a fallback.
+        // Unknown shell should use the configured shell path, not default_prog.
         assert!(
-            cmd.is_default_prog(),
-            "unknown shell should use default_prog"
+            !cmd.is_default_prog(),
+            "unknown shell should use the configured path, not default_prog"
         );
     }
 

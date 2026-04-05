@@ -909,8 +909,15 @@ impl App {
             None => return,
         };
 
-        // Resolve target pane from pointer position.
-        let target_pane = match self.pane_at_position(px, py) {
+        // For button release during a drag, route to the pane where the drag
+        // started so mouse-reporting apps don't get mismatched press/release.
+        let target_pane = if state == ElementState::Released && button == MouseButton::Left {
+            self.mouse_drag_pane
+                .or_else(|| self.pane_at_position(px, py))
+        } else {
+            self.pane_at_position(px, py)
+        };
+        let target_pane = match target_pane {
             Some(id) => id,
             None => return,
         };
