@@ -295,11 +295,32 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
     }
 }
 
+/// Options for customizing shell spawn behavior.
+#[derive(Debug, Default)]
+pub struct SpawnOptions {
+    /// Shell command to use instead of the user's default. Empty = use default.
+    pub shell: String,
+    /// Extra environment variables to merge into the PTY environment.
+    pub env: std::collections::HashMap<String, String>,
+}
+
 /// Spawn the user's default shell in a new PTY of the given size.
 ///
 /// Detects the shell type and injects integration scripts automatically.
 /// Returns the master side of the PTY (for reading/writing) and the child process handle.
 pub fn spawn_shell(cols: u16, rows: u16) -> Result<SpawnResult, PtyError> {
+    spawn_shell_with_options(cols, rows, &SpawnOptions::default())
+}
+
+/// Spawn a shell in a new PTY with custom options (shell override, extra env vars).
+///
+/// If `options.shell` is non-empty, it is used instead of the user's default shell.
+/// Extra env vars from `options.env` are merged into the PTY environment.
+pub fn spawn_shell_with_options(
+    cols: u16,
+    rows: u16,
+    options: &SpawnOptions,
+) -> Result<SpawnResult, PtyError> {
     let pty_system = portable_pty::native_pty_system();
 
     let size = PtySize {
@@ -311,11 +332,21 @@ pub fn spawn_shell(cols: u16, rows: u16) -> Result<SpawnResult, PtyError> {
 
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
 
-    let shell = get_default_shell();
+    let shell = if options.shell.is_empty() {
+        get_default_shell()
+    } else {
+        debug!(shell = %options.shell, "using config shell override");
+        options.shell.clone()
+    };
     let shell_type = detect_shell_type(&shell);
     debug!(?shell, ?shell_type, "detected shell for PTY spawn");
 
-    let cmd = build_shell_command(&shell, shell_type)?;
+    let mut cmd = build_shell_command(&shell, shell_type)?;
+
+    // Merge extra env vars from config.
+    for (k, v) in &options.env {
+        cmd.env(k, v);
+    }
 
     let child = pair.slave.spawn_command(cmd).map_err(PtyError::Spawn)?;
 

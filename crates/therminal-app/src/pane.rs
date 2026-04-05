@@ -133,6 +133,9 @@ pub enum LayoutNode {
         first: Box<LayoutNode>,
         second: Box<LayoutNode>,
     },
+    /// A zero-cost placeholder used transiently during tree restructuring
+    /// (e.g. with `std::mem::replace`). Should never persist in the final tree.
+    Empty,
 }
 
 impl LayoutNode {
@@ -157,6 +160,7 @@ impl LayoutNode {
                 first.layout(r1);
                 second.layout(r2);
             }
+            LayoutNode::Empty => {}
         }
     }
 
@@ -171,6 +175,7 @@ impl LayoutNode {
                 first.resize_all_panes(renderer);
                 second.resize_all_panes(renderer);
             }
+            LayoutNode::Empty => {}
         }
     }
 
@@ -188,6 +193,7 @@ impl LayoutNode {
                 first.collect_ids(ids);
                 second.collect_ids(ids);
             }
+            LayoutNode::Empty => {}
         }
     }
 
@@ -199,6 +205,7 @@ impl LayoutNode {
             LayoutNode::Split { first, second, .. } => {
                 first.find_pane(id).or_else(|| second.find_pane(id))
             }
+            LayoutNode::Empty => None,
         }
     }
 
@@ -210,6 +217,7 @@ impl LayoutNode {
             LayoutNode::Split { first, second, .. } => {
                 first.find_pane_mut(id).or_else(|| second.find_pane_mut(id))
             }
+            LayoutNode::Empty => None,
         }
     }
 
@@ -251,7 +259,7 @@ impl LayoutNode {
                 let new_id = new_pane.id;
 
                 // Take self out via dummy, then replace with the Split node.
-                let old_self = std::mem::replace(self, LayoutNode::dummy_leaf());
+                let old_self = std::mem::replace(self, LayoutNode::Empty);
 
                 let mut old_leaf = match old_self {
                     LayoutNode::Leaf(p) => p,
@@ -276,34 +284,8 @@ impl LayoutNode {
                 }
                 second.split_pane_impl(target_id, direction, spawn_fn)
             }
+            LayoutNode::Empty => None,
         }
-    }
-
-    /// Create a minimal dummy leaf for use with `std::mem::replace`.
-    fn dummy_leaf() -> LayoutNode {
-        let pair = portable_pty::native_pty_system()
-            .openpty(portable_pty::PtySize {
-                rows: 1,
-                cols: 2,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        LayoutNode::Leaf(PaneState {
-            id: 0,
-            term: Arc::new(FairMutex::new(Term::new(
-                TermConfig::default(),
-                &PaneTermSize {
-                    columns: 2,
-                    screen_lines: 1,
-                },
-                PaneListener,
-            ))),
-            pty_writer: Box::new(std::io::sink()),
-            pty_master: pair.master,
-            viewport: Rect::new(0.0, 0.0, 1.0, 1.0),
-            scrollback_lines: 0,
-        })
     }
 
     /// Remove a pane by ID. Returns true if found and removed.
@@ -324,13 +306,13 @@ impl LayoutNode {
                     matches!(second.as_ref(), LayoutNode::Leaf(p) if p.id == target_id);
 
                 if first_is_target {
-                    let sibling = std::mem::replace(second.as_mut(), LayoutNode::dummy_leaf());
+                    let sibling = std::mem::replace(second.as_mut(), LayoutNode::Empty);
                     *self = sibling;
                     return Some(true);
                 }
 
                 if second_is_target {
-                    let sibling = std::mem::replace(first.as_mut(), LayoutNode::dummy_leaf());
+                    let sibling = std::mem::replace(first.as_mut(), LayoutNode::Empty);
                     *self = sibling;
                     return Some(true);
                 }
@@ -342,6 +324,7 @@ impl LayoutNode {
                 }
                 second.remove_pane(target_id)
             }
+            LayoutNode::Empty => Some(false),
         }
     }
 
@@ -393,6 +376,7 @@ impl LayoutNode {
                     false
                 }
             }
+            LayoutNode::Empty => false,
         }
     }
 
@@ -449,6 +433,7 @@ impl LayoutNode {
                 rects.extend(second.leaf_rects());
                 rects
             }
+            LayoutNode::Empty => vec![],
         }
     }
 
@@ -457,6 +442,7 @@ impl LayoutNode {
         match self {
             LayoutNode::Leaf(_) => 1,
             LayoutNode::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+            LayoutNode::Empty => 0,
         }
     }
 }
@@ -481,10 +467,16 @@ pub fn next_pane_id() -> PaneId {
 ///
 /// `proxy_fn` is called with the pane_id to create a wake callback that
 /// notifies the event loop when new PTY data arrives.
+///
+/// `interceptor_config` controls which OSC sequence families are intercepted.
+/// `scan_interval_secs` sets the process-detector scan interval (0 = disabled).
 pub fn spawn_pane<F>(
     viewport: Rect,
     renderer: &GridRenderer,
     scrollback_lines: usize,
+    interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
+    scan_interval_secs: u64,
+    spawn_options: &therminal_terminal::pty::SpawnOptions,
     proxy_fn: F,
 ) -> Result<PaneState, anyhow::Error>
 where
@@ -506,8 +498,9 @@ where
     let term = Term::new(term_config, &term_size, PaneListener);
     let term = Arc::new(FairMutex::new(term));
 
-    let (pty_master, _child) = therminal_terminal::pty::spawn_shell(cols as u16, rows as u16)
-        .map_err(|e| anyhow::anyhow!("failed to spawn shell for pane: {e}"))?;
+    let (pty_master, _child) =
+        therminal_terminal::pty::spawn_shell_with_options(cols as u16, rows as u16, spawn_options)
+            .map_err(|e| anyhow::anyhow!("failed to spawn shell for pane: {e}"))?;
 
     let pty_reader = pty_master
         .try_clone_reader()
@@ -522,7 +515,13 @@ where
     thread::Builder::new()
         .name(format!("pty-reader-{id}"))
         .spawn(move || {
-            pane_pty_reader_loop(pty_reader, term_for_reader, wake);
+            pane_pty_reader_loop(
+                pty_reader,
+                term_for_reader,
+                wake,
+                interceptor_config,
+                scan_interval_secs,
+            );
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn pane PTY reader thread: {e}"))?;
 
@@ -543,11 +542,27 @@ fn pane_pty_reader_loop(
     mut reader: Box<dyn IoRead + Send>,
     term: Arc<FairMutex<Term<PaneListener>>>,
     wake: Box<dyn Fn() + Send + 'static>,
+    interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
+    scan_interval_secs: u64,
 ) {
-    use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
+    use std::time::Duration;
+
+    use therminal_terminal::interceptor::TherminalInterceptor;
+    use therminal_terminal::process_detector::ProcessDetector;
 
     let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
-    let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+    let (mut interceptor, _event_rx) = TherminalInterceptor::new(interceptor_config);
+
+    // Build process detector; 0 = disabled (interval set to 0 yields instant rescans,
+    // so we gate on the configured value before constructing).
+    let scan_interval = if scan_interval_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(scan_interval_secs))
+    };
+    let mut process_detector =
+        scan_interval.map(|interval| ProcessDetector::new(None).with_interval(interval));
+
     let mut buf = [0u8; 4096];
 
     loop {
@@ -564,6 +579,14 @@ fn pane_pty_reader_loop(
                         &mut interceptor,
                         &buf[..n],
                     );
+                }
+                // Run process-tree scan if enabled and interval has elapsed.
+                if let Some(ref mut detector) = process_detector {
+                    if let Some(agents) = detector.scan_if_due() {
+                        if !agents.is_empty() {
+                            tracing::debug!("detected agents: {:?}", agents);
+                        }
+                    }
                 }
                 wake();
             }

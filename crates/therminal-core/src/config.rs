@@ -44,16 +44,24 @@ pub struct TherminalConfig {
     pub profiles: HashMap<String, ProfileConfig>,
     /// Agent trust tier settings.
     pub trust: TrustConfig,
+    /// Terminal OSC sequence interceptor settings.
+    pub terminal: TerminalConfig,
 }
 
 impl TherminalConfig {
     /// Load config from the default path, falling back to defaults if the
     /// file does not exist or contains errors.
+    ///
+    /// When the config file doesn't exist, a fully-commented default config
+    /// is written to disk so users can discover all available options.
     pub fn load() -> Self {
         Self::load_from(&config_path())
     }
 
     /// Load config from a specific path.
+    ///
+    /// If the file doesn't exist, writes a commented default config and
+    /// returns [`TherminalConfig::default`].
     pub fn load_from(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(contents) => match toml::from_str::<TherminalConfig>(&contents) {
@@ -67,8 +75,12 @@ impl TherminalConfig {
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!(?path, "no config file found, using defaults");
-                Self::default()
+                info!(?path, "no config file found, writing default config");
+                let defaults = Self::default();
+                if let Err(write_err) = defaults.save_default_to(path) {
+                    warn!(?path, %write_err, "failed to write default config");
+                }
+                defaults
             }
             Err(e) => {
                 warn!(?path, %e, "failed to read config, using defaults");
@@ -89,6 +101,232 @@ impl TherminalConfig {
         }
         let contents = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, contents)
+    }
+
+    /// Write a fully-commented default config to the default path.
+    ///
+    /// All values are commented out (`#`-prefixed) so the file acts as
+    /// documentation rather than live overrides.  Users can uncomment and
+    /// edit any line to take effect on the next hot-reload.
+    pub fn save_default() -> std::io::Result<()> {
+        Self::default().save_default_to(&config_path())
+    }
+
+    /// Write a fully-commented default config to `path` (creates parent dirs).
+    pub fn save_default_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, Self::default_config_text())
+    }
+
+    /// Return the fully-commented default config as a TOML string.
+    ///
+    /// Every line is either a comment or a commented-out value so that the
+    /// file round-trips back to defaults when un-commented.
+    pub fn default_config_text() -> String {
+        let d = Self::default();
+        let mut out = String::new();
+
+        out.push_str("# Therminal config — hot-reloaded on save\n");
+        out.push_str("# Uncomment and edit any value to override the default.\n");
+        out.push('\n');
+
+        // ── [general] ───────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [general] — Window geometry, shell, scrollback, and environment.\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[general]\n");
+        out.push_str(&format!("# title = {:?}\n", d.general.title));
+        out.push_str(&format!("# window_width = {}\n", d.general.window_width));
+        out.push_str(&format!("# window_height = {}\n", d.general.window_height));
+        out.push_str(&format!(
+            "# scrollback_lines = {}\n",
+            d.general.scrollback_lines
+        ));
+        out.push_str("# shell = \"\"  # empty = user's default shell\n");
+        out.push_str(&format!("# padding = {}\n", d.general.padding));
+        out.push_str("# [general.env]  # extra PTY environment variables\n");
+        out.push_str("# MY_VAR = \"value\"\n");
+        out.push('\n');
+
+        // ── [font] ───────────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [font] — Font family, size, and rendering options.\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[font]\n");
+        out.push_str(&format!("# family = {:?}\n", d.font.family));
+        out.push_str(&format!("# size = {}\n", d.font.size));
+        out.push_str(&format!(
+            "# line_height_scale = {}\n",
+            d.font.line_height_scale
+        ));
+        out.push_str("# extra_fallbacks = [\"Noto Color Emoji\"]\n");
+        out.push_str(&format!("# nerd_font = {}\n", d.font.nerd_font));
+        out.push('\n');
+
+        // ── [colors] ─────────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [colors] — Terminal color palette overrides (hex: \"#RRGGBB\").\n");
+        out.push_str("# Leave a field absent (or comment it out) to use the built-in palette.\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[colors]\n");
+        out.push_str("# background = \"#0a0010\"\n");
+        out.push_str("# foreground = \"#c4b5fd\"\n");
+        out.push_str("# foreground_bright = \"#ede9fe\"\n");
+        out.push_str("# foreground_muted = \"#6b7280\"\n");
+        out.push_str("# surface = \"#1a0a2e\"\n");
+        out.push_str("# cursor = \"#a78bfa\"\n");
+        out.push_str("# selection = \"#2d1b69\"\n");
+        out.push_str("# ansi = [  # 16-entry ANSI palette override\n");
+        out.push_str("#   \"#000000\", \"#cc0000\", \"#00cc00\", \"#cccc00\",\n");
+        out.push_str("#   \"#0000cc\", \"#cc00cc\", \"#00cccc\", \"#cccccc\",\n");
+        out.push_str("#   \"#888888\", \"#ff5555\", \"#55ff55\", \"#ffff55\",\n");
+        out.push_str("#   \"#5555ff\", \"#ff55ff\", \"#55ffff\", \"#ffffff\",\n");
+        out.push_str("# ]\n");
+        out.push('\n');
+
+        // ── [terminal] ───────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [terminal] — OSC sequence interceptor.\n");
+        out.push_str(
+            "# Controls which escape-sequence families are intercepted for AI-awareness\n",
+        );
+        out.push_str("# and shell integration.  Disable a family only if a third-party tool\n");
+        out.push_str("# conflicts.  All families are enabled by default.\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[terminal]\n");
+        out.push_str(&format!(
+            "# osc_633 = {}  # VS Code shell integration\n",
+            d.terminal.osc_633
+        ));
+        out.push_str(&format!(
+            "# osc_133 = {}  # FinalTerm shell integration\n",
+            d.terminal.osc_133
+        ));
+        out.push_str(&format!(
+            "# osc_7 = {}   # current working directory\n",
+            d.terminal.osc_7
+        ));
+        out.push_str(&format!(
+            "# osc_1337 = {}  # iTerm2 extensions\n",
+            d.terminal.osc_1337
+        ));
+        out.push('\n');
+
+        // ── [trust] ──────────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [trust] — AI agent trust tiers.\n");
+        out.push_str("# default_tier: \"sandboxed\" | \"supervised\" | \"trusted\"\n");
+        out.push_str("# agent_scan_interval: seconds between process-tree scans (0 = disabled).\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[trust]\n");
+        out.push_str(&format!(
+            "# default_tier = {:?}\n",
+            Self::trust_tier_str(&d.trust.default_tier)
+        ));
+        out.push_str(&format!(
+            "# show_agent_indicator = {}\n",
+            d.trust.show_agent_indicator
+        ));
+        out.push_str(&format!(
+            "# agent_scan_interval = {}  # seconds (0 = disabled)\n",
+            d.trust.agent_scan_interval
+        ));
+        out.push('\n');
+        out.push_str(
+            "# Per-agent overrides — tier: \"sandboxed\" | \"supervised\" | \"trusted\"\n",
+        );
+        out.push_str("# [trust.agents.claude]\n");
+        out.push_str("# tier = \"trusted\"\n");
+        out.push_str("# allowed_tools = [\"read_file\", \"write_file\"]\n");
+        out.push('\n');
+
+        // ── [keybindings] ────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [keybindings] — Key-action bindings merged on top of built-in defaults.\n");
+        out.push_str("# Actions: copy | paste | font_size_up | font_size_down | font_size_reset\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[keybindings]\n");
+        out.push_str("# [[keybindings.bindings]]\n");
+        out.push_str("# key = \"ctrl+shift+c\"\n");
+        out.push_str("# action = \"copy\"\n");
+        out.push('\n');
+        out.push_str("# [[keybindings.bindings]]\n");
+        out.push_str("# key = \"ctrl+shift+v\"\n");
+        out.push_str("# action = \"paste\"\n");
+        out.push('\n');
+        out.push_str("# [[keybindings.bindings]]\n");
+        out.push_str("# key = \"ctrl+plus\"\n");
+        out.push_str("# action = \"font_size_up\"\n");
+        out.push('\n');
+        out.push_str("# [[keybindings.bindings]]\n");
+        out.push_str("# key = \"ctrl+minus\"\n");
+        out.push_str("# action = \"font_size_down\"\n");
+        out.push('\n');
+        out.push_str("# [[keybindings.bindings]]\n");
+        out.push_str("# key = \"ctrl+0\"\n");
+        out.push_str("# action = \"font_size_reset\"\n");
+        out.push('\n');
+
+        // ── [profiles] ───────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [profiles] — Named session profiles with per-profile overrides.\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [profiles.dev]\n");
+        out.push_str("# shell = \"/bin/zsh\"\n");
+        out.push_str("# working_directory = \"~/dev\"\n");
+        out.push_str("# font_size = 14.0\n");
+        out.push_str("# scrollback_lines = 50000\n");
+        out.push_str("# [profiles.dev.env]\n");
+        out.push_str("# EDITOR = \"nvim\"\n");
+        out.push('\n');
+
+        out
+    }
+
+    /// Return the TOML string representation of a [`TrustTier`] variant.
+    fn trust_tier_str(tier: &TrustTier) -> &'static str {
+        match tier {
+            TrustTier::Sandboxed => "sandboxed",
+            TrustTier::Supervised => "supervised",
+            TrustTier::Trusted => "trusted",
+        }
+    }
+
+    /// Serialise the current effective config to a TOML string.
+    ///
+    /// Used by `therminal --print-config`.
+    pub fn to_toml_string(&self) -> String {
+        toml::to_string_pretty(self).unwrap_or_else(|e| format!("# serialization error: {e}\n"))
     }
 
     /// Build a [`CoreFontConfig`] from the config's font section.
@@ -326,6 +564,37 @@ pub struct ProfileConfig {
     pub scrollback_lines: Option<usize>,
 }
 
+// ── Section: Terminal ────────────────────────────────────────────────────
+
+/// Configuration for the terminal sequence interceptor.
+///
+/// Controls which OSC escape-sequence families are intercepted for AI
+/// awareness and shell integration.  All families are enabled by default;
+/// disable individual families only if a third-party tool conflicts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Intercept OSC 633 sequences (VS Code shell integration).
+    pub osc_633: bool,
+    /// Intercept OSC 133 sequences (FinalTerm shell integration).
+    pub osc_133: bool,
+    /// Intercept OSC 7 sequences (current working directory).
+    pub osc_7: bool,
+    /// Intercept OSC 1337 sequences (iTerm2).
+    pub osc_1337: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            osc_633: true,
+            osc_133: true,
+            osc_7: true,
+            osc_1337: true,
+        }
+    }
+}
+
 // ── Section: Trust ───────────────────────────────────────────────────────
 
 /// Trust tier assigned to an AI agent.
@@ -353,6 +622,11 @@ pub struct TrustConfig {
     pub agents: HashMap<String, AgentTrust>,
     /// Whether to show visual indicators when agents are detected.
     pub show_agent_indicator: bool,
+    /// Interval in seconds between process-tree scans for agent detection.
+    ///
+    /// Set to `0` to disable automatic process-tree scanning.
+    /// Default is `3` seconds.
+    pub agent_scan_interval: u64,
 }
 
 impl Default for TrustConfig {
@@ -361,6 +635,7 @@ impl Default for TrustConfig {
             default_tier: TrustTier::Supervised,
             agents: HashMap::new(),
             show_agent_indicator: true,
+            agent_scan_interval: 3,
         }
     }
 }
@@ -521,5 +796,153 @@ allowed_tools = ["read_file", "write_file"]
         let kb = KeybindingsConfig::default();
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::Copy));
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::Paste));
+    }
+
+    #[test]
+    fn terminal_config_defaults_all_enabled() {
+        let config = TerminalConfig::default();
+        assert!(config.osc_633);
+        assert!(config.osc_133);
+        assert!(config.osc_7);
+        assert!(config.osc_1337);
+    }
+
+    #[test]
+    fn terminal_config_deserialize_partial() {
+        let toml_str = r#"
+[terminal]
+osc_633 = false
+osc_1337 = false
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.terminal.osc_633);
+        assert!(config.terminal.osc_133); // defaults to true
+        assert!(config.terminal.osc_7); // defaults to true
+        assert!(!config.terminal.osc_1337);
+    }
+
+    #[test]
+    fn terminal_config_round_trips_through_toml() {
+        let mut config = TherminalConfig::default();
+        config.terminal.osc_633 = false;
+        config.terminal.osc_1337 = false;
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+
+        assert!(!decoded.terminal.osc_633);
+        assert!(decoded.terminal.osc_133);
+        assert!(decoded.terminal.osc_7);
+        assert!(!decoded.terminal.osc_1337);
+    }
+
+    #[test]
+    fn trust_config_default_scan_interval() {
+        let trust = TrustConfig::default();
+        assert_eq!(trust.agent_scan_interval, 3);
+    }
+
+    #[test]
+    fn trust_config_scan_interval_deserialize() {
+        let toml_str = r#"
+[trust]
+agent_scan_interval = 10
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trust.agent_scan_interval, 10);
+    }
+
+    #[test]
+    fn trust_config_scan_interval_zero_disabled() {
+        let toml_str = r#"
+[trust]
+agent_scan_interval = 0
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trust.agent_scan_interval, 0);
+    }
+
+    #[test]
+    fn trust_config_scan_interval_round_trips() {
+        let mut config = TherminalConfig::default();
+        config.trust.agent_scan_interval = 5;
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(decoded.trust.agent_scan_interval, 5);
+    }
+
+    #[test]
+    fn default_config_text_has_header() {
+        let text = TherminalConfig::default_config_text();
+        assert!(text.starts_with("# Therminal config — hot-reloaded on save\n"));
+    }
+
+    #[test]
+    fn default_config_text_all_lines_are_comments_or_empty() {
+        let text = TherminalConfig::default_config_text();
+        for line in text.lines() {
+            assert!(
+                line.is_empty() || line.starts_with('#') || line.starts_with('['),
+                "unexpected non-comment line: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_config_text_parses_as_empty_toml() {
+        // Since every value line is commented out, the text should parse
+        // successfully and yield the same result as an empty TOML document
+        // (i.e. all defaults).
+        let text = TherminalConfig::default_config_text();
+        let config: TherminalConfig =
+            toml::from_str(&text).expect("default config text must parse");
+        assert_eq!(config.general.title, "Therminal");
+        assert_eq!(config.font.size, 17.0);
+        assert_eq!(config.trust.default_tier, TrustTier::Supervised);
+        assert_eq!(config.trust.agent_scan_interval, 3);
+        assert!(config.terminal.osc_633);
+        assert!(config.terminal.osc_133);
+        assert!(config.terminal.osc_7);
+        assert!(config.terminal.osc_1337);
+    }
+
+    #[test]
+    fn save_default_to_writes_parseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+
+        TherminalConfig::default()
+            .save_default_to(&path)
+            .expect("save_default_to should succeed");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with("# Therminal config"));
+        let _config: TherminalConfig =
+            toml::from_str(&contents).expect("written default config must parse");
+    }
+
+    #[test]
+    fn load_from_missing_file_writes_default_and_returns_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+
+        assert!(!path.exists());
+        let config = TherminalConfig::load_from(&path);
+
+        // Returns defaults.
+        assert_eq!(config.general.title, "Therminal");
+        // Wrote the commented default config to disk.
+        assert!(path.exists());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.starts_with("# Therminal config"));
+    }
+
+    #[test]
+    fn to_toml_string_produces_valid_toml() {
+        let config = TherminalConfig::default();
+        let s = config.to_toml_string();
+        let _: TherminalConfig =
+            toml::from_str(&s).expect("to_toml_string must produce valid TOML");
     }
 }

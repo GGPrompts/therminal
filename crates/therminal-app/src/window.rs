@@ -43,6 +43,7 @@ use therminal_core::palette::Color as PaletteColor;
 use therminal_terminal::input::{
     self, KeyCode, Modifiers as InputModifiers, MouseButton as InputMouseButton,
 };
+use therminal_terminal::interceptor::InterceptorConfig;
 
 // ── Custom event for waking the event loop from the PTY reader ───────────
 
@@ -54,15 +55,6 @@ enum UserEvent {
     /// Config file changed; apply new settings.
     ConfigChanged(Box<ConfigChanged>),
 }
-
-// ── Background color (matches grid_renderer TERM_BG) ─────────────────────
-
-const BG_COLOR: wgpu::Color = wgpu::Color {
-    r: 10.0 / 255.0,
-    g: 0.0,
-    b: 16.0 / 255.0,
-    a: 1.0,
-};
 
 /// Color for focused pane border indicator.
 const FOCUS_BORDER_COLOR: [f32; 4] = {
@@ -269,32 +261,50 @@ impl App {
             font_size = font_config.font_size,
             "Applying DPI scale to font"
         );
-        let grid_renderer = GridRenderer::new(
+        let padding = self.config.general.padding;
+        let mut grid_renderer = GridRenderer::new(
             &device,
             &queue,
             format,
             config.width,
             config.height,
             font_config,
+            padding,
         );
+        grid_renderer.apply_color_overrides(&self.config.colors);
 
         // ── First pane (fills entire window) ─────────────────────────────
         let full_rect = Rect::new(0.0, 0.0, config.width as f32, config.height as f32);
         let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_1337: self.config.terminal.osc_1337,
+        };
+        let scan_interval_secs = self.config.trust.agent_scan_interval;
+        let spawn_options = self.build_spawn_options();
         let proxy = self.event_proxy.clone();
-        let pane =
-            match crate::pane::spawn_pane(full_rect, &grid_renderer, scrollback, |_pane_id| {
+        let pane = match crate::pane::spawn_pane(
+            full_rect,
+            &grid_renderer,
+            scrollback,
+            interceptor_cfg,
+            scan_interval_secs,
+            &spawn_options,
+            |_pane_id| {
                 let p = proxy.clone();
                 Box::new(move || {
                     let _ = p.send_event(UserEvent::PtyOutput);
                 })
-            }) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to spawn initial pane");
-                    return;
-                }
-            };
+            },
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to spawn initial pane");
+                return;
+            }
+        };
         let pane_id = pane.id;
         let layout = LayoutNode::Leaf(pane);
 
@@ -402,7 +412,14 @@ impl App {
                 label: Some("therminal_render"),
             });
 
-        // Clear to background color.
+        // Clear to background color (respects config overrides).
+        let resolved_bg = renderer.resolved_bg();
+        let clear_color = wgpu::Color {
+            r: resolved_bg[0] as f64,
+            g: resolved_bg[1] as f64,
+            b: resolved_bg[2] as f64,
+            a: resolved_bg[3] as f64,
+        };
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),
@@ -410,7 +427,7 @@ impl App {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BG_COLOR),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -504,17 +521,36 @@ impl App {
             None => return,
         };
         let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_1337: self.config.terminal.osc_1337,
+        };
+        let scan_interval_secs = self.config.trust.agent_scan_interval;
+        let spawn_options = therminal_terminal::pty::SpawnOptions {
+            shell: self.config.general.shell.clone(),
+            env: self.config.general.env.clone(),
+        };
         let proxy = self.event_proxy.clone();
 
         let new_id = layout.split_pane(
             focused,
             direction,
-            |viewport| match crate::pane::spawn_pane(viewport, renderer, scrollback, |_pane_id| {
-                let p = proxy.clone();
-                Box::new(move || {
-                    let _ = p.send_event(UserEvent::PtyOutput);
-                })
-            }) {
+            |viewport| match crate::pane::spawn_pane(
+                viewport,
+                renderer,
+                scrollback,
+                interceptor_cfg.clone(),
+                scan_interval_secs,
+                &spawn_options,
+                |_pane_id| {
+                    let p = proxy.clone();
+                    Box::new(move || {
+                        let _ = p.send_event(UserEvent::PtyOutput);
+                    })
+                },
+            ) {
                 Ok(pane) => Some(pane),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to spawn pane for split");
@@ -719,8 +755,8 @@ impl App {
         let pane = layout.find_pane(pane_id)?;
 
         let vp = pane.viewport;
-        let col = ((px as f32 - vp.x() - 4.0) / renderer.cell_width).floor();
-        let row = ((py as f32 - vp.y() - 4.0) / renderer.cell_height).floor();
+        let col = ((px as f32 - vp.x() - renderer.padding_x()) / renderer.cell_width).floor();
+        let row = ((py as f32 - vp.y() - renderer.padding_y()) / renderer.cell_height).floor();
         if col < 0.0 || row < 0.0 {
             return None;
         }
@@ -979,46 +1015,100 @@ impl App {
             || (self.config.font.line_height_scale - old_config.font.line_height_scale).abs()
                 > f32::EPSILON;
 
-        if font_changed {
+        // ── Padding hot-reload ───────────────────────────────────────────
+        let padding_changed =
+            (self.config.general.padding - old_config.general.padding).abs() > f32::EPSILON;
+
+        // ── Color overrides hot-reload ──────────────────────────────────
+        let colors_changed = self.config.colors.background != old_config.colors.background
+            || self.config.colors.foreground != old_config.colors.foreground
+            || self.config.colors.cursor != old_config.colors.cursor
+            || self.config.colors.selection != old_config.colors.selection;
+
+        if colors_changed {
+            if let Some(renderer) = self.grid_renderer.as_mut() {
+                renderer.apply_color_overrides(&self.config.colors);
+                info!("color overrides updated via hot-reload");
+            }
+        }
+
+        let needs_relayout = font_changed || padding_changed;
+
+        if needs_relayout {
             if let (Some(renderer), Some(gpu), Some(window)) = (
                 self.grid_renderer.as_mut(),
                 self.gpu.as_ref(),
                 self.window.as_ref(),
             ) {
-                let scale = window.scale_factor() as f32;
-                let mut new_font_config = FontConfig::new(
-                    self.config.font.family.clone(),
-                    self.config.font.size * scale,
-                );
-                new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
-                new_font_config.line_height =
-                    self.config.font.size * self.config.font.line_height_scale * scale;
-                renderer.update_font(
-                    new_font_config,
-                    &gpu.device,
-                    &gpu.queue,
-                    gpu.config.width,
-                    gpu.config.height,
-                );
+                if padding_changed {
+                    renderer.set_padding(self.config.general.padding);
+                    info!(
+                        padding = self.config.general.padding,
+                        "padding updated via hot-reload"
+                    );
+                }
 
-                // Resize all panes after font change.
+                if font_changed {
+                    let scale = window.scale_factor() as f32;
+                    let mut new_font_config = FontConfig::new(
+                        self.config.font.family.clone(),
+                        self.config.font.size * scale,
+                    );
+                    new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
+                    new_font_config.line_height =
+                        self.config.font.size * self.config.font.line_height_scale * scale;
+                    renderer.update_font(
+                        new_font_config,
+                        &gpu.device,
+                        &gpu.queue,
+                        gpu.config.width,
+                        gpu.config.height,
+                    );
+
+                    info!(
+                        font_size = self.config.font.size,
+                        family = %self.config.font.family,
+                        "font config updated via hot-reload"
+                    );
+                }
+
+                // Resize all panes after font or padding change.
                 let full_rect =
                     Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
                 if let Some(layout) = self.layout.as_mut() {
                     layout.layout(full_rect);
                     layout.resize_all_panes(renderer);
                 }
-
-                info!(
-                    font_size = self.config.font.size,
-                    family = %self.config.font.family,
-                    "font config updated via hot-reload"
-                );
             }
+        }
+
+        // ── Non-hot-reloadable settings (log a note) ────────────────────
+        if self.config.general.shell != old_config.general.shell {
+            info!(
+                new_shell = %self.config.general.shell,
+                "shell config changed; takes effect on next PTY spawn (restart needed)"
+            );
+        }
+        if self.config.general.scrollback_lines != old_config.general.scrollback_lines {
+            info!(
+                new_scrollback = self.config.general.scrollback_lines,
+                "scrollback_lines changed; takes effect on next PTY spawn (restart needed)"
+            );
+        }
+        if self.config.general.env != old_config.general.env {
+            info!("env config changed; takes effect on next PTY spawn (restart needed)");
         }
 
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
+        }
+    }
+
+    /// Build PTY spawn options from the current config (shell override + env).
+    fn build_spawn_options(&self) -> therminal_terminal::pty::SpawnOptions {
+        therminal_terminal::pty::SpawnOptions {
+            shell: self.config.general.shell.clone(),
+            env: self.config.general.env.clone(),
         }
     }
 
@@ -1041,6 +1131,7 @@ impl App {
             LayoutNode::Split { first, second, .. } => self
                 .find_pane_at(first, px, py)
                 .or_else(|| self.find_pane_at(second, px, py)),
+            LayoutNode::Empty => None,
         }
     }
 }
@@ -1101,6 +1192,7 @@ fn render_panes_recursive(
                 surface_height,
             );
         }
+        LayoutNode::Empty => {}
     }
 }
 
@@ -1182,8 +1274,10 @@ fn render_single_pane(
     // Temporarily adjust renderer's padding to offset by the pane's viewport origin.
     let orig_pad_x = renderer.padding_x;
     let orig_pad_y = renderer.padding_y;
-    renderer.padding_x = vp.x() + 4.0; // 4.0 is the standard internal padding
-    renderer.padding_y = vp.y() + 4.0;
+    let internal_pad_x = renderer.padding_x();
+    let internal_pad_y = renderer.padding_y();
+    renderer.padding_x = vp.x() + internal_pad_x;
+    renderer.padding_y = vp.y() + internal_pad_y;
 
     renderer.render(
         &cells,

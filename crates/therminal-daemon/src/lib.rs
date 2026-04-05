@@ -24,6 +24,7 @@
 pub mod client;
 pub mod control;
 pub mod ensure;
+pub mod framing;
 pub mod handoff;
 pub mod lifecycle;
 pub mod server;

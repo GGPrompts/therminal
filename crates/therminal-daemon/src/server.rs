@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
+
+use crate::framing::{read_frame, write_frame};
 use tracing::{debug, error, info, warn};
 
 use therminal_protocol::daemon::{
@@ -180,41 +182,6 @@ impl Drop for IpcServer {
 }
 
 // ── Connection handler ────────────────────────────────────────────────────
-
-/// Read a single length-prefixed frame from the stream.
-///
-/// Returns `Ok(None)` on clean EOF, `Ok(Some(bytes))` with the payload,
-/// or `Err` on protocol violations.
-async fn read_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-
-    let msg_len = u32::from_be_bytes(len_buf) as usize;
-    if msg_len > MAX_FRAME_SIZE {
-        anyhow::bail!("frame too large: {msg_len} bytes (max {MAX_FRAME_SIZE})");
-    }
-
-    let mut payload = vec![0u8; msg_len];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .context("failed to read frame payload")?;
-
-    Ok(Some(payload))
-}
-
-/// Write a length-prefixed frame to the stream.
-async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
-    let len = payload.len() as u32;
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(payload).await?;
-    stream.flush().await?;
-    Ok(())
-}
 
 /// Handle a single client connection.
 ///

@@ -22,6 +22,8 @@ use therminal_protocol::daemon::{
     MAX_FRAME_SIZE,
 };
 
+use crate::framing::read_frame;
+
 /// Default timeout for daemon communication.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -282,7 +284,7 @@ async fn connection_task(
         loop {
             let frame = {
                 let mut r = reader_read.lock().await;
-                read_frame_from(&mut *r).await
+                read_frame(&mut *r).await
             };
             match frame {
                 Ok(Some(data)) => match decode_ipc(&data) {
@@ -361,27 +363,4 @@ async fn connection_task(
 
     // Shut down reader
     reader_handle.abort();
-}
-
-/// Read a single length-prefixed frame.
-async fn read_frame_from(stream: &mut (impl AsyncReadExt + Unpin)) -> Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-
-    let msg_len = u32::from_be_bytes(len_buf) as usize;
-    if msg_len > MAX_FRAME_SIZE {
-        anyhow::bail!("frame too large: {msg_len} bytes");
-    }
-
-    let mut payload = vec![0u8; msg_len];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .context("failed to read frame payload")?;
-
-    Ok(Some(payload))
 }

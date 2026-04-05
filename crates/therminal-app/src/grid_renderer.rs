@@ -270,6 +270,16 @@ pub struct GridRenderer {
     /// Hyperlink URL map: (row, col) -> URL string.
     /// Rebuilt each frame from cell hyperlinks (OSC 8) and regex URL detection.
     pub hyperlink_map: HashMap<(usize, usize), String>,
+
+    // ── Color overrides from config ──────────────────────────────────────
+    /// Override for background clear color (from config.colors.background).
+    bg_override: Option<[f32; 4]>,
+    /// Override for default foreground color (from config.colors.foreground).
+    fg_override: Option<[f32; 4]>,
+    /// Override for cursor color (from config.colors.cursor).
+    cursor_override: Option<[f32; 4]>,
+    /// Override for selection color (from config.colors.selection).
+    selection_override: Option<[f32; 4]>,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -290,6 +300,7 @@ impl GridRenderer {
         width: u32,
         height: u32,
         font_config: FontConfig,
+        padding: f32,
     ) -> Self {
         let font_size = font_config.font_size;
         let line_height = font_config.line_height;
@@ -406,8 +417,8 @@ impl GridRenderer {
         });
 
         // ── Persistent rect vertex buffer ─────────────────────────────
-        let padding_x = 4.0_f32;
-        let padding_y = 4.0_f32;
+        let padding_x = padding;
+        let padding_y = padding;
         let usable_w = width as f32 - padding_x * 2.0;
         let usable_h = height as f32 - padding_y * 2.0;
         let cols = (usable_w / cell_width).floor().max(2.0) as usize;
@@ -448,6 +459,65 @@ impl GridRenderer {
             frame_time_idx: 0,
             frame_time_sum: 0,
             hyperlink_map: HashMap::new(),
+            bg_override: None,
+            fg_override: None,
+            cursor_override: None,
+            selection_override: None,
+        }
+    }
+
+    /// Set padding (both x and y) from config. Call before resize to take effect.
+    pub fn set_padding(&mut self, padding: f32) {
+        self.padding_x = padding;
+        self.padding_y = padding;
+    }
+
+    /// Apply color overrides from the config's `ColorsConfig`.
+    pub fn apply_color_overrides(&mut self, colors: &therminal_core::config::ColorsConfig) {
+        self.bg_override = colors
+            .background
+            .as_deref()
+            .and_then(therminal_core::config::ColorsConfig::parse_hex)
+            .map(|c| c.to_f32_array());
+        self.fg_override = colors
+            .foreground
+            .as_deref()
+            .and_then(therminal_core::config::ColorsConfig::parse_hex)
+            .map(|c| c.to_f32_array());
+        self.cursor_override = colors
+            .cursor
+            .as_deref()
+            .and_then(therminal_core::config::ColorsConfig::parse_hex)
+            .map(|c| c.to_f32_array());
+        self.selection_override = colors
+            .selection
+            .as_deref()
+            .and_then(therminal_core::config::ColorsConfig::parse_hex)
+            .map(|c| c.to_f32_array());
+    }
+
+    /// Get the resolved background clear color as `[f32; 4]`, respecting config overrides.
+    pub fn resolved_bg(&self) -> [f32; 4] {
+        self.bg_override.unwrap_or(TERM_BG)
+    }
+
+    /// Get the resolved cursor color as `[f32; 4]`, respecting config overrides.
+    pub fn resolved_cursor_color(&self) -> [f32; 4] {
+        if let Some(c) = self.cursor_override {
+            [c[0], c[1], c[2], 0.85]
+        } else {
+            let wh = PaletteColor::WHITE_HOT.to_f32_array();
+            [wh[0], wh[1], wh[2], 0.85]
+        }
+    }
+
+    /// Get the resolved selection highlight color as `[f32; 4]`, respecting config overrides.
+    pub fn resolved_selection_color(&self) -> [f32; 4] {
+        if let Some(c) = self.selection_override {
+            [c[0], c[1], c[2], 0.35]
+        } else {
+            let accent = PaletteColor::ACCENT_COOL.to_f32_array();
+            [accent[0], accent[1], accent[2], 0.35]
         }
     }
 
@@ -712,8 +782,7 @@ impl GridRenderer {
                 let col_idx = cursor.point.column.0;
                 let cx = self.padding_x + col_idx as f32 * self.cell_width;
                 let cy = self.padding_y + cursor_row as f32 * self.cell_height;
-                let wh = PaletteColor::WHITE_HOT.to_f32_array();
-                let cursor_color = [wh[0], wh[1], wh[2], 0.85];
+                let cursor_color = self.resolved_cursor_color();
 
                 match cursor.shape {
                     CursorShape::Block => {
@@ -749,8 +818,7 @@ impl GridRenderer {
 
         // ── Selection highlight rects ────────────────────────────────────
         if let Some(sel) = selection {
-            let sel_color = PaletteColor::ACCENT_COOL.to_f32_array();
-            let sel_highlight = [sel_color[0], sel_color[1], sel_color[2], 0.35];
+            let sel_highlight = self.resolved_selection_color();
 
             for row in self.row_cache.iter().flatten() {
                 for cell in &row.cells {
@@ -893,7 +961,7 @@ impl GridRenderer {
                     && cursor_col == cell.col
                     && cursor_row == cell.row;
                 let fg = if is_block_cursor {
-                    TERM_BG
+                    self.resolved_bg()
                 } else if cell.hyperlink.is_some() {
                     PaletteColor::ACCENT_COOL.to_f32_array()
                 } else if cell.flags.contains(Flags::INVERSE) {
