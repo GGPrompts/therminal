@@ -37,7 +37,7 @@ use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
 use crate::menu::ContextMenu;
-use crate::pane::{LayoutNode, LayoutSnapshot, PaneId, SplitDirection};
+use crate::pane::{LayoutNode, LayoutSnapshot, PaneId, SplitDirection, WorkspaceManager};
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
 use therminal_core::geometry::Rect;
@@ -75,11 +75,8 @@ pub struct App {
     gpu: Option<GpuState>,
     grid_renderer: Option<GridRenderer>,
 
-    /// Root of the pane layout tree.
-    layout: Option<LayoutNode>,
-
-    /// ID of the currently focused pane.
-    focused_pane: Option<PaneId>,
+    /// Workspace manager holding all workspace layouts.
+    workspaces: Option<WorkspaceManager>,
 
     /// Proxy to wake the event loop from PTY reader threads.
     event_proxy: EventLoopProxy<UserEvent>,
@@ -195,8 +192,7 @@ impl App {
             window: None,
             gpu: None,
             grid_renderer: None,
-            layout: None,
-            focused_pane: None,
+            workspaces: None,
             event_proxy,
             modifiers: Modifiers::default(),
             pending_resize: None,
@@ -369,6 +365,7 @@ impl App {
         };
         let pane_id = pane.id;
         let layout = LayoutNode::Leaf(pane);
+        let wm = WorkspaceManager::new(layout, Some(pane_id));
 
         let init_width = config.width;
         let init_height = config.height;
@@ -381,13 +378,12 @@ impl App {
             config,
         });
         self.grid_renderer = Some(grid_renderer);
-        self.layout = Some(layout);
-        self.focused_pane = Some(pane_id);
+        self.workspaces = Some(wm);
 
         // Resize initial pane with correct header height (0 for single pane).
-        if let Some(layout) = self.layout.as_mut() {
+        if let Some(wm) = self.workspaces.as_mut() {
             if let Some(renderer) = self.grid_renderer.as_ref() {
-                layout.resize_all_panes(renderer);
+                wm.layout_mut().resize_all_panes(renderer);
             }
         }
 
@@ -433,8 +429,9 @@ impl App {
             new_size.width as f32,
             new_size.height as f32 - status_bar_h,
         );
-        if let (Some(layout), Some(renderer)) = (self.layout.as_mut(), self.grid_renderer.as_ref())
+        if let (Some(wm), Some(renderer)) = (self.workspaces.as_mut(), self.grid_renderer.as_ref())
         {
+            let layout = wm.layout_mut();
             layout.layout(full_rect);
             layout.resize_all_panes(renderer);
         }
@@ -443,7 +440,9 @@ impl App {
             "Resized to {}x{} ({} panes)",
             new_size.width,
             new_size.height,
-            self.layout.as_ref().map_or(0, |l| l.pane_count()),
+            self.workspaces
+                .as_ref()
+                .map_or(0, |wm| wm.layout().pane_count()),
         );
     }
 
@@ -457,7 +456,7 @@ impl App {
             Some(r) => r,
             None => return,
         };
-        let layout = match self.layout.as_ref() {
+        let layout = match self.workspaces.as_ref().map(|wm| wm.layout()) {
             Some(l) => l,
             None => return,
         };
@@ -514,7 +513,7 @@ impl App {
         }
 
         // Render each pane.
-        let focused = self.focused_pane;
+        let focused = self.workspaces.as_ref().and_then(|wm| wm.focused_pane());
         let pane_count = layout.pane_count();
         let show_focus = pane_count > 1;
 
@@ -539,7 +538,11 @@ impl App {
         // ── Status bar ──────────────────────────────────────────────────
         if self.config.general.show_status_bar {
             // Gather status info from the focused pane.
-            let focused_pane = self.focused_pane.and_then(|fid| layout.find_pane(fid));
+            let focused_pane = self
+                .workspaces
+                .as_ref()
+                .and_then(|wm| wm.focused_pane())
+                .and_then(|fid| layout.find_pane(fid));
 
             let (cwd, last_exit_code, agent_name, dimensions) = if let Some(pane) = focused_pane {
                 let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -557,12 +560,20 @@ impl App {
                 (None, None, None, (80, 24))
             };
 
+            let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
+                (wm.workspace_ids(), wm.active_id())
+            } else {
+                (vec![1], 1)
+            };
+
             let status_info = chrome::StatusBarInfo {
                 agent_name,
                 cwd,
                 dimensions,
                 last_exit_code,
                 show_agent_indicator: self.config.trust.show_agent_indicator,
+                workspace_ids,
+                active_workspace,
             };
 
             let mut encoder = gpu
@@ -675,17 +686,23 @@ impl App {
             KeyAction::RestoreLayout => {
                 self.restore_layout();
             }
+            KeyAction::SwitchWorkspace(n) => {
+                self.switch_workspace(n);
+            }
+            KeyAction::SendToWorkspace(n) => {
+                self.send_to_workspace(n);
+            }
         }
         true
     }
 
     /// Handle a keyboard event: encode it and write to the focused pane's PTY.
     fn handle_key_input(&mut self, key_event: &KeyEvent) {
-        let focused = match self.focused_pane {
+        let focused = match self.workspaces.as_ref().and_then(|wm| wm.focused_pane()) {
             Some(id) => id,
             None => return,
         };
-        let layout = match self.layout.as_mut() {
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
             None => return,
         };
@@ -760,7 +777,7 @@ impl App {
         let bindings = &self.config.keybindings.bindings;
 
         // Check if the pane under the cursor has a selection.
-        let has_selection = if let Some(layout) = self.layout.as_ref() {
+        let has_selection = if let Some(layout) = self.workspaces.as_ref().map(|wm| wm.layout()) {
             if let Some(pane) = layout.find_pane(pane_id) {
                 let term_guard = pane.term.lock();
                 term_guard
@@ -776,8 +793,9 @@ impl App {
 
         let menu = if has_selection {
             let text = self
-                .layout
+                .workspaces
                 .as_ref()
+                .map(|wm| wm.layout())
                 .and_then(|l| l.find_pane(pane_id))
                 .and_then(|p| p.term.lock().selection_to_string())
                 .unwrap_or_default();
@@ -910,7 +928,8 @@ impl App {
                     gpu.config.width as f32,
                     gpu.config.height as f32 - status_bar_h,
                 );
-                if let Some(layout) = self.layout.as_mut() {
+                if let Some(wm) = self.workspaces.as_mut() {
+                    let layout = wm.layout_mut();
                     layout.layout(full_rect);
                     layout.resize_all_panes(renderer);
                 }
@@ -946,7 +965,8 @@ impl App {
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
 
             let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
-            if let Some(lay) = self.layout.as_mut() {
+            if let Some(wm) = self.workspaces.as_mut() {
+                let lay = wm.layout_mut();
                 lay.layout(full_rect);
                 lay.resize_all_panes(renderer);
             }
@@ -965,7 +985,8 @@ impl App {
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
 
             let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
-            if let Some(layout) = self.layout.as_mut() {
+            if let Some(wm) = self.workspaces.as_mut() {
+                let layout = wm.layout_mut();
                 layout.layout(full_rect);
                 layout.resize_all_panes(renderer);
             }
@@ -1082,7 +1103,7 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // If layout was removed (last pane closed), exit --
                 // unless we have a saved layout snapshot (close-all with restore).
-                if self.layout.is_none() {
+                if self.workspaces.is_none() {
                     if self.saved_layout.is_none() {
                         event_loop.exit();
                         return;
@@ -1241,7 +1262,9 @@ impl ApplicationHandler<UserEvent> for App {
                             header_handled = true;
                             match action {
                                 HeaderAction::Focus(pane_id) => {
-                                    self.focused_pane = Some(pane_id);
+                                    if let Some(wm) = self.workspaces.as_mut() {
+                                        wm.set_focused_pane(Some(pane_id));
+                                    }
                                 }
                                 HeaderAction::Close(pane_id) => {
                                     self.close_pane_by_id(pane_id);
@@ -1265,8 +1288,12 @@ impl ApplicationHandler<UserEvent> for App {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         if let Some((px, py)) = self.cursor_position {
                             if let Some(pane_id) = self.pane_at_position(px, py) {
-                                if self.focused_pane != Some(pane_id) {
-                                    self.focused_pane = Some(pane_id);
+                                if self.workspaces.as_ref().and_then(|wm| wm.focused_pane())
+                                    != Some(pane_id)
+                                {
+                                    if let Some(wm) = self.workspaces.as_mut() {
+                                        wm.set_focused_pane(Some(pane_id));
+                                    }
                                     if let Some(w) = self.window.as_ref() {
                                         w.request_redraw();
                                     }

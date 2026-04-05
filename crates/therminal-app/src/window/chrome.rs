@@ -567,6 +567,10 @@ pub(crate) struct StatusBarInfo {
     pub last_exit_code: Option<i32>,
     /// Whether the config allows showing the agent indicator.
     pub show_agent_indicator: bool,
+    /// IDs of all existing workspaces (sorted).
+    pub workspace_ids: Vec<usize>,
+    /// Currently active workspace number.
+    pub active_workspace: usize,
 }
 
 /// Draw the window status bar at the bottom of the screen.
@@ -636,6 +640,47 @@ pub(crate) fn draw_status_bar(
     let mut text_areas: Vec<TextArea<'_>> = Vec::new();
     // We need to keep the buffers alive for the text_areas references.
     // Allocate all buffers first, then build text_areas.
+
+    // ── Workspace indicators (left-most) ────────────────────────────────
+    // Show workspace numbers; highlight the active one. Only show when >1 workspace.
+    let workspace_text = if info.workspace_ids.len() > 1 {
+        let mut s = String::from(" ");
+        for &ws_id in &info.workspace_ids {
+            if ws_id == info.active_workspace {
+                s.push_str(&format!("[{ws_id}] "));
+            } else {
+                s.push_str(&format!(" {ws_id}  "));
+            }
+        }
+        s
+    } else {
+        String::new()
+    };
+
+    let workspace_active_color = GlyphColor::rgba(
+        PaletteColor::FOCUS.r,
+        PaletteColor::FOCUS.g,
+        PaletteColor::FOCUS.b,
+        255,
+    );
+
+    let mut workspace_buf = Buffer::new(&mut renderer.font_system, metrics);
+    workspace_buf.set_size(&mut renderer.font_system, Some(sw * 0.25), Some(bar_h));
+    workspace_buf.set_text(
+        &mut renderer.font_system,
+        &workspace_text,
+        Attrs::new()
+            .family(Family::Name(&renderer.font_config.family))
+            .color(workspace_active_color),
+        Shaping::Basic,
+    );
+    workspace_buf.shape_until_scroll(&mut renderer.font_system, false);
+
+    let workspace_text_width = workspace_buf
+        .layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0);
 
     // ── Left section: agent indicator (when detected and config allows) ──
     let left_text = if info.show_agent_indicator {
@@ -751,11 +796,24 @@ pub(crate) fn draw_status_bar(
         },
     );
 
+    // Workspace indicators (left-most).
+    if !workspace_text.is_empty() {
+        text_areas.push(TextArea {
+            buffer: &workspace_buf,
+            left: 0.0,
+            top: bar_y,
+            scale: 1.0,
+            bounds,
+            default_color: workspace_active_color,
+            custom_glyphs: &[],
+        });
+    }
+
     // Only add left area if there is agent text.
     if !left_text_ref.is_empty() {
         text_areas.push(TextArea {
             buffer: &left_buf,
-            left: 0.0,
+            left: workspace_text_width,
             top: bar_y,
             scale: 1.0,
             bounds,

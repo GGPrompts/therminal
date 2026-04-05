@@ -555,6 +555,10 @@ pub enum KeyAction {
     SwapNext,
     /// Swap focused pane with the previous pane.
     SwapPrev,
+    /// Switch to workspace N (1-9).
+    SwitchWorkspace(u8),
+    /// Send focused pane to workspace N (1-9).
+    SendToWorkspace(u8),
 }
 
 impl KeyAction {
@@ -584,6 +588,8 @@ impl KeyAction {
             KeyAction::RestoreLayout => "Restore last layout",
             KeyAction::SwapNext => "Swap pane with next",
             KeyAction::SwapPrev => "Swap pane with previous",
+            KeyAction::SwitchWorkspace(_) => "Switch workspace",
+            KeyAction::SendToWorkspace(_) => "Send pane to workspace",
         }
     }
 
@@ -606,7 +612,9 @@ impl KeyAction {
             | KeyAction::CloseAllPanes
             | KeyAction::RestoreLayout
             | KeyAction::SwapNext
-            | KeyAction::SwapPrev => "Pane Management",
+            | KeyAction::SwapPrev
+            | KeyAction::SwitchWorkspace(_)
+            | KeyAction::SendToWorkspace(_) => "Pane Management",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
         }
@@ -739,6 +747,80 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "alt+shift+left".to_string(),
                     action: KeyAction::SwapPrev,
+                },
+                // Workspace switching (Alt+1 through Alt+9)
+                Keybinding {
+                    key: "alt+1".to_string(),
+                    action: KeyAction::SwitchWorkspace(1),
+                },
+                Keybinding {
+                    key: "alt+2".to_string(),
+                    action: KeyAction::SwitchWorkspace(2),
+                },
+                Keybinding {
+                    key: "alt+3".to_string(),
+                    action: KeyAction::SwitchWorkspace(3),
+                },
+                Keybinding {
+                    key: "alt+4".to_string(),
+                    action: KeyAction::SwitchWorkspace(4),
+                },
+                Keybinding {
+                    key: "alt+5".to_string(),
+                    action: KeyAction::SwitchWorkspace(5),
+                },
+                Keybinding {
+                    key: "alt+6".to_string(),
+                    action: KeyAction::SwitchWorkspace(6),
+                },
+                Keybinding {
+                    key: "alt+7".to_string(),
+                    action: KeyAction::SwitchWorkspace(7),
+                },
+                Keybinding {
+                    key: "alt+8".to_string(),
+                    action: KeyAction::SwitchWorkspace(8),
+                },
+                Keybinding {
+                    key: "alt+9".to_string(),
+                    action: KeyAction::SwitchWorkspace(9),
+                },
+                // Send pane to workspace (Alt+Shift+1 through Alt+Shift+9)
+                Keybinding {
+                    key: "alt+shift+1".to_string(),
+                    action: KeyAction::SendToWorkspace(1),
+                },
+                Keybinding {
+                    key: "alt+shift+2".to_string(),
+                    action: KeyAction::SendToWorkspace(2),
+                },
+                Keybinding {
+                    key: "alt+shift+3".to_string(),
+                    action: KeyAction::SendToWorkspace(3),
+                },
+                Keybinding {
+                    key: "alt+shift+4".to_string(),
+                    action: KeyAction::SendToWorkspace(4),
+                },
+                Keybinding {
+                    key: "alt+shift+5".to_string(),
+                    action: KeyAction::SendToWorkspace(5),
+                },
+                Keybinding {
+                    key: "alt+shift+6".to_string(),
+                    action: KeyAction::SendToWorkspace(6),
+                },
+                Keybinding {
+                    key: "alt+shift+7".to_string(),
+                    action: KeyAction::SendToWorkspace(7),
+                },
+                Keybinding {
+                    key: "alt+shift+8".to_string(),
+                    action: KeyAction::SendToWorkspace(8),
+                },
+                Keybinding {
+                    key: "alt+shift+9".to_string(),
+                    action: KeyAction::SendToWorkspace(9),
                 },
             ],
         }
