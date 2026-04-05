@@ -9,7 +9,39 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work atomically
 bd close <id>         # Complete work
-bd-push               # Push beads data to remote
+bd-pull               # Pull beads data from Hetzner Dolt remote
+bd-push               # Push beads data to Hetzner Dolt remote
+```
+
+## Embedded Dolt Setup
+
+This repo is configured for **embedded Dolt mode**:
+
+```json
+{
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tn"
+}
+```
+
+Use the workflow from `~/BeadsHive/plugins/beads-planner/commands/gg-migrate.md`:
+
+- Daily issue work happens locally through `bd`
+- Cross-device sync uses the shell helpers `bd-pull` and `bd-push`
+- Do **not** rely on `bd sync`
+- Do **not** rely on `bd dolt push` in embedded mode here; the migration doc notes it does not pass `--user` correctly for remotesapi
+
+If the shell helpers are not loaded in the current shell, use the documented fallback:
+
+```bash
+DB="$(command grep -oP '"dolt_database"\s*:\s*"\K[^"]+' .beads/metadata.json)"
+
+# Pull from Hetzner
+(cd ".beads/embeddeddolt/$DB" && dolt pull --user beads origin main)
+
+# Push to Hetzner
+(cd ".beads/embeddeddolt/$DB" && dolt push --user beads origin main)
 ```
 
 ## Non-Interactive Shell Commands
@@ -48,6 +80,8 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work
 bd close <id>         # Complete work
+bd-pull               # Pull beads data from Hetzner Dolt remote
+bd-push               # Push beads data to Hetzner Dolt remote
 ```
 
 ### Rules
@@ -67,8 +101,9 @@ bd close <id>         # Complete work
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
-   git pull --rebase
-   bd-push
+   bd-pull                 # if switching from another device or before reconciling tracker state
+   git pull --rebase       # only when the worktree is clean enough to rebase safely
+   bd-push                 # or the documented dolt fallback if helper functions are unavailable
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -81,4 +116,5 @@ bd close <id>         # Complete work
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+- In embedded Dolt mode, `bd-push`/`bd-pull` are the expected sync path; if they are unavailable, use the explicit `dolt push --user beads` / `dolt pull --user beads` fallback inside `.beads/embeddeddolt/<db>`
 <!-- END BEADS INTEGRATION -->
