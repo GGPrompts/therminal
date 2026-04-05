@@ -83,10 +83,10 @@ impl FontConfig {
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-/// Terminal background — matches kitty's `background #0a0010` (palette BG).
+/// Terminal background — VOID_0 from the Codex 2031 palette (#060a12).
 /// Spec(0,0,0) and palette BG are suppressed in ansi_to_glyphon_bg
 /// so they don't draw redundant bg rects over this clear color.
-pub(crate) const TERM_BG: [f32; 4] = [10.0 / 255.0, 0.0, 16.0 / 255.0, 1.0]; // #0a0010
+pub(crate) const TERM_BG: [f32; 4] = [6.0 / 255.0, 10.0 / 255.0, 18.0 / 255.0, 1.0]; // #060a12
 
 /// Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
 #[allow(dead_code)]
@@ -646,11 +646,13 @@ impl GridRenderer {
     }
 
     /// Get the base horizontal padding (config value, not viewport-adjusted).
+    #[allow(clippy::misnamed_getters)]
     pub fn padding_x(&self) -> f32 {
         self.base_padding_x
     }
 
     /// Get the base vertical padding (config value, not viewport-adjusted).
+    #[allow(clippy::misnamed_getters)]
     pub fn padding_y(&self) -> f32 {
         self.base_padding_y
     }

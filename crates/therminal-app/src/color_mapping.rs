@@ -27,7 +27,7 @@ pub(crate) fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
         AnsiColor::Named(named) => Some(named_to_thermal_bg(*named)),
         AnsiColor::Spec(rgb) => {
             if (rgb.r == 0 && rgb.g == 0 && rgb.b == 0)
-                || (rgb.r == 10 && rgb.g == 0 && rgb.b == 16)
+                || (rgb.r == 6 && rgb.g == 10 && rgb.b == 18)
             {
                 None
             } else {
@@ -65,24 +65,24 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
         NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(),
 
-        NamedColor::BrightBlack => [0.53, 0.47, 0.78, 1.0],
-        NamedColor::BrightRed => [0.97, 0.45, 0.45, 1.0],
-        NamedColor::BrightGreen => [0.20, 0.83, 0.60, 1.0],
+        NamedColor::BrightBlack => PaletteColor::INK_DIM.to_f32_array(),
+        NamedColor::BrightRed => [1.0, 0.49, 0.56, 1.0], // lighter ALERT
+        NamedColor::BrightGreen => [0.35, 1.0, 0.78, 1.0], // lighter SIGNAL
         NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),
         NamedColor::BrightBlue => PaletteColor::ACCENT_COLD.to_f32_array(),
         NamedColor::BrightMagenta => PaletteColor::TEXT.to_f32_array(),
-        NamedColor::BrightCyan => [0.18, 0.83, 0.75, 1.0],
+        NamedColor::BrightCyan => [0.30, 0.90, 0.80, 1.0],
         NamedColor::BrightWhite | NamedColor::BrightForeground => {
             PaletteColor::WHITE_HOT.to_f32_array()
         }
 
         NamedColor::DimBlack => TERM_BG,
-        NamedColor::DimRed => [0.94, 0.27, 0.27, 1.0],
-        NamedColor::DimGreen => [0.17, 0.72, 0.66, 1.0],
+        NamedColor::DimRed => [0.85, 0.35, 0.42, 1.0], // muted ALERT
+        NamedColor::DimGreen => [0.20, 0.80, 0.60, 1.0], // muted SIGNAL
         NamedColor::DimYellow => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::DimBlue => [0.20, 0.47, 0.95, 1.0],
+        NamedColor::DimBlue => [0.30, 0.55, 0.85, 1.0], // muted FOCUS
         NamedColor::DimMagenta => PaletteColor::ACCENT_COLD.to_f32_array(),
-        NamedColor::DimCyan => [0.17, 0.72, 0.66, 1.0],
+        NamedColor::DimCyan => [0.20, 0.72, 0.66, 1.0],
         NamedColor::DimWhite | NamedColor::DimForeground => PaletteColor::TEXT.to_f32_array(),
 
         NamedColor::Background => TERM_BG,

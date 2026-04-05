@@ -741,4 +741,297 @@ mod tests {
             assert!((*ratio - 0.9).abs() < f32::EPSILON);
         }
     }
+
+    // ── Edge-case tests ──────────────────────────────────────────────────
+
+    /// Helper to build a leaf without a real PTY pair using sequential IDs.
+    /// Returns (node, id).
+    fn make_leaf(id: PaneId) -> LayoutNode {
+        test_leaf(id, Rect::new(0.0, 0.0, 800.0, 600.0))
+    }
+
+    /// Build a split node from two pre-built children.
+    fn make_split(
+        direction: SplitDirection,
+        ratio: f32,
+        first: LayoutNode,
+        second: LayoutNode,
+    ) -> LayoutNode {
+        LayoutNode::Split {
+            direction,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    /// Collect all viewport rects from leaves in the tree.
+    fn collect_leaf_rects(node: &LayoutNode) -> Vec<Rect> {
+        match node {
+            LayoutNode::Leaf(pane) => vec![pane.viewport],
+            LayoutNode::Split { first, second, .. } => {
+                let mut rects = collect_leaf_rects(first);
+                rects.extend(collect_leaf_rects(second));
+                rects
+            }
+            LayoutNode::Empty => vec![],
+        }
+    }
+
+    // ── 1. Deep nesting: split 5+ times, close inner panes ──────────────
+
+    #[test]
+    fn deep_nesting_split_and_close_rebalances() {
+        // Build a right-leaning chain of 6 panes: each split adds a new leaf on
+        // the right, so pane IDs 1..=6 exist in order left-to-right.
+        //
+        // Tree after 6 panes:
+        //   Split(1, Split(2, Split(3, Split(4, Split(5, 6)))))
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = test_leaf(1, rect);
+
+        for id in 2u64..=6 {
+            let pair = portable_pty::native_pty_system()
+                .openpty(portable_pty::PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let new_pane = PaneState {
+                id,
+                term: Arc::new(FairMutex::new(Term::new(
+                    TermConfig::default(),
+                    &PaneTermSize {
+                        columns: 80,
+                        screen_lines: 24,
+                    },
+                    PaneListener,
+                ))),
+                pty_writer: writer,
+                pty_master: pair.master,
+                viewport: rect,
+                scrollback_lines: 1000,
+            };
+            // Find the rightmost leaf to split there.
+            let rightmost_id = *root.pane_ids().last().unwrap();
+            root.split_pane(rightmost_id, SplitDirection::Horizontal, |r| {
+                let _ = r;
+                Some(new_pane)
+            });
+        }
+
+        assert_eq!(root.pane_count(), 6);
+        assert_eq!(root.pane_ids(), vec![1, 2, 3, 4, 5, 6]);
+
+        // Close inner panes 3, 4, 5 one by one.
+        for id in [3u64, 4, 5] {
+            let result = root.remove_pane(id);
+            assert_eq!(result, Some(true), "should remove pane {id}");
+        }
+
+        assert_eq!(root.pane_count(), 3);
+        // Remaining panes are 1, 2, 6 in tree order.
+        let ids = root.pane_ids();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert!(ids.contains(&6));
+        assert!(!ids.contains(&3));
+        assert!(!ids.contains(&4));
+        assert!(!ids.contains(&5));
+    }
+
+    // ── 2. Resize propagation: leaf rects must tile the viewport exactly ─
+
+    #[test]
+    fn layout_rects_tile_viewport_exactly() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Build a 3-pane tree:  Split(H, Split(V, 1, 2), 3)
+        // Pane 1 and 2 share the left half stacked vertically.
+        // Pane 3 occupies the right half.
+        let left = make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2));
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, left, make_leaf(3));
+
+        root.layout(viewport);
+
+        let rects = collect_leaf_rects(&root);
+        assert_eq!(rects.len(), 3);
+
+        // Total area of leaf rects + separators must equal viewport area.
+        // Each split introduces one SEPARATOR_GAP strip; two splits = 2 gaps.
+        let leaf_area: f32 = rects.iter().map(|r| r.width() * r.height()).sum();
+        let viewport_area = viewport.width() * viewport.height();
+
+        // The separator gaps reduce usable area: we allow a tolerance of two
+        // full-width / full-height strips (SEPARATOR_GAP px wide/tall each).
+        let gap_budget = SEPARATOR_GAP * (viewport.width() + viewport.height());
+        assert!(
+            (viewport_area - leaf_area).abs() < gap_budget + 1.0,
+            "leaf area {leaf_area} should be close to viewport area {viewport_area}"
+        );
+
+        // All leaf rects must be within viewport bounds.
+        for r in &rects {
+            assert!(r.x() >= viewport.x() - f32::EPSILON);
+            assert!(r.y() >= viewport.y() - f32::EPSILON);
+            assert!(r.right() <= viewport.right() + f32::EPSILON);
+            assert!(r.bottom() <= viewport.bottom() + f32::EPSILON);
+        }
+    }
+
+    // ── 3. Asymmetric splits: close from the shallow side ───────────────
+
+    #[test]
+    fn asymmetric_tree_close_shallow_side() {
+        // Asymmetric tree:
+        //   Split(H,
+        //     1,                          ← shallow (single leaf)
+        //     Split(V, 2, Split(H, 3, 4)) ← deep right subtree
+        //   )
+        let deep = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
+        let right_subtree = make_split(SplitDirection::Vertical, 0.5, make_leaf(2), deep);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), right_subtree);
+
+        assert_eq!(root.pane_count(), 4);
+
+        // Close pane 1 (the shallow side leaf that is a direct child of root).
+        let result = root.remove_pane(1);
+        assert_eq!(result, Some(true));
+
+        // Root should now be promoted to the right subtree.
+        assert_eq!(root.pane_count(), 3);
+        let ids = root.pane_ids();
+        assert_eq!(ids, vec![2, 3, 4]);
+
+        // The new root must be a Split (right subtree), not a Leaf or Empty.
+        assert!(
+            matches!(&root, LayoutNode::Split { .. }),
+            "root should be a split node after promotion"
+        );
+    }
+
+    // ── 4. Ratio extremes: verify minimum sizes enforced ────────────────
+
+    #[test]
+    fn ratio_extreme_low_layout_stays_within_bounds() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.1, // near minimum
+            make_leaf(1),
+            make_leaf(2),
+        );
+        root.layout(viewport);
+
+        let rects = collect_leaf_rects(&root);
+        assert_eq!(rects.len(), 2);
+
+        // Both panes must have positive dimensions.
+        for r in &rects {
+            assert!(r.width() > 0.0, "pane width must be positive at ratio 0.1");
+            assert!(r.height() > 0.0);
+        }
+        // All within viewport.
+        for r in &rects {
+            assert!(r.right() <= viewport.right() + f32::EPSILON);
+            assert!(r.bottom() <= viewport.bottom() + f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn ratio_extreme_high_layout_stays_within_bounds() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(
+            SplitDirection::Vertical,
+            0.9, // near maximum
+            make_leaf(1),
+            make_leaf(2),
+        );
+        root.layout(viewport);
+
+        let rects = collect_leaf_rects(&root);
+        assert_eq!(rects.len(), 2);
+
+        for r in &rects {
+            assert!(r.width() > 0.0);
+            assert!(
+                r.height() > 0.0,
+                "pane height must be positive at ratio 0.9"
+            );
+        }
+        for r in &rects {
+            assert!(r.right() <= viewport.right() + f32::EPSILON);
+            assert!(r.bottom() <= viewport.bottom() + f32::EPSILON);
+        }
+    }
+
+    // ── 5. Close all panes one-by-one: last close returns None ──────────
+
+    #[test]
+    fn close_all_panes_last_returns_none() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Build a 4-pane tree.
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2)),
+            make_split(SplitDirection::Vertical, 0.5, make_leaf(3), make_leaf(4)),
+        );
+        let _ = rect; // used by make_leaf via test_leaf
+
+        assert_eq!(root.pane_count(), 4);
+
+        // Close panes 1, 2, 3 — each should succeed.
+        for id in [1u64, 2, 3] {
+            let result = root.remove_pane(id);
+            assert_eq!(
+                result,
+                Some(true),
+                "removing pane {id} should return Some(true)"
+            );
+        }
+
+        // One pane left (id=4). Closing it must return None (not panic).
+        assert_eq!(root.pane_count(), 1);
+        let last_id = root.pane_ids()[0];
+        let result = root.remove_pane(last_id);
+        assert_eq!(result, None, "closing last pane must return None");
+    }
+
+    // ── 6. Adjacent pane navigation with complex trees ───────────────────
+
+    #[test]
+    fn adjacent_pane_navigation_complex_tree() {
+        // 4-pane tree: pane IDs in layout order are [1, 2, 3, 4].
+        let root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2)),
+            make_split(SplitDirection::Vertical, 0.5, make_leaf(3), make_leaf(4)),
+        );
+
+        // Forward navigation wraps.
+        assert_eq!(root.adjacent_pane(1, FocusDirection::Next), Some(2));
+        assert_eq!(root.adjacent_pane(2, FocusDirection::Next), Some(3));
+        assert_eq!(root.adjacent_pane(3, FocusDirection::Next), Some(4));
+        assert_eq!(root.adjacent_pane(4, FocusDirection::Next), Some(1)); // wraps
+
+        // Backward navigation wraps.
+        assert_eq!(root.adjacent_pane(1, FocusDirection::Prev), Some(4)); // wraps
+        assert_eq!(root.adjacent_pane(2, FocusDirection::Prev), Some(1));
+        assert_eq!(root.adjacent_pane(3, FocusDirection::Prev), Some(2));
+        assert_eq!(root.adjacent_pane(4, FocusDirection::Prev), Some(3));
+    }
+
+    #[test]
+    fn adjacent_pane_unknown_id_returns_none() {
+        let root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        // An ID not present in the tree should return None.
+        assert_eq!(root.adjacent_pane(99, FocusDirection::Next), None);
+        assert_eq!(root.adjacent_pane(99, FocusDirection::Prev), None);
+    }
 }

@@ -171,6 +171,11 @@ impl TherminalConfig {
         ));
         out.push_str("# extra_fallbacks = [\"Noto Color Emoji\"]\n");
         out.push_str(&format!("# nerd_font = {}\n", d.font.nerd_font));
+        out.push_str(&format!("# ui_font_family = {:?}\n", d.font.ui_font_family));
+        out.push_str(&format!(
+            "# display_font_family = {:?}\n",
+            d.font.display_font_family
+        ));
         out.push('\n');
 
         // ── [colors] ─────────────────────────────────────────────────────────
@@ -183,13 +188,13 @@ impl TherminalConfig {
             "# ─────────────────────────────────────────────────────────────────────────\n",
         );
         out.push_str("[colors]\n");
-        out.push_str("# background = \"#0a0010\"\n");
-        out.push_str("# foreground = \"#c4b5fd\"\n");
-        out.push_str("# foreground_bright = \"#ede9fe\"\n");
-        out.push_str("# foreground_muted = \"#6b7280\"\n");
-        out.push_str("# surface = \"#1a0a2e\"\n");
-        out.push_str("# cursor = \"#a78bfa\"\n");
-        out.push_str("# selection = \"#2d1b69\"\n");
+        out.push_str("# background = \"#060a12\"\n");
+        out.push_str("# foreground = \"#e7f0ff\"\n");
+        out.push_str("# foreground_bright = \"#e7f0ff\"\n");
+        out.push_str("# foreground_muted = \"#a9b8cd\"\n");
+        out.push_str("# surface = \"#18263a\"\n");
+        out.push_str("# cursor = \"#56a7ff\"\n");
+        out.push_str("# selection = \"#22324a\"\n");
         out.push_str("# ansi = [  # 16-entry ANSI palette override\n");
         out.push_str("#   \"#000000\", \"#cc0000\", \"#00cc00\", \"#cccc00\",\n");
         out.push_str("#   \"#0000cc\", \"#cc00cc\", \"#00cccc\", \"#cccccc\",\n");
@@ -387,7 +392,7 @@ impl Default for GeneralConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
-    /// Primary font family name. Empty string uses platform default.
+    /// Primary font family name for the terminal grid. Empty string uses platform default.
     pub family: String,
     /// Font size in points (before DPI scaling).
     pub size: f32,
@@ -397,6 +402,10 @@ pub struct FontConfig {
     pub extra_fallbacks: Vec<String>,
     /// Whether to try Nerd Font variant of the primary family.
     pub nerd_font: bool,
+    /// UI chrome font family (tabs, status bar, menus). Reserved for future use.
+    pub ui_font_family: String,
+    /// Display/brand font family (splash, about). Reserved for future use.
+    pub display_font_family: String,
 }
 
 impl Default for FontConfig {
@@ -410,6 +419,8 @@ impl Default for FontConfig {
             line_height_scale: 1.375,
             extra_fallbacks: vec!["Noto Color Emoji".to_string()],
             nerd_font: true,
+            ui_font_family: "IBM Plex Sans".to_string(),
+            display_font_family: "Chakra Petch".to_string(),
         }
     }
 }
@@ -682,13 +693,13 @@ size = 20.0
 
     #[test]
     fn parse_hex_6_digit() {
-        let c = ColorsConfig::parse_hex("#0a0010").unwrap();
+        let c = ColorsConfig::parse_hex("#060a12").unwrap();
         assert_eq!(c, Color::BG);
     }
 
     #[test]
     fn parse_hex_without_hash() {
-        let c = ColorsConfig::parse_hex("c4b5fd").unwrap();
+        let c = ColorsConfig::parse_hex("e7f0ff").unwrap();
         assert_eq!(c, Color::TEXT);
     }
 

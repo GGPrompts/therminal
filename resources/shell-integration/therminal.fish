@@ -20,23 +20,25 @@ end
 
 # -- Prompt hooks --------------------------------------------------------------
 
-# Fish uses event-based hooks: fish_prompt, fish_preexec, fish_postexec.
+# Fish uses event-based hooks for preexec/postexec, and function wrapping for
+# the prompt itself (to correctly bracket A...prompt-text...B in order).
 
 set -g __therminal_preexec_fired 0
 
-# Wrap fish_prompt to emit PromptStart (A) before and PromptEnd (B) after.
-# We use the fish_prompt event rather than replacing the function.
-
-function __therminal_fish_prompt --on-event fish_prompt
-    __therminal_osc '133;A'
+# Wrap the existing fish_prompt to emit PromptStart (A) before and
+# PromptEnd (B) after the prompt text.  This is the only source of A/B marks.
+if functions -q fish_prompt
+    functions -c fish_prompt __therminal_original_fish_prompt
+else
+    function __therminal_original_fish_prompt
+        printf '> '
+    end
 end
 
-function __therminal_fish_prompt_end --on-event fish_prompt
-    # This fires after the prompt function returns. We emit B here.
-    # Note: fish_prompt event fires once; we rely on the prompt function
-    # outputting between A and B. The B mark goes to stderr so it appears
-    # after the prompt text.
-    __therminal_osc '133;B' >&2
+function fish_prompt
+    __therminal_osc '133;A'
+    __therminal_original_fish_prompt
+    __therminal_osc '133;B'
 end
 
 # PreExec (C) — fires when the user submits a command.
@@ -53,15 +55,4 @@ function __therminal_postexec --on-event fish_postexec
         set -g __therminal_preexec_fired 0
     end
     __therminal_report_cwd
-end
-
-# Wrap the existing fish_prompt to inject B mark at the end.
-# We save the original and define a wrapper.
-if functions -q fish_prompt
-    functions -c fish_prompt __therminal_original_fish_prompt
-    function fish_prompt
-        __therminal_osc '133;A'
-        __therminal_original_fish_prompt
-        __therminal_osc '133;B'
-    end
 end

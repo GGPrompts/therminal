@@ -71,45 +71,78 @@ impl Color {
 
 // THERMAL-COLORS-START
 impl Color {
-    // Void / Background
-    pub const BG: Color = Color::from_hex(0x0a0010);
-    pub const BG_LIGHT: Color = Color::from_hex(0x0f0018);
-    pub const BG_SURFACE: Color = Color::from_hex(0x120822);
+    // ── Depth ramp (Codex 2031) ─────────────────────────────────────────
+    /// Deepest background — replaces old BG (#0a0010).
+    pub const VOID_0: Color = Color::from_hex(0x060a12);
+    /// Slightly raised surface.
+    pub const VOID_1: Color = Color::from_hex(0x0d1421);
+    /// Mid-depth surface.
+    pub const VOID_2: Color = Color::from_hex(0x111c2d);
+    /// Panel / card background.
+    pub const PLATE: Color = Color::from_hex(0x18263a);
+    /// Strong panel / raised element.
+    pub const PLATE_STRONG: Color = Color::from_hex(0x22324a);
 
-    // Cold spectrum
-    pub const FREEZING: Color = Color::from_hex(0x1a0030);
-    pub const COLD: Color = Color::from_hex(0x2d1b69);
-    pub const COOL: Color = Color::from_hex(0x1e3a8a);
+    // Backwards-compat aliases — old names map to the new depth ramp.
+    pub const BG: Color = Self::VOID_0;
+    pub const BG_LIGHT: Color = Self::VOID_1;
+    pub const BG_SURFACE: Color = Self::VOID_2;
 
-    // Neutral
-    pub const MILD: Color = Color::from_hex(0x0d9488);
-    pub const WARM: Color = Color::from_hex(0x22c55e);
+    // ── Ink (text) ──────────────────────────────────────────────────────
+    /// Primary text — replaces old TEXT (#c4b5fd).
+    pub const INK: Color = Color::from_hex(0xe7f0ff);
+    /// Muted text — secondary labels.
+    pub const INK_MUTED: Color = Color::from_hex(0xa9b8cd);
+    /// Dim text — placeholders, disabled.
+    pub const INK_DIM: Color = Color::from_hex(0x7b8fa9);
 
-    // Hot spectrum
-    pub const HOT: Color = Color::from_hex(0xeab308);
-    pub const HOTTER: Color = Color::from_hex(0xf97316);
-    pub const SEARING: Color = Color::from_hex(0xef4444);
-    pub const CRITICAL: Color = Color::from_hex(0xdc2626);
+    // Backwards-compat aliases for old text names.
+    pub const TEXT: Color = Self::INK;
+    pub const TEXT_BRIGHT: Color = Self::INK;
+    pub const TEXT_MUTED: Color = Self::INK_MUTED;
 
-    // White-hot
-    pub const WHITE_HOT: Color = Color::from_hex(0xfef3c7);
+    // ── Semantic accents (Codex 2031) ───────────────────────────────────
+    /// Success / safe / go — teal-green.
+    pub const SIGNAL: Color = Color::from_hex(0x39ffb6);
+    /// Human interaction / focus — blue.
+    pub const FOCUS: Color = Color::from_hex(0x56a7ff);
+    /// Caution / warning — amber.
+    pub const WARN: Color = Color::from_hex(0xffb24f);
+    /// Error / blocked / danger — coral-red.
+    pub const ALERT: Color = Color::from_hex(0xff5f78);
 
-    // Text
-    pub const TEXT: Color = Color::from_hex(0xc4b5fd);
-    pub const TEXT_BRIGHT: Color = Color::from_hex(0xe9e0ff);
-    pub const TEXT_MUTED: Color = Color::from_hex(0x9b8dd1);
+    // ── Borders ─────────────────────────────────────────────────────────
+    /// Hard border line.
+    pub const LINE: Color = Color::from_hex(0x2f4564);
+    /// Soft border (use with alpha in rendering contexts).
+    pub const LINE_SOFT: Color = Color::from_rgba(123, 156, 193, 51); // ~0.2 alpha
 
-    // Accents
-    pub const ACCENT_COLD: Color = Color::from_hex(0x818cf8);
-    pub const ACCENT_COOL: Color = Color::from_hex(0x3b82f6);
-    pub const ACCENT_NEUTRAL: Color = Color::from_hex(0x14b8a6);
-    pub const ACCENT_WARM: Color = Color::from_hex(0xf59e0b);
-    pub const ACCENT_HOT: Color = Color::from_hex(0xef4444);
+    // ── Temperature spectrum (mapped to semantic values) ────────────────
+    // These preserve the thermal gradient API while pointing at Codex colors.
+    pub const FREEZING: Color = Self::VOID_2;
+    pub const COLD: Color = Self::PLATE;
+    pub const COOL: Color = Self::SIGNAL; // was blue, now success-green
+    pub const MILD: Color = Color::from_hex(0x0d9488); // teal (retained)
+    pub const WARM: Color = Self::WARN; // was green, now amber
 
-    // Status
-    pub const STATUS_OK: Color = Color::from_hex(0x22c55e);
-    pub const STATUS_WARN: Color = Color::from_hex(0xf59e0b);
-    pub const STATUS_ERROR: Color = Color::from_hex(0xef4444);
+    pub const HOT: Color = Color::from_hex(0xeab308); // yellow (retained)
+    pub const HOTTER: Color = Color::from_hex(0xf97316); // orange (retained)
+    pub const SEARING: Color = Self::ALERT; // was red, now coral-red
+    pub const CRITICAL: Color = Color::from_hex(0xdc2626); // deep red (retained)
+
+    pub const WHITE_HOT: Color = Color::from_hex(0xfef3c7); // retained
+
+    // ── Accent aliases (backwards compat) ───────────────────────────────
+    pub const ACCENT_COLD: Color = Self::FOCUS;
+    pub const ACCENT_COOL: Color = Self::FOCUS;
+    pub const ACCENT_NEUTRAL: Color = Self::SIGNAL;
+    pub const ACCENT_WARM: Color = Self::WARN;
+    pub const ACCENT_HOT: Color = Self::ALERT;
+
+    // ── Status aliases ──────────────────────────────────────────────────
+    pub const STATUS_OK: Color = Self::SIGNAL;
+    pub const STATUS_WARN: Color = Self::WARN;
+    pub const STATUS_ERROR: Color = Self::ALERT;
 }
 // THERMAL-COLORS-END
 
@@ -262,9 +295,9 @@ mod tests {
 
     #[test]
     fn from_hex_arbitrary() {
-        // BG constant: 0x0a0010
-        let c = Color::from_hex(0x0a0010);
-        assert_eq!((c.r, c.g, c.b), (0x0a, 0x00, 0x10));
+        // VOID_0 constant: 0x060a12
+        let c = Color::from_hex(0x060a12);
+        assert_eq!((c.r, c.g, c.b), (0x06, 0x0a, 0x12));
     }
 
     // --- Color::from_rgba ---
@@ -582,9 +615,10 @@ mod tests {
 
     #[test]
     fn text_colors_meet_wcag_aa() {
-        assert_contrast("TEXT", Color::TEXT, WCAG_AA_TEXT);
-        assert_contrast("TEXT_BRIGHT", Color::TEXT_BRIGHT, WCAG_AA_TEXT);
-        assert_contrast("TEXT_MUTED", Color::TEXT_MUTED, WCAG_AA_TEXT);
+        assert_contrast("INK", Color::INK, WCAG_AA_TEXT);
+        assert_contrast("INK_MUTED", Color::INK_MUTED, WCAG_AA_TEXT);
+        // INK_DIM is for placeholders/disabled — only needs large-text ratio.
+        assert_contrast("INK_DIM", Color::INK_DIM, WCAG_AA_LARGE);
     }
 
     #[test]
@@ -603,12 +637,11 @@ mod tests {
     }
 
     #[test]
-    fn accent_colors_meet_wcag_aa_large() {
-        assert_contrast("ACCENT_COLD", Color::ACCENT_COLD, WCAG_AA_LARGE);
-        assert_contrast("ACCENT_COOL", Color::ACCENT_COOL, WCAG_AA_LARGE);
-        assert_contrast("ACCENT_NEUTRAL", Color::ACCENT_NEUTRAL, WCAG_AA_LARGE);
-        assert_contrast("ACCENT_WARM", Color::ACCENT_WARM, WCAG_AA_LARGE);
-        assert_contrast("ACCENT_HOT", Color::ACCENT_HOT, WCAG_AA_LARGE);
+    fn semantic_accents_meet_wcag_aa_large() {
+        assert_contrast("SIGNAL", Color::SIGNAL, WCAG_AA_LARGE);
+        assert_contrast("FOCUS", Color::FOCUS, WCAG_AA_LARGE);
+        assert_contrast("WARN", Color::WARN, WCAG_AA_LARGE);
+        assert_contrast("ALERT", Color::ALERT, WCAG_AA_LARGE);
     }
 
     #[test]
@@ -621,45 +654,61 @@ mod tests {
 
 // THERMAL-PALETTE-COLORS-START
 impl ThermalPalette {
-    // Void / Background
-    pub const BG: [f32; 4] = Self::hex(0x0a, 0x00, 0x10);
-    pub const BG_LIGHT: [f32; 4] = Self::hex(0x0f, 0x00, 0x18);
-    pub const BG_SURFACE: [f32; 4] = Self::hex(0x12, 0x08, 0x22);
+    // Depth ramp (Codex 2031)
+    pub const VOID_0: [f32; 4] = Self::hex(0x06, 0x0a, 0x12);
+    pub const VOID_1: [f32; 4] = Self::hex(0x0d, 0x14, 0x21);
+    pub const VOID_2: [f32; 4] = Self::hex(0x11, 0x1c, 0x2d);
+    pub const PLATE: [f32; 4] = Self::hex(0x18, 0x26, 0x3a);
+    pub const PLATE_STRONG: [f32; 4] = Self::hex(0x22, 0x32, 0x4a);
 
-    // Cold spectrum
-    pub const FREEZING: [f32; 4] = Self::hex(0x1a, 0x00, 0x30);
-    pub const COLD: [f32; 4] = Self::hex(0x2d, 0x1b, 0x69);
-    pub const COOL: [f32; 4] = Self::hex(0x1e, 0x3a, 0x8a);
+    // Backwards-compat aliases
+    pub const BG: [f32; 4] = Self::VOID_0;
+    pub const BG_LIGHT: [f32; 4] = Self::VOID_1;
+    pub const BG_SURFACE: [f32; 4] = Self::VOID_2;
 
-    // Neutral
+    // Ink (text)
+    pub const INK: [f32; 4] = Self::hex(0xe7, 0xf0, 0xff);
+    pub const INK_MUTED: [f32; 4] = Self::hex(0xa9, 0xb8, 0xcd);
+    pub const INK_DIM: [f32; 4] = Self::hex(0x7b, 0x8f, 0xa9);
+
+    pub const TEXT: [f32; 4] = Self::INK;
+    pub const TEXT_BRIGHT: [f32; 4] = Self::INK;
+    pub const TEXT_MUTED: [f32; 4] = Self::INK_MUTED;
+
+    // Semantic accents (Codex 2031)
+    pub const SIGNAL: [f32; 4] = Self::hex(0x39, 0xff, 0xb6);
+    pub const FOCUS: [f32; 4] = Self::hex(0x56, 0xa7, 0xff);
+    pub const WARN: [f32; 4] = Self::hex(0xff, 0xb2, 0x4f);
+    pub const ALERT: [f32; 4] = Self::hex(0xff, 0x5f, 0x78);
+
+    // Borders
+    pub const LINE: [f32; 4] = Self::hex(0x2f, 0x45, 0x64);
+
+    // Temperature spectrum
+    pub const FREEZING: [f32; 4] = Self::VOID_2;
+    pub const COLD: [f32; 4] = Self::PLATE;
+    pub const COOL: [f32; 4] = Self::SIGNAL;
     pub const MILD: [f32; 4] = Self::hex(0x0d, 0x94, 0x88);
-    pub const WARM: [f32; 4] = Self::hex(0x22, 0xc5, 0x5e);
+    pub const WARM: [f32; 4] = Self::WARN;
 
-    // Hot spectrum
     pub const HOT: [f32; 4] = Self::hex(0xea, 0xb3, 0x08);
     pub const HOTTER: [f32; 4] = Self::hex(0xf9, 0x73, 0x16);
-    pub const SEARING: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
+    pub const SEARING: [f32; 4] = Self::ALERT;
     pub const CRITICAL: [f32; 4] = Self::hex(0xdc, 0x26, 0x26);
 
-    // White-hot
     pub const WHITE_HOT: [f32; 4] = Self::hex(0xfe, 0xf3, 0xc7);
 
-    // Text
-    pub const TEXT: [f32; 4] = Self::hex(0xc4, 0xb5, 0xfd);
-    pub const TEXT_BRIGHT: [f32; 4] = Self::hex(0xe9, 0xe0, 0xff);
-    pub const TEXT_MUTED: [f32; 4] = Self::hex(0x9b, 0x8d, 0xd1);
+    // Accent aliases
+    pub const ACCENT_COLD: [f32; 4] = Self::FOCUS;
+    pub const ACCENT_COOL: [f32; 4] = Self::FOCUS;
+    pub const ACCENT_NEUTRAL: [f32; 4] = Self::SIGNAL;
+    pub const ACCENT_WARM: [f32; 4] = Self::WARN;
+    pub const ACCENT_HOT: [f32; 4] = Self::ALERT;
 
-    // Accents
-    pub const ACCENT_COLD: [f32; 4] = Self::hex(0x81, 0x8c, 0xf8);
-    pub const ACCENT_COOL: [f32; 4] = Self::hex(0x3b, 0x82, 0xf6);
-    pub const ACCENT_NEUTRAL: [f32; 4] = Self::hex(0x14, 0xb8, 0xa6);
-    pub const ACCENT_WARM: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);
-    pub const ACCENT_HOT: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
-
-    // Status
-    pub const STATUS_OK: [f32; 4] = Self::hex(0x22, 0xc5, 0x5e);
-    pub const STATUS_WARN: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);
-    pub const STATUS_ERROR: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
+    // Status aliases
+    pub const STATUS_OK: [f32; 4] = Self::SIGNAL;
+    pub const STATUS_WARN: [f32; 4] = Self::WARN;
+    pub const STATUS_ERROR: [f32; 4] = Self::ALERT;
     // THERMAL-PALETTE-COLORS-END
 
     const fn hex(r: u8, g: u8, b: u8) -> [f32; 4] {

@@ -56,9 +56,9 @@ enum UserEvent {
     ConfigChanged(Box<ConfigChanged>),
 }
 
-/// Color for focused pane border indicator.
+/// Color for focused pane border indicator (FOCUS from Codex 2031 palette).
 const FOCUS_BORDER_COLOR: [f32; 4] = {
-    let c = PaletteColor::ACCENT_COOL;
+    let c = PaletteColor::FOCUS;
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
