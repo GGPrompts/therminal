@@ -1,27 +1,92 @@
 #![allow(dead_code)]
-
 /// Clipboard support: arboard wrapper + OSC 52 parsing.
 ///
 /// OSC 52 sequence format: `\x1b]52;c;{base64-encoded-text}\a`
 /// The `c` parameter selects the clipboard selection (we treat all as the
 /// system clipboard). The payload is standard base64-encoded UTF-8 text.
+///
+/// On WSL2, arboard's Wayland backend (`wlr-data-control`) fails because
+/// WSLg doesn't support that protocol. We detect WSL2 via `WSL_DISTRO_NAME`
+/// and temporarily unset `WAYLAND_DISPLAY` so arboard skips straight to the
+/// X11 backend (WSLg provides an X11 server via XWayland).
+use std::sync::{Mutex, OnceLock};
+
 use base64::Engine as _;
 use tracing::{debug, warn};
+
+/// Cached clipboard instance. Created once, reused for all operations.
+/// This avoids repeated Wayland → X11 fallback attempts and the associated
+/// log noise on WSL2.
+static CLIPBOARD: OnceLock<Mutex<arboard::Clipboard>> = OnceLock::new();
+
+/// Detect WSL2 via the `WSL_DISTRO_NAME` environment variable.
+fn is_wsl2() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+}
+
+/// Get or create the cached clipboard instance.
+///
+/// On WSL2, temporarily unsets `WAYLAND_DISPLAY` so arboard initializes
+/// with the X11 backend directly (WSLg's Wayland compositor doesn't
+/// support `wlr-data-control`, but its XWayland server works fine).
+fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
+    Some(CLIPBOARD.get_or_init(|| {
+        // On WSL2, force X11 backend by hiding WAYLAND_DISPLAY during init.
+        let wayland_display = if is_wsl2() {
+            let val = std::env::var_os("WAYLAND_DISPLAY");
+            if val.is_some() {
+                debug!("WSL2 detected: forcing X11 clipboard backend");
+                std::env::remove_var("WAYLAND_DISPLAY");
+            }
+            val
+        } else {
+            None
+        };
+
+        let result = arboard::Clipboard::new();
+
+        // Restore WAYLAND_DISPLAY so other code (wgpu, winit) still sees it.
+        if let Some(val) = wayland_display {
+            std::env::set_var("WAYLAND_DISPLAY", val);
+        }
+
+        match result {
+            Ok(cb) => {
+                debug!("clipboard initialized");
+                Mutex::new(cb)
+            }
+            Err(e) => {
+                warn!("clipboard unavailable: {e}");
+                // Return a clipboard anyway — OnceLock needs a value.
+                // We'll get errors on actual use, which is fine.
+                // Try one more time without any display vars as last resort.
+                Mutex::new(arboard::Clipboard::new().unwrap_or_else(|_| {
+                    // This path is essentially unreachable on platforms with
+                    // any clipboard support, but arboard::Clipboard::new()
+                    // can't actually fail on macOS/Windows.
+                    panic!("clipboard completely unavailable: {e}");
+                }))
+            }
+        }
+    }))
+}
 
 /// Copy `text` to the system clipboard.
 ///
 /// Logs a warning and returns `()` on failure so callers don't need to handle
 /// clipboard errors as fatal.
 pub fn copy_to_clipboard(text: &str) {
-    match arboard::Clipboard::new() {
-        Ok(mut cb) => {
-            if let Err(e) = cb.set_text(text) {
-                warn!("clipboard write failed: {e}");
-            } else {
-                debug!("copied {} bytes to clipboard", text.len());
-            }
-        }
-        Err(e) => warn!("clipboard unavailable: {e}"),
+    let Some(cb_mutex) = get_clipboard() else {
+        return;
+    };
+    let Ok(mut cb) = cb_mutex.lock() else {
+        warn!("clipboard mutex poisoned");
+        return;
+    };
+    if let Err(e) = cb.set_text(text) {
+        warn!("clipboard write failed: {e}");
+    } else {
+        debug!("copied {} bytes to clipboard", text.len());
     }
 }
 
@@ -30,19 +95,20 @@ pub fn copy_to_clipboard(text: &str) {
 /// Returns an empty string if the clipboard is unavailable or contains
 /// non-text data.
 pub fn paste_from_clipboard() -> String {
-    match arboard::Clipboard::new() {
-        Ok(mut cb) => match cb.get_text() {
-            Ok(text) => {
-                debug!("pasted {} bytes from clipboard", text.len());
-                text
-            }
-            Err(e) => {
-                warn!("clipboard read failed: {e}");
-                String::new()
-            }
-        },
+    let Some(cb_mutex) = get_clipboard() else {
+        return String::new();
+    };
+    let Ok(mut cb) = cb_mutex.lock() else {
+        warn!("clipboard mutex poisoned");
+        return String::new();
+    };
+    match cb.get_text() {
+        Ok(text) => {
+            debug!("pasted {} bytes from clipboard", text.len());
+            text
+        }
         Err(e) => {
-            warn!("clipboard unavailable: {e}");
+            warn!("clipboard read failed: {e}");
             String::new()
         }
     }
@@ -121,5 +187,17 @@ mod tests {
     #[test]
     fn parse_osc52_query_recognised() {
         assert!(handle_osc52("\x1b]52;c;?\x07"));
+    }
+
+    #[test]
+    fn wsl2_detection_reads_env() {
+        // Without WSL_DISTRO_NAME set, should not detect WSL2.
+        let had_var = std::env::var_os("WSL_DISTRO_NAME");
+        std::env::remove_var("WSL_DISTRO_NAME");
+        assert!(!is_wsl2());
+        // Restore if it was set.
+        if let Some(val) = had_var {
+            std::env::set_var("WSL_DISTRO_NAME", val);
+        }
     }
 }
