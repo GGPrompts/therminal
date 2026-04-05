@@ -14,6 +14,7 @@
 //!   C -- copy                V -- paste
 
 mod chrome;
+mod help_overlay;
 mod keybindings;
 mod mouse;
 mod pane_ops;
@@ -124,6 +125,9 @@ pub struct App {
 
     /// Last split direction used (for auto-direction alternation).
     last_split_direction: SplitDirection,
+
+    /// Whether the keybinding help overlay is currently visible.
+    show_help_overlay: bool,
 }
 
 impl App {
@@ -183,6 +187,7 @@ impl App {
             binding_map,
             _config_watcher: config_watcher,
             last_split_direction: SplitDirection::Horizontal,
+            show_help_overlay: false,
         }
     }
 
@@ -514,6 +519,27 @@ impl App {
         );
 
         gpu.queue.submit(std::iter::once(encoder.finish()));
+
+        // ── Help overlay (on top of everything) ─────────────────────────
+        if self.show_help_overlay {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("help_overlay_encoder"),
+                });
+            help_overlay::draw_help_overlay(
+                &self.config.keybindings,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+        }
+
         output.present();
     }
 
@@ -559,6 +585,9 @@ impl App {
             KeyAction::FontSizeReset => {
                 // TODO: implement font size reset
                 info!("font size reset: not yet implemented");
+            }
+            KeyAction::ShowHelp => {
+                self.show_help_overlay = !self.show_help_overlay;
             }
         }
         true
@@ -869,6 +898,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                // Dismiss help overlay on any mouse click.
+                if self.show_help_overlay
+                    && state == ElementState::Pressed
+                    && button == MouseButton::Left
+                {
+                    self.show_help_overlay = false;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
                 // Header button click detection (only when multiple panes).
                 let mut header_handled = false;
                 if state == ElementState::Pressed && button == MouseButton::Left {
@@ -922,6 +963,15 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                 ..
             } => {
+                // When help overlay is visible, any key dismisses it.
+                if self.show_help_overlay {
+                    self.show_help_overlay = false;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
                 // Check configured keybindings first.
                 if self.handle_keybinding(key_event) {
                     // Keybinding consumed the event. Copy/Paste preserve

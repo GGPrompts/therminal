@@ -538,6 +538,56 @@ pub enum KeyAction {
     FocusRight,
     /// Toggle focused pane fullscreen (zoom).
     ZoomPane,
+    /// Show the keybinding help overlay.
+    ShowHelp,
+}
+
+impl KeyAction {
+    /// Human-readable description of what this action does.
+    pub fn description(&self) -> &'static str {
+        match self {
+            KeyAction::Copy => "Copy selection",
+            KeyAction::Paste => "Paste from clipboard",
+            KeyAction::FontSizeUp => "Increase font size",
+            KeyAction::FontSizeDown => "Decrease font size",
+            KeyAction::FontSizeReset => "Reset font size",
+            KeyAction::SplitHorizontal => "Split pane horizontally",
+            KeyAction::SplitVertical => "Split pane vertically",
+            KeyAction::SplitAuto => "Auto split pane",
+            KeyAction::ClosePane => "Close focused pane",
+            KeyAction::ResizeGrow => "Grow pane ratio",
+            KeyAction::ResizeShrink => "Shrink pane ratio",
+            KeyAction::FocusNext => "Focus next pane",
+            KeyAction::FocusPrev => "Focus previous pane",
+            KeyAction::FocusUp => "Focus pane above",
+            KeyAction::FocusDown => "Focus pane below",
+            KeyAction::FocusLeft => "Focus pane left",
+            KeyAction::FocusRight => "Focus pane right",
+            KeyAction::ZoomPane => "Toggle pane zoom",
+            KeyAction::ShowHelp => "Show keybinding help",
+        }
+    }
+
+    /// Which section this action belongs to in the help overlay.
+    pub fn section(&self) -> &'static str {
+        match self {
+            KeyAction::SplitHorizontal
+            | KeyAction::SplitVertical
+            | KeyAction::SplitAuto
+            | KeyAction::ClosePane
+            | KeyAction::ResizeGrow
+            | KeyAction::ResizeShrink
+            | KeyAction::FocusNext
+            | KeyAction::FocusPrev
+            | KeyAction::FocusUp
+            | KeyAction::FocusDown
+            | KeyAction::FocusLeft
+            | KeyAction::FocusRight
+            | KeyAction::ZoomPane => "Pane Management",
+            KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
+            KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
+        }
+    }
 }
 
 /// A single keybinding entry.
@@ -643,6 +693,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+z".to_string(),
                     action: KeyAction::ZoomPane,
+                },
+                // Help overlay
+                Keybinding {
+                    key: "ctrl+shift+/".to_string(),
+                    action: KeyAction::ShowHelp,
                 },
             ],
         }
