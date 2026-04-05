@@ -890,13 +890,14 @@ fn pty_reader_loop(
 ) {
     use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
 
+    use therminal_terminal::region_index::RegionIndex;
+
     let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
-    // Keep the receiver alive so `interceptor.send()` calls don't fail.
-    // Events will be consumed once we wire up semantic event handling.
-    let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+    let (mut interceptor, event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+    let mut region_index = RegionIndex::new();
     let mut buf = [0u8; 4096];
 
-    info!("PTY reader thread started (with SequenceInterceptor)");
+    info!("PTY reader thread started (with SequenceInterceptor + RegionIndex)");
 
     loop {
         match reader.read(&mut buf) {
@@ -907,6 +908,7 @@ fn pty_reader_loop(
             Ok(n) => {
                 // Feed bytes to the terminal under the lock.
                 // The interceptor sees OSC/DCS/APC sequences first.
+                let current_line;
                 {
                     let mut term_guard = term.lock();
                     processor.advance_with_interceptor(
@@ -914,6 +916,13 @@ fn pty_reader_loop(
                         &mut interceptor,
                         &buf[..n],
                     );
+                    current_line = term_guard.grid().cursor.point.line.0 as usize;
+                }
+
+                // Drain intercepted events into the region index.
+                region_index.set_current_line(current_line);
+                while let Ok(event) = event_rx.try_recv() {
+                    region_index.push_event(&event);
                 }
 
                 // Wake the event loop to trigger a redraw.
