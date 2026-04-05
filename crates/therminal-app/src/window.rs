@@ -30,17 +30,21 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{cell_display_text, FontConfig, GridRenderer, RenderCell};
+use therminal_core::config::TherminalConfig;
+use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
 use therminal_terminal::input::{
     self, KeyCode, Modifiers as InputModifiers, MouseButton as InputMouseButton,
 };
 
 // ── Custom event for waking the event loop from the PTY reader ───────────
 
-/// Events sent from the PTY reader thread to the winit event loop.
+/// Events sent from background threads to the winit event loop.
 #[derive(Debug)]
 enum UserEvent {
     /// New bytes are available from the PTY; request a redraw.
     PtyOutput,
+    /// Config file changed; apply new settings.
+    ConfigChanged(Box<ConfigChanged>),
 }
 
 // ── EventListener for alacritty_terminal::Term ──────────────────────────
@@ -134,10 +138,49 @@ pub struct App {
 
     /// Whether the left mouse button is currently held (for drag reporting).
     mouse_left_held: bool,
+
+    /// Current loaded configuration.
+    config: TherminalConfig,
+
+    /// Config file watcher handle (kept alive).
+    _config_watcher: Option<ConfigWatcher>,
 }
 
 impl App {
     fn new(event_proxy: EventLoopProxy<UserEvent>) -> Self {
+        // Load config from disk (or defaults if no file exists).
+        let config = TherminalConfig::load();
+        info!(
+            font_size = config.font.size,
+            title = %config.general.title,
+            "loaded config"
+        );
+
+        // Start config file watcher, forwarding events to the event loop.
+        let config_watcher = match ConfigWatcher::start() {
+            Ok((watcher, rx)) => {
+                let proxy = event_proxy.clone();
+                thread::Builder::new()
+                    .name("config-event-bridge".into())
+                    .spawn(move || {
+                        while let Ok(event) = rx.recv() {
+                            if proxy
+                                .send_event(UserEvent::ConfigChanged(Box::new(event)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("failed to spawn config event bridge thread");
+                Some(watcher)
+            }
+            Err(e) => {
+                warn!(%e, "failed to start config watcher, hot-reload disabled");
+                None
+            }
+        };
+
         Self {
             window: None,
             gpu: None,
@@ -151,6 +194,8 @@ impl App {
             last_resize_at: None,
             cursor_position: None,
             mouse_left_held: false,
+            config,
+            _config_watcher: config_watcher,
         }
     }
 
@@ -238,10 +283,12 @@ impl App {
 
         // ── Grid renderer ────────────────────────────────────────────────
         let scale = window.scale_factor() as f32;
-        let mut font_config = FontConfig::default();
+        let mut font_config =
+            FontConfig::new(self.config.font.family.clone(), self.config.font.size);
+        font_config.fallback_families = self.config.font.extra_fallbacks.clone();
         // Scale font size to physical pixels so glyphs fill the correct cell area.
         font_config.font_size *= scale;
-        font_config.line_height = font_config.font_size * 1.4;
+        font_config.line_height = font_config.font_size * self.config.font.line_height_scale;
         info!(
             scale,
             font_size = font_config.font_size,
@@ -259,7 +306,7 @@ impl App {
         // ── Terminal (alacritty_terminal::Term) ──────────────────────────
         let (cols, rows) = grid_renderer.grid_size(config.width, config.height);
         let term_config = TermConfig {
-            scrolling_history: 10_000,
+            scrolling_history: self.config.general.scrollback_lines,
             ..Default::default()
         };
         let term_size = TermSize {
@@ -749,6 +796,76 @@ impl App {
             self.pty_write(&bytes);
         }
     }
+
+    /// Apply a new configuration, updating renderer and window as needed.
+    fn apply_config(&mut self, new_config: TherminalConfig) {
+        let old_config = std::mem::replace(&mut self.config, new_config);
+
+        // Update window title if changed.
+        if self.config.general.title != old_config.general.title {
+            if let Some(w) = self.window.as_ref() {
+                w.set_title(&self.config.general.title);
+            }
+        }
+
+        // Update font if any font settings changed.
+        let font_changed = self.config.font.family != old_config.font.family
+            || (self.config.font.size - old_config.font.size).abs() > f32::EPSILON
+            || (self.config.font.line_height_scale - old_config.font.line_height_scale).abs()
+                > f32::EPSILON;
+
+        if font_changed {
+            if let (Some(renderer), Some(gpu), Some(window)) = (
+                self.grid_renderer.as_mut(),
+                self.gpu.as_ref(),
+                self.window.as_ref(),
+            ) {
+                let scale = window.scale_factor() as f32;
+                let mut new_font_config = FontConfig::new(
+                    self.config.font.family.clone(),
+                    self.config.font.size * scale,
+                );
+                new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
+                new_font_config.line_height =
+                    self.config.font.size * self.config.font.line_height_scale * scale;
+                renderer.update_font(
+                    new_font_config,
+                    &gpu.device,
+                    &gpu.queue,
+                    gpu.config.width,
+                    gpu.config.height,
+                );
+
+                // Recalculate grid dimensions after font change.
+                let (cols, rows) = renderer.grid_size(gpu.config.width, gpu.config.height);
+                if let Some(term) = self.term.as_ref() {
+                    let mut term_guard = term.lock();
+                    let term_size = TermSize {
+                        columns: cols,
+                        screen_lines: rows,
+                    };
+                    term_guard.resize(term_size);
+                }
+                if let Some(master) = self._pty_master.as_ref() {
+                    if let Err(e) =
+                        therminal_terminal::pty::resize(master.as_ref(), cols as u16, rows as u16)
+                    {
+                        warn!("Failed to resize PTY after config change: {e}");
+                    }
+                }
+                info!(
+                    font_size = self.config.font.size,
+                    family = %self.config.font.family,
+                    "font config updated via hot-reload"
+                );
+            }
+        }
+
+        // Request a redraw to apply any visual changes.
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -758,8 +875,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("Therminal")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
+            .with_title(&self.config.general.title)
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                self.config.general.window_width,
+                self.config.general.window_height,
+            ));
 
         let window = Arc::new(
             event_loop
@@ -780,6 +900,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
+            }
+            UserEvent::ConfigChanged(changed) => {
+                info!("applying config change (hot-reload)");
+                self.apply_config(changed.config.clone());
             }
         }
     }

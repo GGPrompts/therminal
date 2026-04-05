@@ -476,6 +476,27 @@ impl GridRenderer {
         self.last_cursor_pos = None;
     }
 
+    /// Replace the font configuration and recalculate metrics.
+    ///
+    /// Used by the config hot-reload path to apply new font settings
+    /// without recreating the entire renderer.  Caller should follow up
+    /// with `resize()` to re-create the rect buffer for the new grid size.
+    pub fn update_font(
+        &mut self,
+        new_config: FontConfig,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) {
+        self.font_config = new_config;
+        self.font_system
+            .db_mut()
+            .set_monospace_family(&self.font_config.family);
+        self.update_font_metrics();
+        self.resize(device, queue, width, height);
+    }
+
     /// Recalculate cell metrics after a font configuration change.
     pub fn update_font_metrics(&mut self) {
         let font_size = self.font_config.font_size;

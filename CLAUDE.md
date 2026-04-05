@@ -14,9 +14,9 @@ Cargo workspace with six crates:
 crates/
 ├── therminal-protocol/    # Wire types, MCP schema, semantic events
 ├── therminal-terminal/    # PTY, OSC parsing, state inference, agent detection, region index
-├── therminal-core/        # Color palette, wgpu context, text renderer
+├── therminal-core/        # Color palette, wgpu context, text renderer, TOML config, hot-reload
 ├── therminal-runtime/     # Cross-platform paths, runtime dir management
-├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server (stub)
+├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server
 └── therminal-app/         # winit window, grid renderer, mouse input, PTY wiring
 vendor/
 ├── alacritty_terminal/    # Vendored v0.25.1
@@ -30,10 +30,57 @@ resources/
 - **Terminal emulation**: alacritty_terminal (vendored) + VTE with SequenceInterceptor
 - **Windowing**: winit (cross-platform)
 - **PTY**: portable-pty (cross-platform)
+- **Configuration**: toml + serde (TOML config), notify (file watcher for hot-reload)
 - **Agent detection**: sysinfo (process tree), cadence analysis (output stream timing)
 - **IPC**: interprocess crate (Unix sockets / named pipes)
 - **Wire protocol**: MessagePack framing
 - **Language**: Rust
+
+### Daemon Lifecycle
+
+The daemon uses a **socket-as-lock** pattern -- successful socket bind = ownership of the daemon role, no pidfiles needed.
+
+**BUILD_HASH**: `build.rs` in `therminal-daemon` embeds `<git-short-hash>-<unix-timestamp>` at compile time via `env!("BUILD_HASH")`. Used for version-mismatch detection during handoff.
+
+**State machine**: `Starting -> Binding -> Ready -> Running -> Draining -> Stopped`
+
+**`ensure_daemon()` startup protocol**:
+1. Try connect to daemon socket, send `Ping`, check `Pong { build_hash }`
+2. Version match: reuse existing daemon (`EnsureResult::Reused`)
+3. Version mismatch: send `GracefulShutdown`, wait for old daemon to drain, start new daemon
+4. Connection refused / no socket: clean stale socket, start new daemon
+
+**Zero-downtime handoff**: New daemon sends `GracefulShutdown` to old daemon, waits for socket to be released (5s timeout), then binds the canonical socket path. Rollback on crash removes temp socket.
+
+**Health check**: `Ping` / `Pong { uptime, sessions, version, build_hash }` with 2s timeout over length-prefixed MessagePack framing.
+
+**Idle exit**: Daemon exits when last session closes + configurable `keep_alive` duration (default 5 minutes).
+
+Key files: `ensure.rs` (entry point), `lifecycle.rs` (state machine), `server.rs` (socket server), `client.rs` (socket client), `handoff.rs` (version handoff).
+
+## Configuration System
+
+TOML-based config with hot-reload, implemented in `therminal-core`.
+
+### Config File
+
+Location: `therminal_runtime::paths::config_dir() / "therminal.toml"` (e.g. `~/.config/therminal/therminal.toml` on Linux).
+
+Sections: `[general]` (window, scrollback, shell), `[font]` (family, size, line_height_scale), `[colors]` (hex overrides for palette), `[keybindings]` (key/action pairs), `[profiles]` (named session profiles), `[trust]` (agent trust tiers).
+
+All fields have sensible defaults matching the current hardcoded values. Missing fields fall back to defaults. Invalid TOML logs a warning and uses full defaults.
+
+### Hot-Reload
+
+`ConfigWatcher` (in `config_watcher.rs`) uses the `notify` crate to watch the config directory. Events are debounced (500ms) to handle editor atomic-write patterns. On change, the config is reloaded and a `ConfigChanged` event is sent to the winit event loop via a bridge thread. The `App::apply_config()` method applies changes (window title, font metrics, grid resize) without restart.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `crates/therminal-core/src/config.rs` | `TherminalConfig` struct, TOML serde, load/save |
+| `crates/therminal-core/src/config_watcher.rs` | `ConfigWatcher`, debounced file watching |
+| `crates/therminal-app/src/window.rs` | Config wiring into event loop, `apply_config()` |
 
 ## Shell Integration
 
