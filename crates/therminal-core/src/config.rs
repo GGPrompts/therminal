@@ -150,6 +150,10 @@ impl TherminalConfig {
         ));
         out.push_str("# shell = \"\"  # empty = user's default shell\n");
         out.push_str(&format!("# padding = {}\n", d.general.padding));
+        out.push_str(&format!(
+            "# show_status_bar = {}\n",
+            d.general.show_status_bar
+        ));
         out.push_str("# [general.env]  # extra PTY environment variables\n");
         out.push_str("# MY_VAR = \"value\"\n");
         out.push('\n');
@@ -373,6 +377,8 @@ pub struct GeneralConfig {
     pub env: HashMap<String, String>,
     /// Padding in pixels around the terminal grid.
     pub padding: f32,
+    /// Whether to show the status bar at the bottom of the window.
+    pub show_status_bar: bool,
 }
 
 impl Default for GeneralConfig {
@@ -385,6 +391,7 @@ impl Default for GeneralConfig {
             shell: String::new(),
             env: HashMap::new(),
             padding: 4.0,
+            show_status_bar: true,
         }
     }
 }

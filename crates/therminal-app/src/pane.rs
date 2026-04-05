@@ -6,7 +6,7 @@
 //! tree rebalancing.
 
 use std::io::{Read as IoRead, Write as IoWrite};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
@@ -51,6 +51,15 @@ pub fn effective_header_height(pane_count: usize) -> f32 {
 /// Height of the window status bar in physical pixels.
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
+/// Return the effective status bar height: 0 when disabled, STATUS_BAR_HEIGHT otherwise.
+pub fn effective_status_bar_height(show: bool) -> f32 {
+    if show {
+        STATUS_BAR_HEIGHT
+    } else {
+        0.0
+    }
+}
+
 /// Minimum pane width in physical pixels.
 pub const MIN_PANE_WIDTH: f32 = 80.0;
 
@@ -92,6 +101,20 @@ impl Dimensions for PaneTermSize {
     }
 }
 
+// ── Shared pane status (updated by PTY reader, read by render loop) ────
+
+/// Shared status data for a pane, updated by the PTY reader thread and
+/// read (cheaply) by the render loop to populate the status bar.
+#[derive(Debug, Default, Clone)]
+pub struct PaneStatus {
+    /// Current working directory (from OSC 7).
+    pub cwd: Option<String>,
+    /// Exit code of the last finished command (from OSC 633 D mark).
+    pub last_exit_code: Option<i32>,
+    /// Name of a detected AI agent (from ProcessDetector).
+    pub agent_name: Option<String>,
+}
+
 // ── Per-pane state ──────────────────────────────────────────────────────
 
 /// State for a single terminal pane.
@@ -105,6 +128,8 @@ pub struct PaneState {
     /// Scrollback configuration.
     #[allow(dead_code)]
     pub scrollback_lines: usize,
+    /// Shared status updated by the PTY reader thread.
+    pub status: Arc<Mutex<PaneStatus>>,
 }
 
 impl PaneState {
@@ -813,6 +838,10 @@ where
         .take_writer()
         .map_err(|e| anyhow::anyhow!("failed to get PTY writer for pane: {e}"))?;
 
+    // Shared status for status bar rendering.
+    let status = Arc::new(Mutex::new(PaneStatus::default()));
+    let status_for_reader = Arc::clone(&status);
+
     // Spawn PTY reader thread for this pane.
     let term_for_reader = Arc::clone(&term);
     let wake = proxy_fn(id);
@@ -825,6 +854,7 @@ where
                 wake,
                 interceptor_config,
                 scan_interval_secs,
+                status_for_reader,
             );
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn pane PTY reader thread: {e}"))?;
@@ -838,6 +868,7 @@ where
         pty_master,
         viewport,
         scrollback_lines,
+        status,
     })
 }
 
@@ -848,14 +879,15 @@ fn pane_pty_reader_loop(
     wake: Box<dyn Fn() + Send + 'static>,
     interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
     scan_interval_secs: u64,
+    status: Arc<Mutex<PaneStatus>>,
 ) {
     use std::time::Duration;
 
-    use therminal_terminal::interceptor::TherminalInterceptor;
+    use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
     use therminal_terminal::process_detector::ProcessDetector;
 
     let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
-    let (mut interceptor, _event_rx) = TherminalInterceptor::new(interceptor_config);
+    let (mut interceptor, event_rx) = TherminalInterceptor::new(interceptor_config);
 
     // Build process detector; 0 = disabled (interval set to 0 yields instant rescans,
     // so we gate on the configured value before constructing).
@@ -884,9 +916,35 @@ fn pane_pty_reader_loop(
                         &buf[..n],
                     );
                 }
+
+                // Drain intercepted events and update shared status.
+                while let Ok(event) = event_rx.try_recv() {
+                    match event {
+                        InterceptedEvent::CurrentDirectory(path) => {
+                            if let Ok(mut s) = status.lock() {
+                                s.cwd = Some(path);
+                            }
+                        }
+                        InterceptedEvent::Osc633(
+                            therminal_terminal::osc633::Osc633Mark::CommandFinished { exit_code },
+                        )
+                        | InterceptedEvent::Osc133(
+                            therminal_terminal::osc633::Osc633Mark::CommandFinished { exit_code },
+                        ) => {
+                            if let Ok(mut s) = status.lock() {
+                                s.last_exit_code = exit_code;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Run process-tree scan if enabled and interval has elapsed.
                 if let Some(ref mut detector) = process_detector {
                     if let Some(agents) = detector.scan_if_due() {
+                        if let Ok(mut s) = status.lock() {
+                            s.agent_name = agents.first().map(|a| a.name.clone());
+                        }
                         if !agents.is_empty() {
                             tracing::debug!("detected agents: {:?}", agents);
                         }
@@ -935,6 +993,7 @@ mod tests {
             pty_master: pair.master,
             viewport: rect,
             scrollback_lines: 1000,
+            status: Arc::new(Mutex::new(PaneStatus::default())),
         })
     }
 
@@ -976,6 +1035,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
+                status: Arc::new(Mutex::new(PaneStatus::default())),
             })
         });
 
@@ -1118,6 +1178,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: rect,
                 scrollback_lines: 1000,
+                status: Arc::new(Mutex::new(PaneStatus::default())),
             };
             // Find the rightmost leaf to split there.
             let rightmost_id = *root.pane_ids().last().unwrap();
@@ -1527,6 +1588,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
+                status: Arc::new(Mutex::new(PaneStatus::default())),
             })
         });
         assert_eq!(result, None, "split should be refused when too small");
@@ -1568,6 +1630,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
+                status: Arc::new(Mutex::new(PaneStatus::default())),
             })
         });
 

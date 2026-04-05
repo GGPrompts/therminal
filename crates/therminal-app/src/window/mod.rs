@@ -329,11 +329,13 @@ impl App {
         grid_renderer.apply_color_overrides(&self.config.colors);
 
         // ── First pane (fills window minus status bar) ─────────────────
+        let status_bar_h =
+            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
         let full_rect = Rect::new(
             0.0,
             0.0,
             config.width as f32,
-            config.height as f32 - crate::pane::STATUS_BAR_HEIGHT,
+            config.height as f32 - status_bar_h,
         );
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -423,11 +425,13 @@ impl App {
         }
 
         // Recalculate layout tree and resize all pane PTYs (minus status bar).
+        let status_bar_h =
+            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
         let full_rect = Rect::new(
             0.0,
             0.0,
             new_size.width as f32,
-            new_size.height as f32 - crate::pane::STATUS_BAR_HEIGHT,
+            new_size.height as f32 - status_bar_h,
         );
         if let (Some(layout), Some(renderer)) = (self.layout.as_mut(), self.grid_renderer.as_ref())
         {
@@ -533,23 +537,52 @@ impl App {
         );
 
         // ── Status bar ──────────────────────────────────────────────────
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("status_bar_encoder"),
-            });
-        chrome::draw_status_bar(
-            pane_count,
-            renderer,
-            &gpu.device,
-            &gpu.queue,
-            &mut encoder,
-            &view,
-            gpu.config.width,
-            gpu.config.height,
-        );
+        if self.config.general.show_status_bar {
+            // Gather status info from the focused pane.
+            let focused_pane = self.focused_pane.and_then(|fid| layout.find_pane(fid));
 
-        gpu.queue.submit(std::iter::once(encoder.finish()));
+            let (cwd, last_exit_code, agent_name, dimensions) = if let Some(pane) = focused_pane {
+                let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
+                let term_guard = pane.term.lock();
+                let cols = alacritty_terminal::grid::Dimensions::columns(&*term_guard);
+                let rows = alacritty_terminal::grid::Dimensions::screen_lines(&*term_guard);
+                drop(term_guard);
+                (
+                    status.cwd.clone(),
+                    status.last_exit_code,
+                    status.agent_name.clone(),
+                    (cols, rows),
+                )
+            } else {
+                (None, None, None, (80, 24))
+            };
+
+            let status_info = chrome::StatusBarInfo {
+                agent_name,
+                cwd,
+                dimensions,
+                last_exit_code,
+                show_agent_indicator: self.config.trust.show_agent_indicator,
+            };
+
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("status_bar_encoder"),
+                });
+            chrome::draw_status_bar(
+                &status_info,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
+
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+        }
 
         // ── Help overlay (on top of everything) ─────────────────────────
         if self.show_help_overlay {
@@ -819,7 +852,10 @@ impl App {
             }
         }
 
-        let needs_relayout = font_changed || padding_changed;
+        let status_bar_changed =
+            self.config.general.show_status_bar != old_config.general.show_status_bar;
+
+        let needs_relayout = font_changed || padding_changed || status_bar_changed;
 
         if needs_relayout {
             if let (Some(renderer), Some(gpu), Some(window)) = (
@@ -860,8 +896,14 @@ impl App {
                 }
 
                 // Resize all panes after font or padding change.
-                let full_rect =
-                    Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+                let status_bar_h =
+                    crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+                let full_rect = Rect::new(
+                    0.0,
+                    0.0,
+                    gpu.config.width as f32,
+                    gpu.config.height as f32 - status_bar_h,
+                );
                 if let Some(layout) = self.layout.as_mut() {
                     layout.layout(full_rect);
                     layout.resize_all_panes(renderer);

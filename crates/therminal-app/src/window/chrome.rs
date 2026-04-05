@@ -555,10 +555,24 @@ pub(crate) fn draw_pane_header(
 
 // ── Status bar ─────────────────────────────────────────────────────────
 
+/// Data collected for the status bar from the focused pane.
+pub(crate) struct StatusBarInfo {
+    /// Agent name (from ProcessDetector), shown on the left when present.
+    pub agent_name: Option<String>,
+    /// Current working directory (from OSC 7).
+    pub cwd: Option<String>,
+    /// Pane grid dimensions (cols, rows).
+    pub dimensions: (usize, usize),
+    /// Last command exit code (from OSC 633 D mark).
+    pub last_exit_code: Option<i32>,
+    /// Whether the config allows showing the agent indicator.
+    pub show_agent_indicator: bool,
+}
+
 /// Draw the window status bar at the bottom of the screen.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_status_bar(
-    pane_count: usize,
+    info: &StatusBarInfo,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -612,9 +626,34 @@ pub(crate) fn draw_status_bar(
     let line_height = bar_h;
     let metrics = Metrics::new(font_size, line_height);
 
-    // Left: "therminal"
-    let left_text = " therminal";
-    let left_color = GlyphColor::rgba(
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_width as i32,
+        bottom: surface_height as i32,
+    };
+
+    let mut text_areas: Vec<TextArea<'_>> = Vec::new();
+    // We need to keep the buffers alive for the text_areas references.
+    // Allocate all buffers first, then build text_areas.
+
+    // ── Left section: agent indicator (when detected and config allows) ──
+    let left_text = if info.show_agent_indicator {
+        info.agent_name
+            .as_ref()
+            .map(|name| format!(" [agent: {name}]"))
+    } else {
+        None
+    };
+    let left_text_ref = left_text.as_deref().unwrap_or("");
+
+    let agent_color = GlyphColor::rgba(
+        PaletteColor::FOCUS.r,
+        PaletteColor::FOCUS.g,
+        PaletteColor::FOCUS.b,
+        230,
+    );
+    let muted_color = GlyphColor::rgba(
         PaletteColor::INK_MUTED.r,
         PaletteColor::INK_MUTED.g,
         PaletteColor::INK_MUTED.b,
@@ -622,23 +661,19 @@ pub(crate) fn draw_status_bar(
     );
 
     let mut left_buf = Buffer::new(&mut renderer.font_system, metrics);
-    left_buf.set_size(&mut renderer.font_system, Some(sw * 0.4), Some(bar_h));
+    left_buf.set_size(&mut renderer.font_system, Some(sw * 0.35), Some(bar_h));
     left_buf.set_text(
         &mut renderer.font_system,
-        left_text,
+        left_text_ref,
         Attrs::new()
             .family(Family::Name(&renderer.font_config.family))
-            .color(left_color),
+            .color(agent_color),
         Shaping::Basic,
     );
     left_buf.shape_until_scroll(&mut renderer.font_system, false);
 
-    // Center: pane count
-    let center_text = if pane_count == 1 {
-        "1 pane".to_string()
-    } else {
-        format!("{pane_count} panes")
-    };
+    // ── Center section: CWD ─────────────────────────────────────────────
+    let center_text = info.cwd.as_deref().map(abbreviate_path).unwrap_or_default();
     let center_color = GlyphColor::rgba(
         PaletteColor::INK.r,
         PaletteColor::INK.g,
@@ -665,6 +700,49 @@ pub(crate) fn draw_status_bar(
         .unwrap_or(0.0);
     let center_offset = ((sw - center_text_width) / 2.0).max(0.0);
 
+    // ── Right section: dimensions + exit code ───────────────────────────
+    let (cols, rows) = info.dimensions;
+    let right_text = match info.last_exit_code {
+        Some(code) => format!("{cols}x{rows}  [{code}] "),
+        None => format!("{cols}x{rows} "),
+    };
+
+    let exit_color = match info.last_exit_code {
+        Some(0) => GlyphColor::rgba(
+            PaletteColor::STATUS_OK.r,
+            PaletteColor::STATUS_OK.g,
+            PaletteColor::STATUS_OK.b,
+            230,
+        ),
+        Some(_) => GlyphColor::rgba(
+            PaletteColor::STATUS_ERROR.r,
+            PaletteColor::STATUS_ERROR.g,
+            PaletteColor::STATUS_ERROR.b,
+            230,
+        ),
+        None => muted_color,
+    };
+
+    let mut right_buf = Buffer::new(&mut renderer.font_system, metrics);
+    right_buf.set_size(&mut renderer.font_system, Some(sw * 0.35), Some(bar_h));
+    right_buf.set_text(
+        &mut renderer.font_system,
+        &right_text,
+        Attrs::new()
+            .family(Family::Name(&renderer.font_config.family))
+            .color(exit_color),
+        Shaping::Basic,
+    );
+    right_buf.shape_until_scroll(&mut renderer.font_system, false);
+
+    // Measure right text width for right-alignment.
+    let right_text_width = right_buf
+        .layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0);
+    let right_x = (sw - right_text_width).max(0.0);
+
     renderer.viewport.update(
         queue,
         Resolution {
@@ -673,36 +751,40 @@ pub(crate) fn draw_status_bar(
         },
     );
 
-    let text_areas = vec![
-        TextArea {
+    // Only add left area if there is agent text.
+    if !left_text_ref.is_empty() {
+        text_areas.push(TextArea {
             buffer: &left_buf,
             left: 0.0,
             top: bar_y,
             scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: surface_width as i32,
-                bottom: surface_height as i32,
-            },
-            default_color: left_color,
+            bounds,
+            default_color: agent_color,
             custom_glyphs: &[],
-        },
-        TextArea {
+        });
+    }
+
+    if !center_text.is_empty() {
+        text_areas.push(TextArea {
             buffer: &center_buf,
             left: center_offset,
             top: bar_y,
             scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: surface_width as i32,
-                bottom: surface_height as i32,
-            },
+            bounds,
             default_color: center_color,
             custom_glyphs: &[],
-        },
-    ];
+        });
+    }
+
+    text_areas.push(TextArea {
+        buffer: &right_buf,
+        left: right_x,
+        top: bar_y,
+        scale: 1.0,
+        bounds,
+        default_color: exit_color,
+        custom_glyphs: &[],
+    });
 
     if let Err(e) = renderer.overlay_text_renderer.prepare(
         device,
@@ -740,4 +822,25 @@ pub(crate) fn draw_status_bar(
             tracing::warn!("status bar text render failed: {}", e);
         }
     }
+}
+
+/// Abbreviate a path for status bar display: replace the home directory with `~`
+/// and extract the path from `file://` URLs.
+fn abbreviate_path(path: &str) -> String {
+    // OSC 7 sends file:// URLs; extract the path portion.
+    let path = if let Some(rest) = path.strip_prefix("file://") {
+        // Strip the hostname part (e.g., "file://hostname/path" -> "/path").
+        rest.find('/').map(|i| &rest[i..]).unwrap_or(rest)
+    } else {
+        path
+    };
+
+    // Replace home dir with ~.
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = path.strip_prefix(home.as_str()) {
+            return format!("~{rest}");
+        }
+    }
+
+    path.to_string()
 }

@@ -100,6 +100,20 @@ The daemon provides persistent multiplexed sessions via a `Session -> Window -> 
 
 **Graceful shutdown**: `IpcServer::run()` calls `SessionManager::shutdown()` on exit, which destroys all sessions (dropping PTY masters, causing reader threads to get EOF and exit).
 
+### Status Bar
+
+A full-width status bar at the bottom of the window (24px tall) with three sections:
+
+- **Left**: Agent indicator (`[agent: <name>]`) when a process-tree agent is detected and `trust.show_agent_indicator` is enabled. Hidden otherwise.
+- **Center**: Current working directory (from OSC 7), with home directory abbreviated to `~`.
+- **Right**: Pane dimensions (`cols x rows`) and last command exit code (from OSC 633 D mark), color-coded green (exit 0) or red (non-zero).
+
+**Data flow**: The PTY reader thread in `pane.rs` drains `InterceptedEvent`s from the `TherminalInterceptor` and `ProcessDetector` results into a shared `Arc<Mutex<PaneStatus>>` on `PaneState`. The render loop reads this lock-free snapshot to populate `StatusBarInfo` passed to `draw_status_bar()` in `chrome.rs`.
+
+**Config**: `general.show_status_bar` (default `true`) controls visibility. When disabled, panes use the full window height. `trust.show_agent_indicator` controls whether the agent name appears in the left section.
+
+Key files: `crates/therminal-app/src/window/chrome.rs` (rendering), `crates/therminal-app/src/pane.rs` (`PaneStatus`, PTY reader wiring).
+
 ## Configuration System
 
 TOML-based config with hot-reload, implemented in `therminal-core`.

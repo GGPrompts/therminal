@@ -555,7 +555,8 @@ impl App {
             0.0,
             0.0,
             gpu.config.width as f32,
-            gpu.config.height as f32 - crate::pane::STATUS_BAR_HEIGHT,
+            gpu.config.height as f32
+                - crate::pane::effective_status_bar_height(self.config.general.show_status_bar),
         ))
     }
 
