@@ -12,7 +12,7 @@
 //! The server listens on a dedicated Unix socket (separate from the IPC socket)
 //! and uses the `rmcp` crate for protocol handling.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -385,31 +385,13 @@ impl ServerHandler for TherminalMcpServer {
 
 // ── Server lifecycle ────────────────────────────────────────────────────
 
-/// MCP server configuration.
-#[derive(Debug, Clone)]
-pub struct McpServerConfig {
-    /// Whether the MCP server is enabled.
-    pub enabled: bool,
-    /// Socket path for the MCP server.
-    pub socket_path: PathBuf,
-}
-
-impl Default for McpServerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            socket_path: therminal_runtime::paths::socket_path("mcp"),
-        }
-    }
-}
-
 /// Start the MCP server, accepting connections on the given Unix socket.
 ///
 /// Each accepted connection is served independently. The server runs until
 /// the `shutdown` notify is triggered. Trust enforcement uses the provided
 /// `TrustConfig` to gate tool access per agent.
 pub async fn start_mcp_server(
-    config: McpServerConfig,
+    config: therminal_core::config::McpConfig,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
@@ -420,10 +402,10 @@ pub async fn start_mcp_server(
         return Ok(());
     }
 
-    let socket_path = &config.socket_path;
+    let socket_path = config.resolved_socket_path();
 
     // Clean stale socket
-    match std::fs::remove_file(socket_path) {
+    match std::fs::remove_file(&socket_path) {
         Ok(()) => debug!(path = %socket_path.display(), "removed stale MCP socket"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -434,7 +416,7 @@ pub async fn start_mcp_server(
         }
     }
 
-    let listener = UnixListener::bind(socket_path)
+    let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind MCP socket: {}", socket_path.display()))?;
 
     // Set socket permissions on Unix (owner-only)
@@ -442,12 +424,10 @@ pub async fn start_mcp_server(
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(socket_path, perms).ok();
+        std::fs::set_permissions(&socket_path, perms).ok();
     }
 
     info!(path = %socket_path.display(), "MCP server listening");
-
-    let socket_path_owned = socket_path.to_path_buf();
 
     loop {
         tokio::select! {
@@ -486,7 +466,7 @@ pub async fn start_mcp_server(
     }
 
     // Clean up socket
-    cleanup_socket(&socket_path_owned);
+    cleanup_socket(&socket_path);
     Ok(())
 }
 

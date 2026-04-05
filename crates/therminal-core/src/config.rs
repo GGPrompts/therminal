@@ -1173,6 +1173,18 @@ pub struct McpConfig {
     pub socket_path: String,
 }
 
+impl McpConfig {
+    /// Return the effective socket path, falling back to the default
+    /// runtime directory path if `socket_path` is empty.
+    pub fn resolved_socket_path(&self) -> std::path::PathBuf {
+        if self.socket_path.is_empty() {
+            therminal_runtime::paths::socket_path("mcp")
+        } else {
+            std::path::PathBuf::from(&self.socket_path)
+        }
+    }
+}
+
 impl Default for McpConfig {
     fn default() -> Self {
         Self {

@@ -26,7 +26,8 @@ pub fn run() -> Result<()> {
 }
 
 async fn run_async() -> Result<()> {
-    let socket_path = therminal_runtime::paths::socket_path("mcp");
+    let config = therminal_core::config::TherminalConfig::load();
+    let socket_path = config.mcp.resolved_socket_path();
 
     info!(path = %socket_path.display(), "connecting to daemon MCP socket");
 

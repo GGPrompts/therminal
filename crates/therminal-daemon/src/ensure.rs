@@ -18,7 +18,7 @@ use therminal_protocol::DaemonState;
 use crate::client;
 use crate::handoff::{self, DaemonCheck};
 use crate::lifecycle::{Lifecycle, LifecycleConfig};
-use crate::mcp::{self, McpServerConfig};
+use crate::mcp;
 use crate::server::DaemonServer;
 
 /// Build hash embedded at compile time by `build.rs`.
@@ -157,7 +157,7 @@ async fn start_daemon(socket_path: PathBuf, config: LifecycleConfig) -> Result<A
 
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
-    let mcp_config = McpServerConfig::default();
+    let mcp_config = app_config.mcp.clone();
     let mcp_session_mgr = server.session_manager();
     let mcp_shutdown_clone = Arc::clone(&mcp_shutdown);
     let mcp_trust = Arc::clone(&trust_config);
