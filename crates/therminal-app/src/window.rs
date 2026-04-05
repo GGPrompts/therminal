@@ -671,6 +671,9 @@ impl App {
         let pane_count = layout.pane_count();
         let show_focus = pane_count > 1;
 
+        // Submit the clear pass immediately so pane renders can use fresh encoders.
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+
         let mut pane_counter = 0;
         render_panes_recursive(
             layout,
@@ -681,13 +684,17 @@ impl App {
             renderer,
             &gpu.device,
             &gpu.queue,
-            &mut encoder,
             &view,
             gpu.config.width,
             gpu.config.height,
         );
 
         // ── Status bar ──────────────────────────────────────────────────
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("status_bar_encoder"),
+            });
         draw_status_bar(
             pane_count,
             renderer,
@@ -1087,6 +1094,7 @@ impl App {
                 NamedKey::PageDown => Some(KeyCode::PageDown),
                 NamedKey::Insert => Some(KeyCode::Insert),
                 NamedKey::Delete => Some(KeyCode::Delete),
+                NamedKey::Space => Some(KeyCode::Char(' ')),
                 NamedKey::F1 => Some(KeyCode::F1),
                 NamedKey::F2 => Some(KeyCode::F2),
                 NamedKey::F3 => Some(KeyCode::F3),
@@ -1800,7 +1808,6 @@ fn render_panes_recursive(
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
@@ -1809,6 +1816,12 @@ fn render_panes_recursive(
         LayoutNode::Leaf(pane) => {
             let idx = *pane_counter;
             *pane_counter += 1;
+            // Each pane gets its own encoder so that glyphon prepare()/render()
+            // for one pane doesn't overwrite another pane's glyph data in the
+            // shared atlas before the GPU executes the draw commands.
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pane_encoder"),
+            });
             render_single_pane(
                 pane,
                 idx,
@@ -1817,11 +1830,12 @@ fn render_panes_recursive(
                 renderer,
                 device,
                 queue,
-                encoder,
+                &mut encoder,
                 view,
                 surface_width,
                 surface_height,
             );
+            queue.submit(std::iter::once(encoder.finish()));
         }
         LayoutNode::Split {
             direction,
@@ -1838,7 +1852,6 @@ fn render_panes_recursive(
                 renderer,
                 device,
                 queue,
-                encoder,
                 view,
                 surface_width,
                 surface_height,
@@ -1852,13 +1865,15 @@ fn render_panes_recursive(
                 renderer,
                 device,
                 queue,
-                encoder,
                 view,
                 surface_width,
                 surface_height,
             );
 
             // Draw separator line between the two children.
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("separator_encoder"),
+            });
             draw_split_separator(
                 *direction,
                 first,
@@ -1866,11 +1881,12 @@ fn render_panes_recursive(
                 focused,
                 renderer,
                 device,
-                encoder,
+                &mut encoder,
                 view,
                 surface_width,
                 surface_height,
             );
+            queue.submit(std::iter::once(encoder.finish()));
         }
         LayoutNode::Empty => {}
     }
