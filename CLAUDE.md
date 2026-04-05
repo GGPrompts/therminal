@@ -4,7 +4,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-**Phase 0 and Phase 1 complete.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection, and output cadence analysis. Next: Phase 2 (Session Daemon + Multiplexing).
+**Phase 0, 1, and 2 complete.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection, output cadence analysis, persistent multiplexed sessions via daemon with socket-as-lock, zero-downtime handoff, IPC protocol (MessagePack framing), split panes, TOML config with hot-reload, and control mode. Next: Phase 3 (AI Detection + Hotspots).
 
 ## Architecture
 
