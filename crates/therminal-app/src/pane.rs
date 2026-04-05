@@ -36,6 +36,12 @@ pub enum SplitDirection {
 /// Separator gap between panes in physical pixels.
 pub const SEPARATOR_GAP: f32 = 2.0;
 
+/// Height of the pane header strip in physical pixels.
+pub const PANE_HEADER_HEIGHT: f32 = 20.0;
+
+/// Height of the window status bar in physical pixels.
+pub const STATUS_BAR_HEIGHT: f32 = 24.0;
+
 /// Minimum pane width in physical pixels.
 pub const MIN_PANE_WIDTH: f32 = 80.0;
 
@@ -117,9 +123,10 @@ impl PaneState {
 }
 
 /// Compute (cols, rows) for a viewport rect using the renderer's cell metrics.
+/// Accounts for pane header height at the top.
 pub fn grid_size_for_rect(rect: Rect, renderer: &GridRenderer) -> (usize, usize) {
     let usable_w = rect.width() - renderer.padding_x() * 2.0;
-    let usable_h = rect.height() - renderer.padding_y() * 2.0;
+    let usable_h = rect.height() - renderer.padding_y() * 2.0 - PANE_HEADER_HEIGHT;
     let cols = (usable_w / renderer.cell_width).floor().max(2.0) as usize;
     let rows = (usable_h / renderer.cell_height).floor().max(1.0) as usize;
     (cols, rows)
@@ -473,6 +480,11 @@ impl LayoutNode {
             first.collect_separators(rects);
             second.collect_separators(rects);
         }
+    }
+
+    /// Collect leaf viewport rects (public version for separator drawing).
+    pub fn leaf_rects_pub(&self) -> Vec<Rect> {
+        self.leaf_rects()
     }
 
     fn leaf_rects(&self) -> Vec<Rect> {
