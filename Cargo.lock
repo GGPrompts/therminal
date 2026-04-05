@@ -2735,6 +2735,7 @@ dependencies = [
  "serde",
  "serde_json",
  "therminal-protocol",
+ "therminal-runtime",
  "thiserror 2.0.18",
  "tracing",
 ]

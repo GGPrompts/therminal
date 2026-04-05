@@ -28,6 +28,16 @@ crates/
 - **Wire protocol**: MessagePack framing
 - **Language**: Rust
 
+## Shell Integration
+
+Therminal uses Ghostty-style `TERM_PROGRAM` detection. When spawning a PTY, three env vars are set:
+
+- `TERM_PROGRAM=therminal` -- shells use this to detect the terminal and auto-source integration scripts
+- `TERM_PROGRAM_VERSION` -- the crate version from `Cargo.toml`
+- `THERMINAL_RESOURCES_DIR` -- absolute path to the resources directory containing shell scripts
+
+Shell integration scripts live in `resources/shell-integration/` (bash, zsh, fish, PowerShell). Each script emits OSC 133 marks (A=PromptStart, B=PromptEnd, C=PreExec, D=CommandFinished) and OSC 7 for current directory. All scripts guard against double-sourcing via `__THERMINAL_SHELL_INTEGRATION`.
+
 ## Building & Testing
 
 Run `./scripts/ci.sh` before committing code changes. This runs the same checks as GitHub Actions CI:

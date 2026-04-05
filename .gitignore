@@ -10,3 +10,6 @@ Thumbs.db
 *.db
 .beads-credential-key
 logs/
+# bd worktrees (top-level only)
+/region-index/
+/shell-integration/

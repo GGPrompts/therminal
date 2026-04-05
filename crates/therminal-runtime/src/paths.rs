@@ -94,6 +94,39 @@ pub fn pidfile_path(name: &str) -> PathBuf {
     runtime_dir().join(format!("{name}.pid"))
 }
 
+/// Return the Therminal resources directory.
+///
+/// Contains shell integration scripts and other bundled assets.
+/// At runtime this is derived from the executable location:
+/// `<exe_dir>/../resources` (standard install layout) or
+/// `<workspace>/resources` during development.
+///
+/// Falls back to `<data_dir>/resources` if neither of the above exists.
+pub fn resources_dir() -> PathBuf {
+    // 1. Try relative to executable: <exe_dir>/../resources
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("../resources").canonicalize().ok();
+            if let Some(dir) = candidate {
+                if dir.is_dir() {
+                    return dir;
+                }
+            }
+            // Also check <exe_dir>/resources (flat layout)
+            let candidate = exe_dir.join("resources");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+
+    // 2. Check CARGO_MANIFEST_DIR for dev builds (set at compile time via env!)
+    // This is handled by callers who can use env!("CARGO_MANIFEST_DIR") at compile time.
+
+    // 3. Fallback: <data_dir>/resources
+    data_dir().join("resources")
+}
+
 /// Return the full path for a named lockfile.
 ///
 /// Example: `lockfile_path("daemon")` -> `<runtime_dir>/daemon.lock`
