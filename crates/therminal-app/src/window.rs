@@ -1950,8 +1950,16 @@ fn render_single_pane(
     term_guard.reset_damage();
     drop(term_guard);
 
-    // Clear per-pane caches so stale state from a previous pane doesn't bleed through.
-    renderer.reset_pane_caches();
+    // In multi-pane mode, clear per-pane caches so stale state from a previous pane
+    // doesn't bleed through. This forces a full rebuild (damaged_rows = None) since
+    // the cache was just wiped. In single-pane mode, keep the cache for incremental
+    // rendering — without this, undamaged rows disappear after the cache clear.
+    let damaged_rows = if pane_count > 1 {
+        renderer.reset_pane_caches();
+        None // force full rebuild after cache clear
+    } else {
+        damaged_rows
+    };
 
     // ── Draw pane header strip (only when multiple panes) ────────────────
     let header_h = crate::pane::effective_header_height(pane_count);
