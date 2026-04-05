@@ -461,6 +461,41 @@ impl LayoutNode {
         }
     }
 
+    /// Swap the positions of two panes in the tree by exchanging their `PaneState` contents.
+    /// Returns `true` if both panes were found and swapped.
+    pub fn swap_pane(&mut self, a: PaneId, b: PaneId) -> bool {
+        // Collect mutable pointers to the two leaf PaneStates.
+        fn find_leaf(node: &mut LayoutNode, id: PaneId) -> Option<*mut PaneState> {
+            match node {
+                LayoutNode::Leaf(ps) if ps.id == id => Some(ps as *mut PaneState),
+                LayoutNode::Split { first, second, .. } => {
+                    find_leaf(first, id).or_else(|| find_leaf(second, id))
+                }
+                _ => None,
+            }
+        }
+
+        let ptr_a = find_leaf(self, a);
+        let ptr_b = find_leaf(self, b);
+
+        match (ptr_a, ptr_b) {
+            (Some(pa), Some(pb)) if pa != pb => {
+                // SAFETY: pa and pb point to distinct leaf nodes in the tree,
+                // so there is no aliasing. We swap the PaneState contents and
+                // then restore each node's original viewport so the visual
+                // layout stays the same.
+                unsafe {
+                    std::ptr::swap(pa, pb);
+                    // After swapping, the viewports followed the PaneState data.
+                    // Exchange them back so each position keeps its original rect.
+                    std::mem::swap(&mut (*pa).viewport, &mut (*pb).viewport);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Adjust the split ratio for the split containing the focused pane.
     pub fn adjust_ratio(&mut self, focused_id: PaneId, delta: f32) -> bool {
         match self {
@@ -1661,5 +1696,54 @@ mod tests {
                 "after close, root ratio should be ~0.333, got {ratio}"
             );
         }
+    }
+
+    // ── swap_pane tests ────────────────────────────────────────────────
+
+    #[test]
+    fn swap_pane_two_leaves() {
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
+
+        let rects_before = collect_leaf_rects(&root);
+        assert!(root.swap_pane(1, 2));
+
+        // IDs should now be in reversed order.
+        assert_eq!(root.pane_ids(), vec![2, 1]);
+        // Viewports should stay in their original positions.
+        let rects_after = collect_leaf_rects(&root);
+        assert_eq!(rects_before, rects_after);
+    }
+
+    #[test]
+    fn swap_pane_preserves_tree_structure() {
+        // 4-pane tree: [1, 2, 3, 4]
+        let left = make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2));
+        let right = make_split(SplitDirection::Vertical, 0.5, make_leaf(3), make_leaf(4));
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, left, right);
+        root.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
+
+        // Swap panes across branches.
+        assert!(root.swap_pane(1, 4));
+        assert_eq!(root.pane_ids(), vec![4, 2, 3, 1]);
+        assert_eq!(root.pane_count(), 4);
+    }
+
+    #[test]
+    fn swap_pane_same_id_returns_false() {
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        assert!(!root.swap_pane(1, 1));
+    }
+
+    #[test]
+    fn swap_pane_unknown_id_returns_false() {
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        assert!(!root.swap_pane(1, 99));
+    }
+
+    #[test]
+    fn swap_pane_single_leaf_returns_false() {
+        let mut root = make_leaf(1);
+        assert!(!root.swap_pane(1, 2));
     }
 }

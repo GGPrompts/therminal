@@ -551,6 +551,10 @@ pub enum KeyAction {
     CloseAllPanes,
     /// Restore the last closed-all layout.
     RestoreLayout,
+    /// Swap focused pane with the next pane.
+    SwapNext,
+    /// Swap focused pane with the previous pane.
+    SwapPrev,
 }
 
 impl KeyAction {
@@ -578,6 +582,8 @@ impl KeyAction {
             KeyAction::ShowHelp => "Show keybinding help",
             KeyAction::CloseAllPanes => "Close all panes",
             KeyAction::RestoreLayout => "Restore last layout",
+            KeyAction::SwapNext => "Swap pane with next",
+            KeyAction::SwapPrev => "Swap pane with previous",
         }
     }
 
@@ -598,7 +604,9 @@ impl KeyAction {
             | KeyAction::FocusRight
             | KeyAction::ZoomPane
             | KeyAction::CloseAllPanes
-            | KeyAction::RestoreLayout => "Pane Management",
+            | KeyAction::RestoreLayout
+            | KeyAction::SwapNext
+            | KeyAction::SwapPrev => "Pane Management",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
         }
@@ -722,6 +730,15 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+u".to_string(),
                     action: KeyAction::RestoreLayout,
+                },
+                // Pane swap
+                Keybinding {
+                    key: "alt+shift+right".to_string(),
+                    action: KeyAction::SwapNext,
+                },
+                Keybinding {
+                    key: "alt+shift+left".to_string(),
+                    action: KeyAction::SwapPrev,
                 },
             ],
         }

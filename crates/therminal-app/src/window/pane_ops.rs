@@ -296,6 +296,28 @@ impl App {
         }
     }
 
+    /// Swap the focused pane with the adjacent pane in the given direction.
+    /// Focus follows the moved pane (stays on the same pane ID).
+    pub(crate) fn swap_focused_pane(&mut self, direction: FocusDirection) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+
+        if let Some(target_id) = layout.adjacent_pane(focused, direction) {
+            if layout.swap_pane(focused, target_id) {
+                // Focus stays on the original pane ID (it moved to the new position).
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
+    }
+
     /// Adjust the split ratio around the focused pane.
     pub(crate) fn adjust_focused_ratio(&mut self, delta: f32) {
         let focused = match self.focused_pane {

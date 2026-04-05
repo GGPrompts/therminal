@@ -641,6 +641,12 @@ impl App {
             KeyAction::FocusPrev | KeyAction::FocusLeft | KeyAction::FocusUp => {
                 self.move_focus(crate::pane::FocusDirection::Prev);
             }
+            KeyAction::SwapNext => {
+                self.swap_focused_pane(crate::pane::FocusDirection::Next);
+            }
+            KeyAction::SwapPrev => {
+                self.swap_focused_pane(crate::pane::FocusDirection::Prev);
+            }
             KeyAction::ZoomPane => {
                 // TODO: implement pane zoom toggle (tn-oxa)
                 info!("zoom pane: not yet implemented");
