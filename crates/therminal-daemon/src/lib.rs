@@ -30,6 +30,7 @@ pub mod lifecycle;
 pub mod mcp;
 pub mod server;
 pub mod session;
+pub mod trust;
 
 pub use ensure::{ensure_daemon, EnsureResult, BUILD_HASH, VERSION};
 pub use lifecycle::{Lifecycle, LifecycleConfig};

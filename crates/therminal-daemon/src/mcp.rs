@@ -4,6 +4,11 @@
 //! allowing external tools (Claude Code, TUIs, dashboards) to interact with
 //! daemon sessions.
 //!
+//! Trust enforcement is applied to every tool call: the agent's identity is
+//! extracted from the MCP `initialize` handshake, looked up against the
+//! `[trust]` config section, and checked against the tool's required tier.
+//! Destructive tools are additionally rate-limited.
+//!
 //! The server listens on a dedicated Unix socket (separate from the IPC socket)
 //! and uses the `rmcp` crate for protocol handling.
 
@@ -23,7 +28,10 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tracing::{debug, error, info, warn};
 
+use therminal_core::config::TrustConfig;
+
 use crate::session::SessionManager;
+use crate::trust::{check_tool_access, AgentIdentity, RateLimiter, TrustCheckResult};
 
 // ── Tool parameter types ────────────────────────────────────────────────
 
@@ -108,20 +116,60 @@ fn parse_args<T: serde::de::DeserializeOwned>(
         .map_err(|e| ErrorData::invalid_params(format!("invalid parameters: {e}"), None))
 }
 
+// ── Agent identity extraction ──────────────────────────────────────────
+
+/// Extract the agent identity from the MCP connection context.
+///
+/// Uses the client's `Implementation.name` from the MCP `initialize`
+/// handshake. Falls back to `"unknown"` if the peer info is not available
+/// (e.g. before initialization completes).
+fn extract_agent_identity(context: &RequestContext<RoleServer>) -> AgentIdentity {
+    let name = context
+        .peer
+        .peer_info()
+        .map(|info| info.client_info.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    AgentIdentity { name }
+}
+
 // ── MCP Server ──────────────────────────────────────────────────────────
 
 /// Therminal MCP server handler.
 ///
 /// Wraps a shared `SessionManager` and exposes session/pane operations as
-/// MCP tools. Each tool delegates to the existing `SessionManager` methods.
+/// MCP tools. Each tool call is gated by trust tier enforcement and
+/// audit-logged.
 pub struct TherminalMcpServer {
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    trust_config: Arc<TrustConfig>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl TherminalMcpServer {
-    /// Create a new MCP server backed by the given session manager.
-    pub fn new(session_mgr: Arc<tokio::sync::Mutex<SessionManager>>) -> Self {
-        Self { session_mgr }
+    /// Create a new MCP server backed by the given session manager and trust config.
+    pub fn new(
+        session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+        trust_config: Arc<TrustConfig>,
+        rate_limiter: Arc<RateLimiter>,
+    ) -> Self {
+        Self {
+            session_mgr,
+            trust_config,
+            rate_limiter,
+        }
+    }
+
+    /// Enforce trust tier and rate limiting for the given tool call.
+    ///
+    /// Returns `Ok(())` if allowed, or an `Err(CallToolResult)` with
+    /// a permission-denied error to return to the client.
+    fn enforce_trust(&self, tool_name: &str, agent: &AgentIdentity) -> Result<(), CallToolResult> {
+        match check_tool_access(tool_name, agent, &self.trust_config, &self.rate_limiter) {
+            TrustCheckResult::Allowed => Ok(()),
+            TrustCheckResult::Denied(reason) => {
+                Err(CallToolResult::error(vec![Content::text(reason)]))
+            }
+        }
     }
 
     async fn handle_list_sessions(&self) -> Result<CallToolResult, ErrorData> {
@@ -292,10 +340,19 @@ impl ServerHandler for TherminalMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let name = request.name.as_ref();
         let args = request.arguments.unwrap_or_default();
+
+        // Extract agent identity from the MCP connection context.
+        let agent = extract_agent_identity(&context);
+
+        // Enforce trust tier and rate limiting.
+        if let Err(denied_result) = self.enforce_trust(name, &agent) {
+            return Ok(denied_result);
+        }
+
         match name {
             "list_sessions" => self.handle_list_sessions().await,
             "get_session" => {
@@ -349,10 +406,13 @@ impl Default for McpServerConfig {
 /// Start the MCP server, accepting connections on the given Unix socket.
 ///
 /// Each accepted connection is served independently. The server runs until
-/// the `shutdown` notify is triggered.
+/// the `shutdown` notify is triggered. Trust enforcement uses the provided
+/// `TrustConfig` to gate tool access per agent.
 pub async fn start_mcp_server(
     config: McpServerConfig,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    trust_config: Arc<TrustConfig>,
+    rate_limiter: Arc<RateLimiter>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if !config.enabled {
@@ -395,8 +455,10 @@ pub async fn start_mcp_server(
                 match accept_result {
                     Ok((stream, _addr)) => {
                         let sm = Arc::clone(&session_mgr);
+                        let tc = Arc::clone(&trust_config);
+                        let rl = Arc::clone(&rate_limiter);
                         tokio::spawn(async move {
-                            let server = TherminalMcpServer::new(sm);
+                            let server = TherminalMcpServer::new(sm, tc, rl);
                             let (reader, writer) = stream.into_split();
                             match server.serve((reader, writer)).await {
                                 Ok(running) => {

@@ -264,6 +264,10 @@ impl TherminalConfig {
             "# agent_scan_interval = {}  # seconds (0 = disabled)\n",
             d.trust.agent_scan_interval
         ));
+        out.push_str(&format!(
+            "# destructive_rate_limit = {}  # max destructive ops per agent per minute (0 = unlimited)\n",
+            d.trust.destructive_rate_limit
+        ));
         out.push('\n');
         out.push_str(
             "# Per-agent overrides — tier: \"sandboxed\" | \"supervised\" | \"trusted\"\n",
@@ -1057,7 +1061,7 @@ impl Default for TerminalConfig {
 // ── Section: Trust ───────────────────────────────────────────────────────
 
 /// Trust tier assigned to an AI agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustTier {
     /// Minimal permissions; agent actions are heavily restricted.
@@ -1066,6 +1070,36 @@ pub enum TrustTier {
     Supervised,
     /// Full access; agent is treated as trusted.
     Trusted,
+}
+
+impl TrustTier {
+    /// Numeric privilege level for comparison.
+    /// Higher values grant more permissions.
+    fn level(self) -> u8 {
+        match self {
+            Self::Sandboxed => 0,
+            Self::Supervised => 1,
+            Self::Trusted => 2,
+        }
+    }
+
+    /// Returns `true` if this tier has at least the given required tier's
+    /// privilege level.
+    pub fn has_access(self, required: Self) -> bool {
+        self.level() >= required.level()
+    }
+}
+
+impl PartialOrd for TrustTier {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TrustTier {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.level().cmp(&other.level())
+    }
 }
 
 /// Agent trust tier configuration.
@@ -1077,13 +1111,14 @@ pub enum TrustTier {
 pub struct TrustConfig {
     /// Default trust tier for unknown agents.
     ///
-    /// **Not yet wired.** Parsed and round-tripped but not consumed by the
-    /// runtime. Agent trust enforcement is planned for Phase 3.
+    /// Used by the MCP server to gate tool access when the connecting agent
+    /// is not listed in `agents`. Sandboxed = read-only, Supervised = read
+    /// + write, Trusted = full access including destructive operations.
     pub default_tier: TrustTier,
-    /// Per-agent trust overrides, keyed by agent process name.
+    /// Per-agent trust overrides, keyed by agent name (matched against the
+    /// MCP client's `Implementation.name` from the `initialize` handshake).
     ///
-    /// **Not yet wired.** Parsed and round-tripped but not consumed by the
-    /// runtime. Per-agent trust policy enforcement is planned for Phase 3.
+    /// Agents not listed here fall back to `default_tier`.
     pub agents: HashMap<String, AgentTrust>,
     /// Whether to show visual indicators when agents are detected.
     pub show_agent_indicator: bool,
@@ -1092,6 +1127,10 @@ pub struct TrustConfig {
     /// Set to `0` to disable automatic process-tree scanning.
     /// Default is `3` seconds.
     pub agent_scan_interval: u64,
+    /// Maximum number of destructive MCP operations (destroy_session, etc.)
+    /// allowed per agent per minute. Set to `0` to disable rate limiting.
+    /// Default is `5`.
+    pub destructive_rate_limit: u32,
 }
 
 impl Default for TrustConfig {
@@ -1101,6 +1140,7 @@ impl Default for TrustConfig {
             agents: HashMap::new(),
             show_agent_indicator: true,
             agent_scan_interval: 3,
+            destructive_rate_limit: 5,
         }
     }
 }

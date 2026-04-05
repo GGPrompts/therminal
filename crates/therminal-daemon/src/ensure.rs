@@ -148,13 +148,29 @@ async fn start_daemon(socket_path: PathBuf, config: LifecycleConfig) -> Result<A
     // Spawn the idle watcher
     lifecycle.spawn_idle_watcher();
 
+    // Load trust config for MCP enforcement.
+    let app_config = therminal_core::config::TherminalConfig::load();
+    let trust_config = Arc::new(app_config.trust.clone());
+    let rate_limiter = Arc::new(crate::trust::RateLimiter::new(
+        app_config.trust.destructive_rate_limit,
+    ));
+
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = McpServerConfig::default();
     let mcp_session_mgr = server.session_manager();
     let mcp_shutdown_clone = Arc::clone(&mcp_shutdown);
+    let mcp_trust = Arc::clone(&trust_config);
+    let mcp_rl = Arc::clone(&rate_limiter);
     tokio::spawn(async move {
-        if let Err(e) = mcp::start_mcp_server(mcp_config, mcp_session_mgr, mcp_shutdown_clone).await
+        if let Err(e) = mcp::start_mcp_server(
+            mcp_config,
+            mcp_session_mgr,
+            mcp_trust,
+            mcp_rl,
+            mcp_shutdown_clone,
+        )
+        .await
         {
             warn!(error = %e, "MCP server exited with error");
         }
