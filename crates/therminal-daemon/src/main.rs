@@ -26,6 +26,10 @@ struct Cli {
     /// for programmatic control (similar to tmux -CC).
     #[arg(long)]
     control_mode: bool,
+
+    /// Print the control-mode protocol reference and exit.
+    #[arg(long)]
+    help_control: bool,
 }
 
 #[tokio::main]
@@ -35,6 +39,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(if cli.verbose { "debug" } else { "info" })
         .init();
+
+    if cli.help_control {
+        println!("{}", therminal_daemon::control::protocol_reference());
+        return Ok(());
+    }
 
     if cli.control_mode {
         return run_control_mode().await;

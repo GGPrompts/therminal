@@ -43,6 +43,123 @@ use therminal_protocol::{PaneId, SessionId};
 use crate::lifecycle::Lifecycle;
 use crate::session::SessionManager;
 
+/// Return a formatted help string listing all control-mode commands.
+pub fn help_text() -> String {
+    "\
+Commands:
+  new-session [-n NAME]       Create a new session (optional name)
+  list-sessions               List all session IDs
+  send-keys PANE_ID KEYS...   Send input to a pane
+  split-pane [-h|-v] PANE_ID  Split a pane (default: vertical)
+  select-pane PANE_ID         Focus a pane
+  capture-pane PANE_ID [-p]   Get pane content (JSON, or plain text with -p)
+  kill-pane PANE_ID           Close a pane
+  list-panes SESSION_ID       List panes in a session
+  ping                        Health check
+  help                        Show this help
+  exit                        Close the control connection"
+        .to_string()
+}
+
+/// Return the full control-mode protocol reference (used by --help-control).
+pub fn protocol_reference() -> String {
+    "\
+Therminal Control Mode Protocol Reference
+==========================================
+
+Control mode provides a text-based, machine-readable protocol for driving
+Therminal programmatically, similar to tmux's -CC mode. External tools
+(claude-squad, agent-deck, etc.) connect via the daemon's IPC socket and
+exchange text commands.
+
+CONNECTING
+----------
+  therminal-daemon --control-mode
+
+  Or connect directly to the Unix socket and send the handshake:
+
+    echo 'mode: control' | socat - UNIX-CONNECT:$SOCKET_PATH
+
+HANDSHAKE
+---------
+  On connect, the client sends:
+
+    mode: control\\n
+
+  The daemon responds with a greeting wrapped in a %begin/%end block:
+
+    %begin 0
+    {\"mode\":\"control\",\"version\":\"...\",\"build_hash\":\"...\"}
+    %end 0
+
+RESPONSE FORMAT
+---------------
+  Every command gets a response wrapped in %begin/%end with a request ID.
+  Request IDs increment from 1 for each command sent.
+
+  Success:
+    %begin <request_id>
+    <JSON or plain text body>
+    %end <request_id>
+
+  Error:
+    %begin <request_id>
+    %error <message>
+    %end <request_id>
+
+COMMANDS
+--------
+  new-session [-n NAME]       Create a new session (optional name)
+                              Response: {\"session_id\": <id>}
+
+  list-sessions               List all session IDs
+                              Response: [<id>, ...]
+
+  send-keys PANE_ID KEYS...   Send input to a pane
+                              Response: {\"pane_id\": <id>, \"sent\": true}
+
+  split-pane [-h|-v] PANE_ID  Split a pane (default: vertical)
+                              -h = horizontal, -v = vertical
+                              Response: {\"new_pane_id\": <id>}
+
+  select-pane PANE_ID         Focus a pane
+                              Response: {\"pane_id\": <id>, \"selected\": true}
+
+  capture-pane PANE_ID [-p]   Get pane content
+                              Without -p: JSON with grid, cursor, dimensions
+                              With -p: plain text, one line per row
+                              Response: {\"pane_id\": <id>, \"cols\": ..., ...}
+
+  kill-pane PANE_ID           Close a pane
+                              Response: {\"pane_id\": <id>, \"killed\": true}
+
+  list-panes SESSION_ID       List panes in a session
+                              Response: [{\"pane_id\": ..., \"cols\": ..., \"rows\": ...}, ...]
+
+  ping                        Health check
+                              Response: {\"status\": \"ok\", \"version\": ..., ...}
+
+  help                        Show available commands
+                              Response: command listing (plain text)
+
+  exit                        Close the control connection
+                              Response: \"goodbye\"
+
+ASYNC NOTIFICATIONS
+-------------------
+  While connected, the daemon pushes async events prefixed with %:
+
+  %session-changed <session_id>    A session was created
+  %session-closed <session_id>     A session was destroyed
+  %state-changed <old> <new>       Daemon state changed (e.g. ready -> running)
+  %pane-output <pane_id>           A pane produced output
+
+  Notifications can arrive between command/response pairs. Clients should
+  handle them by checking for lines starting with % that are outside a
+  %begin/%end block."
+        .to_string()
+}
+
 /// A single parsed control-mode command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlCommand {
@@ -64,6 +181,8 @@ pub enum ControlCommand {
     ListPanes { session_id: SessionId },
     /// `ping`
     Ping,
+    /// `help`
+    Help,
     /// `exit`
     Exit,
 }
@@ -201,9 +320,10 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
             Ok(ControlCommand::ListPanes { session_id })
         }
         "ping" => Ok(ControlCommand::Ping),
+        "help" => Ok(ControlCommand::Help),
         "exit" => Ok(ControlCommand::Exit),
         _ => Err(ParseError {
-            message: format!("unknown command: {cmd}"),
+            message: format!("unknown command: {cmd}. Type 'help' for available commands"),
         }),
     }
 }
@@ -450,6 +570,7 @@ async fn dispatch_control_command(
                 None => Err(format!("session not found: {session_id}")),
             }
         }
+        ControlCommand::Help => Ok(help_text()),
         ControlCommand::Exit => {
             // Handled in the main loop before dispatching
             unreachable!()
@@ -587,8 +708,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_help() {
+        assert_eq!(parse_command("help").unwrap(), ControlCommand::Help);
+    }
+
+    #[test]
     fn parse_unknown_command() {
-        assert!(parse_command("foobar").is_err());
+        let err = parse_command("foobar").unwrap_err();
+        assert!(err.message.contains("unknown command: foobar"));
+        assert!(err.message.contains("help"));
     }
 
     #[test]
