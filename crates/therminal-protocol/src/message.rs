@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Re-export types used in this module.
-pub use crate::ggl_types::{AgentId, ParseAgentIdError, TaskState};
+pub use crate::bus_types::{AgentId, ParseAgentIdError, TaskState};
 
 // ── MessageType ────────────────────────────────────────────────────────────────
 

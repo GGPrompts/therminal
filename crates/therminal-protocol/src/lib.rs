@@ -4,19 +4,12 @@
 //! schemas. It has no GPU, async, or system dependencies — making it suitable
 //! for lightweight consumers like `therminal-terminal`.
 
-pub mod config;
+pub mod bus_types;
 pub mod daemon;
-pub mod ggl_types;
 pub mod message;
-pub mod pane;
-pub mod state;
 
-pub use config::{ConductorConfig, Layout};
+pub use bus_types::{AgentId, ClaudeStatus, ParseAgentIdError, TaskState};
 pub use daemon::{DaemonEvent, DaemonState, EventKind, IpcMessage, IpcRequest, IpcResponse};
-pub use ggl_types::{
-    AgentId, AgentState, ClaudeStatus, PaneInfo, ParseAgentIdError, SessionState, TaskState,
-    ToolArgs, ToolDetails,
-};
 pub use message::{Message, MessageType};
 
 // ── Canonical ID types ──────────────────────────────────────────────────

@@ -205,14 +205,13 @@ impl InferredStatus {
 
 // -- State file format -------------------------------------------------------
 
-/// JSON structure written to state files, matching the `SessionStateV1` schema
-/// defined in `therminal-core/schemas/therminal-protocol.ggl`.
+/// JSON structure written to state files for agent session state.
 ///
-/// Field names and types are aligned with the ggl-generated `SessionStateV1`
-/// struct so that the JSON written here deserializes correctly via
-/// `ClaudeStatePoller` (therminal-core). We keep a local struct rather than
-/// importing `therminal-core` to avoid pulling GPU/Wayland dependencies into
-/// this lightweight, Android-compatible crate.
+/// Field names and types are aligned with the `ClaudeStatus` enum in
+/// `therminal-protocol` so that the JSON written here deserializes correctly
+/// via `ClaudeStatePoller` (therminal-core). We keep a local struct rather
+/// than importing `therminal-core` to avoid pulling GPU/Wayland dependencies
+/// into this lightweight, Android-compatible crate.
 #[derive(Debug, Serialize)]
 struct StateFile {
     session_id: String,
