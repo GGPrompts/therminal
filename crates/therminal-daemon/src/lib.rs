@@ -29,6 +29,7 @@ pub mod server;
 
 pub use ensure::{ensure_daemon, EnsureResult, BUILD_HASH, VERSION};
 pub use lifecycle::{Lifecycle, LifecycleConfig};
+pub use server::IpcServer;
 
 pub use therminal_protocol as protocol;
 pub use therminal_runtime as runtime;

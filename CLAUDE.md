@@ -56,7 +56,29 @@ The daemon uses a **socket-as-lock** pattern -- successful socket bind = ownersh
 
 **Idle exit**: Daemon exits when last session closes + configurable `keep_alive` duration (default 5 minutes).
 
-Key files: `ensure.rs` (entry point), `lifecycle.rs` (state machine), `server.rs` (socket server), `client.rs` (socket client), `handoff.rs` (version handoff).
+Key files: `ensure.rs` (entry point), `lifecycle.rs` (state machine), `server.rs` (IPC server), `client.rs` (IPC client), `handoff.rs` (version handoff).
+
+### IPC Protocol
+
+The daemon exposes a multiplexed IPC protocol over Unix domain sockets with length-prefixed MessagePack framing.
+
+**Wire format**: `[4-byte BE length][MessagePack payload]`. Max frame size: 1 MiB.
+
+**Envelope** (`IpcMessage`): Three variants -- `Request { request_id, payload }`, `Response { request_id, payload }`, `Event { payload }`. The `request_id: u64` enables multiplexing multiple in-flight requests over one connection.
+
+**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`.
+
+**Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
+
+**Events** (`DaemonEvent`): `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`. Clients subscribe via `Subscribe { filter: Vec<EventKind> }` -- empty filter = all events.
+
+**Client API** (`DaemonClient`): Persistent connection with `connect()`, `send_request()`, `ping()`, `shutdown()`, `subscribe_events()`, `recv_event()`. Uses internal reader/writer tasks for full-duplex communication.
+
+**Server** (`IpcServer`): Accepts connections, dispatches to handlers, manages per-connection event subscriptions via `tokio::sync::broadcast`. Auto-detects legacy vs IPC protocol on first frame.
+
+**Backward compatibility**: The server auto-detects legacy `DaemonRequest` frames (used by `ensure_daemon()` and handoff) vs new `IpcMessage` frames. Legacy single-shot `send_request()` function is preserved. `DaemonServer` is a type alias for `IpcServer`.
+
+Protocol types live in `therminal-protocol/src/daemon.rs`. Server/client in `therminal-daemon/src/{server,client}.rs`.
 
 ## Configuration System
 

@@ -12,7 +12,10 @@ pub mod pane;
 pub mod state;
 
 pub use config::{ConductorConfig, Layout};
-pub use daemon::{DaemonRequest, DaemonResponse, DaemonState};
+pub use daemon::{
+    DaemonEvent, DaemonRequest, DaemonResponse, DaemonState, EventKind, IpcMessage, IpcRequest,
+    IpcResponse,
+};
 pub use ggl_types::{
     AgentId, AgentState, ClaudeStatus, PaneInfo, ParseAgentIdError, SessionState, TaskState,
     ToolArgs, ToolDetails,
