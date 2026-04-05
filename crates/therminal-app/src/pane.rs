@@ -36,6 +36,12 @@ pub enum SplitDirection {
 /// Separator gap between panes in physical pixels.
 pub const SEPARATOR_GAP: f32 = 2.0;
 
+/// Minimum pane width in physical pixels.
+pub const MIN_PANE_WIDTH: f32 = 80.0;
+
+/// Minimum pane height in physical pixels.
+pub const MIN_PANE_HEIGHT: f32 = 60.0;
+
 // ── EventListener for per-pane Term ─────────────────────────────────────
 
 /// Minimal listener forwarded from each pane's Term.
@@ -248,8 +254,18 @@ impl LayoutNode {
     {
         match self {
             LayoutNode::Leaf(pane) if pane.id == target_id => {
-                let factory = spawn_fn.take().expect("spawn_fn already consumed");
                 let rect = pane.viewport;
+
+                // Refuse to split if result would be below minimum pane size.
+                if !LayoutNode::can_split(rect, direction) {
+                    warn!(
+                        "Cannot split pane {}: result would be below minimum size",
+                        target_id
+                    );
+                    return None;
+                }
+
+                let factory = spawn_fn.take().expect("spawn_fn already consumed");
                 let (r1, r2) = match direction {
                     SplitDirection::Horizontal => rect.split_horizontal_ratio(0.5, SEPARATOR_GAP),
                     SplitDirection::Vertical => rect.split_vertical_ratio(0.5, SEPARATOR_GAP),
@@ -280,16 +296,32 @@ impl LayoutNode {
             LayoutNode::Split { first, second, .. } => {
                 let result = first.split_pane_impl(target_id, direction, spawn_fn);
                 if result.is_some() {
+                    // Rebalance this node after a child was split.
+                    let first_leaves = first.leaf_count() as f32;
+                    let total_leaves = first_leaves + second.leaf_count() as f32;
+                    if let LayoutNode::Split { ratio, .. } = self {
+                        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
+                    }
                     return result;
                 }
-                second.split_pane_impl(target_id, direction, spawn_fn)
+                let result = second.split_pane_impl(target_id, direction, spawn_fn);
+                if result.is_some() {
+                    // Rebalance this node after a child was split.
+                    let first_leaves = first.leaf_count() as f32;
+                    let total_leaves = first_leaves + second.leaf_count() as f32;
+                    if let LayoutNode::Split { ratio, .. } = self {
+                        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
+                    }
+                }
+                result
             }
             LayoutNode::Empty => None,
         }
     }
 
     /// Remove a pane by ID. Returns true if found and removed.
-    /// After removal the sibling takes the parent's position.
+    /// After removal the sibling takes the parent's position and the tree
+    /// is rebalanced so remaining panes share space proportionally.
     /// Returns None if the pane is the only one (root leaf).
     pub fn remove_pane(&mut self, target_id: PaneId) -> Option<bool> {
         match self {
@@ -308,21 +340,39 @@ impl LayoutNode {
                 if first_is_target {
                     let sibling = std::mem::replace(second.as_mut(), LayoutNode::Empty);
                     *self = sibling;
+                    // Rebalance the promoted subtree.
+                    self.rebalance();
                     return Some(true);
                 }
 
                 if second_is_target {
                     let sibling = std::mem::replace(first.as_mut(), LayoutNode::Empty);
                     *self = sibling;
+                    // Rebalance the promoted subtree.
+                    self.rebalance();
                     return Some(true);
                 }
 
                 // Recurse.
                 let removed = first.remove_pane(target_id);
                 if removed == Some(true) {
+                    // Rebalance this node after child removal changed leaf counts.
+                    let first_leaves = first.leaf_count() as f32;
+                    let total_leaves = first_leaves + second.leaf_count() as f32;
+                    if let LayoutNode::Split { ratio, .. } = self {
+                        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
+                    }
                     return Some(true);
                 }
-                second.remove_pane(target_id)
+                let removed = second.remove_pane(target_id);
+                if removed == Some(true) {
+                    let first_leaves = first.leaf_count() as f32;
+                    let total_leaves = first_leaves + second.leaf_count() as f32;
+                    if let LayoutNode::Split { ratio, .. } = self {
+                        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
+                    }
+                }
+                removed
             }
             LayoutNode::Empty => Some(false),
         }
@@ -443,6 +493,64 @@ impl LayoutNode {
             LayoutNode::Leaf(_) => 1,
             LayoutNode::Split { first, second, .. } => first.pane_count() + second.pane_count(),
             LayoutNode::Empty => 0,
+        }
+    }
+
+    /// Count leaf nodes (alias for pane_count, used for ratio computation).
+    pub fn leaf_count(&self) -> usize {
+        self.pane_count()
+    }
+
+    /// Rebalance the tree so that all leaves get approximately equal space.
+    ///
+    /// For each Split node, sets `ratio` = (first child leaf count) / (total leaf count)
+    /// so that space is divided proportionally to the number of leaves on each side.
+    pub fn rebalance(&mut self) {
+        if let LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        {
+            let first_leaves = first.leaf_count() as f32;
+            let total_leaves = first_leaves + second.leaf_count() as f32;
+            if total_leaves > 0.0 {
+                *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
+            }
+            first.rebalance();
+            second.rebalance();
+        }
+    }
+
+    /// Determine the best split direction for a pane based on its viewport rect.
+    ///
+    /// - If width > height * 1.5: Horizontal (side-by-side) to use the wide space
+    /// - If height > width * 1.5: Vertical (stacked) to use the tall space
+    /// - Otherwise: use `fallback` (caller alternates based on last split)
+    pub fn auto_split_direction(rect: Rect, fallback: SplitDirection) -> SplitDirection {
+        if rect.width() > rect.height() * 1.5 {
+            SplitDirection::Horizontal
+        } else if rect.height() > rect.width() * 1.5 {
+            SplitDirection::Vertical
+        } else {
+            fallback
+        }
+    }
+
+    /// Check whether splitting `rect` in `direction` would produce children
+    /// below the minimum pane size.
+    pub fn can_split(rect: Rect, direction: SplitDirection) -> bool {
+        match direction {
+            SplitDirection::Horizontal => {
+                let usable = rect.width() - SEPARATOR_GAP;
+                // Each child gets half
+                usable / 2.0 >= MIN_PANE_WIDTH
+            }
+            SplitDirection::Vertical => {
+                let usable = rect.height() - SEPARATOR_GAP;
+                usable / 2.0 >= MIN_PANE_HEIGHT
+            }
         }
     }
 }
@@ -1033,5 +1141,266 @@ mod tests {
         // An ID not present in the tree should return None.
         assert_eq!(root.adjacent_pane(99, FocusDirection::Next), None);
         assert_eq!(root.adjacent_pane(99, FocusDirection::Prev), None);
+    }
+
+    // ── Rebalance tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn rebalance_3_way_even() {
+        // Build a 3-pane tree: Split(H, 1, Split(H, 2, 3))
+        // Before rebalance: root ratio=0.5 (giving pane 1 half, the right subtree half).
+        // After rebalance: root ratio should be ~0.333 (1/3), inner split ~0.5 (1/2).
+        let inner = make_split(SplitDirection::Horizontal, 0.5, make_leaf(2), make_leaf(3));
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), inner);
+
+        root.rebalance();
+
+        if let LayoutNode::Split { ratio, second, .. } = &root {
+            // Root: 1 leaf on left, 2 on right -> ratio = 1/3
+            assert!(
+                (*ratio - 1.0 / 3.0).abs() < 0.01,
+                "root ratio should be ~0.333, got {ratio}"
+            );
+            // Inner split: 1 leaf each -> ratio = 0.5
+            if let LayoutNode::Split { ratio: inner_r, .. } = second.as_ref() {
+                assert!(
+                    (*inner_r - 0.5).abs() < 0.01,
+                    "inner ratio should be ~0.5, got {inner_r}"
+                );
+            }
+        } else {
+            panic!("expected Split at root");
+        }
+    }
+
+    #[test]
+    fn rebalance_4_way_even() {
+        // 4 panes: Split(H, Split(H, 1, 2), Split(H, 3, 4))
+        // Root: 2 leaves each side -> ratio = 0.5
+        // Each inner: 1 each -> ratio = 0.5
+        let left = make_split(SplitDirection::Horizontal, 0.3, make_leaf(1), make_leaf(2));
+        let right = make_split(SplitDirection::Horizontal, 0.7, make_leaf(3), make_leaf(4));
+        let mut root = make_split(SplitDirection::Horizontal, 0.8, left, right);
+
+        root.rebalance();
+
+        if let LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = &root
+        {
+            assert!(
+                (*ratio - 0.5).abs() < 0.01,
+                "root ratio should be ~0.5, got {ratio}"
+            );
+            if let LayoutNode::Split { ratio: lr, .. } = first.as_ref() {
+                assert!((*lr - 0.5).abs() < 0.01, "left inner ratio: {lr}");
+            }
+            if let LayoutNode::Split { ratio: rr, .. } = second.as_ref() {
+                assert!((*rr - 0.5).abs() < 0.01, "right inner ratio: {rr}");
+            }
+        }
+    }
+
+    #[test]
+    fn rebalance_asymmetric() {
+        // Asymmetric: Split(H, 1, Split(H, 2, Split(H, 3, 4)))
+        // Root: 1 vs 3 -> ratio = 0.25
+        // Mid: 1 vs 2 -> ratio = 0.333
+        // Inner: 1 vs 1 -> ratio = 0.5
+        let inner = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
+        let mid = make_split(SplitDirection::Horizontal, 0.5, make_leaf(2), inner);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), mid);
+
+        root.rebalance();
+
+        if let LayoutNode::Split { ratio, second, .. } = &root {
+            assert!(
+                (*ratio - 0.25).abs() < 0.01,
+                "root ratio should be ~0.25, got {ratio}"
+            );
+            if let LayoutNode::Split {
+                ratio: mid_r,
+                second: inner_node,
+                ..
+            } = second.as_ref()
+            {
+                assert!(
+                    (*mid_r - 1.0 / 3.0).abs() < 0.01,
+                    "mid ratio should be ~0.333, got {mid_r}"
+                );
+                if let LayoutNode::Split { ratio: inner_r, .. } = inner_node.as_ref() {
+                    assert!((*inner_r - 0.5).abs() < 0.01, "inner ratio: {inner_r}");
+                }
+            }
+        }
+    }
+
+    // ── Auto-direction tests ────────────────────────────────────────────
+
+    #[test]
+    fn auto_direction_wide_rect() {
+        // width > height * 1.5 -> Horizontal
+        let rect = Rect::new(0.0, 0.0, 800.0, 200.0); // 800 > 200*1.5=300
+        let dir = LayoutNode::auto_split_direction(rect, SplitDirection::Vertical);
+        assert_eq!(dir, SplitDirection::Horizontal);
+    }
+
+    #[test]
+    fn auto_direction_tall_rect() {
+        // height > width * 1.5 -> Vertical
+        let rect = Rect::new(0.0, 0.0, 200.0, 800.0); // 800 > 200*1.5=300
+        let dir = LayoutNode::auto_split_direction(rect, SplitDirection::Horizontal);
+        assert_eq!(dir, SplitDirection::Vertical);
+    }
+
+    #[test]
+    fn auto_direction_square_uses_fallback() {
+        // Neither condition met -> fallback
+        let rect = Rect::new(0.0, 0.0, 400.0, 400.0);
+        assert_eq!(
+            LayoutNode::auto_split_direction(rect, SplitDirection::Horizontal),
+            SplitDirection::Horizontal,
+        );
+        assert_eq!(
+            LayoutNode::auto_split_direction(rect, SplitDirection::Vertical),
+            SplitDirection::Vertical,
+        );
+    }
+
+    // ── Minimum size enforcement tests ──────────────────────────────────
+
+    #[test]
+    fn can_split_respects_minimum_width() {
+        // rect width = 150, gap = 2 -> usable = 148, each half = 74 < MIN_PANE_WIDTH(80)
+        let rect = Rect::new(0.0, 0.0, 150.0, 600.0);
+        assert!(!LayoutNode::can_split(rect, SplitDirection::Horizontal));
+    }
+
+    #[test]
+    fn can_split_allows_sufficient_width() {
+        // rect width = 200, gap = 2 -> usable = 198, each half = 99 >= 80
+        let rect = Rect::new(0.0, 0.0, 200.0, 600.0);
+        assert!(LayoutNode::can_split(rect, SplitDirection::Horizontal));
+    }
+
+    #[test]
+    fn can_split_respects_minimum_height() {
+        // rect height = 100, gap = 2 -> usable = 98, each half = 49 < MIN_PANE_HEIGHT(60)
+        let rect = Rect::new(0.0, 0.0, 800.0, 100.0);
+        assert!(!LayoutNode::can_split(rect, SplitDirection::Vertical));
+    }
+
+    #[test]
+    fn can_split_allows_sufficient_height() {
+        // rect height = 200, gap = 2 -> usable = 198, each half = 99 >= 60
+        let rect = Rect::new(0.0, 0.0, 800.0, 200.0);
+        assert!(LayoutNode::can_split(rect, SplitDirection::Vertical));
+    }
+
+    #[test]
+    fn split_refused_when_below_minimum_size() {
+        // A rect too small to split horizontally should refuse the split.
+        let tiny_rect = Rect::new(0.0, 0.0, 150.0, 600.0); // 150 - 2 gap = 148, /2 = 74 < 80
+        let mut node = make_leaf(1);
+        node.layout(tiny_rect);
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let result = node.split_pane(1, SplitDirection::Horizontal, |r| {
+            Some(PaneState {
+                id: 2,
+                term: Arc::new(FairMutex::new(Term::new(
+                    TermConfig::default(),
+                    &PaneTermSize {
+                        columns: 80,
+                        screen_lines: 24,
+                    },
+                    PaneListener,
+                ))),
+                pty_writer: writer,
+                pty_master: pair.master,
+                viewport: r,
+                scrollback_lines: 1000,
+            })
+        });
+        assert_eq!(result, None, "split should be refused when too small");
+        assert_eq!(node.pane_count(), 1, "should still have 1 pane");
+    }
+
+    // ── Rebalance on split/close integration tests ──────────────────────
+
+    #[test]
+    fn split_rebalances_parent_ratio() {
+        // Start with 2 panes, split pane 2 -> 3 panes total.
+        // Root should rebalance: 1 leaf on left, 2 on right -> ratio ~0.333.
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+
+        // Split pane 2.
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        root.split_pane(2, SplitDirection::Horizontal, |r| {
+            Some(PaneState {
+                id: 3,
+                term: Arc::new(FairMutex::new(Term::new(
+                    TermConfig::default(),
+                    &PaneTermSize {
+                        columns: 80,
+                        screen_lines: 24,
+                    },
+                    PaneListener,
+                ))),
+                pty_writer: writer,
+                pty_master: pair.master,
+                viewport: r,
+                scrollback_lines: 1000,
+            })
+        });
+
+        assert_eq!(root.pane_count(), 3);
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!(
+                (*ratio - 1.0 / 3.0).abs() < 0.05,
+                "after split, root ratio should be ~0.333, got {ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_rebalances_remaining_tree() {
+        // 4 panes: Split(H, Split(H, 1, 2), Split(H, 3, 4))
+        // Close pane 1 -> 3 panes: Split(H, 2, Split(H, 3, 4))
+        // Root should rebalance: 1 vs 2 -> ratio ~0.333.
+        let left = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        let right = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, left, right);
+
+        root.remove_pane(1);
+        assert_eq!(root.pane_count(), 3);
+
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!(
+                (*ratio - 1.0 / 3.0).abs() < 0.05,
+                "after close, root ratio should be ~0.333, got {ratio}"
+            );
+        }
     }
 }

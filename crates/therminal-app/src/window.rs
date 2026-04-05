@@ -114,6 +114,9 @@ pub struct App {
 
     /// Config file watcher handle (kept alive).
     _config_watcher: Option<ConfigWatcher>,
+
+    /// Last split direction used (for auto-direction alternation).
+    last_split_direction: SplitDirection,
 }
 
 impl App {
@@ -164,6 +167,7 @@ impl App {
             mouse_drag_pane: None,
             config,
             _config_watcher: config_watcher,
+            last_split_direction: SplitDirection::Horizontal,
         }
     }
 
@@ -468,6 +472,11 @@ impl App {
         }
 
         match &key_event.logical_key {
+            // Ctrl+Shift+Enter -> auto-direction split
+            Key::Named(NamedKey::Enter) => {
+                self.split_focused_pane_auto();
+                true
+            }
             // Ctrl+Shift+H -> horizontal split
             Key::Character(s) if s.as_str() == "H" => {
                 self.split_focused_pane(SplitDirection::Horizontal);
@@ -504,6 +513,28 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Split the currently focused pane with auto-detected direction.
+    fn split_focused_pane_auto(&mut self) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane(focused) {
+            Some(p) => p,
+            None => return,
+        };
+        let fallback = match self.last_split_direction {
+            SplitDirection::Horizontal => SplitDirection::Vertical,
+            SplitDirection::Vertical => SplitDirection::Horizontal,
+        };
+        let direction = LayoutNode::auto_split_direction(pane.viewport, fallback);
+        self.split_focused_pane(direction);
     }
 
     /// Split the currently focused pane.
@@ -561,6 +592,8 @@ impl App {
 
         if let Some(new_id) = new_id {
             info!("Split pane {focused} {:?} -> new pane {new_id}", direction);
+            self.last_split_direction = direction;
+
             // Resize all panes after split.
             let gpu = self.gpu.as_ref().unwrap();
             let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
