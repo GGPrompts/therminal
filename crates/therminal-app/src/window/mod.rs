@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
@@ -135,6 +135,25 @@ pub struct App {
 
     /// Saved layout snapshot from close_all_panes(), for restore.
     saved_layout: Option<LayoutSnapshot>,
+
+    /// Active separator drag state (path to split node, direction, parent rect).
+    separator_drag: Option<SeparatorDrag>,
+
+    /// Whether the cursor is currently showing a resize icon (for separator hover).
+    separator_cursor_active: bool,
+
+    /// Timestamp of last separator click (for double-click detection).
+    last_separator_click: Option<Instant>,
+}
+
+/// State for an in-progress separator drag.
+struct SeparatorDrag {
+    /// Path to the split node being dragged (from `separator_hit_test`).
+    path: Vec<bool>,
+    /// Direction of the split being dragged.
+    direction: SplitDirection,
+    /// Bounding rect of the split node (for ratio computation).
+    parent_rect: Rect,
 }
 
 impl App {
@@ -197,6 +216,9 @@ impl App {
             show_help_overlay: false,
             active_menu: None,
             saved_layout: None,
+            separator_drag: None,
+            separator_cursor_active: false,
+            last_separator_click: None,
         }
     }
 
@@ -1126,6 +1148,40 @@ impl ApplicationHandler<UserEvent> for App {
                             w.request_redraw();
                         }
                         return;
+                    }
+                }
+
+                // ── Separator drag: release ends drag ──────────────────────
+                if state == ElementState::Released
+                    && button == MouseButton::Left
+                    && self.separator_drag.is_some()
+                {
+                    self.end_separator_drag();
+                    return;
+                }
+
+                // ── Separator drag: press starts drag or double-click resets ─
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some((px, py)) = self.cursor_position {
+                        // Double-click detection on separator.
+                        let now = Instant::now();
+                        let is_separator = self.separator_hit(px as f32, py as f32).is_some();
+                        if is_separator {
+                            let is_double = self.last_separator_click.is_some_and(|t| {
+                                now.duration_since(t) < Duration::from_millis(300)
+                            });
+                            if is_double {
+                                self.last_separator_click = None;
+                                self.try_separator_double_click(px as f32, py as f32);
+                                return;
+                            }
+                            self.last_separator_click = Some(now);
+                            if self.try_start_separator_drag(px as f32, py as f32) {
+                                return;
+                            }
+                        } else {
+                            self.last_separator_click = None;
+                        }
                     }
                 }
 

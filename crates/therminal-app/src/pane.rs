@@ -472,6 +472,107 @@ impl LayoutNode {
         }
     }
 
+    /// Hit-test for separator drag: find the split node whose separator is
+    /// within `tolerance` pixels of `(px, py)`.
+    ///
+    /// Returns `Some((path, direction, parent_rect))` where `path` is the
+    /// sequence of `false` (first child) / `true` (second child) steps from
+    /// the root to the split node, `direction` is the split direction, and
+    /// `parent_rect` is the bounding rect of the split node (used for ratio
+    /// computation during drag).
+    pub fn separator_hit_test(
+        &self,
+        px: f32,
+        py: f32,
+        tolerance: f32,
+        parent_rect: Rect,
+    ) -> Option<(Vec<bool>, SplitDirection, Rect)> {
+        match self {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                // Compute child rects the same way layout() does.
+                let (r1, r2) = match direction {
+                    SplitDirection::Horizontal => {
+                        parent_rect.split_horizontal_ratio(*ratio, SEPARATOR_GAP)
+                    }
+                    SplitDirection::Vertical => {
+                        parent_rect.split_vertical_ratio(*ratio, SEPARATOR_GAP)
+                    }
+                };
+
+                // Build the separator hit zone (expanded by tolerance).
+                let hit = match direction {
+                    SplitDirection::Horizontal => {
+                        // Vertical separator between left and right.
+                        let sep_x = r1.right();
+                        let sep_y = parent_rect.y();
+                        let sep_h = parent_rect.height();
+                        px >= sep_x - tolerance
+                            && px <= sep_x + SEPARATOR_GAP + tolerance
+                            && py >= sep_y
+                            && py <= sep_y + sep_h
+                    }
+                    SplitDirection::Vertical => {
+                        // Horizontal separator between top and bottom.
+                        let sep_y = r1.bottom();
+                        let sep_x = parent_rect.x();
+                        let sep_w = parent_rect.width();
+                        py >= sep_y - tolerance
+                            && py <= sep_y + SEPARATOR_GAP + tolerance
+                            && px >= sep_x
+                            && px <= sep_x + sep_w
+                    }
+                };
+
+                if hit {
+                    return Some((vec![], *direction, parent_rect));
+                }
+
+                // Recurse into children.
+                if let Some((mut path, dir, rect)) = first.separator_hit_test(px, py, tolerance, r1)
+                {
+                    path.insert(0, false);
+                    return Some((path, dir, rect));
+                }
+                if let Some((mut path, dir, rect)) =
+                    second.separator_hit_test(px, py, tolerance, r2)
+                {
+                    path.insert(0, true);
+                    return Some((path, dir, rect));
+                }
+
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Set the ratio of a split node identified by `path` (from `separator_hit_test`).
+    /// Returns `true` if the ratio was set.
+    pub fn set_ratio_at_path(&mut self, path: &[bool], new_ratio: f32) -> bool {
+        if path.is_empty() {
+            if let LayoutNode::Split { ratio, .. } = self {
+                *ratio = new_ratio.clamp(0.1, 0.9);
+                return true;
+            }
+            return false;
+        }
+        match self {
+            LayoutNode::Split { first, second, .. } => {
+                if path[0] {
+                    second.set_ratio_at_path(&path[1..], new_ratio)
+                } else {
+                    first.set_ratio_at_path(&path[1..], new_ratio)
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Collect separator rects for drawing.
     #[allow(dead_code)]
     pub fn separator_rects(&self) -> Vec<Rect> {

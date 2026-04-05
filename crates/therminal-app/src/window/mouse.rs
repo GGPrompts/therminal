@@ -347,6 +347,17 @@ impl App {
         let (px, py) = (position.x, position.y);
         self.cursor_position = Some((px, py));
 
+        // ── Separator drag in progress ────────────────────────────────────
+        if self.separator_drag.is_some() {
+            self.update_separator_drag(px as f32, py as f32);
+            return;
+        }
+
+        // ── Separator hover detection (cursor icon) ──────────────────────
+        if !self.mouse_left_held {
+            self.update_separator_hover(px as f32, py as f32);
+        }
+
         if self.mouse_left_held {
             // During a drag, route to the pane where the drag started so that
             // selections and drag reporting stay consistent even if the pointer
@@ -530,5 +541,178 @@ impl App {
     #[allow(dead_code)]
     pub(crate) fn term_mode(&self) -> TermMode {
         self.focused_term_mode()
+    }
+
+    // ── Separator drag helpers ────────────────────────────────────────
+
+    /// Hit-tolerance in pixels for separator detection.
+    const SEPARATOR_HIT_TOLERANCE: f32 = 4.0;
+
+    /// Compute the layout area rect (window minus status bar).
+    fn layout_area_rect(&self) -> Option<therminal_core::geometry::Rect> {
+        let gpu = self.gpu.as_ref()?;
+        Some(therminal_core::geometry::Rect::new(
+            0.0,
+            0.0,
+            gpu.config.width as f32,
+            gpu.config.height as f32 - crate::pane::STATUS_BAR_HEIGHT,
+        ))
+    }
+
+    /// Test if `(px, py)` is near a separator and return hit info.
+    pub(crate) fn separator_hit(
+        &self,
+        px: f32,
+        py: f32,
+    ) -> Option<(
+        Vec<bool>,
+        crate::pane::SplitDirection,
+        therminal_core::geometry::Rect,
+    )> {
+        let layout = self.layout.as_ref()?;
+        let area = self.layout_area_rect()?;
+        layout.separator_hit_test(px, py, Self::SEPARATOR_HIT_TOLERANCE, area)
+    }
+
+    /// Update cursor icon based on separator hover state.
+    fn update_separator_hover(&mut self, px: f32, py: f32) {
+        use winit::window::CursorIcon;
+
+        let hit = self.separator_hit(px, py);
+        match hit {
+            Some((_, dir, _)) => {
+                if !self.separator_cursor_active {
+                    self.separator_cursor_active = true;
+                    let icon = match dir {
+                        crate::pane::SplitDirection::Horizontal => CursorIcon::EwResize,
+                        crate::pane::SplitDirection::Vertical => CursorIcon::NsResize,
+                    };
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_cursor(icon);
+                    }
+                }
+            }
+            None => {
+                if self.separator_cursor_active {
+                    self.separator_cursor_active = false;
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_cursor(CursorIcon::Default);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Try to start a separator drag at `(px, py)`. Returns true if a drag was started.
+    pub(crate) fn try_start_separator_drag(&mut self, px: f32, py: f32) -> bool {
+        use super::SeparatorDrag;
+        use winit::window::CursorIcon;
+
+        if let Some((path, direction, parent_rect)) = self.separator_hit(px, py) {
+            let icon = match direction {
+                crate::pane::SplitDirection::Horizontal => CursorIcon::EwResize,
+                crate::pane::SplitDirection::Vertical => CursorIcon::NsResize,
+            };
+            if let Some(w) = self.window.as_ref() {
+                w.set_cursor(icon);
+            }
+            self.separator_cursor_active = true;
+            self.separator_drag = Some(SeparatorDrag {
+                path,
+                direction,
+                parent_rect,
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update the separator ratio during a drag.
+    fn update_separator_drag(&mut self, px: f32, py: f32) {
+        let (path, direction, parent_rect) = {
+            let drag = match self.separator_drag.as_ref() {
+                Some(d) => d,
+                None => return,
+            };
+            (drag.path.clone(), drag.direction, drag.parent_rect)
+        };
+
+        // Compute new ratio from mouse position relative to parent rect.
+        let new_ratio = match direction {
+            crate::pane::SplitDirection::Horizontal => {
+                let usable = parent_rect.width() - crate::pane::SEPARATOR_GAP;
+                if usable <= 0.0 {
+                    return;
+                }
+                (px - parent_rect.x()) / usable
+            }
+            crate::pane::SplitDirection::Vertical => {
+                let usable = parent_rect.height() - crate::pane::SEPARATOR_GAP;
+                if usable <= 0.0 {
+                    return;
+                }
+                (py - parent_rect.y()) / usable
+            }
+        };
+
+        let new_ratio = new_ratio.clamp(0.1, 0.9);
+
+        // Compute area rect before borrowing layout mutably.
+        let area = self.layout_area_rect();
+        if let Some(layout) = self.layout.as_mut() {
+            layout.set_ratio_at_path(&path, new_ratio);
+            // Re-layout and resize panes.
+            if let Some(area) = area {
+                layout.layout(area);
+            }
+        }
+        // Resize panes (needs shared borrow of both layout and renderer).
+        if let (Some(layout), Some(renderer)) = (self.layout.as_mut(), self.grid_renderer.as_ref())
+        {
+            layout.resize_all_panes(renderer);
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// End a separator drag and restore cursor.
+    pub(crate) fn end_separator_drag(&mut self) {
+        self.separator_drag = None;
+        // Keep resize cursor if still hovering over a separator.
+        if let Some((px, py)) = self.cursor_position {
+            self.update_separator_hover(px as f32, py as f32);
+        } else {
+            self.separator_cursor_active = false;
+            if let Some(w) = self.window.as_ref() {
+                w.set_cursor(winit::window::CursorIcon::Default);
+            }
+        }
+    }
+
+    /// Handle double-click on separator: reset to 50/50.
+    pub(crate) fn try_separator_double_click(&mut self, px: f32, py: f32) -> bool {
+        if let Some((path, _, _)) = self.separator_hit(px, py) {
+            let area = self.layout_area_rect();
+            if let Some(layout) = self.layout.as_mut() {
+                layout.set_ratio_at_path(&path, 0.5);
+                if let Some(area) = area {
+                    layout.layout(area);
+                }
+            }
+            if let (Some(layout), Some(renderer)) =
+                (self.layout.as_mut(), self.grid_renderer.as_ref())
+            {
+                layout.resize_all_panes(renderer);
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            true
+        } else {
+            false
+        }
     }
 }
