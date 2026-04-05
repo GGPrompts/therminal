@@ -5,12 +5,14 @@
 //! for lightweight consumers like `therminal-terminal`.
 
 pub mod config;
+pub mod daemon;
 pub mod ggl_types;
 pub mod message;
 pub mod pane;
 pub mod state;
 
 pub use config::{ConductorConfig, Layout};
+pub use daemon::{DaemonRequest, DaemonResponse, DaemonState};
 pub use ggl_types::{
     AgentId, AgentState, ClaudeStatus, PaneInfo, ParseAgentIdError, SessionState, TaskState,
     ToolArgs, ToolDetails,
