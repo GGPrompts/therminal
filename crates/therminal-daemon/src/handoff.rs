@@ -19,6 +19,7 @@ use crate::client;
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Result of an `ensure_daemon` check against a running daemon.
+#[derive(Debug)]
 pub enum DaemonCheck {
     /// Daemon is running with matching build hash — reuse it.
     Reuse,
@@ -26,6 +27,10 @@ pub enum DaemonCheck {
     StartFresh,
     /// Daemon running with different build hash — handoff needed.
     NeedsHandoff { old_build_hash: String },
+    /// Something is listening on the socket but doesn't speak our protocol
+    /// (e.g. an old daemon with a legacy wire format). We connected
+    /// successfully but the ping failed with a decode error or timeout.
+    IncompatibleDaemon,
 }
 
 /// Check the state of the existing daemon.
@@ -35,6 +40,12 @@ pub enum DaemonCheck {
 /// - Returns `NeedsHandoff` if hashes differ.
 /// - Returns `StartFresh` if no daemon is reachable.
 pub async fn check_daemon(socket_path: &Path, our_build_hash: &str) -> DaemonCheck {
+    // First, check if anything is listening on the socket at all.
+    // We do this by attempting a raw TCP-level connect before running
+    // the full IPC ping, so we can distinguish "nothing listening"
+    // from "something listening but speaking the wrong protocol".
+    let can_connect = tokio::net::UnixStream::connect(socket_path).await.is_ok();
+
     match client::ping(socket_path).await {
         Ok(therminal_protocol::IpcResponse::Pong { build_hash, .. }) => {
             if build_hash == our_build_hash {
@@ -53,11 +64,24 @@ pub async fn check_daemon(socket_path: &Path, our_build_hash: &str) -> DaemonChe
         }
         Ok(other) => {
             warn!(?other, "unexpected response to ping");
-            DaemonCheck::StartFresh
+            if can_connect {
+                warn!("socket accepted connection but returned unexpected response — treating as incompatible daemon");
+                DaemonCheck::IncompatibleDaemon
+            } else {
+                DaemonCheck::StartFresh
+            }
         }
         Err(e) => {
-            info!(error = %e, "no reachable daemon, starting fresh");
-            DaemonCheck::StartFresh
+            if can_connect {
+                warn!(
+                    error = %e,
+                    "socket accepted connection but ping failed — incompatible daemon detected"
+                );
+                DaemonCheck::IncompatibleDaemon
+            } else {
+                info!(error = %e, "no reachable daemon, starting fresh");
+                DaemonCheck::StartFresh
+            }
         }
     }
 }

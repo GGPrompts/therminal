@@ -15,6 +15,7 @@ use tracing::{info, warn};
 
 use therminal_protocol::DaemonState;
 
+use crate::client;
 use crate::handoff::{self, DaemonCheck};
 use crate::lifecycle::{Lifecycle, LifecycleConfig};
 use crate::server::DaemonServer;
@@ -71,6 +72,40 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
                 "performing version handoff"
             );
             handoff::perform_handoff(&socket_path).await?;
+        }
+        DaemonCheck::IncompatibleDaemon => {
+            warn!(
+                "incompatible daemon detected on socket — attempting graceful shutdown before starting fresh"
+            );
+            // Try to shut down whatever is listening, even though it
+            // may not understand our protocol.  If it fails, force-remove.
+            match client::request_shutdown(&socket_path).await {
+                Ok(_) => {
+                    info!("incompatible daemon acknowledged shutdown, waiting for socket removal");
+                    // Give it a moment to release the socket.
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                    loop {
+                        if !socket_path.exists() {
+                            break;
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            warn!("incompatible daemon did not release socket in time, force-removing");
+                            std::fs::remove_file(&socket_path).ok();
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to send shutdown to incompatible daemon, force-removing socket"
+                    );
+                    if socket_path.exists() {
+                        std::fs::remove_file(&socket_path).ok();
+                    }
+                }
+            }
         }
         DaemonCheck::StartFresh => {
             // Clean any stale socket

@@ -126,8 +126,7 @@ async fn check_daemon_needs_handoff_when_hash_differs() {
                 "NeedsHandoff should carry the old hash"
             );
         }
-        DaemonCheck::Reuse => panic!("expected NeedsHandoff, got Reuse"),
-        DaemonCheck::StartFresh => panic!("expected NeedsHandoff, got StartFresh"),
+        other => panic!("expected NeedsHandoff, got {other:?}"),
     }
 
     lifecycle.initiate_shutdown().await.unwrap();
@@ -326,6 +325,76 @@ async fn server_graceful_shutdown_via_ipc() {
     assert!(removed, "socket should be removed after graceful shutdown");
 
     let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+}
+
+/// A server that accepts connections but sends garbage data should be detected
+/// as an incompatible daemon — `check_daemon` returns `IncompatibleDaemon`,
+/// not `StartFresh`.
+#[tokio::test]
+async fn check_daemon_incompatible_when_garbage_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("garbage.sock");
+
+    // Spawn a mock server that accepts connections and sends garbage bytes.
+    let listener = UnixListener::bind(&socket_path).expect("bind garbage socket");
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+
+        // Accept connections in a loop so both the probe connect and the
+        // ping connect succeed.
+        loop {
+            match listener.accept().await {
+                Ok((mut stream, _)) => {
+                    // Send garbage: a valid length prefix followed by random bytes.
+                    let garbage = b"\x00\x00\x00\x04JUNK";
+                    let _ = stream.write_all(garbage).await;
+                    let _ = stream.flush().await;
+                    // Keep the stream alive briefly so the client can read.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Give the mock server time to start.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let result = handoff::check_daemon(&socket_path, "any-hash").await;
+    assert!(
+        matches!(result, DaemonCheck::IncompatibleDaemon),
+        "expected IncompatibleDaemon for a server sending garbage, got {result:?}"
+    );
+}
+
+/// A server that accepts connections but immediately closes them should be
+/// detected as incompatible (not StartFresh), since something is listening.
+#[tokio::test]
+async fn check_daemon_incompatible_when_immediate_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("close-immediately.sock");
+
+    let listener = UnixListener::bind(&socket_path).expect("bind socket");
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    // Accept and immediately drop — simulates a server that
+                    // doesn't speak our protocol at all.
+                    drop(stream);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let result = handoff::check_daemon(&socket_path, "any-hash").await;
+    assert!(
+        matches!(result, DaemonCheck::IncompatibleDaemon),
+        "expected IncompatibleDaemon for a server that immediately closes, got {result:?}"
+    );
 }
 
 /// Verify that `IpcServer::bind` cleans up a stale socket file automatically
