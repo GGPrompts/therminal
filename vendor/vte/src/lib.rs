@@ -825,6 +825,51 @@ pub trait Perform {
     }
 }
 
+/// Intercepts OSC, DCS, and APC sequences before they reach the terminal handler.
+///
+/// Modeled on xterm.js's `addOscHandler()` pattern. Implementations get first
+/// crack at sequences; returning `true` consumes the sequence (preventing
+/// default handling), while `false` lets it pass through normally.
+///
+/// This allows therminal to detect AI-agent–specific escape sequences (OSC 633,
+/// OSC 133, OSC 1337, etc.) without forking alacritty_terminal.
+pub trait SequenceInterceptor {
+    /// Called before an OSC sequence reaches the handler.
+    /// Return `true` to consume (prevent default handling), `false` to pass through.
+    fn intercept_osc(&mut self, _params: &[&[u8]], _bell_terminated: bool) -> bool {
+        false
+    }
+
+    /// Called before a DCS hook reaches the handler.
+    /// Return `true` to consume (prevent default handling), `false` to pass through.
+    fn intercept_dcs(
+        &mut self,
+        _params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        _action: char,
+    ) -> bool {
+        false
+    }
+
+    /// Called when APC data bytes are received.
+    ///
+    /// VTE normally drops APC strings (SosPmApcString state). This hook
+    /// allows interceptors to accumulate APC data. Called once per byte
+    /// while in the APC state; call `intercept_apc_end` when the string
+    /// terminates.
+    fn intercept_apc_byte(&mut self, _byte: u8) {}
+
+    /// Called when an APC string is terminated (by ST or a cancel character).
+    /// Return `true` to signal that the APC was handled.
+    fn intercept_apc_end(&mut self) -> bool {
+        false
+    }
+}
+
+/// A no-op interceptor that passes everything through.
+impl SequenceInterceptor for () {}
+
 #[cfg(all(test, not(feature = "std")))]
 #[macro_use]
 extern crate std;

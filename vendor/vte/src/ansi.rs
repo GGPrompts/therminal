@@ -311,6 +311,37 @@ impl<T: Timeout> Processor<T> {
         }
     }
 
+    /// Process a new byte from the PTY with a [`SequenceInterceptor`].
+    ///
+    /// The interceptor gets first crack at OSC, DCS, and APC sequences.
+    /// If it returns `true`, the sequence is consumed and not forwarded to the
+    /// handler. Otherwise it passes through normally.
+    ///
+    /// [`SequenceInterceptor`]: crate::SequenceInterceptor
+    #[inline]
+    pub fn advance_with_interceptor<H, I>(
+        &mut self,
+        handler: &mut H,
+        interceptor: &mut I,
+        bytes: &[u8],
+    ) where
+        H: Handler,
+        I: crate::SequenceInterceptor,
+    {
+        let mut processed = 0;
+        while processed != bytes.len() {
+            if self.state.sync_state.timeout.pending_timeout() {
+                processed +=
+                    self.advance_sync_with_interceptor(handler, interceptor, &bytes[processed..]);
+            } else {
+                let mut performer =
+                    Performer::with_interceptor(&mut self.state, handler, interceptor);
+                processed +=
+                    self.parser.advance_until_terminated(&mut performer, &bytes[processed..]);
+            }
+        }
+    }
+
     /// End a synchronized update.
     pub fn stop_sync<H>(&mut self, handler: &mut H)
     where
@@ -416,25 +447,126 @@ impl<T: Timeout> Processor<T> {
             }
         }
     }
+
+    /// Like [`Self::stop_sync_internal`] but threads an interceptor through.
+    fn stop_sync_internal_with_interceptor<H, I>(
+        &mut self,
+        handler: &mut H,
+        interceptor: &mut I,
+        bsu_offset: Option<usize>,
+    ) where
+        H: Handler,
+        I: crate::SequenceInterceptor,
+    {
+        let buffer = mem::take(&mut self.state.sync_state.buffer);
+        let offset = bsu_offset.unwrap_or(buffer.len());
+        let mut performer =
+            Performer::with_interceptor(&mut self.state, handler, interceptor);
+        self.parser.advance(&mut performer, &buffer[..offset]);
+        self.state.sync_state.buffer = buffer;
+
+        match bsu_offset {
+            Some(bsu_offset) => {
+                let new_len = self.state.sync_state.buffer.len() - bsu_offset;
+                self.state.sync_state.buffer.copy_within(bsu_offset.., 0);
+                self.state.sync_state.buffer.truncate(new_len);
+            },
+            None => {
+                handler.unset_private_mode(NamedPrivateMode::SyncUpdate.into());
+                self.state.sync_state.timeout.clear_timeout();
+                self.state.sync_state.buffer.clear();
+            },
+        }
+    }
+
+    /// Like [`Self::advance_sync`] but threads an interceptor through.
+    #[cold]
+    fn advance_sync_with_interceptor<H, I>(
+        &mut self,
+        handler: &mut H,
+        interceptor: &mut I,
+        bytes: &[u8],
+    ) -> usize
+    where
+        H: Handler,
+        I: crate::SequenceInterceptor,
+    {
+        if self.state.sync_state.buffer.len() + bytes.len() >= SYNC_BUFFER_SIZE - 1 {
+            self.stop_sync_internal_with_interceptor(handler, interceptor, None);
+
+            let mut performer =
+                Performer::with_interceptor(&mut self.state, handler, interceptor);
+            self.parser.advance_until_terminated(&mut performer, bytes)
+        } else {
+            self.state.sync_state.buffer.extend(bytes);
+            self.advance_sync_csi_with_interceptor(handler, interceptor, bytes.len());
+            bytes.len()
+        }
+    }
+
+    /// Like [`Self::advance_sync_csi`] but threads an interceptor through.
+    fn advance_sync_csi_with_interceptor<H, I>(
+        &mut self,
+        handler: &mut H,
+        interceptor: &mut I,
+        new_bytes: usize,
+    ) where
+        H: Handler,
+        I: crate::SequenceInterceptor,
+    {
+        let buffer_len = self.state.sync_state.buffer.len();
+        let start_offset = (buffer_len - new_bytes).saturating_sub(SYNC_ESCAPE_LEN - 1);
+        let end_offset = buffer_len.saturating_sub(SYNC_ESCAPE_LEN - 1);
+        let search_buffer = &self.state.sync_state.buffer[start_offset..end_offset];
+
+        let mut bsu_offset = None;
+        for index in memchr::memchr_iter(0x1B, search_buffer).rev() {
+            let offset = start_offset + index;
+            let escape = &self.state.sync_state.buffer[offset..offset + SYNC_ESCAPE_LEN];
+
+            if escape == BSU_CSI {
+                self.state.sync_state.timeout.set_timeout(SYNC_UPDATE_TIMEOUT);
+                bsu_offset = Some(offset);
+            } else if escape == ESU_CSI {
+                self.stop_sync_internal_with_interceptor(handler, interceptor, bsu_offset);
+                break;
+            }
+        }
+    }
 }
 
 /// Helper type that implements `crate::Perform`.
 ///
 /// Processor creates a Performer when running advance and passes the Performer
 /// to `crate::Parser`.
-struct Performer<'a, H: Handler, T: Timeout> {
+struct Performer<'a, H: Handler, T: Timeout, I: crate::SequenceInterceptor = ()> {
     state: &'a mut ProcessorState<T>,
     handler: &'a mut H,
+    interceptor: &'a mut I,
 
     /// Whether the parser should be prematurely terminated.
     terminated: bool,
 }
 
-impl<'a, H: Handler + 'a, T: Timeout> Performer<'a, H, T> {
-    /// Create a performer.
+impl<'a, H: Handler + 'a, T: Timeout> Performer<'a, H, T, ()> {
+    /// Create a performer with no interceptor.
     #[inline]
-    pub fn new<'b>(state: &'b mut ProcessorState<T>, handler: &'b mut H) -> Performer<'b, H, T> {
-        Performer { state, handler, terminated: Default::default() }
+    pub fn new<'b>(state: &'b mut ProcessorState<T>, handler: &'b mut H) -> Performer<'b, H, T, ()> {
+        static mut UNIT: () = ();
+        // SAFETY: () is a ZST with no state; aliasing is harmless.
+        Performer { state, handler, interceptor: unsafe { &mut *core::ptr::addr_of_mut!(UNIT) }, terminated: Default::default() }
+    }
+}
+
+impl<'a, H: Handler + 'a, T: Timeout, I: crate::SequenceInterceptor> Performer<'a, H, T, I> {
+    /// Create a performer with an interceptor.
+    #[inline]
+    pub fn with_interceptor<'b>(
+        state: &'b mut ProcessorState<T>,
+        handler: &'b mut H,
+        interceptor: &'b mut I,
+    ) -> Performer<'b, H, T, I> {
+        Performer { state, handler, interceptor, terminated: Default::default() }
     }
 }
 
@@ -1281,10 +1413,11 @@ pub enum ScpUpdateMode {
     PresentationToData,
 }
 
-impl<'a, H, T> crate::Perform for Performer<'a, H, T>
+impl<'a, H, T, I> crate::Perform for Performer<'a, H, T, I>
 where
     H: Handler + 'a,
     T: Timeout,
+    I: crate::SequenceInterceptor,
 {
     #[inline]
     fn print(&mut self, c: char) {
@@ -1309,6 +1442,10 @@ where
 
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        // Let the interceptor consume the DCS if it wants to.
+        if self.interceptor.intercept_dcs(params, intermediates, ignore, action) {
+            return;
+        }
         debug!(
             "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
             params, intermediates, ignore, action
@@ -1327,6 +1464,11 @@ where
 
     #[inline]
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        // Let the interceptor consume the OSC if it wants to.
+        if self.interceptor.intercept_osc(params, bell_terminated) {
+            return;
+        }
+
         let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
 
         fn unhandled(params: &[&[u8]]) {

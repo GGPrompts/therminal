@@ -860,15 +860,22 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// Reads PTY output in a loop, feeds bytes to the Term via the VTE parser,
 /// and wakes the event loop for redraw.
+///
+/// An optional [`TherminalInterceptor`] gets first crack at OSC/DCS/APC
+/// sequences before they reach the terminal handler.  This is how therminal
+/// detects AI-agent shell-integration escapes without forking alacritty_terminal.
 fn pty_reader_loop(
     mut reader: Box<dyn IoRead + Send>,
     term: Arc<FairMutex<Term<TherminalListener>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
+    use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
+
     let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+    let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
     let mut buf = [0u8; 4096];
 
-    info!("PTY reader thread started");
+    info!("PTY reader thread started (with SequenceInterceptor)");
 
     loop {
         match reader.read(&mut buf) {
@@ -878,9 +885,14 @@ fn pty_reader_loop(
             }
             Ok(n) => {
                 // Feed bytes to the terminal under the lock.
+                // The interceptor sees OSC/DCS/APC sequences first.
                 {
                     let mut term_guard = term.lock();
-                    processor.advance(&mut *term_guard, &buf[..n]);
+                    processor.advance_with_interceptor(
+                        &mut *term_guard,
+                        &mut interceptor,
+                        &buf[..n],
+                    );
                 }
 
                 // Wake the event loop to trigger a redraw.
