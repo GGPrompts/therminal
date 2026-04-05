@@ -200,7 +200,13 @@ impl App {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            .unwrap_or_else(|| {
+                surface_caps
+                    .formats
+                    .first()
+                    .copied()
+                    .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb)
+            });
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -218,7 +224,12 @@ impl App {
                         .iter()
                         .find(|m| **m == wgpu::CompositeAlphaMode::Auto)
                 })
-                .unwrap_or(&surface_caps.alpha_modes[0]),
+                .unwrap_or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .first()
+                        .unwrap_or(&wgpu::CompositeAlphaMode::Opaque)
+                }),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -571,7 +582,15 @@ impl App {
         if col < 0.0 || row < 0.0 {
             return None;
         }
-        Some((col as usize, row as usize))
+        let col = col as usize;
+        let row = row as usize;
+
+        // Clamp to terminal grid bounds.
+        let term = self.term.as_ref()?;
+        let term_guard = term.lock();
+        let max_col = term_guard.columns().saturating_sub(1);
+        let max_row = term_guard.screen_lines().saturating_sub(1);
+        Some((col.min(max_col), row.min(max_row)))
     }
 
     /// Get the current terminal mode flags, or empty if term is not initialized.
@@ -872,6 +891,8 @@ fn pty_reader_loop(
     use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
 
     let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+    // Keep the receiver alive so `interceptor.send()` calls don't fail.
+    // Events will be consumed once we wire up semantic event handling.
     let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
     let mut buf = [0u8; 4096];
 

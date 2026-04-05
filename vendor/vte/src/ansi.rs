@@ -304,7 +304,8 @@ impl<T: Timeout> Processor<T> {
             if self.state.sync_state.timeout.pending_timeout() {
                 processed += self.advance_sync(handler, &bytes[processed..]);
             } else {
-                let mut performer = Performer::new(&mut self.state, handler);
+                let mut unit = ();
+                let mut performer = Performer::new(&mut self.state, handler, &mut unit);
                 processed +=
                     self.parser.advance_until_terminated(&mut performer, &bytes[processed..]);
             }
@@ -343,6 +344,15 @@ impl<T: Timeout> Processor<T> {
     }
 
     /// End a synchronized update.
+    ///
+    /// **Note:** This replays the sync buffer *without* a [`SequenceInterceptor`].
+    /// If the processor was driven via [`advance_with_interceptor`], intercepted
+    /// sequences inside the sync buffer will not be routed through the interceptor
+    /// during replay. Use the interceptor-aware sync path if interception of
+    /// buffered sequences is required.
+    ///
+    /// [`SequenceInterceptor`]: crate::SequenceInterceptor
+    /// [`advance_with_interceptor`]: Self::advance_with_interceptor
     pub fn stop_sync<H>(&mut self, handler: &mut H)
     where
         H: Handler,
@@ -365,7 +375,8 @@ impl<T: Timeout> Processor<T> {
         // processed automatically during the synchronized update.
         let buffer = mem::take(&mut self.state.sync_state.buffer);
         let offset = bsu_offset.unwrap_or(buffer.len());
-        let mut performer = Performer::new(&mut self.state, handler);
+        let mut unit = ();
+        let mut performer = Performer::new(&mut self.state, handler, &mut unit);
         self.parser.advance(&mut performer, &buffer[..offset]);
         self.state.sync_state.buffer = buffer;
 
@@ -408,7 +419,8 @@ impl<T: Timeout> Processor<T> {
             self.stop_sync_internal(handler, None);
 
             // Just parse the bytes normally.
-            let mut performer = Performer::new(&mut self.state, handler);
+            let mut unit = ();
+            let mut performer = Performer::new(&mut self.state, handler, &mut unit);
             self.parser.advance_until_terminated(&mut performer, bytes)
         } else {
             self.state.sync_state.buffer.extend(bytes);
@@ -550,11 +562,12 @@ struct Performer<'a, H: Handler, T: Timeout, I: crate::SequenceInterceptor = ()>
 
 impl<'a, H: Handler + 'a, T: Timeout> Performer<'a, H, T, ()> {
     /// Create a performer with no interceptor.
+    ///
+    /// The caller must supply a `&mut ()` that outlives the returned `Performer`.
+    /// This avoids the unsound `static mut` pattern previously used here.
     #[inline]
-    pub fn new<'b>(state: &'b mut ProcessorState<T>, handler: &'b mut H) -> Performer<'b, H, T, ()> {
-        static mut UNIT: () = ();
-        // SAFETY: () is a ZST with no state; aliasing is harmless.
-        Performer { state, handler, interceptor: unsafe { &mut *core::ptr::addr_of_mut!(UNIT) }, terminated: Default::default() }
+    pub fn new<'b>(state: &'b mut ProcessorState<T>, handler: &'b mut H, unit: &'b mut ()) -> Performer<'b, H, T, ()> {
+        Performer { state, handler, interceptor: unit, terminated: Default::default() }
     }
 }
 

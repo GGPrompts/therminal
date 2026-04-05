@@ -858,10 +858,17 @@ pub trait SequenceInterceptor {
     /// allows interceptors to accumulate APC data. Called once per byte
     /// while in the APC state; call `intercept_apc_end` when the string
     /// terminates.
+    ///
+    /// **Note:** These APC hooks are defined but not yet wired into the VTE
+    /// state machine (`SosPmApcString` currently dispatches to `anywhere()`).
+    /// They will be connected when APC support is added to the parser.
     fn intercept_apc_byte(&mut self, _byte: u8) {}
 
     /// Called when an APC string is terminated (by ST or a cancel character).
     /// Return `true` to signal that the APC was handled.
+    ///
+    /// **Note:** Not yet wired into the VTE state machine — see
+    /// [`intercept_apc_byte`](Self::intercept_apc_byte) for details.
     fn intercept_apc_end(&mut self) -> bool {
         false
     }
