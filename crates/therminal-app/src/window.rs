@@ -1272,12 +1272,10 @@ fn render_single_pane(
     renderer.reset_pane_caches();
 
     // Temporarily adjust renderer's padding to offset by the pane's viewport origin.
-    let orig_pad_x = renderer.padding_x;
-    let orig_pad_y = renderer.padding_y;
+    // Use a closure to guarantee restoration even if render() panics.
     let internal_pad_x = renderer.padding_x();
     let internal_pad_y = renderer.padding_y();
-    renderer.padding_x = vp.x() + internal_pad_x;
-    renderer.padding_y = vp.y() + internal_pad_y;
+    renderer.set_viewport_offset(vp.x() + internal_pad_x, vp.y() + internal_pad_y);
 
     renderer.render(
         &cells,
@@ -1294,8 +1292,7 @@ fn render_single_pane(
         surface_height,
     );
 
-    renderer.padding_x = orig_pad_x;
-    renderer.padding_y = orig_pad_y;
+    renderer.restore_padding();
 
     // Draw focus indicator border for the focused pane.
     if draw_focus_border {

@@ -243,7 +243,10 @@ pub struct GridRenderer {
     pub cell_width: f32,
     pub cell_height: f32,
 
-    // Padding from top-left corner of the window
+    // Padding from top-left corner of the window (base values from config).
+    base_padding_x: f32,
+    base_padding_y: f32,
+    // Active padding used during rendering (includes viewport offset for split panes).
     pub(crate) padding_x: f32,
     pub(crate) padding_y: f32,
 
@@ -448,6 +451,8 @@ impl GridRenderer {
             rect_buf_capacity,
             cell_width,
             cell_height,
+            base_padding_x: padding_x,
+            base_padding_y: padding_y,
             padding_x,
             padding_y,
             row_cache: Vec::new(),
@@ -468,8 +473,23 @@ impl GridRenderer {
 
     /// Set padding (both x and y) from config. Call before resize to take effect.
     pub fn set_padding(&mut self, padding: f32) {
+        self.base_padding_x = padding;
+        self.base_padding_y = padding;
         self.padding_x = padding;
         self.padding_y = padding;
+    }
+
+    /// Set viewport offset for split-pane rendering.
+    /// Call before render(), then call `restore_padding()` after.
+    pub fn set_viewport_offset(&mut self, x: f32, y: f32) {
+        self.padding_x = x;
+        self.padding_y = y;
+    }
+
+    /// Restore padding to base config values after split-pane render.
+    pub fn restore_padding(&mut self) {
+        self.padding_x = self.base_padding_x;
+        self.padding_y = self.base_padding_y;
     }
 
     /// Apply color overrides from the config's `ColorsConfig`.
@@ -618,21 +638,21 @@ impl GridRenderer {
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
     pub fn grid_size(&self, width: u32, height: u32) -> (usize, usize) {
-        let usable_w = width as f32 - self.padding_x * 2.0;
-        let usable_h = height as f32 - self.padding_y * 2.0;
+        let usable_w = width as f32 - self.base_padding_x * 2.0;
+        let usable_h = height as f32 - self.base_padding_y * 2.0;
         let cols = (usable_w / self.cell_width).floor().max(2.0) as usize;
         let rows = (usable_h / self.cell_height).floor().max(1.0) as usize;
         (cols, rows)
     }
 
-    /// Get the horizontal padding from the window edge.
+    /// Get the base horizontal padding (config value, not viewport-adjusted).
     pub fn padding_x(&self) -> f32 {
-        self.padding_x
+        self.base_padding_x
     }
 
-    /// Get the vertical padding from the window edge.
+    /// Get the base vertical padding (config value, not viewport-adjusted).
     pub fn padding_y(&self) -> f32 {
-        self.padding_y
+        self.base_padding_y
     }
 
     /// Render the terminal grid with damage tracking.
