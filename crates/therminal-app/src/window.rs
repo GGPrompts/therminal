@@ -120,8 +120,11 @@ pub struct App {
     /// Current modifiers state from winit.
     modifiers: Modifiers,
 
-    /// Last resize timestamp for debouncing rapid resize events.
-    last_resize: Option<Instant>,
+    /// Trailing-edge resize debounce: stores the most recent size that
+    /// arrived too soon after the last applied resize, plus the timestamp
+    /// of the last applied resize. Flushed on the next RedrawRequested.
+    pending_resize: Option<PhysicalSize<u32>>,
+    last_resize_at: Option<Instant>,
 }
 
 impl App {
@@ -135,7 +138,8 @@ impl App {
             _pty_master: None,
             event_proxy,
             modifiers: Modifiers::default(),
-            last_resize: None,
+            pending_resize: None,
+            last_resize_at: None,
         }
     }
 
@@ -593,13 +597,20 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::Resized(new_size) => {
                 let now = Instant::now();
-                let should_resize = self
-                    .last_resize
+                let elapsed_ok = self
+                    .last_resize_at
                     .map(|t| now.duration_since(t).as_millis() > 16)
                     .unwrap_or(true);
-                if should_resize {
-                    self.last_resize = Some(now);
+                if elapsed_ok {
+                    self.last_resize_at = Some(now);
+                    self.pending_resize = None;
                     self.resize(new_size);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                } else {
+                    // Stash for trailing-edge flush on next RedrawRequested.
+                    self.pending_resize = Some(new_size);
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
@@ -618,6 +629,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // Flush any pending trailing-edge resize before rendering.
+                if let Some(size) = self.pending_resize.take() {
+                    self.last_resize_at = Some(Instant::now());
+                    self.resize(size);
+                }
                 self.render();
             }
 
