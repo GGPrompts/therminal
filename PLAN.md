@@ -312,37 +312,37 @@ therminal is the standalone, cross-platform product. thermal-desktop is the opin
 
 ## Implementation Roadmap
 
-### Phase 0: Basic GPU Terminal Window
+### Phase 0: Basic GPU Terminal Window ✅ COMPLETE
+
 A single-window terminal that opens, runs a shell, renders with wgpu, handles input. Cross-platform from day one.
 
-**Port directly from thermal-desktop (zero changes, ~4,700 LOC):**
-- therminal-protocol (wire types, pure serde)
-- therminal-core: palette.rs, wgpu_ctx.rs, text.rs
-- therminal-terminal: input.rs (1,111 LOC), osc633.rs (525 LOC), terminal.rs (63 LOC)
-- therminal-app: grid_renderer.rs (1,130 LOC), color_mapping.rs (347 LOC), url_detection.rs (81 LOC)
-
-**Rewrite for cross-platform (~1,500 LOC):**
-- PTY via portable-pty (replaces nix::pty)
-- Window via winit 0.30 (replaces smithay-client-toolkit)
-- Input via winit events → thermal-terminal encode_key()
-- Clipboard via arboard crate (replaces wl-copy/wl-paste)
+**Completed:**
+- Cargo workspace scaffold with all six crates
+- Ported therminal-protocol wire types, therminal-core (palette, wgpu context, text renderer)
+- Ported therminal-terminal (input encoding with Kitty protocol, OSC 633 parser, state inference)
+- Ported therminal-app (grid renderer, color mapping, URL detection)
+- Vendored alacritty_terminal v0.25.1 and VTE
+- Cross-platform PTY via portable-pty
+- winit 0.30 window + event loop
+- Clipboard via arboard + OSC 52
+- Mouse input: scroll (scrollback navigation), click (SGR 1006 mouse reporting), cursor tracking
+- CI: GitHub Actions cross-platform matrix
 - Runtime paths via dirs crate
+- Cross-platform font discovery with JetBrainsMono Nerd Font
 
-**Rendering pipeline:**
-- Multi-pass: bg fill → cell bg → text (glyphon) → cursor
-- Damage-tracked (only redraw changed rows)
-- Linear alpha blending from the start
-- Event-driven, not continuous
+### Phase 1: Semantic Scrollback + SequenceInterceptor ✅ COMPLETE
 
-### Phase 1: Semantic Scrollback + SequenceInterceptor
-Before the daemon, build the semantic foundation that everything else queries.
+Built the semantic foundation that everything else queries.
 
-- Formalize the `SequenceInterceptor` trait between VTE parser and Term handler
-- Register handlers for OSC 133, 633, 7, 1337 families
-- Build in-memory semantic region index (typed regions with byte offsets)
-- Ship shell integration scripts for bash/zsh/fish/PowerShell that emit OSC 133
-- Process tree inspection via `sysinfo` crate for agent detection
-- Output stream analysis (typing cadence, burst detection, spinner patterns)
+**Completed:**
+- `SequenceInterceptor` trait in vendored VTE — intercepts OSC/DCS/APC sequences before they reach the terminal handler (xterm.js `addOscHandler()` pattern)
+- `TherminalInterceptor` implementation handling OSC 133, 633, 7, 1337 families
+- In-memory semantic region index with typed regions (Prompt, Command, Output, Error, ToolCall, Thinking, Annotation) queryable by kind, line, or recency
+- Shell integration scripts for bash, zsh, fish, and PowerShell emitting OSC 133 marks
+- Ghostty-style TERM_PROGRAM detection (TERM_PROGRAM=therminal, THERMINAL_RESOURCES_DIR env vars)
+- Process tree agent detection via sysinfo (Claude Code, Codex, Aider, Copilot)
+- Output cadence analysis — classifies output as Human, Agent, Burst, or Unknown based on timing, chunk size, and backspace patterns
+- Spinner pattern detection (cursor-control-heavy output)
 
 ### Phase 2: Session Daemon + Multiplexing
 
@@ -417,9 +417,9 @@ Note: daemon mode means double emulation (daemon headless + client render). WezT
 - Control mode (machine-readable protocol for scripting, like tmux -CC)
 
 ### Phase 3: AI Detection + Hotspots
-- Port state_inference.rs with platform-abstracted paths
-- Port claude_state.rs (agent session monitoring via sysinfo, not /proc)
-- Full 4-layer detection stack (OSC → process tree → output analysis → state machine)
+Detection layers 1-3 are complete (OSC interception, process tree, output cadence). Remaining:
+- Layer 4: Composite state machine combining all signals into six states (idle, processing, streaming, tool_use, awaiting_input, thinking)
+- Custom OSC 7777 extension for cooperative agent self-reporting
 - Hotspot detection engine (file paths, URLs, errors, git refs, issue refs, commands)
 - OSC 8 hyperlink protocol
 - Hotspot rendering (underline + cursor change on hover, action palette on click)

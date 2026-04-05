@@ -4,26 +4,33 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-Early planning phase. Core technology exists in [thermal-desktop](../thermal-desktop/) and will be extracted and made cross-platform.
+**Phase 0 and Phase 1 complete.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection, and output cadence analysis. Next: Phase 2 (Session Daemon + Multiplexing).
 
 ## Architecture
 
-Cargo workspace with crates extracted from thermal-desktop:
+Cargo workspace with six crates:
 
 ```
 crates/
 ├── therminal-protocol/    # Wire types, MCP schema, semantic events
-├── therminal-terminal/    # PTY management, OSC 633, state inference engine
+├── therminal-terminal/    # PTY, OSC parsing, state inference, agent detection, region index
 ├── therminal-core/        # Color palette, wgpu context, text renderer
-├── therminal-runtime/     # Cross-platform IPC (interprocess), locks, paths
-├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server
-└── therminal-app/         # winit window, grid renderer, overlays, tiling
+├── therminal-runtime/     # Cross-platform paths, runtime dir management
+├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server (stub)
+└── therminal-app/         # winit window, grid renderer, mouse input, PTY wiring
+vendor/
+├── alacritty_terminal/    # Vendored v0.25.1
+└── vte/                   # Vendored with SequenceInterceptor trait
+resources/
+└── shell-integration/     # bash, zsh, fish, PowerShell scripts
 ```
 
 ### Core Stack
 - **GPU rendering**: wgpu + glyphon + cosmic-text
-- **Terminal emulation**: alacritty_terminal (vendored)
+- **Terminal emulation**: alacritty_terminal (vendored) + VTE with SequenceInterceptor
 - **Windowing**: winit (cross-platform)
+- **PTY**: portable-pty (cross-platform)
+- **Agent detection**: sysinfo (process tree), cadence analysis (output stream timing)
 - **IPC**: interprocess crate (Unix sockets / named pipes)
 - **Wire protocol**: MessagePack framing
 - **Language**: Rust

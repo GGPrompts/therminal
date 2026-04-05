@@ -4,7 +4,20 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-**Early development.** The terminal renders, runs a shell, and handles keyboard input. Not yet feature-complete.
+**Active development — Phase 0 and Phase 1 complete.**
+
+What works today:
+- GPU-accelerated terminal rendering (wgpu + glyphon + cosmic-text)
+- Full keyboard input (including Kitty protocol) and mouse input (scroll, click, SGR 1006)
+- Shell integration scripts (bash, zsh, fish, PowerShell) emitting OSC 133 semantic marks
+- SequenceInterceptor — AI-aware OSC parsing between VTE and terminal handler
+- Semantic region index — typed regions (Prompt, Command, Output, Error, ToolCall, Thinking)
+- Process tree agent detection via sysinfo (Claude Code, Codex, Aider, Copilot)
+- Output cadence analysis — distinguishes human typing from agent output
+- Clipboard via arboard + OSC 52
+- URL detection and cross-platform runtime paths
+
+Next: Phase 2 (Session Daemon + Multiplexing).
 
 ## Building
 
@@ -67,11 +80,16 @@ Cargo workspace with six crates:
 ```
 crates/
   therminal-protocol/    Wire types, MCP schema, semantic events
-  therminal-terminal/    PTY management, OSC 633, state inference engine
+  therminal-terminal/    PTY, OSC parsing, state inference, agent detection, region index
   therminal-core/        Color palette, wgpu context, text renderer
-  therminal-runtime/     Cross-platform IPC, locks, paths
-  therminal-daemon/      Session manager, event bus, multiplexer, MCP server
-  therminal-app/         winit window, grid renderer, overlays, tiling
+  therminal-runtime/     Cross-platform paths, runtime dir management
+  therminal-daemon/      Session manager, event bus, multiplexer, MCP server (stub)
+  therminal-app/         winit window, grid renderer, mouse input, PTY wiring
+vendor/
+  alacritty_terminal/    Vendored v0.25.1
+  vte/                   Vendored with SequenceInterceptor trait
+resources/
+  shell-integration/     bash, zsh, fish, PowerShell integration scripts
 ```
 
 ### Core Stack
@@ -79,8 +97,10 @@ crates/
 | Layer | Technology |
 |-------|-----------|
 | GPU rendering | wgpu + glyphon + cosmic-text |
-| Terminal emulation | alacritty_terminal (vendored) |
+| Terminal emulation | alacritty_terminal (vendored) + VTE with SequenceInterceptor |
 | Windowing | winit (cross-platform) |
+| PTY | portable-pty (cross-platform) |
+| Agent detection | sysinfo (process tree) + cadence analysis (output timing) |
 | IPC | interprocess (Unix sockets / named pipes) |
 | Wire protocol | MessagePack framing |
 
