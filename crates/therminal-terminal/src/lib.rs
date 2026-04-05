@@ -7,5 +7,6 @@ pub mod input;
 pub mod interceptor;
 pub mod osc633;
 pub mod pty;
+pub mod region_index;
 pub mod state_inference;
 pub mod terminal;
