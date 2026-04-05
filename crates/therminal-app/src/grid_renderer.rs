@@ -45,15 +45,16 @@ pub struct FontConfig {
     default_font_size: f32,
 }
 
-const LINE_HEIGHT_RATIO: f32 = 1.4;
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+const LINE_HEIGHT_RATIO: f32 = 1.375;
+const DEFAULT_FONT_SIZE: f32 = 17.0;
+const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
 impl Default for FontConfig {
     fn default() -> Self {
         let font_size = DEFAULT_FONT_SIZE;
         Self {
-            family: "monospace".to_string(),
-            fallback_families: Vec::new(),
+            family: DEFAULT_FONT_FAMILY.to_string(),
+            fallback_families: vec!["Noto Color Emoji".to_string()],
             font_size,
             line_height: font_size * LINE_HEIGHT_RATIO,
             default_font_size: font_size,
