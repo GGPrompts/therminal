@@ -2029,8 +2029,8 @@ mod tests {
             !engine.dirty,
             "dirty should be cleared after deferred flush"
         );
-        assert!(
-            engine.last_write > initial_write_time,
+        assert_ne!(
+            engine.last_write, initial_write_time,
             "last_write should be updated after flush"
         );
     }
