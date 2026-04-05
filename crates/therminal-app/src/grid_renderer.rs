@@ -626,6 +626,27 @@ impl GridRenderer {
         self.last_cursor_pos = None;
     }
 
+    /// Adjust the font size by `delta` points (e.g. +1.0 or -1.0).
+    ///
+    /// Clamps to the range 8.0..=32.0, recalculates cell metrics, and clears
+    /// all caches to force a full rebuild.  Returns the new font size.
+    pub fn adjust_font_size(&mut self, delta: f32) -> f32 {
+        let new_size = (self.font_config.font_size + delta).clamp(8.0, 32.0);
+        self.font_config.font_size = new_size;
+        self.font_config.line_height = new_size * LINE_HEIGHT_RATIO;
+        self.update_font_metrics();
+        new_size
+    }
+
+    /// Reset the font size to the startup default and recalculate metrics.
+    ///
+    /// Returns the restored font size.
+    pub fn reset_font_size(&mut self) -> f32 {
+        self.font_config.reset_size();
+        self.update_font_metrics();
+        self.font_config.font_size
+    }
+
     /// Reset per-pane caches so stale state from a previous pane doesn't bleed
     /// into the next one.  Call this before rendering each pane when a single
     /// `GridRenderer` is shared across multiple panes.

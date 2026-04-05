@@ -597,16 +597,13 @@ impl App {
                 self.paste_clipboard();
             }
             KeyAction::FontSizeUp => {
-                // TODO: implement font size up
-                info!("font size up: not yet implemented");
+                self.adjust_font_size_action(1.0);
             }
             KeyAction::FontSizeDown => {
-                // TODO: implement font size down
-                info!("font size down: not yet implemented");
+                self.adjust_font_size_action(-1.0);
             }
             KeyAction::FontSizeReset => {
-                // TODO: implement font size reset
-                info!("font size reset: not yet implemented");
+                self.reset_font_size_action();
             }
             KeyAction::ShowHelp => {
                 self.show_help_overlay = !self.show_help_overlay;
@@ -867,6 +864,44 @@ impl App {
             info!("env config changed; takes effect on next PTY spawn (restart needed)");
         }
 
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Adjust font size by `delta` points, resize panes, and request a redraw.
+    fn adjust_font_size_action(&mut self, delta: f32) {
+        if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
+            let new_size = renderer.adjust_font_size(delta);
+            renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
+
+            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            if let Some(lay) = self.layout.as_mut() {
+                lay.layout(full_rect);
+                lay.resize_all_panes(renderer);
+            }
+
+            info!(font_size = new_size, "font size adjusted");
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Reset font size to startup default, resize panes, and request a redraw.
+    fn reset_font_size_action(&mut self) {
+        if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
+            let new_size = renderer.reset_font_size();
+            renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
+
+            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            if let Some(layout) = self.layout.as_mut() {
+                layout.layout(full_rect);
+                layout.resize_all_panes(renderer);
+            }
+
+            info!(font_size = new_size, "font size reset to default");
+        }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
