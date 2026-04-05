@@ -956,4 +956,237 @@ agent_scan_interval = 0
         let _: TherminalConfig =
             toml::from_str(&s).expect("to_toml_string must produce valid TOML");
     }
+
+    // ── Config-to-renderer mapping tests ─────────────────────────────────────
+
+    /// Task 1: Font config change produces correct CoreFontConfig fields.
+    #[test]
+    fn font_config_change_produces_correct_core_font_config() {
+        let mut config = TherminalConfig::default();
+        config.font.family = "Fira Code".to_string();
+        config.font.size = 20.0;
+        config.font.line_height_scale = 1.5;
+        config.font.nerd_font = false;
+        config.font.extra_fallbacks = vec!["Iosevka".to_string()];
+
+        let core = config.to_core_font_config();
+
+        // Family is mapped through the Some() wrapper when non-empty.
+        assert_eq!(core.family.as_deref(), Some("Fira Code"));
+        assert_eq!(core.size, 20.0);
+        assert_eq!(core.line_height_scale, 1.5);
+        assert!(!core.nerd_font);
+        assert_eq!(core.extra_fallbacks, vec!["Iosevka".to_string()]);
+    }
+
+    /// Empty family string maps to None in CoreFontConfig (use platform default).
+    #[test]
+    fn empty_font_family_maps_to_none_in_core_font_config() {
+        let mut config = TherminalConfig::default();
+        config.font.family = String::new();
+
+        let core = config.to_core_font_config();
+        assert!(
+            core.family.is_none(),
+            "empty family should map to None so platform default is used"
+        );
+    }
+
+    /// Default font config round-trips to expected CoreFontConfig defaults.
+    #[test]
+    fn default_font_config_maps_to_correct_core_font_config() {
+        let config = TherminalConfig::default();
+        let core = config.to_core_font_config();
+
+        // Default family is JetBrainsMono Nerd Font Mono (non-empty → Some).
+        assert_eq!(
+            core.family.as_deref(),
+            Some("JetBrainsMono Nerd Font Mono")
+        );
+        assert_eq!(core.size, 17.0);
+        assert_eq!(core.line_height_scale, 1.375);
+        assert!(core.nerd_font);
+    }
+
+    /// Task 2: Color overrides with hex values produce the correct Color structs.
+    #[test]
+    fn color_hex_overrides_produce_correct_color_values() {
+        let colors = ColorsConfig {
+            background: Some("#1a2b3c".to_string()),
+            foreground: Some("#aabbcc".to_string()),
+            cursor: Some("#39ffb6".to_string()),
+            ..Default::default()
+        };
+
+        let bg = colors.background_color();
+        assert_eq!(bg.r, 0x1a);
+        assert_eq!(bg.g, 0x2b);
+        assert_eq!(bg.b, 0x3c);
+
+        let fg = colors.foreground_color();
+        assert_eq!(fg.r, 0xaa);
+        assert_eq!(fg.g, 0xbb);
+        assert_eq!(fg.b, 0xcc);
+
+        // cursor uses parse_hex directly; verify against known Codex SIGNAL color.
+        let cursor = colors
+            .cursor
+            .as_deref()
+            .and_then(ColorsConfig::parse_hex)
+            .expect("cursor should parse");
+        assert_eq!(cursor, Color::SIGNAL); // SIGNAL = #39ffb6
+    }
+
+    /// Task 3: Invalid hex color string falls back to the palette default.
+    #[test]
+    fn invalid_hex_color_falls_back_to_palette_default() {
+        let colors = ColorsConfig {
+            background: Some("not-a-hex".to_string()),
+            foreground: Some("#GGGGGG".to_string()), // invalid hex digits
+            ..Default::default()
+        };
+
+        // Should silently fall back to the Codex 2031 palette constants.
+        assert_eq!(
+            colors.background_color(),
+            Color::BG,
+            "invalid hex background should fall back to Color::BG (VOID_0)"
+        );
+        assert_eq!(
+            colors.foreground_color(),
+            Color::TEXT,
+            "invalid hex foreground should fall back to Color::TEXT (INK)"
+        );
+    }
+
+    /// Task 4: Partial config (only [font] section) preserves all other section defaults.
+    #[test]
+    fn partial_font_config_preserves_other_section_defaults() {
+        let toml_str = r#"
+[font]
+family = "Hack"
+size = 16.0
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        let core = config.to_core_font_config();
+
+        // Font section was overridden.
+        assert_eq!(core.family.as_deref(), Some("Hack"));
+        assert_eq!(core.size, 16.0);
+
+        // line_height_scale still uses the font default (not the core default).
+        assert_eq!(core.line_height_scale, FontConfig::default().line_height_scale);
+
+        // All other sections remain at their defaults.
+        assert_eq!(config.general.title, "Therminal");
+        assert_eq!(config.general.padding, 4.0);
+        assert_eq!(config.general.scrollback_lines, 10_000);
+        assert_eq!(config.trust.default_tier, TrustTier::Supervised);
+        assert!(config.trust.show_agent_indicator);
+        assert_eq!(config.trust.agent_scan_interval, 3);
+        assert!(config.terminal.osc_633);
+        assert!(config.terminal.osc_133);
+        assert!(config.terminal.osc_7);
+        assert!(config.terminal.osc_1337);
+        // Colors section should be all None (defaults).
+        assert!(config.colors.background.is_none());
+        assert!(config.colors.foreground.is_none());
+    }
+
+    /// Task 5: Invalid TOML logs a warning and returns defaults — does not panic.
+    #[test]
+    fn invalid_toml_returns_defaults_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+
+        std::fs::write(&path, "this is not [ valid toml !!@#$%").unwrap();
+
+        // Must not panic; must return the full defaults.
+        let config = TherminalConfig::load_from(&path);
+        assert_eq!(
+            config.general.title, "Therminal",
+            "invalid TOML should fall back to default title"
+        );
+        assert_eq!(
+            config.font.size, 17.0,
+            "invalid TOML should fall back to default font size"
+        );
+        assert_eq!(
+            config.trust.default_tier,
+            TrustTier::Supervised,
+            "invalid TOML should fall back to default trust tier"
+        );
+    }
+
+    /// Task 6: Write a fully-populated config, load it back, and verify all
+    /// fields survived the round-trip faithfully.
+    #[test]
+    fn full_config_round_trip_write_load_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+
+        let mut original = TherminalConfig::default();
+        // General
+        original.general.title = "RT Terminal".to_string();
+        original.general.window_width = 1920.0;
+        original.general.window_height = 1080.0;
+        original.general.scrollback_lines = 50_000;
+        original.general.padding = 8.0;
+        // Font
+        original.font.family = "Cascadia Code".to_string();
+        original.font.size = 15.0;
+        original.font.line_height_scale = 1.4;
+        original.font.nerd_font = false;
+        original.font.extra_fallbacks = vec!["Noto Color Emoji".to_string()];
+        // Colors
+        original.colors.background = Some("#0d1421".to_string());
+        original.colors.foreground = Some("#e7f0ff".to_string());
+        original.colors.cursor = Some("#56a7ff".to_string());
+        // Trust
+        original.trust.default_tier = TrustTier::Sandboxed;
+        original.trust.show_agent_indicator = false;
+        original.trust.agent_scan_interval = 10;
+        // Terminal
+        original.terminal.osc_633 = false;
+        original.terminal.osc_1337 = false;
+
+        original.save_to(&path).expect("save_to should succeed");
+
+        let loaded = TherminalConfig::load_from(&path);
+
+        // Verify general
+        assert_eq!(loaded.general.title, "RT Terminal");
+        assert_eq!(loaded.general.window_width, 1920.0);
+        assert_eq!(loaded.general.window_height, 1080.0);
+        assert_eq!(loaded.general.scrollback_lines, 50_000);
+        assert_eq!(loaded.general.padding, 8.0);
+        // Verify font
+        assert_eq!(loaded.font.family, "Cascadia Code");
+        assert_eq!(loaded.font.size, 15.0);
+        assert_eq!(loaded.font.line_height_scale, 1.4);
+        assert!(!loaded.font.nerd_font);
+        assert_eq!(loaded.font.extra_fallbacks, vec!["Noto Color Emoji"]);
+        // Verify colors
+        assert_eq!(
+            loaded.colors.background.as_deref(),
+            Some("#0d1421"),
+            "background color should survive round-trip"
+        );
+        assert_eq!(loaded.colors.foreground.as_deref(), Some("#e7f0ff"));
+        assert_eq!(loaded.colors.cursor.as_deref(), Some("#56a7ff"));
+        // Verify parsed color values from loaded config.
+        let bg = loaded.colors.background_color();
+        assert_eq!(bg, Color::VOID_1, "loaded background should parse to VOID_1");
+        let fg = loaded.colors.foreground_color();
+        assert_eq!(fg, Color::INK, "loaded foreground should parse to INK");
+        // Verify trust
+        assert_eq!(loaded.trust.default_tier, TrustTier::Sandboxed);
+        assert!(!loaded.trust.show_agent_indicator);
+        assert_eq!(loaded.trust.agent_scan_interval, 10);
+        // Verify terminal
+        assert!(!loaded.terminal.osc_633);
+        assert!(loaded.terminal.osc_133);
+        assert!(loaded.terminal.osc_7);
+        assert!(!loaded.terminal.osc_1337);
+    }
 }
