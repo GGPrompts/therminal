@@ -596,6 +596,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::Resized(new_size) => {
+                // Ignore zero-size resizes (e.g. minimize) — don't let them
+                // overwrite a valid pending size.
+                if new_size.width == 0 || new_size.height == 0 {
+                    return;
+                }
                 let now = Instant::now();
                 let elapsed_ok = self
                     .last_resize_at
