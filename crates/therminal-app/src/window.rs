@@ -14,22 +14,25 @@ use std::time::Instant;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config as TermConfig, Term, TermDamage};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi;
 use anyhow::Result;
 use portable_pty::MasterPty;
 use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, KeyEvent, Modifiers, WindowEvent};
+use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{cell_display_text, FontConfig, GridRenderer, RenderCell};
-use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
+use therminal_terminal::input::{
+    self, KeyCode, Modifiers as InputModifiers, MouseButton as InputMouseButton,
+};
 
 // ── Custom event for waking the event loop from the PTY reader ───────────
 
@@ -125,6 +128,12 @@ pub struct App {
     /// of the last applied resize. Flushed on the next RedrawRequested.
     pending_resize: Option<PhysicalSize<u32>>,
     last_resize_at: Option<Instant>,
+
+    /// Current cursor position in physical pixels (updated on CursorMoved).
+    cursor_position: Option<(f64, f64)>,
+
+    /// Whether the left mouse button is currently held (for drag reporting).
+    mouse_left_held: bool,
 }
 
 impl App {
@@ -140,6 +149,8 @@ impl App {
             modifiers: Modifiers::default(),
             pending_resize: None,
             last_resize_at: None,
+            cursor_position: None,
+            mouse_left_held: false,
         }
     }
 
@@ -548,6 +559,177 @@ impl App {
             }
         }
     }
+
+    /// Convert physical pixel coordinates to terminal grid (col, row).
+    ///
+    /// Returns `None` if the coordinates fall outside the grid area or
+    /// if the grid renderer is not initialized.
+    fn pixel_to_grid(&self, px: f64, py: f64) -> Option<(usize, usize)> {
+        let renderer = self.grid_renderer.as_ref()?;
+        let col = ((px as f32 - renderer.padding_x) / renderer.cell_width).floor();
+        let row = ((py as f32 - renderer.padding_y) / renderer.cell_height).floor();
+        if col < 0.0 || row < 0.0 {
+            return None;
+        }
+        Some((col as usize, row as usize))
+    }
+
+    /// Get the current terminal mode flags, or empty if term is not initialized.
+    fn term_mode(&self) -> TermMode {
+        self.term
+            .as_ref()
+            .map(|t| *t.lock().mode())
+            .unwrap_or_default()
+    }
+
+    /// Get input modifiers from the current winit modifier state.
+    fn input_mods(&self) -> InputModifiers {
+        let state = self.modifiers.state();
+        InputModifiers {
+            ctrl: state.control_key(),
+            alt: state.alt_key(),
+            shift: state.shift_key(),
+        }
+    }
+
+    /// Write bytes to the PTY.
+    fn pty_write(&mut self, bytes: &[u8]) {
+        if let Some(pty) = self.pty_writer.as_mut() {
+            if let Err(e) = pty.write_all(bytes) {
+                warn!("Failed to write to PTY: {e}");
+            }
+        }
+    }
+
+    /// Handle mouse scroll: either scroll the terminal scrollback or forward
+    /// as SGR mouse events to the running program.
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let (col, row) = self
+            .cursor_position
+            .and_then(|(px, py)| self.pixel_to_grid(px, py))
+            .unwrap_or((0, 0));
+
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_x, y) => y,
+            MouseScrollDelta::PixelDelta(pos) => {
+                // Convert pixel delta to approximate line count.
+                let cell_h = self
+                    .grid_renderer
+                    .as_ref()
+                    .map(|r| r.cell_height)
+                    .unwrap_or(20.0);
+                (pos.y as f32) / cell_h
+            }
+        };
+
+        if lines.abs() < 0.01 {
+            return;
+        }
+
+        let mode = self.term_mode();
+        let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
+            || mode.contains(TermMode::MOUSE_DRAG)
+            || mode.contains(TermMode::MOUSE_MOTION);
+
+        if mouse_mode {
+            // Forward scroll as SGR mouse events to the running program.
+            let mods = self.input_mods();
+            let button = if lines > 0.0 {
+                InputMouseButton::ScrollUp
+            } else {
+                InputMouseButton::ScrollDown
+            };
+            let steps = lines.abs().ceil() as usize;
+            let mut seq = Vec::new();
+            for _ in 0..steps {
+                seq.extend_from_slice(&input::encode_mouse_press(button, col, row, &mods));
+            }
+            self.pty_write(&seq);
+        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            // In alt screen with alternate scroll: send arrow key presses.
+            let steps = lines.abs().ceil() as usize;
+            let arrow = if lines > 0.0 { b"\x1b[A" } else { b"\x1b[B" };
+            let mut seq = Vec::with_capacity(steps * 3);
+            for _ in 0..steps {
+                seq.extend_from_slice(arrow);
+            }
+            self.pty_write(&seq);
+        } else {
+            // Normal scrollback navigation.
+            if let Some(term) = self.term.as_ref() {
+                let scroll_lines = (lines * 3.0).round() as i32;
+                let mut term_guard = term.lock();
+                term_guard.scroll_display(Scroll::Delta(scroll_lines));
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Handle mouse button press/release.
+    fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        let (col, row) = match self
+            .cursor_position
+            .and_then(|(px, py)| self.pixel_to_grid(px, py))
+        {
+            Some(pos) => pos,
+            None => return,
+        };
+
+        // Track left button state for drag reporting.
+        if button == MouseButton::Left {
+            self.mouse_left_held = state == ElementState::Pressed;
+        }
+
+        let mode = self.term_mode();
+        let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
+            || mode.contains(TermMode::MOUSE_DRAG)
+            || mode.contains(TermMode::MOUSE_MOTION);
+
+        if !mouse_mode {
+            return;
+        }
+
+        let input_button = match button {
+            MouseButton::Left => InputMouseButton::Left,
+            MouseButton::Middle => InputMouseButton::Middle,
+            MouseButton::Right => InputMouseButton::Right,
+            _ => return,
+        };
+
+        let mods = self.input_mods();
+        let bytes = match state {
+            ElementState::Pressed => input::encode_mouse_press(input_button, col, row, &mods),
+            ElementState::Released => input::encode_mouse_release(input_button, col, row, &mods),
+        };
+        self.pty_write(&bytes);
+    }
+
+    /// Handle mouse motion for drag/motion reporting.
+    fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        let (px, py) = (position.x, position.y);
+        self.cursor_position = Some((px, py));
+
+        let (col, row) = match self.pixel_to_grid(px, py) {
+            Some(pos) => pos,
+            None => return,
+        };
+
+        let mode = self.term_mode();
+
+        if self.mouse_left_held
+            && (mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION))
+        {
+            let mods = self.input_mods();
+            let bytes = input::encode_mouse_drag(InputMouseButton::Left, col, row, &mods);
+            self.pty_write(&bytes);
+        } else if mode.contains(TermMode::MOUSE_MOTION) {
+            let mods = self.input_mods();
+            let bytes = input::encode_mouse_motion(col, row, &mods);
+            self.pty_write(&bytes);
+        }
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -644,6 +826,18 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers;
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.handle_cursor_moved(position);
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.handle_mouse_wheel(delta);
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.handle_mouse_input(state, button);
             }
 
             WindowEvent::KeyboardInput {

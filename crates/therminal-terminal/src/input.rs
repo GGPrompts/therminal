@@ -421,6 +421,92 @@ fn encode_fkey(key: &KeyCode) -> Option<Vec<u8>> {
     Some(seq.to_vec())
 }
 
+// -- Mouse encoding (SGR 1006) -----------------------------------------------
+
+/// Mouse button identifiers for SGR encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    /// Scroll up (button 64 in SGR).
+    ScrollUp,
+    /// Scroll down (button 65 in SGR).
+    ScrollDown,
+}
+
+/// Encode a mouse press event as an SGR 1006 escape sequence.
+///
+/// Format: `\x1b[<button;col;row M`
+///
+/// `col` and `row` are 1-based grid coordinates. Modifier bits are added
+/// to the button value: +4 shift, +8 alt, +16 ctrl.
+pub fn encode_mouse_press(
+    button: MouseButton,
+    col: usize,
+    row: usize,
+    mods: &Modifiers,
+) -> Vec<u8> {
+    let btn = mouse_button_code(button, mods);
+    format!("\x1b[<{btn};{};{}M", col + 1, row + 1).into_bytes()
+}
+
+/// Encode a mouse release event as an SGR 1006 escape sequence.
+///
+/// Format: `\x1b[<button;col;row m`
+pub fn encode_mouse_release(
+    button: MouseButton,
+    col: usize,
+    row: usize,
+    mods: &Modifiers,
+) -> Vec<u8> {
+    let btn = mouse_button_code(button, mods);
+    format!("\x1b[<{btn};{};{}m", col + 1, row + 1).into_bytes()
+}
+
+/// Encode a mouse drag (motion with button held) as an SGR 1006 escape.
+///
+/// Format: `\x1b[<(32+button);col;row M`
+pub fn encode_mouse_drag(button: MouseButton, col: usize, row: usize, mods: &Modifiers) -> Vec<u8> {
+    let btn = mouse_button_code(button, mods) + 32;
+    format!("\x1b[<{btn};{};{}M", col + 1, row + 1).into_bytes()
+}
+
+/// Encode a mouse motion (no button held) as an SGR 1006 escape.
+///
+/// Format: `\x1b[<35;col;row M`
+pub fn encode_mouse_motion(col: usize, row: usize, mods: &Modifiers) -> Vec<u8> {
+    let btn = 35 + modifier_bits(mods);
+    format!("\x1b[<{btn};{};{}M", col + 1, row + 1).into_bytes()
+}
+
+/// Compute the SGR button code including modifier bits.
+fn mouse_button_code(button: MouseButton, mods: &Modifiers) -> u8 {
+    let base = match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::ScrollUp => 64,
+        MouseButton::ScrollDown => 65,
+    };
+    base + modifier_bits(mods)
+}
+
+/// Modifier bits for SGR mouse encoding: +4 shift, +8 alt, +16 ctrl.
+fn modifier_bits(mods: &Modifiers) -> u8 {
+    let mut bits = 0u8;
+    if mods.shift {
+        bits += 4;
+    }
+    if mods.alt {
+        bits += 8;
+    }
+    if mods.ctrl {
+        bits += 16;
+    }
+    bits
+}
+
 // -- Tests -------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1107,5 +1193,49 @@ mod tests {
         assert!(flags.contains(KittyFlags::REPORT_EVENTS));
         assert!(!flags.contains(KittyFlags::REPORT_ALL_KEYS));
         assert!(!flags.contains(KittyFlags::NONE));
+    }
+
+    // -- Mouse SGR encoding --------------------------------------------------
+
+    #[test]
+    fn mouse_press_left() {
+        let bytes = encode_mouse_press(MouseButton::Left, 5, 10, &no_mods());
+        assert_eq!(bytes, b"\x1b[<0;6;11M");
+    }
+
+    #[test]
+    fn mouse_release_right() {
+        let bytes = encode_mouse_release(MouseButton::Right, 0, 0, &no_mods());
+        assert_eq!(bytes, b"\x1b[<2;1;1m");
+    }
+
+    #[test]
+    fn mouse_press_with_ctrl() {
+        let bytes = encode_mouse_press(MouseButton::Left, 3, 7, &ctrl());
+        assert_eq!(bytes, b"\x1b[<16;4;8M");
+    }
+
+    #[test]
+    fn mouse_scroll_up() {
+        let bytes = encode_mouse_press(MouseButton::ScrollUp, 10, 5, &no_mods());
+        assert_eq!(bytes, b"\x1b[<64;11;6M");
+    }
+
+    #[test]
+    fn mouse_scroll_down() {
+        let bytes = encode_mouse_press(MouseButton::ScrollDown, 10, 5, &no_mods());
+        assert_eq!(bytes, b"\x1b[<65;11;6M");
+    }
+
+    #[test]
+    fn mouse_drag_left() {
+        let bytes = encode_mouse_drag(MouseButton::Left, 4, 2, &no_mods());
+        assert_eq!(bytes, b"\x1b[<32;5;3M");
+    }
+
+    #[test]
+    fn mouse_motion_no_button() {
+        let bytes = encode_mouse_motion(4, 2, &no_mods());
+        assert_eq!(bytes, b"\x1b[<35;5;3M");
     }
 }
