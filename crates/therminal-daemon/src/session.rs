@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn session_manager_create_and_list() {
         let tx = make_event_tx();
-        let mut mgr = SessionManager::new(tx);
+        let mgr = SessionManager::new(tx);
 
         // Create with a mock - we can't easily spawn real PTYs in unit tests
         // without a TTY, so test the non-PTY parts.
