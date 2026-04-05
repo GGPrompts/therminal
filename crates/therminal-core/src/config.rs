@@ -46,6 +46,8 @@ pub struct TherminalConfig {
     pub trust: TrustConfig,
     /// Terminal OSC sequence interceptor settings.
     pub terminal: TerminalConfig,
+    /// MCP server settings.
+    pub mcp: McpConfig,
 }
 
 impl TherminalConfig {
@@ -320,6 +322,19 @@ impl TherminalConfig {
         out.push_str("# scrollback_lines = 50000\n");
         out.push_str("# [profiles.dev.env]\n");
         out.push_str("# EDITOR = \"nvim\"\n");
+        out.push('\n');
+
+        // ── [mcp] ────────────────────────────────────────────────────────────
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("# [mcp] — MCP (Model Context Protocol) server for external tool access.\n");
+        out.push_str(
+            "# ─────────────────────────────────────────────────────────────────────────\n",
+        );
+        out.push_str("[mcp]\n");
+        out.push_str(&format!("# enabled = {}\n", d.mcp.enabled));
+        out.push_str("# socket_path = \"\"  # empty = default runtime dir socket\n");
         out.push('\n');
 
         out
@@ -1097,6 +1112,34 @@ pub struct AgentTrust {
     pub tier: TrustTier,
     /// Optional list of allowed MCP tool patterns.
     pub allowed_tools: Option<Vec<String>>,
+}
+
+// ── Section: MCP ────────────────────────────────────────────────────────
+
+/// MCP (Model Context Protocol) server configuration.
+///
+/// When enabled, the daemon exposes session management tools via the MCP
+/// protocol on a dedicated Unix socket, allowing external tools (Claude
+/// Code, TUIs, dashboards) to interact with terminal sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// Whether the MCP server is enabled.
+    pub enabled: bool,
+    /// Custom socket path for the MCP server.
+    ///
+    /// If empty, defaults to the runtime directory socket path
+    /// (`<runtime_dir>/mcp.sock`).
+    pub socket_path: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            socket_path: String::new(),
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

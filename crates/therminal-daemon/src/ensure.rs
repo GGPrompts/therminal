@@ -18,6 +18,7 @@ use therminal_protocol::DaemonState;
 use crate::client;
 use crate::handoff::{self, DaemonCheck};
 use crate::lifecycle::{Lifecycle, LifecycleConfig};
+use crate::mcp::{self, McpServerConfig};
 use crate::server::DaemonServer;
 
 /// Build hash embedded at compile time by `build.rs`.
@@ -147,12 +148,26 @@ async fn start_daemon(socket_path: PathBuf, config: LifecycleConfig) -> Result<A
     // Spawn the idle watcher
     lifecycle.spawn_idle_watcher();
 
+    // Start MCP server alongside the IPC server
+    let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
+    let mcp_config = McpServerConfig::default();
+    let mcp_session_mgr = server.session_manager();
+    let mcp_shutdown_clone = Arc::clone(&mcp_shutdown);
+    tokio::spawn(async move {
+        if let Err(e) = mcp::start_mcp_server(mcp_config, mcp_session_mgr, mcp_shutdown_clone).await
+        {
+            warn!(error = %e, "MCP server exited with error");
+        }
+    });
+
     // Spawn the server accept loop in the background
     let lc = Arc::clone(&lifecycle);
     tokio::spawn(async move {
         if let Err(e) = server.run().await {
             warn!(error = %e, "daemon server exited with error");
         }
+        // Signal MCP server to stop when IPC server stops
+        mcp_shutdown.notify_one();
         // Ensure lifecycle reaches Stopped
         if lc.state() != DaemonState::Stopped {
             let _ = lc.initiate_shutdown().await;

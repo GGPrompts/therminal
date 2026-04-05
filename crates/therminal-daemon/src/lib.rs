@@ -27,6 +27,7 @@ pub mod ensure;
 pub mod framing;
 pub mod handoff;
 pub mod lifecycle;
+pub mod mcp;
 pub mod server;
 pub mod session;
 
