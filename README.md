@@ -47,10 +47,11 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 - Control mode (tmux -CC style machine-readable protocol, --help-control flag)
 
 **MCP server & trust**
-- MCP server in the daemon (rmcp, Unix socket, stdio transport)
+- MCP server in the daemon (rmcp, Unix socket) with stdio bridge (`therminal mcp`) for Claude Code integration
 - Tools: list_sessions, get_session, read_pane_content, create_session, write_to_pane, destroy_session
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at the MCP handler layer
 - Sliding-window rate limiter for destructive tools; all decisions audit-logged
+- Configure in Claude Code: `{ "command": "therminal", "args": ["mcp"] }` in `.mcp.json`
 
 ## Building
 

@@ -430,10 +430,11 @@ Note: daemon mode means double emulation (daemon headless + client render). WezT
 Detection layers 1-3 are complete (OSC interception, process tree, output cadence). MCP server and trust tier enforcement are also complete.
 
 **Complete:**
-- MCP server in daemon (`mcp.rs`, `rmcp` crate, Unix socket / stdio transport)
+- MCP server in daemon (`mcp.rs`, `rmcp` crate, Unix socket) with stdio bridge (`therminal mcp` subcommand for Claude Code integration)
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at MCP layer (`trust.rs`)
 - Sliding-window rate limiter for destructive MCP tools
 - Audit logging for all MCP tool invocations
+- MCP socket path configurable via `[mcp]` in `therminal.toml`
 
 **Remaining:**
 - Layer 4: Composite state machine combining all signals into six states (idle, processing, streaming, tool_use, awaiting_input, thinking)
@@ -466,12 +467,12 @@ Detection layers 1-3 are complete (OSC interception, process tree, output cadenc
 
 ## Open Questions
 
-- [ ] License — MIT? Apache 2.0?
+- [x] License — MIT
+- [x] Config format — TOML (`therminal.toml`)
+- [x] CI — GitHub Actions cross-platform matrix
 - [ ] MCP schema design — coordinate with TabzChrome's existing 85 tools
-- [ ] Config format — TOML seems right (alacritty precedent, Rust ecosystem)
 - [ ] Default theme — thermal aesthetic? Or neutral with thermal as an option?
 - [ ] Distribution — cargo install? Homebrew? Winget? Flatpak?
-- [ ] CI — cross-platform builds (Linux + macOS + Windows) from day one
 - [ ] OSC 7777 spec — design and publish as open standard for cooperative agent reporting
 - [ ] libghostty-vt — monitor maturity for potential future backend swap
 - [ ] Atuin integration — SQLite schema compatibility for shell history portability

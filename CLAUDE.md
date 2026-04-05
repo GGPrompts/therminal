@@ -142,7 +142,9 @@ Clicking and dragging a pane separator adjusts the `split_ratio` of the enclosin
 
 ### MCP Server
 
-`crates/therminal-daemon/src/mcp.rs` implements an MCP server (`rmcp` crate, stdio transport, Unix socket per session). It exposes tools for session and pane management:
+`crates/therminal-daemon/src/mcp.rs` implements an MCP server (`rmcp` crate) listening on a Unix socket (configurable via `[mcp] socket_path` in `therminal.toml`, defaults to `<runtime_dir>/mcp.sock`). `crates/therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's MCP socket, enabling MCP clients like Claude Code to connect as a subprocess.
+
+Tools exposed:
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -153,7 +155,7 @@ Clicking and dragging a pane separator adjusts the `split_ratio` of the enclosin
 | `write_to_pane` | Writer | Send input to a pane's PTY |
 | `destroy_session` | Admin | Kill a session |
 
-Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call.
+Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 
 ### Trust Tier Enforcement
 
@@ -167,7 +169,7 @@ Agent identity is extracted from the MCP `initialize` handshake and passed to tr
 
 Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallback. Destructive (Admin) tools are additionally subject to a sliding-window rate limiter (configurable `max_destructive_per_minute`). All allow/deny decisions are audit-logged via `tracing`.
 
-Key files: `crates/therminal-daemon/src/mcp.rs` (server), `crates/therminal-daemon/src/trust.rs` (enforcement + rate limiter).
+Key files: `crates/therminal-daemon/src/mcp.rs` (server), `crates/therminal-daemon/src/trust.rs` (enforcement + rate limiter), `crates/therminal-app/src/mcp_stdio.rs` (stdio bridge), `crates/therminal-core/src/config.rs` (`McpConfig`).
 
 ### Control Mode
 
@@ -181,7 +183,7 @@ TOML-based config with hot-reload, implemented in `therminal-core`.
 
 Location: `therminal_runtime::paths::config_dir() / "therminal.toml"` (e.g. `~/.config/therminal/therminal.toml` on Linux).
 
-Sections: `[general]` (window, scrollback, shell), `[font]` (family, size, line_height_scale), `[colors]` (hex overrides for palette), `[keybindings]` (key/action pairs), `[profiles]` (named session profiles), `[trust]` (agent trust tiers).
+Sections: `[general]` (window, scrollback, shell), `[font]` (family, size, line_height_scale), `[colors]` (hex overrides for palette), `[keybindings]` (key/action pairs), `[profiles]` (named session profiles), `[trust]` (agent trust tiers), `[mcp]` (MCP server enable/disable, socket path).
 
 All fields have sensible defaults matching the current hardcoded values. Missing fields fall back to defaults. Invalid TOML logs a warning and uses full defaults.
 
@@ -236,12 +238,13 @@ Therminal runs fine on WSL2. The quirks below are documented for future contribu
 ### Module Size
 Prefer small, focused modules over large monolithic files. When a file exceeds ~500 lines, consider splitting it into submodules with a clear single responsibility each. Use `mod.rs` or named modules to organize.
 
-For example, `therminal-app/src/window.rs` is overdue for splitting — mouse handling, keybinding dispatch, chrome rendering, and pane management should each be separate modules.
+`therminal-app/src/window/` was split this way: `mod.rs` (event loop), `mouse.rs`, `keybindings.rs`, `chrome.rs`, `help_overlay.rs`, `pane_ops.rs`, `render.rs`.
 
 ### General
 - Keep functions short and focused — if a function needs a section comment, it's probably a candidate for extraction
 - No premature abstraction, but do extract when the same pattern appears in 3+ places
 - Rust idioms: prefer `?` over `.unwrap()`, use `thiserror` for public error types
+- **Config fields must be wired**: if a config struct has a field, code must read it. Don't declare config options that nothing uses — dead config misleads users and future contributors. `TherminalConfig` in `therminal-core` is the single source of truth; other crates consume it, not duplicate it.
 
 ## Building & Testing
 
