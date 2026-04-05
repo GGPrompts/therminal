@@ -1,6 +1,7 @@
 mod clipboard;
 mod color_mapping;
 mod grid_renderer;
+mod menu;
 mod pane;
 mod url_detection;
 mod window;

@@ -36,6 +36,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
+use crate::menu::ContextMenu;
 use crate::pane::{LayoutNode, PaneId, SplitDirection};
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
@@ -128,6 +129,9 @@ pub struct App {
 
     /// Whether the keybinding help overlay is currently visible.
     show_help_overlay: bool,
+
+    /// Active context menu, if one is open.
+    active_menu: Option<ContextMenu>,
 }
 
 impl App {
@@ -188,6 +192,7 @@ impl App {
             _config_watcher: config_watcher,
             last_split_direction: SplitDirection::Horizontal,
             show_help_overlay: false,
+            active_menu: None,
         }
     }
 
@@ -540,6 +545,19 @@ impl App {
             gpu.queue.submit(std::iter::once(encoder.finish()));
         }
 
+        // ── Context menu overlay (on top of everything) ────────────────
+        if let Some(ref menu) = self.active_menu {
+            crate::menu::render_context_menu(
+                menu,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
+        }
+
         output.present();
     }
 
@@ -659,6 +677,75 @@ impl App {
             if let Err(e) = pane.pty_writer.write_all(&bytes) {
                 warn!("Failed to write to pane {} PTY: {e}", pane.id);
             }
+        }
+    }
+
+    // ── Context menu ──────────────────────────────────────────────────
+
+    /// Open a context menu at the given pixel position.
+    fn open_context_menu(&mut self, px: f32, py: f32) {
+        let pane_id = match self.pane_at_position(px as f64, py as f64) {
+            Some(id) => id,
+            None => return,
+        };
+
+        let bindings = &self.config.keybindings.bindings;
+
+        // Check if the pane under the cursor has a selection.
+        let has_selection = if let Some(layout) = self.layout.as_ref() {
+            if let Some(pane) = layout.find_pane(pane_id) {
+                let term_guard = pane.term.lock();
+                term_guard
+                    .selection_to_string()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let menu = if has_selection {
+            let text = self
+                .layout
+                .as_ref()
+                .and_then(|l| l.find_pane(pane_id))
+                .and_then(|p| p.term.lock().selection_to_string())
+                .unwrap_or_default();
+            crate::menu::build_selection_menu(text, bindings, (px, py))
+        } else {
+            crate::menu::build_pane_menu(pane_id, bindings, (px, py))
+        };
+
+        self.active_menu = Some(menu);
+    }
+
+    /// Execute the currently selected menu action and close the menu.
+    fn execute_menu_action(&mut self) {
+        let action = match self.active_menu.as_ref().and_then(|m| m.selected_action()) {
+            Some(a) => a,
+            None => {
+                self.active_menu = None;
+                return;
+            }
+        };
+        self.active_menu = None;
+
+        match action {
+            KeyAction::SplitHorizontal => self.split_focused_pane(SplitDirection::Horizontal),
+            KeyAction::SplitVertical => self.split_focused_pane(SplitDirection::Vertical),
+            KeyAction::SplitAuto => self.split_focused_pane_auto(),
+            KeyAction::ClosePane => self.close_focused_pane(),
+            KeyAction::Copy => self.copy_selection(),
+            KeyAction::Paste => self.paste_clipboard(),
+            _ => {
+                info!("menu action {:?} not handled", action);
+            }
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -890,10 +977,38 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                self.handle_cursor_moved(position);
+                // Update cursor position for menu hover tracking.
+                self.cursor_position = Some((position.x, position.y));
+                if self.active_menu.is_some() {
+                    if let Some(gpu) = self.gpu.as_ref() {
+                        let menu = self.active_menu.as_mut().unwrap();
+                        let geo = menu.geometry(gpu.config.width as f32, gpu.config.height as f32);
+                        let hovered = menu.item_at_position(
+                            position.x as f32,
+                            position.y as f32,
+                            geo.x,
+                            geo.y,
+                            geo.width,
+                            geo.item_height,
+                            geo.section_gap,
+                        );
+                        if hovered != menu.selected_index {
+                            menu.selected_index = hovered;
+                            if let Some(w) = self.window.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                } else {
+                    self.handle_cursor_moved(position);
+                }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // Ignore scroll when context menu is open.
+                if self.active_menu.is_some() {
+                    return;
+                }
                 self.handle_mouse_wheel(delta);
             }
 
@@ -908,6 +1023,58 @@ impl ApplicationHandler<UserEvent> for App {
                         w.request_redraw();
                     }
                     return;
+                }
+
+                // ── Context menu interception ──────────────────────────────
+                if self.active_menu.is_some() && state == ElementState::Pressed {
+                    if button == MouseButton::Left {
+                        if let Some((px, py)) = self.cursor_position {
+                            let menu = self.active_menu.as_ref().unwrap();
+                            let gpu = self.gpu.as_ref().unwrap();
+                            let geo =
+                                menu.geometry(gpu.config.width as f32, gpu.config.height as f32);
+                            if menu.contains_point(px as f32, py as f32, geo.width, geo.height) {
+                                // Click inside menu -- select and execute.
+                                if let Some(idx) = menu.item_at_position(
+                                    px as f32,
+                                    py as f32,
+                                    geo.x,
+                                    geo.y,
+                                    geo.width,
+                                    geo.item_height,
+                                    geo.section_gap,
+                                ) {
+                                    self.active_menu.as_mut().unwrap().selected_index = Some(idx);
+                                    self.execute_menu_action();
+                                }
+                            } else {
+                                // Click outside menu -- close it.
+                                self.active_menu = None;
+                            }
+                        } else {
+                            self.active_menu = None;
+                        }
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    // Right-click while menu is open: close and re-open at new position.
+                    if button == MouseButton::Right {
+                        self.active_menu = None;
+                        // Fall through to open a new menu below.
+                    }
+                }
+
+                // ── Right-click: open context menu ─────────────────────────
+                if state == ElementState::Pressed && button == MouseButton::Right {
+                    if let Some((px, py)) = self.cursor_position {
+                        self.open_context_menu(px as f32, py as f32);
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                 }
 
                 // Header button click detection (only when multiple panes).
@@ -963,6 +1130,32 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                 ..
             } => {
+                // ── Context menu keyboard navigation ───────────────────
+                if self.active_menu.is_some() {
+                    match &key_event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.active_menu = None;
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.active_menu.as_mut().unwrap().move_up();
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            self.active_menu.as_mut().unwrap().move_down();
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            self.execute_menu_action();
+                        }
+                        _ => {
+                            // Any other key closes the menu.
+                            self.active_menu = None;
+                        }
+                    }
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
                 // When help overlay is visible, any key dismisses it.
                 if self.show_help_overlay {
                     self.show_help_overlay = false;
