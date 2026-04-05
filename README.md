@@ -4,7 +4,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-**Active development — Phase 0 and Phase 1 complete.**
+**Active development — Phase 0, 1, and 2 complete.**
 
 What works today:
 - GPU-accelerated terminal rendering (wgpu + glyphon + cosmic-text)
@@ -16,8 +16,13 @@ What works today:
 - Output cadence analysis — distinguishes human typing from agent output
 - Clipboard via arboard + OSC 52
 - URL detection and cross-platform runtime paths
+- Session daemon with socket-as-lock lifecycle and zero-downtime handoff
+- IPC protocol (MessagePack framing, multiplexed request/response, event streaming)
+- Split panes with binary layout tree and keyboard shortcuts
+- TOML config with hot-reload via file watcher
+- Control mode (tmux -CC style machine-readable protocol)
 
-Next: Phase 2 (Session Daemon + Multiplexing).
+Next: Phase 3 (AI Detection + Hotspots).
 
 ## Building
 
