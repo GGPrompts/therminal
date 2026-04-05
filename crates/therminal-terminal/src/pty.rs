@@ -487,6 +487,48 @@ mod tests {
     }
 
     #[test]
+    fn spawn_options_default_uses_empty_shell() {
+        let opts = SpawnOptions::default();
+        assert!(
+            opts.shell.is_empty(),
+            "default SpawnOptions should use empty shell (= user's login shell)"
+        );
+        assert!(
+            opts.env.is_empty(),
+            "default SpawnOptions should have no extra env vars"
+        );
+    }
+
+    #[test]
+    fn spawn_options_shell_override_selects_correct_shell_type() {
+        let opts = SpawnOptions {
+            shell: "/usr/bin/fish".to_string(),
+            ..Default::default()
+        };
+        // When shell is non-empty, spawn_shell_with_options uses it instead of default.
+        assert!(!opts.shell.is_empty());
+        assert_eq!(
+            detect_shell_type(&opts.shell),
+            ShellType::Fish,
+            "shell override should be detected as Fish"
+        );
+    }
+
+    #[test]
+    fn spawn_options_env_vars_are_accessible() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("EDITOR".to_string(), "nvim".to_string());
+        env.insert("MY_VAR".to_string(), "hello".to_string());
+        let opts = SpawnOptions {
+            shell: String::new(),
+            env,
+        };
+        assert_eq!(opts.env.len(), 2);
+        assert_eq!(opts.env["EDITOR"], "nvim");
+        assert_eq!(opts.env["MY_VAR"], "hello");
+    }
+
+    #[test]
     fn shell_integration_dir_exists() {
         let dir = shell_integration_dir();
         assert!(

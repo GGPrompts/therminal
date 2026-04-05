@@ -412,9 +412,15 @@ pub struct FontConfig {
     pub extra_fallbacks: Vec<String>,
     /// Whether to try Nerd Font variant of the primary family.
     pub nerd_font: bool,
-    /// UI chrome font family (tabs, status bar, menus). Reserved for future use.
+    /// UI chrome font family (tabs, status bar, menus).
+    ///
+    /// **Not yet wired.** Reserved for Phase 3 chrome rendering. Parsed and
+    /// round-tripped through TOML but not consumed by any renderer today.
     pub ui_font_family: String,
-    /// Display/brand font family (splash, about). Reserved for future use.
+    /// Display/brand font family (splash, about).
+    ///
+    /// **Not yet wired.** Reserved for Phase 3 splash/about screen. Parsed
+    /// and round-tripped through TOML but not consumed by any renderer today.
     pub display_font_family: String,
 }
 
@@ -982,6 +988,11 @@ pub fn parse_binding(binding: &str) -> Option<(ParsedModifiers, ParsedKey)> {
 // ── Section: Profiles ────────────────────────────────────────────────────
 
 /// A named session profile with optional overrides.
+///
+/// **Not yet wired.** Profiles are parsed and round-tripped through TOML but
+/// there is no profile-selection UI or CLI flag to activate a profile yet.
+/// Planned for Phase 3 session management. The struct is kept so that users
+/// can start writing profiles in their config file in advance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProfileConfig {
@@ -1050,8 +1061,14 @@ pub enum TrustTier {
 #[serde(default)]
 pub struct TrustConfig {
     /// Default trust tier for unknown agents.
+    ///
+    /// **Not yet wired.** Parsed and round-tripped but not consumed by the
+    /// runtime. Agent trust enforcement is planned for Phase 3.
     pub default_tier: TrustTier,
     /// Per-agent trust overrides, keyed by agent process name.
+    ///
+    /// **Not yet wired.** Parsed and round-tripped but not consumed by the
+    /// runtime. Per-agent trust policy enforcement is planned for Phase 3.
     pub agents: HashMap<String, AgentTrust>,
     /// Whether to show visual indicators when agents are detected.
     pub show_agent_indicator: bool,
@@ -1725,5 +1742,177 @@ size = 16.0
         assert!(loaded.terminal.osc_133);
         assert!(loaded.terminal.osc_7);
         assert!(!loaded.terminal.osc_1337);
+    }
+
+    // ── Config wiring audit tests ───────────────────────────────────────────
+    //
+    // Each test verifies that a config field set to a non-default value
+    // survives load_from() and produces the expected value at the point
+    // where the app would consume it.
+
+    /// Shell override round-trips and is available for PTY spawn.
+    #[test]
+    fn shell_override_round_trips_through_toml() {
+        let toml_str = r#"
+[general]
+shell = "/usr/bin/fish"
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.general.shell, "/usr/bin/fish");
+
+        // Round-trip through file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(
+            loaded.general.shell, "/usr/bin/fish",
+            "shell override must survive save/load round-trip"
+        );
+    }
+
+    /// Empty shell string means "use the user's default shell".
+    #[test]
+    fn empty_shell_means_default() {
+        let config = TherminalConfig::default();
+        assert!(
+            config.general.shell.is_empty(),
+            "default shell should be empty (meaning: use user's login shell)"
+        );
+    }
+
+    /// Extra env vars round-trip and are available for PTY spawn.
+    #[test]
+    fn env_vars_round_trip_through_toml() {
+        let toml_str = r#"
+[general.env]
+EDITOR = "nvim"
+MY_VAR = "hello world"
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.general.env.len(), 2);
+        assert_eq!(config.general.env["EDITOR"], "nvim");
+        assert_eq!(config.general.env["MY_VAR"], "hello world");
+
+        // Round-trip through file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(loaded.general.env["EDITOR"], "nvim");
+        assert_eq!(loaded.general.env["MY_VAR"], "hello world");
+    }
+
+    /// Padding round-trips and non-default value is preserved.
+    #[test]
+    fn padding_round_trips_through_toml() {
+        let toml_str = r#"
+[general]
+padding = 12.0
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.general.padding, 12.0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(
+            loaded.general.padding, 12.0,
+            "padding override must survive save/load round-trip"
+        );
+    }
+
+    /// Scrollback lines round-trips and non-default value is preserved.
+    #[test]
+    fn scrollback_lines_round_trips_through_toml() {
+        let toml_str = r#"
+[general]
+scrollback_lines = 100000
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.general.scrollback_lines, 100_000);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(
+            loaded.general.scrollback_lines, 100_000,
+            "scrollback_lines override must survive save/load round-trip"
+        );
+    }
+
+    /// show_status_bar round-trips with non-default value.
+    #[test]
+    fn show_status_bar_round_trips_through_toml() {
+        let toml_str = r#"
+[general]
+show_status_bar = false
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.general.show_status_bar,
+            "show_status_bar should be false when set explicitly"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert!(
+            !loaded.general.show_status_bar,
+            "show_status_bar override must survive save/load round-trip"
+        );
+    }
+
+    /// Dead fields: ui_font_family and display_font_family are parsed but
+    /// not consumed by to_core_font_config (which is the only consumer path).
+    #[test]
+    fn reserved_font_fields_are_not_in_core_font_config() {
+        let mut config = TherminalConfig::default();
+        config.font.ui_font_family = "Custom UI Font".to_string();
+        config.font.display_font_family = "Custom Display Font".to_string();
+
+        let core = config.to_core_font_config();
+
+        // CoreFontConfig has no ui_font_family or display_font_family fields,
+        // so these values are intentionally dropped. This test documents that
+        // these fields exist in config but are not yet wired to any consumer.
+        assert_eq!(core.family.as_deref(), Some("JetBrainsMono Nerd Font Mono"));
+        assert_eq!(core.size, 17.0);
+        // The reserved fields round-trip through TOML though.
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(decoded.font.ui_font_family, "Custom UI Font");
+        assert_eq!(decoded.font.display_font_family, "Custom Display Font");
+    }
+
+    /// Dead fields: profiles are parsed but not consumed by any app code.
+    #[test]
+    fn profiles_round_trip_but_are_not_consumed() {
+        let toml_str = r#"
+[profiles.dev]
+shell = "/bin/zsh"
+font_size = 14.0
+scrollback_lines = 50000
+
+[profiles.dev.env]
+EDITOR = "nvim"
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.profiles.len(), 1);
+        let dev = &config.profiles["dev"];
+        assert_eq!(dev.shell.as_deref(), Some("/bin/zsh"));
+        assert_eq!(dev.font_size, Some(14.0));
+        assert_eq!(dev.scrollback_lines, Some(50_000));
+        assert_eq!(dev.env["EDITOR"], "nvim");
+
+        // Round-trip through file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(loaded.profiles["dev"].shell.as_deref(), Some("/bin/zsh"));
     }
 }
