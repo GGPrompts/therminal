@@ -246,13 +246,29 @@ impl ColorsConfig {
 
 // ── Section: Keybindings ─────────────────────────────────────────────────
 
+/// Typed action for a keybinding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyAction {
+    /// Copy selected text to the clipboard.
+    Copy,
+    /// Paste text from the clipboard.
+    Paste,
+    /// Increase the font size by one step.
+    FontSizeUp,
+    /// Decrease the font size by one step.
+    FontSizeDown,
+    /// Reset the font size to the configured default.
+    FontSizeReset,
+}
+
 /// A single keybinding entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keybinding {
     /// Key combination (e.g. "ctrl+shift+c", "ctrl+plus").
     pub key: String,
-    /// Action name (e.g. "copy", "paste", "font_size_up").
-    pub action: String,
+    /// Action to perform when this keybinding is triggered.
+    pub action: KeyAction,
 }
 
 /// Keybinding configuration.
@@ -269,23 +285,23 @@ impl Default for KeybindingsConfig {
             bindings: vec![
                 Keybinding {
                     key: "ctrl+shift+c".to_string(),
-                    action: "copy".to_string(),
+                    action: KeyAction::Copy,
                 },
                 Keybinding {
                     key: "ctrl+shift+v".to_string(),
-                    action: "paste".to_string(),
+                    action: KeyAction::Paste,
                 },
                 Keybinding {
                     key: "ctrl+plus".to_string(),
-                    action: "font_size_up".to_string(),
+                    action: KeyAction::FontSizeUp,
                 },
                 Keybinding {
                     key: "ctrl+minus".to_string(),
-                    action: "font_size_down".to_string(),
+                    action: KeyAction::FontSizeDown,
                 },
                 Keybinding {
                     key: "ctrl+0".to_string(),
-                    action: "font_size_reset".to_string(),
+                    action: KeyAction::FontSizeReset,
                 },
             ],
         }
@@ -312,6 +328,18 @@ pub struct ProfileConfig {
 
 // ── Section: Trust ───────────────────────────────────────────────────────
 
+/// Trust tier assigned to an AI agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustTier {
+    /// Minimal permissions; agent actions are heavily restricted.
+    Sandboxed,
+    /// Actions require user confirmation.
+    Supervised,
+    /// Full access; agent is treated as trusted.
+    Trusted,
+}
+
 /// Agent trust tier configuration.
 ///
 /// Controls what level of access AI agents have when detected in the
@@ -320,8 +348,7 @@ pub struct ProfileConfig {
 #[serde(default)]
 pub struct TrustConfig {
     /// Default trust tier for unknown agents.
-    /// Values: "sandboxed", "supervised", "trusted"
-    pub default_tier: String,
+    pub default_tier: TrustTier,
     /// Per-agent trust overrides, keyed by agent process name.
     pub agents: HashMap<String, AgentTrust>,
     /// Whether to show visual indicators when agents are detected.
@@ -331,7 +358,7 @@ pub struct TrustConfig {
 impl Default for TrustConfig {
     fn default() -> Self {
         Self {
-            default_tier: "supervised".to_string(),
+            default_tier: TrustTier::Supervised,
             agents: HashMap::new(),
             show_agent_indicator: true,
         }
@@ -341,8 +368,8 @@ impl Default for TrustConfig {
 /// Trust settings for a specific agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTrust {
-    /// Trust tier: "sandboxed", "supervised", or "trusted".
-    pub tier: String,
+    /// Trust tier for this agent.
+    pub tier: TrustTier,
     /// Optional list of allowed MCP tool patterns.
     pub allowed_tools: Option<Vec<String>>,
 }
@@ -360,7 +387,7 @@ mod tests {
         let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(decoded.general.title, "Therminal");
         assert_eq!(decoded.font.size, 17.0);
-        assert_eq!(decoded.trust.default_tier, "supervised");
+        assert_eq!(decoded.trust.default_tier, TrustTier::Supervised);
     }
 
     #[test]
@@ -457,9 +484,9 @@ tier = "trusted"
 allowed_tools = ["read_file", "write_file"]
 "#;
         let config: TherminalConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.trust.default_tier, "sandboxed");
+        assert_eq!(config.trust.default_tier, TrustTier::Sandboxed);
         assert!(!config.trust.show_agent_indicator);
-        assert_eq!(config.trust.agents["claude"].tier, "trusted");
+        assert_eq!(config.trust.agents["claude"].tier, TrustTier::Trusted);
     }
 
     #[test]
@@ -492,7 +519,7 @@ allowed_tools = ["read_file", "write_file"]
     #[test]
     fn keybindings_default_has_copy_paste() {
         let kb = KeybindingsConfig::default();
-        assert!(kb.bindings.iter().any(|b| b.action == "copy"));
-        assert!(kb.bindings.iter().any(|b| b.action == "paste"));
+        assert!(kb.bindings.iter().any(|b| b.action == KeyAction::Copy));
+        assert!(kb.bindings.iter().any(|b| b.action == KeyAction::Paste));
     }
 }

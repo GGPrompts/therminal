@@ -18,29 +18,33 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, warn};
 
 use therminal_protocol::daemon::{
-    decode_ipc, decode_response, encode_ipc, encode_request, DaemonEvent, DaemonRequest,
-    DaemonResponse, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE,
+    decode_ipc, encode_ipc, DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse,
+    MAX_FRAME_SIZE,
 };
 
 /// Default timeout for daemon communication.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
-// ── Legacy single-shot API (backward-compatible) ──────────────────────────
+// ── Single-shot IPC helpers ───────────────────────────────────────────────
 
-/// Send a legacy request to the daemon and read the response.
+/// Send a single IPC request to the daemon and return the response.
+///
+/// Opens a fresh connection, sends the request, reads one response frame,
+/// then closes the connection. Suitable for one-off operations such as
+/// health checks and shutdown requests.
 ///
 /// Returns `Err` if the socket doesn't exist, the daemon is unreachable,
 /// or the response times out (2s default).
-pub async fn send_request(socket_path: &Path, request: &DaemonRequest) -> Result<DaemonResponse> {
+pub async fn send_request(socket_path: &Path, request: IpcRequest) -> Result<IpcResponse> {
     send_request_with_timeout(socket_path, request, DEFAULT_TIMEOUT).await
 }
 
-/// Send a legacy request with a custom timeout.
+/// Send a single IPC request with a custom timeout.
 pub async fn send_request_with_timeout(
     socket_path: &Path,
-    request: &DaemonRequest,
+    request: IpcRequest,
     timeout: Duration,
-) -> Result<DaemonResponse> {
+) -> Result<IpcResponse> {
     let result = tokio::time::timeout(timeout, async {
         let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
             format!(
@@ -49,15 +53,19 @@ pub async fn send_request_with_timeout(
             )
         })?;
 
-        // Send request
-        let req_bytes = encode_request(request).context("failed to encode request")?;
+        // Send request wrapped in an IpcMessage envelope (request_id = 1)
+        let msg = IpcMessage::Request {
+            request_id: 1,
+            payload: request,
+        };
+        let req_bytes = encode_ipc(&msg).context("failed to encode request")?;
         stream
             .write_all(&req_bytes)
             .await
             .context("failed to send request")?;
         stream.flush().await.ok();
 
-        // Read response
+        // Read one response frame
         let mut len_buf = [0u8; 4];
         stream
             .read_exact(&mut len_buf)
@@ -75,9 +83,13 @@ pub async fn send_request_with_timeout(
             .await
             .context("failed to read response payload")?;
 
-        let response = decode_response(&payload).context("failed to decode response")?;
-        debug!(?response, "received daemon response");
-        Ok(response)
+        match decode_ipc(&payload).context("failed to decode response")? {
+            IpcMessage::Response { payload, .. } => {
+                debug!(?payload, "received daemon response");
+                Ok(payload)
+            }
+            other => anyhow::bail!("unexpected message type from daemon: {other:?}"),
+        }
     })
     .await;
 
@@ -88,13 +100,13 @@ pub async fn send_request_with_timeout(
 }
 
 /// Ping the daemon and return the Pong response, or an error if unreachable.
-pub async fn ping(socket_path: &Path) -> Result<DaemonResponse> {
-    send_request(socket_path, &DaemonRequest::Ping).await
+pub async fn ping(socket_path: &Path) -> Result<IpcResponse> {
+    send_request(socket_path, IpcRequest::Ping).await
 }
 
 /// Request graceful shutdown of the daemon.
-pub async fn request_shutdown(socket_path: &Path) -> Result<DaemonResponse> {
-    send_request(socket_path, &DaemonRequest::GracefulShutdown).await
+pub async fn request_shutdown(socket_path: &Path) -> Result<IpcResponse> {
+    send_request(socket_path, IpcRequest::GracefulShutdown).await
 }
 
 // ── Full IPC client ───────────────────────────────────────────────────────

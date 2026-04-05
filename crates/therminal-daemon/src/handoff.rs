@@ -3,19 +3,15 @@
 //! When a new build detects a running daemon with a different BUILD_HASH,
 //! it performs a graceful handoff:
 //!
-//! 1. New daemon binds a temporary socket (`daemon.sock.new`)
-//! 2. Sends `GracefulShutdown` to the old daemon
-//! 3. Waits for old daemon to drain and release `daemon.sock`
-//! 4. Atomic rename: `daemon.sock.new` -> `daemon.sock`
-//! 5. Emits `HandoffComplete`
-//!
-//! On crash or timeout (5s), rolls back: removes `.sock.new`, keeps old daemon.
+//! 1. Sends `GracefulShutdown` to the old daemon
+//! 2. Waits for old daemon to drain and release `daemon.sock`
+//! 3. New daemon binds the canonical socket path
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::client;
 
@@ -40,7 +36,7 @@ pub enum DaemonCheck {
 /// - Returns `StartFresh` if no daemon is reachable.
 pub async fn check_daemon(socket_path: &Path, our_build_hash: &str) -> DaemonCheck {
     match client::ping(socket_path).await {
-        Ok(therminal_protocol::DaemonResponse::Pong { build_hash, .. }) => {
+        Ok(therminal_protocol::IpcResponse::Pong { build_hash, .. }) => {
             if build_hash == our_build_hash {
                 info!(build_hash = %our_build_hash, "existing daemon matches our build");
                 DaemonCheck::Reuse
@@ -76,7 +72,7 @@ pub async fn perform_handoff(socket_path: &Path) -> Result<()> {
 
     // Send graceful shutdown to old daemon
     match client::request_shutdown(socket_path).await {
-        Ok(therminal_protocol::DaemonResponse::ShutdownAck) => {
+        Ok(therminal_protocol::IpcResponse::ShutdownAck) => {
             info!("old daemon acknowledged shutdown");
         }
         Ok(other) => {
@@ -113,42 +109,4 @@ pub async fn perform_handoff(socket_path: &Path) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-/// Perform atomic socket rename for zero-downtime handoff.
-///
-/// The new daemon binds to `<socket>.new`, then once the old daemon is gone,
-/// renames it to the canonical path.
-pub fn atomic_socket_rename(temp_path: &Path, canonical_path: &Path) -> Result<()> {
-    std::fs::rename(temp_path, canonical_path).with_context(|| {
-        format!(
-            "atomic rename failed: {} -> {}",
-            temp_path.display(),
-            canonical_path.display()
-        )
-    })?;
-    info!(
-        from = %temp_path.display(),
-        to = %canonical_path.display(),
-        "atomic socket rename complete"
-    );
-    Ok(())
-}
-
-/// Rollback a failed handoff by cleaning up the temporary socket.
-pub fn rollback_handoff(temp_path: &Path) {
-    if temp_path.exists() {
-        if let Err(e) = std::fs::remove_file(temp_path) {
-            error!(error = %e, path = %temp_path.display(), "failed to clean up temp socket during rollback");
-        } else {
-            info!(path = %temp_path.display(), "handoff rollback: temp socket cleaned up");
-        }
-    }
-}
-
-/// Get the temporary socket path used during handoff.
-pub fn temp_socket_path(socket_path: &Path) -> PathBuf {
-    let mut temp = socket_path.as_os_str().to_owned();
-    temp.push(".new");
-    PathBuf::from(temp)
 }

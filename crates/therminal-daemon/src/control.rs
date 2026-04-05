@@ -31,12 +31,14 @@
 
 use std::sync::Arc;
 
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use therminal_protocol::daemon::DaemonEvent;
+use therminal_protocol::{PaneId, SessionId};
 
 use crate::lifecycle::Lifecycle;
 use crate::session::SessionManager;
@@ -49,17 +51,17 @@ pub enum ControlCommand {
     /// `list-sessions`
     ListSessions,
     /// `send-keys PANE_ID KEYS...`
-    SendKeys { pane_id: String, keys: String },
+    SendKeys { pane_id: PaneId, keys: String },
     /// `split-pane [-h|-v] PANE_ID`
-    SplitPane { pane_id: String, horizontal: bool },
+    SplitPane { pane_id: PaneId, horizontal: bool },
     /// `select-pane PANE_ID`
-    SelectPane { pane_id: String },
+    SelectPane { pane_id: PaneId },
     /// `capture-pane PANE_ID [-p]`
-    CapturePane { pane_id: String, print_mode: bool },
+    CapturePane { pane_id: PaneId, print_mode: bool },
     /// `kill-pane PANE_ID`
-    KillPane { pane_id: String },
+    KillPane { pane_id: PaneId },
     /// `list-panes SESSION_ID`
-    ListPanes { session_id: String },
+    ListPanes { session_id: SessionId },
     /// `ping`
     Ping,
     /// `exit`
@@ -113,7 +115,9 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
                     message: "usage: send-keys PANE_ID KEYS...".to_string(),
                 });
             }
-            let pane_id = parts[1].to_string();
+            let pane_id: PaneId = parts[1].parse().map_err(|_| ParseError {
+                message: format!("invalid pane ID: {}", parts[1]),
+            })?;
             // Everything after pane_id is the keys (rejoin with spaces)
             let keys = parts[2..].join(" ");
             Ok(ControlCommand::SendKeys { pane_id, keys })
@@ -133,7 +137,9 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
                         i += 1;
                     }
                     _ => {
-                        pane_id = Some(parts[i].to_string());
+                        pane_id = Some(parts[i].parse::<PaneId>().map_err(|_| ParseError {
+                            message: format!("invalid pane ID: {}", parts[i]),
+                        })?);
                         i += 1;
                     }
                 }
@@ -152,9 +158,10 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
                     message: "usage: select-pane PANE_ID".to_string(),
                 });
             }
-            Ok(ControlCommand::SelectPane {
-                pane_id: parts[1].to_string(),
-            })
+            let pane_id: PaneId = parts[1].parse().map_err(|_| ParseError {
+                message: format!("invalid pane ID: {}", parts[1]),
+            })?;
+            Ok(ControlCommand::SelectPane { pane_id })
         }
         "capture-pane" => {
             if parts.len() < 2 {
@@ -162,7 +169,9 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
                     message: "usage: capture-pane PANE_ID [-p]".to_string(),
                 });
             }
-            let pane_id = parts[1].to_string();
+            let pane_id: PaneId = parts[1].parse().map_err(|_| ParseError {
+                message: format!("invalid pane ID: {}", parts[1]),
+            })?;
             let print_mode = parts[2..].contains(&"-p");
             Ok(ControlCommand::CapturePane {
                 pane_id,
@@ -175,9 +184,10 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
                     message: "usage: kill-pane PANE_ID".to_string(),
                 });
             }
-            Ok(ControlCommand::KillPane {
-                pane_id: parts[1].to_string(),
-            })
+            let pane_id: PaneId = parts[1].parse().map_err(|_| ParseError {
+                message: format!("invalid pane ID: {}", parts[1]),
+            })?;
+            Ok(ControlCommand::KillPane { pane_id })
         }
         "list-panes" => {
             if parts.len() < 2 {
@@ -185,9 +195,10 @@ pub fn parse_command(line: &str) -> Result<ControlCommand, ParseError> {
                     message: "usage: list-panes SESSION_ID".to_string(),
                 });
             }
-            Ok(ControlCommand::ListPanes {
-                session_id: parts[1].to_string(),
-            })
+            let session_id: SessionId = parts[1].parse().map_err(|_| ParseError {
+                message: format!("invalid session ID: {}", parts[1]),
+            })?;
+            Ok(ControlCommand::ListPanes { session_id })
         }
         "ping" => Ok(ControlCommand::Ping),
         "exit" => Ok(ControlCommand::Exit),
@@ -248,9 +259,13 @@ pub async fn handle_control_connection(
     let mut request_id: u64 = 0;
 
     // Send initial greeting
-    let greeting = format!(
-        "%begin 0\n{{\"mode\":\"control\",\"version\":\"{version}\",\"build_hash\":\"{build_hash}\"}}\n%end 0\n"
-    );
+    let greeting_body = json!({
+        "mode": "control",
+        "version": version,
+        "build_hash": build_hash,
+    })
+    .to_string();
+    let greeting = format!("%begin 0\n{greeting_body}\n%end 0\n");
     if writer.write_all(greeting.as_bytes()).await.is_err() {
         return;
     }
@@ -336,17 +351,21 @@ async fn dispatch_control_command(
     match cmd {
         ControlCommand::Ping => {
             let mgr = session_mgr.lock().await;
-            Ok(format!(
-                "{{\"status\":\"ok\",\"version\":\"{}\",\"build_hash\":\"{}\",\"uptime_secs\":{},\"sessions\":{}}}",
-                version, build_hash, lifecycle.uptime_secs(), mgr.session_count()
-            ))
+            Ok(json!({
+                "status": "ok",
+                "version": version,
+                "build_hash": build_hash,
+                "uptime_secs": lifecycle.uptime_secs(),
+                "sessions": mgr.session_count(),
+            })
+            .to_string())
         }
         ControlCommand::NewSession { name } => {
             let mut mgr = session_mgr.lock().await;
             match mgr.create_session(name.clone()) {
                 Ok(session_id) => {
                     lifecycle.set_session_count(mgr.session_count());
-                    Ok(format!("{{\"session_id\":\"{session_id}\"}}"))
+                    Ok(json!({ "session_id": session_id }).to_string())
                 }
                 Err(e) => Err(format!("failed to create session: {e}")),
             }
@@ -354,33 +373,32 @@ async fn dispatch_control_command(
         ControlCommand::ListSessions => {
             let mgr = session_mgr.lock().await;
             let ids = mgr.list_sessions();
-            let json_ids: Vec<String> = ids.iter().map(|id| format!("\"{id}\"")).collect();
-            Ok(format!("[{}]", json_ids.join(",")))
+            Ok(json!(ids).to_string())
         }
         ControlCommand::SendKeys { pane_id, keys } => {
             let mut mgr = session_mgr.lock().await;
-            mgr.send_keys_to_pane(pane_id, keys.as_bytes())?;
-            Ok(format!("{{\"pane_id\":\"{pane_id}\",\"sent\":true}}"))
+            mgr.send_keys_to_pane(*pane_id, keys.as_bytes())?;
+            Ok(json!({ "pane_id": pane_id, "sent": true }).to_string())
         }
         ControlCommand::SplitPane {
             pane_id,
             horizontal,
         } => {
             let mut mgr = session_mgr.lock().await;
-            let new_id = mgr.split_pane(pane_id, *horizontal)?;
-            Ok(format!("{{\"new_pane_id\":\"{new_id}\"}}"))
+            let new_id = mgr.split_pane(*pane_id, *horizontal)?;
+            Ok(json!({ "new_pane_id": new_id }).to_string())
         }
         ControlCommand::SelectPane { pane_id } => {
             let mgr = session_mgr.lock().await;
-            mgr.select_pane(pane_id)?;
-            Ok(format!("{{\"pane_id\":\"{pane_id}\",\"selected\":true}}"))
+            mgr.select_pane(*pane_id)?;
+            Ok(json!({ "pane_id": pane_id, "selected": true }).to_string())
         }
         ControlCommand::CapturePane {
             pane_id,
             print_mode,
         } => {
             let mgr = session_mgr.lock().await;
-            let snap = mgr.capture_pane(pane_id)?;
+            let snap = mgr.capture_pane(*pane_id)?;
             let lines: Vec<String> = snap
                 .grid
                 .iter()
@@ -395,38 +413,39 @@ async fn dispatch_control_command(
                 Ok(lines.join("\n"))
             } else {
                 // JSON output
-                let json_lines: Vec<String> = lines
-                    .iter()
-                    .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")))
-                    .collect();
-                Ok(format!(
-                    "{{\"pane_id\":\"{}\",\"cols\":{},\"rows\":{},\"cursor_col\":{},\"cursor_line\":{},\"lines\":[{}]}}",
-                    snap.pane_id, snap.cols, snap.rows, snap.cursor_col, snap.cursor_line,
-                    json_lines.join(",")
-                ))
+                Ok(json!({
+                    "pane_id": snap.pane_id,
+                    "cols": snap.cols,
+                    "rows": snap.rows,
+                    "cursor_col": snap.cursor_col,
+                    "cursor_line": snap.cursor_line,
+                    "lines": lines,
+                })
+                .to_string())
             }
         }
         ControlCommand::KillPane { pane_id } => {
             let mut mgr = session_mgr.lock().await;
-            mgr.kill_pane(pane_id)?;
+            mgr.kill_pane(*pane_id)?;
             lifecycle.set_session_count(mgr.session_count());
-            Ok(format!("{{\"pane_id\":\"{pane_id}\",\"killed\":true}}"))
+            Ok(json!({ "pane_id": pane_id, "killed": true }).to_string())
         }
         ControlCommand::ListPanes { session_id } => {
             let mgr = session_mgr.lock().await;
-            match mgr.attach(session_id) {
+            match mgr.attach(*session_id) {
                 Some(snapshot) => {
-                    let pane_entries: Vec<String> = snapshot
+                    let pane_entries: Vec<serde_json::Value> = snapshot
                         .panes
                         .iter()
                         .map(|p| {
-                            format!(
-                                "{{\"pane_id\":\"{}\",\"cols\":{},\"rows\":{}}}",
-                                p.pane_id, p.cols, p.rows
-                            )
+                            json!({
+                                "pane_id": p.pane_id,
+                                "cols": p.cols,
+                                "rows": p.rows,
+                            })
                         })
                         .collect();
-                    Ok(format!("[{}]", pane_entries.join(",")))
+                    Ok(json!(pane_entries).to_string())
                 }
                 None => Err(format!("session not found: {session_id}")),
             }
@@ -481,9 +500,9 @@ mod tests {
     #[test]
     fn parse_send_keys() {
         assert_eq!(
-            parse_command("send-keys pane-123 ls -la").unwrap(),
+            parse_command("send-keys 123 ls -la").unwrap(),
             ControlCommand::SendKeys {
-                pane_id: "pane-123".to_string(),
+                pane_id: 123,
                 keys: "ls -la".to_string(),
             }
         );
@@ -491,15 +510,20 @@ mod tests {
 
     #[test]
     fn parse_send_keys_missing_args() {
-        assert!(parse_command("send-keys pane-123").is_err());
+        assert!(parse_command("send-keys 123").is_err());
+    }
+
+    #[test]
+    fn parse_send_keys_invalid_id() {
+        assert!(parse_command("send-keys not-a-number ls").is_err());
     }
 
     #[test]
     fn parse_split_pane_vertical() {
         assert_eq!(
-            parse_command("split-pane pane-123").unwrap(),
+            parse_command("split-pane 123").unwrap(),
             ControlCommand::SplitPane {
-                pane_id: "pane-123".to_string(),
+                pane_id: 123,
                 horizontal: false,
             }
         );
@@ -508,9 +532,9 @@ mod tests {
     #[test]
     fn parse_split_pane_horizontal() {
         assert_eq!(
-            parse_command("split-pane -h pane-123").unwrap(),
+            parse_command("split-pane -h 123").unwrap(),
             ControlCommand::SplitPane {
-                pane_id: "pane-123".to_string(),
+                pane_id: 123,
                 horizontal: true,
             }
         );
@@ -519,19 +543,17 @@ mod tests {
     #[test]
     fn parse_select_pane() {
         assert_eq!(
-            parse_command("select-pane pane-abc").unwrap(),
-            ControlCommand::SelectPane {
-                pane_id: "pane-abc".to_string(),
-            }
+            parse_command("select-pane 42").unwrap(),
+            ControlCommand::SelectPane { pane_id: 42 }
         );
     }
 
     #[test]
     fn parse_capture_pane_plain() {
         assert_eq!(
-            parse_command("capture-pane pane-abc").unwrap(),
+            parse_command("capture-pane 42").unwrap(),
             ControlCommand::CapturePane {
-                pane_id: "pane-abc".to_string(),
+                pane_id: 42,
                 print_mode: false,
             }
         );
@@ -540,9 +562,9 @@ mod tests {
     #[test]
     fn parse_capture_pane_print_mode() {
         assert_eq!(
-            parse_command("capture-pane pane-abc -p").unwrap(),
+            parse_command("capture-pane 42 -p").unwrap(),
             ControlCommand::CapturePane {
-                pane_id: "pane-abc".to_string(),
+                pane_id: 42,
                 print_mode: true,
             }
         );
@@ -551,20 +573,16 @@ mod tests {
     #[test]
     fn parse_kill_pane() {
         assert_eq!(
-            parse_command("kill-pane pane-xyz").unwrap(),
-            ControlCommand::KillPane {
-                pane_id: "pane-xyz".to_string(),
-            }
+            parse_command("kill-pane 99").unwrap(),
+            ControlCommand::KillPane { pane_id: 99 }
         );
     }
 
     #[test]
     fn parse_list_panes() {
         assert_eq!(
-            parse_command("list-panes sess-123").unwrap(),
-            ControlCommand::ListPanes {
-                session_id: "sess-123".to_string(),
-            }
+            parse_command("list-panes 123").unwrap(),
+            ControlCommand::ListPanes { session_id: 123 }
         );
     }
 
@@ -593,20 +611,18 @@ mod tests {
 
     #[test]
     fn format_session_created_notification() {
-        let evt = DaemonEvent::SessionCreated {
-            session_id: "sess-abc".to_string(),
-        };
-        assert_eq!(format_notification(&evt), "%session-changed sess-abc\n");
+        let evt = DaemonEvent::SessionCreated { session_id: 42 };
+        assert_eq!(format_notification(&evt), "%session-changed 42\n");
     }
 
     #[test]
     fn format_pane_output_notification() {
         let evt = DaemonEvent::PaneOutput {
-            session_id: "s1".to_string(),
-            pane_id: "p1".to_string(),
+            session_id: 1,
+            pane_id: 7,
             data: vec![65, 66],
         };
-        assert_eq!(format_notification(&evt), "%pane-output p1\n");
+        assert_eq!(format_notification(&evt), "%pane-output 7\n");
     }
 
     #[test]

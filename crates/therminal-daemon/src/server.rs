@@ -1,8 +1,7 @@
 //! Daemon IPC server.
 //!
 //! Listens on a Unix domain socket for IPC messages (request/response multiplexing,
-//! event subscriptions). Supports both the new `IpcMessage` envelope protocol and
-//! the legacy `DaemonRequest`/`DaemonResponse` framing for backward compatibility.
+//! event subscriptions) using the `IpcMessage` envelope protocol.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,8 +15,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use therminal_protocol::daemon::{
-    decode_ipc, decode_request, encode_response, DaemonEvent, DaemonRequest, DaemonResponse,
-    EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE,
+    decode_ipc, DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE,
 };
 
 use crate::control;
@@ -220,12 +218,11 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
 
 /// Handle a single client connection.
 ///
-/// The connection can operate in three modes:
+/// The connection can operate in two modes:
 /// 1. **Control mode**: Text-based protocol for programmatic control (tmux -CC style).
 ///    Detected when the first bytes are `mode: control\n`.
-/// 2. **IPC mode**: Multiple IpcMessage frames with request/response multiplexing
+/// 2. **IPC mode**: Multiple `IpcMessage` frames with request/response multiplexing
 ///    and optional event streaming.
-/// 3. **Legacy mode**: A single DaemonRequest frame followed by a DaemonResponse.
 ///
 /// Mode is detected by peeking at the first bytes on the connection.
 async fn handle_connection(
@@ -282,54 +279,25 @@ async fn handle_connection(
 
     let first_frame = payload;
 
-    // Try IPC protocol first
-    if let Ok(ipc_msg) = decode_ipc(&first_frame) {
-        debug!(conn_id, "IPC protocol detected");
-        return handle_ipc_connection(
-            &mut stream,
-            lifecycle,
-            build_hash,
-            version,
-            event_tx,
-            session_mgr,
-            conn_id,
-            ipc_msg,
-        )
-        .await;
-    }
-
-    // Fall back to legacy protocol
-    debug!(conn_id, "legacy protocol detected");
-    let request = decode_request(&first_frame).context("failed to decode legacy request")?;
-    let response = dispatch_legacy(&request, &lifecycle, &build_hash, &version).await;
-    let response_bytes = encode_response(&response).context("failed to encode response")?;
-    stream.write_all(&response_bytes).await?;
-    stream.flush().await.ok();
-    Ok(())
-}
-
-/// Dispatch a legacy DaemonRequest and return the DaemonResponse.
-async fn dispatch_legacy(
-    request: &DaemonRequest,
-    lifecycle: &Arc<Lifecycle>,
-    build_hash: &str,
-    version: &str,
-) -> DaemonResponse {
-    match request {
-        DaemonRequest::Ping => DaemonResponse::Pong {
-            build_hash: build_hash.to_string(),
-            uptime_secs: lifecycle.uptime_secs(),
-            sessions: lifecycle.session_count(),
-            version: version.to_string(),
-        },
-        DaemonRequest::GracefulShutdown => {
-            let lc = Arc::clone(lifecycle);
-            tokio::spawn(async move {
-                if let Err(e) = lc.initiate_shutdown().await {
-                    error!(error = %e, "shutdown failed");
-                }
-            });
-            DaemonResponse::ShutdownAck
+    // Decode as IPC message
+    match decode_ipc(&first_frame) {
+        Ok(ipc_msg) => {
+            debug!(conn_id, "IPC protocol detected");
+            handle_ipc_connection(
+                &mut stream,
+                lifecycle,
+                build_hash,
+                version,
+                event_tx,
+                session_mgr,
+                conn_id,
+                ipc_msg,
+            )
+            .await
+        }
+        Err(e) => {
+            warn!(conn_id, error = %e, "unrecognized frame, closing connection");
+            Ok(())
         }
     }
 }
@@ -532,7 +500,7 @@ async fn dispatch_ipc(
         }
         IpcRequest::GetSession { session_id } => {
             let mgr = session_mgr.lock().await;
-            match mgr.get_session_info(session_id) {
+            match mgr.get_session_info(*session_id) {
                 Some((id, name, created_at_secs)) => IpcResponse::SessionInfo {
                     session_id: id,
                     name,
@@ -558,10 +526,10 @@ async fn dispatch_ipc(
         }
         IpcRequest::DestroySession { session_id } => {
             let mut mgr = session_mgr.lock().await;
-            if mgr.destroy_session(session_id) {
+            if mgr.destroy_session(*session_id) {
                 lifecycle.set_session_count(mgr.session_count());
                 IpcResponse::SessionDestroyed {
-                    session_id: session_id.clone(),
+                    session_id: *session_id,
                 }
             } else {
                 IpcResponse::Error {
@@ -571,16 +539,14 @@ async fn dispatch_ipc(
         }
         IpcRequest::SendKeys { pane_id, keys } => {
             let mut mgr = session_mgr.lock().await;
-            match mgr.send_keys_to_pane(pane_id, keys) {
-                Ok(()) => IpcResponse::KeysSent {
-                    pane_id: pane_id.clone(),
-                },
+            match mgr.send_keys_to_pane(*pane_id, keys) {
+                Ok(()) => IpcResponse::KeysSent { pane_id: *pane_id },
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
         IpcRequest::CapturePane { pane_id } => {
             let mgr = session_mgr.lock().await;
-            match mgr.capture_pane(pane_id) {
+            match mgr.capture_pane(*pane_id) {
                 Ok(snap) => {
                     let lines: Vec<String> = snap
                         .grid
@@ -604,29 +570,25 @@ async fn dispatch_ipc(
             horizontal,
         } => {
             let mut mgr = session_mgr.lock().await;
-            match mgr.split_pane(pane_id, *horizontal) {
+            match mgr.split_pane(*pane_id, *horizontal) {
                 Ok(new_pane_id) => IpcResponse::PaneSplit { new_pane_id },
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
         IpcRequest::KillPane { pane_id } => {
             let mut mgr = session_mgr.lock().await;
-            match mgr.kill_pane(pane_id) {
+            match mgr.kill_pane(*pane_id) {
                 Ok(()) => {
                     lifecycle.set_session_count(mgr.session_count());
-                    IpcResponse::PaneKilled {
-                        pane_id: pane_id.clone(),
-                    }
+                    IpcResponse::PaneKilled { pane_id: *pane_id }
                 }
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
         IpcRequest::SelectPane { pane_id } => {
             let mgr = session_mgr.lock().await;
-            match mgr.select_pane(pane_id) {
-                Ok(()) => IpcResponse::PaneSelected {
-                    pane_id: pane_id.clone(),
-                },
+            match mgr.select_pane(*pane_id) {
+                Ok(()) => IpcResponse::PaneSelected { pane_id: *pane_id },
                 Err(e) => IpcResponse::Error { message: e },
             }
         }

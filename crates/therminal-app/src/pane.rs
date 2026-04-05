@@ -20,10 +20,9 @@ use tracing::{info, warn};
 
 use crate::grid_renderer::GridRenderer;
 
-// ── Re-export for window.rs ─────────────────────────────────────────────
+// ── Re-export canonical PaneId from protocol ────────────────────────────
 
-/// Unique identifier for a pane.
-pub type PaneId = u64;
+pub use therminal_protocol::PaneId;
 
 /// Direction of a split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

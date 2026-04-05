@@ -103,13 +103,25 @@ pub fn pidfile_path(name: &str) -> PathBuf {
 /// Return the Therminal resources directory.
 ///
 /// Contains shell integration scripts and other bundled assets.
-/// At runtime this is derived from the executable location:
-/// `<exe_dir>/../resources` (standard install layout) or
-/// `<workspace>/resources` during development.
 ///
-/// Falls back to `<data_dir>/resources` if neither of the above exists.
+/// Resolution order:
+/// 1. `THERMINAL_RESOURCES_DIR` env var (runtime override, useful for packaging
+///    and custom layouts — the Ghostty approach)
+/// 2. `<exe_dir>/../resources` (standard install layout)
+/// 3. `<exe_dir>/resources` (flat layout)
+/// 4. Compile-time workspace root via `CARGO_MANIFEST_DIR` (debug/dev builds
+///    under `cargo run`)
+/// 5. `<data_dir>/resources` (final fallback)
 pub fn resources_dir() -> PathBuf {
-    // 1. Try relative to executable: <exe_dir>/../resources
+    // 1. Runtime env var override — highest priority.
+    if let Ok(dir) = std::env::var("THERMINAL_RESOURCES_DIR") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return p;
+        }
+    }
+
+    // 2. Try relative to executable: <exe_dir>/../resources
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             let candidate = exe_dir.join("../resources").canonicalize().ok();
@@ -126,10 +138,25 @@ pub fn resources_dir() -> PathBuf {
         }
     }
 
-    // 2. Check CARGO_MANIFEST_DIR for dev builds (set at compile time via env!)
-    // This is handled by callers who can use env!("CARGO_MANIFEST_DIR") at compile time.
+    // 3. Compile-time fallback for dev builds (`cargo run` / `cargo test`).
+    //    CARGO_MANIFEST_DIR points to the crate directory; the workspace root
+    //    is two levels up (crates/therminal-runtime -> workspace root).
+    if cfg!(debug_assertions) {
+        if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+            let workspace_root = PathBuf::from(manifest_dir)
+                .join("../..")
+                .canonicalize()
+                .ok();
+            if let Some(root) = workspace_root {
+                let candidate = root.join("resources");
+                if candidate.is_dir() {
+                    return candidate;
+                }
+            }
+        }
+    }
 
-    // 3. Fallback: <data_dir>/resources
+    // 4. Fallback: <data_dir>/resources
     data_dir().join("resources")
 }
 
@@ -323,6 +350,43 @@ mod tests {
         assert!(
             runtime_dir().is_absolute(),
             "runtime_dir should be absolute"
+        );
+    }
+
+    #[test]
+    fn resources_dir_contains_shell_scripts() {
+        let dir = resources_dir();
+        assert!(
+            dir.is_dir(),
+            "resources_dir() should be an existing directory, got {dir:?}"
+        );
+        let shell_integration = dir.join("shell-integration");
+        assert!(
+            shell_integration.is_dir(),
+            "resources_dir() should contain shell-integration/, got {dir:?}"
+        );
+        // Verify at least one shell script is present.
+        let bash_script = shell_integration.join("therminal.bash");
+        assert!(
+            bash_script.is_file(),
+            "shell-integration/therminal.bash should exist under resources_dir(), got {dir:?}"
+        );
+    }
+
+    #[test]
+    fn resources_dir_env_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_resources = tmp.path().join("resources");
+        std::fs::create_dir_all(&fake_resources).unwrap();
+
+        // Set the env var and verify it takes precedence.
+        std::env::set_var("THERMINAL_RESOURCES_DIR", &fake_resources);
+        let dir = resources_dir();
+        std::env::remove_var("THERMINAL_RESOURCES_DIR");
+
+        assert_eq!(
+            dir, fake_resources,
+            "env var override should take precedence"
         );
     }
 

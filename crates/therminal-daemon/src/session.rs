@@ -24,19 +24,26 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use therminal_protocol::daemon::DaemonEvent;
+pub use therminal_protocol::{PaneId, SessionId, WindowId};
 
-// ── IDs ──────────────────────────────────────────────────────────────────
+// ── ID generation ───────────────────────────────────────────────────────
 
-pub type SessionId = String;
-pub type WindowId = String;
-pub type PaneId = String;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-fn gen_id(prefix: &str) -> String {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    format!("{prefix}-{ts:x}")
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_session_id() -> SessionId {
+    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_window_id() -> WindowId {
+    NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_pane_id() -> PaneId {
+    NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 // ── State snapshot (sent on attach) ─────────────────────────────────────
@@ -122,7 +129,7 @@ impl Pane {
         event_tx: broadcast::Sender<DaemonEvent>,
         session_id: SessionId,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
-        let id = gen_id("pane");
+        let id = next_pane_id();
 
         // Create headless alacritty_terminal::Term
         let term_config = TermConfig {
@@ -152,10 +159,10 @@ impl Pane {
 
         // Spawn reader thread
         let term_for_reader = Arc::clone(&term);
-        let pane_id = id.clone();
-        let sess_id = session_id.clone();
+        let pane_id = id;
+        let sess_id = session_id;
         let reader_handle = thread::Builder::new()
-            .name(format!("pty-reader-{}", &id))
+            .name(format!("pty-reader-{id}"))
             .spawn(move || {
                 pane_reader_loop(pty_reader, term_for_reader, event_tx, sess_id, pane_id);
             })
@@ -204,7 +211,7 @@ impl Pane {
         }
 
         PaneSnapshot {
-            pane_id: self.id.clone(),
+            pane_id: self.id,
             title: String::new(), // Could extract from Term if needed
             grid,
             cursor_col: cursor_point.column.0,
@@ -268,8 +275,8 @@ fn pane_reader_loop(
 
                 // Broadcast pane output event to subscribed clients
                 let _ = event_tx.send(DaemonEvent::PaneOutput {
-                    session_id: session_id.clone(),
-                    pane_id: pane_id.clone(),
+                    session_id,
+                    pane_id,
                     data: buf[..n].to_vec(),
                 });
             }
@@ -292,7 +299,7 @@ pub struct Window {
 impl Window {
     fn new() -> Self {
         Self {
-            id: gen_id("win"),
+            id: next_window_id(),
             panes: Vec::new(),
         }
     }
@@ -303,12 +310,12 @@ impl Window {
     }
 
     /// Find a pane by ID.
-    pub fn pane(&self, pane_id: &str) -> Option<&Pane> {
+    pub fn pane(&self, pane_id: PaneId) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == pane_id)
     }
 
     /// Find a mutable pane by ID.
-    pub fn pane_mut(&mut self, pane_id: &str) -> Option<&mut Pane> {
+    pub fn pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Pane> {
         self.panes.iter_mut().find(|p| p.id == pane_id)
     }
 }
@@ -326,7 +333,7 @@ pub struct Session {
 
 impl Session {
     fn new(name: Option<String>, event_tx: broadcast::Sender<DaemonEvent>) -> Self {
-        let id = gen_id("sess");
+        let id = next_session_id();
         let created_at_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -347,13 +354,13 @@ impl Session {
         cols: u16,
         rows: u16,
     ) -> Result<&Pane, therminal_terminal::pty::PtyError> {
-        let pane = Pane::spawn(cols, rows, self.event_tx.clone(), self.id.clone())?;
+        let pane = Pane::spawn(cols, rows, self.event_tx.clone(), self.id)?;
         let mut window = Window::new();
-        let pane_id = pane.id.clone();
+        let pane_id = pane.id;
         window.add_pane(pane);
         self.windows.push(window);
         // Return a reference to the newly created pane
-        Ok(self.windows.last().unwrap().pane(&pane_id).unwrap())
+        Ok(self.windows.last().unwrap().pane(pane_id).unwrap())
     }
 
     /// Take a snapshot of the entire session for attach.
@@ -365,14 +372,14 @@ impl Session {
             .collect();
 
         SessionSnapshot {
-            session_id: self.id.clone(),
+            session_id: self.id,
             name: self.name.clone(),
             panes,
         }
     }
 
     /// Find a mutable pane across all windows.
-    pub fn find_pane_mut(&mut self, pane_id: &str) -> Option<&mut Pane> {
+    pub fn find_pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Pane> {
         self.windows.iter_mut().find_map(|w| w.pane_mut(pane_id))
     }
 
@@ -416,45 +423,48 @@ impl SessionManager {
         let mut session = Session::new(name, self.event_tx.clone());
         session.create_default_pane(self.default_cols, self.default_rows)?;
 
-        let session_id = session.id.clone();
-        info!(session_id = %session_id, "session created");
+        let session_id = session.id;
+        info!(session_id = session_id, "session created");
 
         // Broadcast creation event
-        let _ = self.event_tx.send(DaemonEvent::SessionCreated {
-            session_id: session_id.clone(),
-        });
+        let _ = self
+            .event_tx
+            .send(DaemonEvent::SessionCreated { session_id });
 
-        self.sessions.insert(session_id.clone(), session);
+        self.sessions.insert(session_id, session);
         Ok(session_id)
     }
 
     /// List all session IDs.
     pub fn list_sessions(&self) -> Vec<SessionId> {
-        self.sessions.keys().cloned().collect()
+        self.sessions.keys().copied().collect()
     }
 
     /// Get session info (id, name, created_at).
-    pub fn get_session_info(&self, session_id: &str) -> Option<(SessionId, Option<String>, u64)> {
+    pub fn get_session_info(
+        &self,
+        session_id: SessionId,
+    ) -> Option<(SessionId, Option<String>, u64)> {
         self.sessions
-            .get(session_id)
-            .map(|s| (s.id.clone(), s.name.clone(), s.created_at_secs))
+            .get(&session_id)
+            .map(|s| (s.id, s.name.clone(), s.created_at_secs))
     }
 
     /// Attach to a session: returns a snapshot of the current terminal state.
-    pub fn attach(&self, session_id: &str) -> Option<SessionSnapshot> {
-        self.sessions.get(session_id).map(|s| s.snapshot())
+    pub fn attach(&self, session_id: SessionId) -> Option<SessionSnapshot> {
+        self.sessions.get(&session_id).map(|s| s.snapshot())
     }
 
     /// Write input data to a specific pane in a session.
     pub fn write_to_pane(
         &mut self,
-        session_id: &str,
-        pane_id: &str,
+        session_id: SessionId,
+        pane_id: PaneId,
         data: &[u8],
     ) -> Result<(), String> {
         let session = self
             .sessions
-            .get_mut(session_id)
+            .get_mut(&session_id)
             .ok_or_else(|| format!("session not found: {session_id}"))?;
         let pane = session
             .find_pane_mut(pane_id)
@@ -463,12 +473,12 @@ impl SessionManager {
     }
 
     /// Destroy a session and all its panes.
-    pub fn destroy_session(&mut self, session_id: &str) -> bool {
-        if let Some(_session) = self.sessions.remove(session_id) {
-            info!(session_id = %session_id, "session destroyed");
-            let _ = self.event_tx.send(DaemonEvent::SessionDestroyed {
-                session_id: session_id.to_string(),
-            });
+    pub fn destroy_session(&mut self, session_id: SessionId) -> bool {
+        if let Some(_session) = self.sessions.remove(&session_id) {
+            info!(session_id = session_id, "session destroyed");
+            let _ = self
+                .event_tx
+                .send(DaemonEvent::SessionDestroyed { session_id });
             true
         } else {
             false
@@ -481,7 +491,7 @@ impl SessionManager {
     }
 
     /// Send keys to a pane by pane ID (searches all sessions).
-    pub fn send_keys_to_pane(&mut self, pane_id: &str, keys: &[u8]) -> Result<(), String> {
+    pub fn send_keys_to_pane(&mut self, pane_id: PaneId, keys: &[u8]) -> Result<(), String> {
         for session in self.sessions.values_mut() {
             if let Some(pane) = session.find_pane_mut(pane_id) {
                 return pane.write(keys).map_err(|e| format!("write error: {e}"));
@@ -491,7 +501,7 @@ impl SessionManager {
     }
 
     /// Capture pane content by pane ID (searches all sessions).
-    pub fn capture_pane(&self, pane_id: &str) -> Result<PaneSnapshot, String> {
+    pub fn capture_pane(&self, pane_id: PaneId) -> Result<PaneSnapshot, String> {
         for session in self.sessions.values() {
             for window in &session.windows {
                 if let Some(pane) = window.pane(pane_id) {
@@ -505,7 +515,7 @@ impl SessionManager {
     /// Split a pane: creates a new sibling pane in the same window.
     /// Returns the new pane's ID. The `_horizontal` flag is accepted for
     /// future layout use but currently has no effect on the headless daemon.
-    pub fn split_pane(&mut self, pane_id: &str, _horizontal: bool) -> Result<PaneId, String> {
+    pub fn split_pane(&mut self, pane_id: PaneId, _horizontal: bool) -> Result<PaneId, String> {
         // Find which session and window this pane belongs to.
         let session_id = self
             .sessions
@@ -515,7 +525,7 @@ impl SessionManager {
                     .iter()
                     .any(|w| w.panes.iter().any(|p| p.id == pane_id))
             })
-            .map(|s| s.id.clone())
+            .map(|s| s.id)
             .ok_or_else(|| format!("pane not found: {pane_id}"))?;
 
         let session = self.sessions.get_mut(&session_id).unwrap();
@@ -533,7 +543,7 @@ impl SessionManager {
         )
         .map_err(|e| format!("failed to spawn pane: {e}"))?;
 
-        let new_id = new_pane.id.clone();
+        let new_id = new_pane.id;
         window.add_pane(new_pane);
         Ok(new_id)
     }
@@ -541,7 +551,7 @@ impl SessionManager {
     /// Kill (destroy) a single pane by ID. Removes it from its window.
     /// If the window becomes empty, removes the window. If the session
     /// becomes empty, destroys the session.
-    pub fn kill_pane(&mut self, pane_id: &str) -> Result<(), String> {
+    pub fn kill_pane(&mut self, pane_id: PaneId) -> Result<(), String> {
         let session_id = self
             .sessions
             .values()
@@ -550,7 +560,7 @@ impl SessionManager {
                     .iter()
                     .any(|w| w.panes.iter().any(|p| p.id == pane_id))
             })
-            .map(|s| s.id.clone())
+            .map(|s| s.id)
             .ok_or_else(|| format!("pane not found: {pane_id}"))?;
 
         let session = self.sessions.get_mut(&session_id).unwrap();
@@ -564,14 +574,14 @@ impl SessionManager {
         session.windows.retain(|w| !w.panes.is_empty());
         // If no windows left, destroy session
         if session.windows.is_empty() {
-            self.destroy_session(&session_id);
+            self.destroy_session(session_id);
         }
         Ok(())
     }
 
     /// Select (focus) a pane. Currently a no-op since the daemon is headless,
     /// but validates the pane exists and can be extended with focus tracking.
-    pub fn select_pane(&self, pane_id: &str) -> Result<(), String> {
+    pub fn select_pane(&self, pane_id: PaneId) -> Result<(), String> {
         for session in self.sessions.values() {
             for window in &session.windows {
                 if window.pane(pane_id).is_some() {
@@ -584,9 +594,9 @@ impl SessionManager {
 
     /// Graceful shutdown: destroy all sessions.
     pub fn shutdown(&mut self) {
-        let ids: Vec<SessionId> = self.sessions.keys().cloned().collect();
+        let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
-            self.destroy_session(&id);
+            self.destroy_session(id);
         }
     }
 }
@@ -601,9 +611,10 @@ mod tests {
     }
 
     #[test]
-    fn gen_id_has_prefix() {
-        let id = gen_id("test");
-        assert!(id.starts_with("test-"));
+    fn next_pane_id_increments() {
+        let a = next_pane_id();
+        let b = next_pane_id();
+        assert!(b > a);
     }
 
     #[test]
@@ -621,13 +632,13 @@ mod tests {
     fn session_manager_destroy_nonexistent() {
         let tx = make_event_tx();
         let mut mgr = SessionManager::new(tx);
-        assert!(!mgr.destroy_session("does-not-exist"));
+        assert!(!mgr.destroy_session(999999));
     }
 
     #[test]
     fn window_new_has_id() {
         let w = Window::new();
-        assert!(w.id.starts_with("win-"));
+        assert!(w.id > 0);
         assert!(w.panes.is_empty());
     }
 
@@ -635,7 +646,7 @@ mod tests {
     fn session_new_has_id_and_timestamp() {
         let tx = make_event_tx();
         let session = Session::new(Some("test".to_string()), tx);
-        assert!(session.id.starts_with("sess-"));
+        assert!(session.id > 0);
         assert_eq!(session.name.as_deref(), Some("test"));
         assert!(session.created_at_secs > 0);
     }
@@ -650,14 +661,14 @@ mod tests {
         assert_eq!(mgr.session_count(), 1);
         assert!(mgr.list_sessions().contains(&session_id));
 
-        let info = mgr.get_session_info(&session_id).unwrap();
+        let info = mgr.get_session_info(session_id).unwrap();
         assert_eq!(info.1.as_deref(), Some("test"));
 
-        let snapshot = mgr.attach(&session_id).unwrap();
+        let snapshot = mgr.attach(session_id).unwrap();
         assert_eq!(snapshot.session_id, session_id);
         assert!(!snapshot.panes.is_empty());
 
-        assert!(mgr.destroy_session(&session_id));
+        assert!(mgr.destroy_session(session_id));
         assert_eq!(mgr.session_count(), 0);
     }
 
