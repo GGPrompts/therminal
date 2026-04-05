@@ -48,6 +48,20 @@ use therminal_terminal::input::{
 };
 use therminal_terminal::interceptor::InterceptorConfig;
 
+// ── Header button actions ────────────────────────────────────────────────
+
+/// Action resulting from a click in a pane header.
+enum HeaderAction {
+    /// Focus the pane (click anywhere in header that isn't a button).
+    Focus(PaneId),
+    /// Close the pane (click on X button).
+    Close(PaneId),
+    /// Split the pane horizontally (click on H button).
+    SplitH(PaneId),
+    /// Split the pane vertically (click on V button).
+    SplitV(PaneId),
+}
+
 // ── Custom event for waking the event loop from the PTY reader ───────────
 
 /// Events sent from background threads to the winit event loop.
@@ -113,6 +127,12 @@ const HEADER_BG_DIM_COLOR: [f32; 4] = {
         0.6,
     ]
 };
+
+/// Width of each header button in pixels.
+const HEADER_BUTTON_WIDTH: f32 = 24.0;
+
+/// Right-side margin for header buttons.
+const HEADER_BUTTON_MARGIN: f32 = 4.0;
 
 /// Status bar background color (VOID_2 from palette).
 const STATUS_BAR_BG_COLOR: [f32; 4] = {
@@ -519,6 +539,13 @@ impl App {
         self.layout = Some(layout);
         self.focused_pane = Some(pane_id);
 
+        // Resize initial pane with correct header height (0 for single pane).
+        if let Some(layout) = self.layout.as_mut() {
+            if let Some(renderer) = self.grid_renderer.as_ref() {
+                layout.resize_all_panes(renderer);
+            }
+        }
+
         let (cols, rows) = self
             .grid_renderer
             .as_ref()
@@ -649,6 +676,7 @@ impl App {
             layout,
             focused,
             show_focus,
+            pane_count,
             &mut pane_counter,
             renderer,
             &gpu.device,
@@ -869,6 +897,121 @@ impl App {
         }
     }
 
+    /// Split a specific pane by ID.
+    fn split_pane_by_id(&mut self, target_id: PaneId, direction: SplitDirection) {
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_1337: self.config.terminal.osc_1337,
+        };
+        let scan_interval_secs = self.config.trust.agent_scan_interval;
+        let spawn_options = therminal_terminal::pty::SpawnOptions {
+            shell: self.config.general.shell.clone(),
+            env: self.config.general.env.clone(),
+        };
+        let proxy = self.event_proxy.clone();
+
+        let new_id =
+            layout.split_pane(
+                target_id,
+                direction,
+                |viewport| match crate::pane::spawn_pane(
+                    viewport,
+                    renderer,
+                    scrollback,
+                    interceptor_cfg.clone(),
+                    scan_interval_secs,
+                    &spawn_options,
+                    |_pane_id| {
+                        let p = proxy.clone();
+                        Box::new(move || {
+                            let _ = p.send_event(UserEvent::PtyOutput);
+                        })
+                    },
+                ) {
+                    Ok(pane) => Some(pane),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to spawn pane for split");
+                        None
+                    }
+                },
+            );
+
+        if let Some(new_id) = new_id {
+            info!(
+                "Split pane {target_id} {:?} -> new pane {new_id}",
+                direction
+            );
+            self.last_split_direction = direction;
+
+            let gpu = self.gpu.as_ref().unwrap();
+            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let layout = self.layout.as_mut().unwrap();
+            let renderer = self.grid_renderer.as_ref().unwrap();
+            layout.layout(full_rect);
+            layout.resize_all_panes(renderer);
+
+            self.focused_pane = Some(new_id);
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Close a specific pane by ID.
+    fn close_pane_by_id(&mut self, target_id: PaneId) {
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+
+        match layout.remove_pane(target_id) {
+            None => {
+                info!("Last pane closed, exiting");
+                self.focused_pane = None;
+                self.layout = None;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            Some(true) => {
+                info!("Closed pane {target_id}");
+                // If we closed the focused pane, move focus.
+                if self.focused_pane == Some(target_id) {
+                    let layout = self.layout.as_mut().unwrap();
+                    let ids = layout.pane_ids();
+                    self.focused_pane = ids.first().copied();
+                }
+
+                let gpu = self.gpu.as_ref().unwrap();
+                let full_rect =
+                    Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+                let layout = self.layout.as_mut().unwrap();
+                let renderer = self.grid_renderer.as_ref().unwrap();
+                layout.layout(full_rect);
+                layout.resize_all_panes(renderer);
+
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            Some(false) => {
+                warn!("Pane {target_id} not found in layout");
+            }
+        }
+    }
+
     /// Move focus to the next or previous pane.
     fn move_focus(&mut self, direction: FocusDirection) {
         let focused = match self.focused_pane {
@@ -992,13 +1135,14 @@ impl App {
     fn pixel_to_grid_for_pane(&self, px: f64, py: f64, pane_id: PaneId) -> Option<(usize, usize)> {
         let renderer = self.grid_renderer.as_ref()?;
         let layout = self.layout.as_ref()?;
+        let pane_count = layout.pane_count();
         let pane = layout.find_pane(pane_id)?;
 
         let vp = pane.viewport;
+        let header_h = crate::pane::effective_header_height(pane_count);
         let col = ((px as f32 - vp.x() - renderer.padding_x()) / renderer.cell_width).floor();
-        let row = ((py as f32 - vp.y() - renderer.padding_y() - crate::pane::PANE_HEADER_HEIGHT)
-            / renderer.cell_height)
-            .floor();
+        let row =
+            ((py as f32 - vp.y() - renderer.padding_y() - header_h) / renderer.cell_height).floor();
         if col < 0.0 || row < 0.0 {
             return None;
         }
@@ -1599,6 +1743,48 @@ impl App {
             LayoutNode::Empty => None,
         }
     }
+
+    /// Test if a click at (px, py) lands on a pane header and which button (if any).
+    /// Returns `None` if not in a header or if there's only one pane (headers hidden).
+    fn header_hit_test(&self, px: f64, py: f64) -> Option<HeaderAction> {
+        let layout = self.layout.as_ref()?;
+        let pane_count = layout.pane_count();
+        if pane_count <= 1 {
+            return None;
+        }
+
+        let header_h = crate::pane::PANE_HEADER_HEIGHT;
+        let px = px as f32;
+        let py = py as f32;
+
+        // Find which pane's viewport contains this point.
+        let pane_id = self.find_pane_at(layout, px, py)?;
+        let pane = layout.find_pane(pane_id)?;
+        let vp = pane.viewport;
+
+        // Check if click is within the header strip (top `header_h` pixels of viewport).
+        let header_top = vp.y();
+        let header_bottom = vp.y() + header_h;
+        if py < header_top || py >= header_bottom {
+            return None;
+        }
+
+        // Button hit regions (right-aligned): [H] [V] [X]
+        let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
+        let btn_x_vsplit = btn_x_close - HEADER_BUTTON_WIDTH;
+        let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
+
+        if px >= btn_x_close && px < btn_x_close + HEADER_BUTTON_WIDTH {
+            Some(HeaderAction::Close(pane_id))
+        } else if px >= btn_x_vsplit && px < btn_x_vsplit + HEADER_BUTTON_WIDTH {
+            Some(HeaderAction::SplitV(pane_id))
+        } else if px >= btn_x_hsplit && px < btn_x_hsplit + HEADER_BUTTON_WIDTH {
+            Some(HeaderAction::SplitH(pane_id))
+        } else {
+            // Anywhere else in the header -> focus.
+            Some(HeaderAction::Focus(pane_id))
+        }
+    }
 }
 
 // ── Free functions for multi-pane rendering (avoids &self borrow conflicts) ──
@@ -1609,6 +1795,7 @@ fn render_panes_recursive(
     node: &LayoutNode,
     focused: Option<PaneId>,
     show_focus: bool,
+    pane_count: usize,
     pane_counter: &mut usize,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
@@ -1626,6 +1813,7 @@ fn render_panes_recursive(
                 pane,
                 idx,
                 focused == Some(pane.id) && show_focus,
+                pane_count,
                 renderer,
                 device,
                 queue,
@@ -1645,6 +1833,7 @@ fn render_panes_recursive(
                 first,
                 focused,
                 show_focus,
+                pane_count,
                 pane_counter,
                 renderer,
                 device,
@@ -1658,6 +1847,7 @@ fn render_panes_recursive(
                 second,
                 focused,
                 show_focus,
+                pane_count,
                 pane_counter,
                 renderer,
                 device,
@@ -1692,6 +1882,7 @@ fn render_single_pane(
     pane: &PaneState,
     pane_index: usize,
     draw_focus_border: bool,
+    pane_count: usize,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1762,20 +1953,22 @@ fn render_single_pane(
     // Clear per-pane caches so stale state from a previous pane doesn't bleed through.
     renderer.reset_pane_caches();
 
-    // ── Draw pane header strip ──────────────────────────────────────────
-    let header_h = crate::pane::PANE_HEADER_HEIGHT;
-    draw_pane_header(
-        pane,
-        pane_index,
-        draw_focus_border,
-        renderer,
-        device,
-        queue,
-        encoder,
-        view,
-        surface_width,
-        surface_height,
-    );
+    // ── Draw pane header strip (only when multiple panes) ────────────────
+    let header_h = crate::pane::effective_header_height(pane_count);
+    if pane_count > 1 {
+        draw_pane_header(
+            pane,
+            pane_index,
+            draw_focus_border,
+            renderer,
+            device,
+            queue,
+            encoder,
+            view,
+            surface_width,
+            surface_height,
+        );
+    }
 
     // Temporarily adjust renderer's padding to offset by the pane's viewport origin,
     // plus the pane header height.
@@ -2110,6 +2303,73 @@ fn draw_pane_header(
         .unwrap_or(0.0);
     let center_offset = ((vp.width() - process_text_width) / 2.0).max(0.0);
 
+    // ── Right-aligned header buttons: [H] [V] [X] ─────────────────────
+    let close_color = GlyphColor::rgba(
+        PaletteColor::ALERT.r,
+        PaletteColor::ALERT.g,
+        PaletteColor::ALERT.b,
+        if is_focused { 230 } else { 160 },
+    );
+    let button_color = GlyphColor::rgba(
+        PaletteColor::INK_DIM.r,
+        PaletteColor::INK_DIM.g,
+        PaletteColor::INK_DIM.b,
+        if is_focused { 200 } else { 130 },
+    );
+
+    // Button layout from right edge: [X] [V] [H]
+    let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
+    let btn_x_vsplit = btn_x_close - HEADER_BUTTON_WIDTH;
+    let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
+
+    let mut close_buf = Buffer::new(&mut renderer.font_system, metrics);
+    close_buf.set_size(
+        &mut renderer.font_system,
+        Some(HEADER_BUTTON_WIDTH),
+        Some(header_h),
+    );
+    close_buf.set_text(
+        &mut renderer.font_system,
+        " X",
+        Attrs::new()
+            .family(Family::Name(&renderer.font_config.family))
+            .color(close_color),
+        Shaping::Basic,
+    );
+    close_buf.shape_until_scroll(&mut renderer.font_system, false);
+
+    let mut vsplit_buf = Buffer::new(&mut renderer.font_system, metrics);
+    vsplit_buf.set_size(
+        &mut renderer.font_system,
+        Some(HEADER_BUTTON_WIDTH),
+        Some(header_h),
+    );
+    vsplit_buf.set_text(
+        &mut renderer.font_system,
+        " V",
+        Attrs::new()
+            .family(Family::Name(&renderer.font_config.family))
+            .color(button_color),
+        Shaping::Basic,
+    );
+    vsplit_buf.shape_until_scroll(&mut renderer.font_system, false);
+
+    let mut hsplit_buf = Buffer::new(&mut renderer.font_system, metrics);
+    hsplit_buf.set_size(
+        &mut renderer.font_system,
+        Some(HEADER_BUTTON_WIDTH),
+        Some(header_h),
+    );
+    hsplit_buf.set_text(
+        &mut renderer.font_system,
+        " H",
+        Attrs::new()
+            .family(Family::Name(&renderer.font_config.family))
+            .color(button_color),
+        Shaping::Basic,
+    );
+    hsplit_buf.shape_until_scroll(&mut renderer.font_system, false);
+
     renderer.viewport.update(
         queue,
         Resolution {
@@ -2118,18 +2378,20 @@ fn draw_pane_header(
         },
     );
 
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_width as i32,
+        bottom: surface_height as i32,
+    };
+
     let text_areas = vec![
         TextArea {
             buffer: &index_buf,
             left: vp.x(),
             top: vp.y(),
             scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: surface_width as i32,
-                bottom: surface_height as i32,
-            },
+            bounds,
             default_color: index_color,
             custom_glyphs: &[],
         },
@@ -2138,13 +2400,35 @@ fn draw_pane_header(
             left: vp.x() + center_offset,
             top: vp.y(),
             scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: surface_width as i32,
-                bottom: surface_height as i32,
-            },
+            bounds,
             default_color: process_color,
+            custom_glyphs: &[],
+        },
+        TextArea {
+            buffer: &hsplit_buf,
+            left: btn_x_hsplit,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: button_color,
+            custom_glyphs: &[],
+        },
+        TextArea {
+            buffer: &vsplit_buf,
+            left: btn_x_vsplit,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: button_color,
+            custom_glyphs: &[],
+        },
+        TextArea {
+            buffer: &close_buf,
+            left: btn_x_close,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: close_color,
             custom_glyphs: &[],
         },
     ];
@@ -2488,20 +2772,49 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                // Focus-follows-click: if clicking in a different pane, switch focus.
+                // Header button click detection (only when multiple panes).
+                let mut header_handled = false;
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some((px, py)) = self.cursor_position {
-                        if let Some(pane_id) = self.pane_at_position(px, py) {
-                            if self.focused_pane != Some(pane_id) {
-                                self.focused_pane = Some(pane_id);
-                                if let Some(w) = self.window.as_ref() {
-                                    w.request_redraw();
+                        if let Some(action) = self.header_hit_test(px, py) {
+                            header_handled = true;
+                            match action {
+                                HeaderAction::Focus(pane_id) => {
+                                    self.focused_pane = Some(pane_id);
                                 }
+                                HeaderAction::Close(pane_id) => {
+                                    self.close_pane_by_id(pane_id);
+                                }
+                                HeaderAction::SplitH(pane_id) => {
+                                    self.split_pane_by_id(pane_id, SplitDirection::Horizontal);
+                                }
+                                HeaderAction::SplitV(pane_id) => {
+                                    self.split_pane_by_id(pane_id, SplitDirection::Vertical);
+                                }
+                            }
+                            if let Some(w) = self.window.as_ref() {
+                                w.request_redraw();
                             }
                         }
                     }
                 }
-                self.handle_mouse_input(state, button);
+
+                if !header_handled {
+                    // Focus-follows-click: if clicking in a different pane, switch focus.
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        if let Some((px, py)) = self.cursor_position {
+                            if let Some(pane_id) = self.pane_at_position(px, py) {
+                                if self.focused_pane != Some(pane_id) {
+                                    self.focused_pane = Some(pane_id);
+                                    if let Some(w) = self.window.as_ref() {
+                                        w.request_redraw();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.handle_mouse_input(state, button);
+                }
             }
 
             WindowEvent::KeyboardInput {

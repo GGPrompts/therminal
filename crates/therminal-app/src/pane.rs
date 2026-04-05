@@ -36,8 +36,17 @@ pub enum SplitDirection {
 /// Separator gap between panes in physical pixels.
 pub const SEPARATOR_GAP: f32 = 2.0;
 
-/// Height of the pane header strip in physical pixels.
+/// Height of the pane header strip in physical pixels (when multiple panes exist).
 pub const PANE_HEADER_HEIGHT: f32 = 20.0;
+
+/// Return the effective header height: 0 when single pane, PANE_HEADER_HEIGHT otherwise.
+pub fn effective_header_height(pane_count: usize) -> f32 {
+    if pane_count <= 1 {
+        0.0
+    } else {
+        PANE_HEADER_HEIGHT
+    }
+}
 
 /// Height of the window status bar in physical pixels.
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -100,9 +109,20 @@ pub struct PaneState {
 
 impl PaneState {
     /// Resize this pane's terminal and PTY to match a new viewport rect.
+    #[allow(dead_code)]
     pub fn resize_to_viewport(&mut self, rect: Rect, renderer: &GridRenderer) {
+        self.resize_to_viewport_with_header(rect, renderer, PANE_HEADER_HEIGHT);
+    }
+
+    /// Resize with an explicit header height (0 for single pane).
+    pub fn resize_to_viewport_with_header(
+        &mut self,
+        rect: Rect,
+        renderer: &GridRenderer,
+        header_h: f32,
+    ) {
         self.viewport = rect;
-        let (cols, rows) = grid_size_for_rect(rect, renderer);
+        let (cols, rows) = grid_size_for_rect_with_header(rect, renderer, header_h);
         if cols == 0 || rows == 0 {
             return;
         }
@@ -123,10 +143,19 @@ impl PaneState {
 }
 
 /// Compute (cols, rows) for a viewport rect using the renderer's cell metrics.
-/// Accounts for pane header height at the top.
+/// `header_h` is the effective header height (0 for single pane, PANE_HEADER_HEIGHT for multi).
 pub fn grid_size_for_rect(rect: Rect, renderer: &GridRenderer) -> (usize, usize) {
+    grid_size_for_rect_with_header(rect, renderer, PANE_HEADER_HEIGHT)
+}
+
+/// Like `grid_size_for_rect` but with an explicit header height.
+pub fn grid_size_for_rect_with_header(
+    rect: Rect,
+    renderer: &GridRenderer,
+    header_h: f32,
+) -> (usize, usize) {
     let usable_w = rect.width() - renderer.padding_x() * 2.0;
-    let usable_h = rect.height() - renderer.padding_y() * 2.0 - PANE_HEADER_HEIGHT;
+    let usable_h = rect.height() - renderer.padding_y() * 2.0 - header_h;
     let cols = (usable_w / renderer.cell_width).floor().max(2.0) as usize;
     let rows = (usable_h / renderer.cell_height).floor().max(1.0) as usize;
     (cols, rows)
@@ -179,14 +208,20 @@ impl LayoutNode {
 
     /// Resize all pane PTYs to match their current viewport rects.
     pub fn resize_all_panes(&mut self, renderer: &GridRenderer) {
+        let header_h = effective_header_height(self.pane_count());
+        self.resize_all_panes_with_header(renderer, header_h);
+    }
+
+    /// Resize all panes with an explicit header height.
+    pub fn resize_all_panes_with_header(&mut self, renderer: &GridRenderer, header_h: f32) {
         match self {
             LayoutNode::Leaf(pane) => {
                 let rect = pane.viewport;
-                pane.resize_to_viewport(rect, renderer);
+                pane.resize_to_viewport_with_header(rect, renderer, header_h);
             }
             LayoutNode::Split { first, second, .. } => {
-                first.resize_all_panes(renderer);
-                second.resize_all_panes(renderer);
+                first.resize_all_panes_with_header(renderer, header_h);
+                second.resize_all_panes_with_header(renderer, header_h);
             }
             LayoutNode::Empty => {}
         }
