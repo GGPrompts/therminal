@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
+use tokio::io::AsyncWriteExt;
+use tokio::net::UnixStream;
 use tracing::info;
 
 use therminal_daemon::lifecycle::LifecycleConfig;
@@ -19,6 +21,11 @@ struct Cli {
     /// Keep-alive duration in seconds after last session closes (0 = exit immediately)
     #[arg(long, default_value = "300")]
     keep_alive: u64,
+
+    /// Enter control mode: connect to the daemon via a text-based protocol
+    /// for programmatic control (similar to tmux -CC).
+    #[arg(long)]
+    control_mode: bool,
 }
 
 #[tokio::main]
@@ -28,6 +35,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(if cli.verbose { "debug" } else { "info" })
         .init();
+
+    if cli.control_mode {
+        return run_control_mode().await;
+    }
 
     info!(
         build_hash = BUILD_HASH,
@@ -58,6 +69,53 @@ async fn main() -> Result<()> {
                 }
             }
             info!("daemon stopped");
+        }
+    }
+
+    Ok(())
+}
+
+/// Run as a control-mode client: connect to the daemon socket, send the
+/// control-mode handshake, then bridge stdin/stdout to the text protocol.
+async fn run_control_mode() -> Result<()> {
+    let socket_path = therminal_runtime::paths::socket_path("daemon");
+
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon at {}. Is the daemon running?",
+            socket_path.display()
+        )
+    })?;
+
+    // Send control-mode handshake
+    stream
+        .write_all(b"mode: control\n")
+        .await
+        .context("failed to send control-mode handshake")?;
+    stream.flush().await?;
+
+    // Bridge stdin -> socket and socket -> stdout
+    let (reader, writer) = stream.into_split();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        let mut reader = reader;
+        tokio::io::copy(&mut reader, &mut stdout).await
+    });
+
+    let stdin_task = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut writer = writer;
+        tokio::io::copy(&mut stdin, &mut writer).await
+    });
+
+    // Wait for either direction to finish
+    tokio::select! {
+        r = stdout_task => {
+            r.context("stdout task panicked")?.context("stdout copy failed")?;
+        }
+        r = stdin_task => {
+            r.context("stdin task panicked")?.context("stdin copy failed")?;
         }
     }
 

@@ -132,6 +132,16 @@ pub enum IpcRequest {
     DestroySession { session_id: String },
     /// Query daemon state.
     GetState,
+    /// Send keys (input) to a specific pane.
+    SendKeys { pane_id: String, keys: Vec<u8> },
+    /// Capture pane content (terminal grid snapshot).
+    CapturePane { pane_id: String },
+    /// Split a pane (creates a new pane in the same session).
+    SplitPane { pane_id: String, horizontal: bool },
+    /// Kill (destroy) a specific pane.
+    KillPane { pane_id: String },
+    /// Select (focus) a specific pane.
+    SelectPane { pane_id: String },
 }
 
 /// Typed IPC responses.
@@ -168,6 +178,23 @@ pub enum IpcResponse {
     SessionDestroyed { session_id: String },
     /// Current daemon state.
     State { state: DaemonState },
+    /// Keys sent successfully.
+    KeysSent { pane_id: String },
+    /// Pane content captured.
+    PaneCaptured {
+        pane_id: String,
+        lines: Vec<String>,
+        cursor_col: usize,
+        cursor_line: usize,
+        cols: usize,
+        rows: usize,
+    },
+    /// Pane split — new pane created.
+    PaneSplit { new_pane_id: String },
+    /// Pane killed.
+    PaneKilled { pane_id: String },
+    /// Pane selected (focused).
+    PaneSelected { pane_id: String },
     /// Generic error response.
     Error { message: String },
 }

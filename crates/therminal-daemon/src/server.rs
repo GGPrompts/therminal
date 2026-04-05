@@ -20,6 +20,7 @@ use therminal_protocol::daemon::{
     EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE,
 };
 
+use crate::control;
 use crate::lifecycle::Lifecycle;
 use crate::session::SessionManager;
 
@@ -215,13 +216,14 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
 
 /// Handle a single client connection.
 ///
-/// The connection can operate in two modes:
-/// 1. **Legacy mode**: A single DaemonRequest frame followed by a DaemonResponse.
+/// The connection can operate in three modes:
+/// 1. **Control mode**: Text-based protocol for programmatic control (tmux -CC style).
+///    Detected when the first bytes are `mode: control\n`.
 /// 2. **IPC mode**: Multiple IpcMessage frames with request/response multiplexing
 ///    and optional event streaming.
+/// 3. **Legacy mode**: A single DaemonRequest frame followed by a DaemonResponse.
 ///
-/// Mode is detected by attempting to decode the first frame as `IpcMessage`.
-/// If that fails, falls back to legacy `DaemonRequest` decoding.
+/// Mode is detected by peeking at the first bytes on the connection.
 async fn handle_connection(
     mut stream: UnixStream,
     lifecycle: Arc<Lifecycle>,
@@ -231,11 +233,50 @@ async fn handle_connection(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     conn_id: u64,
 ) -> Result<()> {
-    // Read first frame
-    let first_frame = match read_frame(&mut stream).await? {
-        Some(f) => f,
-        None => return Ok(()), // Clean disconnect
-    };
+    // Read the first 4 bytes. For binary protocols this is the length prefix.
+    // For control mode, the handshake starts with "mode" (ASCII).
+    let mut header = [0u8; 4];
+    match stream.read_exact(&mut header).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+
+    // Detect control mode: "mode" in ASCII = [0x6d, 0x6f, 0x64, 0x65]
+    if &header == b"mode" {
+        // Read the rest of the handshake line (": control\n")
+        let mut byte = [0u8; 1];
+        while stream.read_exact(&mut byte).await.is_ok() {
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        debug!(conn_id, "control mode detected");
+        control::handle_control_connection(
+            stream,
+            lifecycle,
+            event_tx,
+            session_mgr,
+            build_hash,
+            version,
+        )
+        .await;
+        return Ok(());
+    }
+
+    // Binary protocol: interpret header as 4-byte BE length prefix
+    let msg_len = u32::from_be_bytes(header) as usize;
+    if msg_len > MAX_FRAME_SIZE {
+        anyhow::bail!("frame too large: {msg_len} bytes (max {MAX_FRAME_SIZE})");
+    }
+
+    let mut payload = vec![0u8; msg_len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .context("failed to read frame payload")?;
+
+    let first_frame = payload;
 
     // Try IPC protocol first
     if let Ok(ipc_msg) = decode_ipc(&first_frame) {
@@ -522,6 +563,67 @@ async fn dispatch_ipc(
                 IpcResponse::Error {
                     message: format!("session not found: {session_id}"),
                 }
+            }
+        }
+        IpcRequest::SendKeys { pane_id, keys } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.send_keys_to_pane(pane_id, keys) {
+                Ok(()) => IpcResponse::KeysSent {
+                    pane_id: pane_id.clone(),
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::CapturePane { pane_id } => {
+            let mgr = session_mgr.lock().await;
+            match mgr.capture_pane(pane_id) {
+                Ok(snap) => {
+                    let lines: Vec<String> = snap
+                        .grid
+                        .iter()
+                        .map(|row| row.iter().map(|(ch, _)| ch).collect())
+                        .collect();
+                    IpcResponse::PaneCaptured {
+                        pane_id: snap.pane_id,
+                        lines,
+                        cursor_col: snap.cursor_col,
+                        cursor_line: snap.cursor_line,
+                        cols: snap.cols,
+                        rows: snap.rows,
+                    }
+                }
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::SplitPane {
+            pane_id,
+            horizontal,
+        } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.split_pane(pane_id, *horizontal) {
+                Ok(new_pane_id) => IpcResponse::PaneSplit { new_pane_id },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::KillPane { pane_id } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.kill_pane(pane_id) {
+                Ok(()) => {
+                    lifecycle.set_session_count(mgr.session_count());
+                    IpcResponse::PaneKilled {
+                        pane_id: pane_id.clone(),
+                    }
+                }
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::SelectPane { pane_id } => {
+            let mgr = session_mgr.lock().await;
+            match mgr.select_pane(pane_id) {
+                Ok(()) => IpcResponse::PaneSelected {
+                    pane_id: pane_id.clone(),
+                },
+                Err(e) => IpcResponse::Error { message: e },
             }
         }
     }

@@ -470,6 +470,108 @@ impl SessionManager {
         self.sessions.len() as u32
     }
 
+    /// Send keys to a pane by pane ID (searches all sessions).
+    pub fn send_keys_to_pane(&mut self, pane_id: &str, keys: &[u8]) -> Result<(), String> {
+        for session in self.sessions.values_mut() {
+            if let Some(pane) = session.find_pane_mut(pane_id) {
+                return pane.write(keys).map_err(|e| format!("write error: {e}"));
+            }
+        }
+        Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Capture pane content by pane ID (searches all sessions).
+    pub fn capture_pane(&self, pane_id: &str) -> Result<PaneSnapshot, String> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Ok(pane.snapshot());
+                }
+            }
+        }
+        Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Split a pane: creates a new sibling pane in the same window.
+    /// Returns the new pane's ID. The `_horizontal` flag is accepted for
+    /// future layout use but currently has no effect on the headless daemon.
+    pub fn split_pane(&mut self, pane_id: &str, _horizontal: bool) -> Result<PaneId, String> {
+        // Find which session and window this pane belongs to.
+        let session_id = self
+            .sessions
+            .values()
+            .find(|s| {
+                s.windows
+                    .iter()
+                    .any(|w| w.panes.iter().any(|p| p.id == pane_id))
+            })
+            .map(|s| s.id.clone())
+            .ok_or_else(|| format!("pane not found: {pane_id}"))?;
+
+        let session = self.sessions.get_mut(&session_id).unwrap();
+        let window = session
+            .windows
+            .iter_mut()
+            .find(|w| w.panes.iter().any(|p| p.id == pane_id))
+            .unwrap();
+
+        let new_pane = Pane::spawn(
+            self.default_cols,
+            self.default_rows,
+            self.event_tx.clone(),
+            session_id,
+        )
+        .map_err(|e| format!("failed to spawn pane: {e}"))?;
+
+        let new_id = new_pane.id.clone();
+        window.add_pane(new_pane);
+        Ok(new_id)
+    }
+
+    /// Kill (destroy) a single pane by ID. Removes it from its window.
+    /// If the window becomes empty, removes the window. If the session
+    /// becomes empty, destroys the session.
+    pub fn kill_pane(&mut self, pane_id: &str) -> Result<(), String> {
+        let session_id = self
+            .sessions
+            .values()
+            .find(|s| {
+                s.windows
+                    .iter()
+                    .any(|w| w.panes.iter().any(|p| p.id == pane_id))
+            })
+            .map(|s| s.id.clone())
+            .ok_or_else(|| format!("pane not found: {pane_id}"))?;
+
+        let session = self.sessions.get_mut(&session_id).unwrap();
+        for window in &mut session.windows {
+            if let Some(pos) = window.panes.iter().position(|p| p.id == pane_id) {
+                window.panes.remove(pos);
+                break;
+            }
+        }
+        // Remove empty windows
+        session.windows.retain(|w| !w.panes.is_empty());
+        // If no windows left, destroy session
+        if session.windows.is_empty() {
+            self.destroy_session(&session_id);
+        }
+        Ok(())
+    }
+
+    /// Select (focus) a pane. Currently a no-op since the daemon is headless,
+    /// but validates the pane exists and can be extended with focus tracking.
+    pub fn select_pane(&self, pane_id: &str) -> Result<(), String> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if window.pane(pane_id).is_some() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(format!("pane not found: {pane_id}"))
+    }
+
     /// Graceful shutdown: destroy all sessions.
     pub fn shutdown(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().cloned().collect();

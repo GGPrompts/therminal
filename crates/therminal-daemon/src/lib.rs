@@ -22,6 +22,7 @@
 //! ```
 
 pub mod client;
+pub mod control;
 pub mod ensure;
 pub mod handoff;
 pub mod lifecycle;
