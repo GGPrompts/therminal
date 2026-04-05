@@ -30,6 +30,45 @@ use tracing::{debug, trace, warn};
 use crate::event_log::{EventLog, SessionEvent};
 use crate::osc633::CommandState;
 
+// -- Output cadence analysis -------------------------------------------------
+
+/// Statistics for a single chunk of PTY output, used for cadence analysis.
+#[derive(Debug, Clone)]
+pub struct ByteChunkStats {
+    /// When this chunk was received.
+    pub timestamp: Instant,
+    /// Number of bytes in the chunk.
+    pub byte_count: usize,
+    /// Whether the chunk contained backspace (0x08) or DEL (0x7F).
+    pub has_backspace: bool,
+    /// Whether the chunk contained CSI sequences for cursor movement.
+    pub has_cursor_control: bool,
+    /// Number of visible (non-control) characters after ANSI stripping.
+    pub visible_chars: usize,
+}
+
+/// Classification of the output stream cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputCadence {
+    /// Human typing: small chunks, moderate intervals, backspaces present.
+    Human,
+    /// Agent output: large chunks, rapid intervals, no backspaces, sustained.
+    Agent,
+    /// Burst output (e.g., `cat` a file, compiler output): large but not sustained.
+    Burst,
+    /// Not enough data to classify.
+    Unknown,
+}
+
+/// Maximum number of chunk stats to keep in the sliding window.
+const MAX_CHUNK_STATS: usize = 20;
+
+/// Minimum number of chunks required before classification (below this -> Unknown).
+const MIN_CHUNKS_FOR_CLASSIFICATION: usize = 3;
+
+/// Minimum sustained duration (in seconds) to distinguish Agent from Burst.
+const AGENT_SUSTAINED_SECS: f64 = 2.0;
+
 // -- State change notifications ----------------------------------------------
 
 /// A notification emitted when the inference engine detects a state change.
@@ -294,6 +333,8 @@ pub struct AgentStateInference {
     /// Stateful ANSI escape sequence stripper (carries parse state across
     /// `feed_bytes` calls so split sequences don't leak into visible text).
     ansi_stripper: AnsiStripper,
+    /// Sliding window of recent chunk statistics for cadence analysis.
+    chunk_stats: VecDeque<ByteChunkStats>,
     /// Dirty flag -- set when any exported field changes, cleared on write.
     /// Persists across `infer_and_write()` calls so throttled writes are
     /// retried instead of lost.
@@ -347,6 +388,7 @@ impl AgentStateInference {
             state_file_path,
             patterns: Patterns::new(),
             ansi_stripper: AnsiStripper::new(),
+            chunk_stats: VecDeque::with_capacity(MAX_CHUNK_STATS + 1),
             dirty: false,
             last_command: None,
             last_exit_code: None,
@@ -447,6 +489,122 @@ impl AgentStateInference {
         self.consecutive_failures
     }
 
+    /// Classify the output stream cadence from the recent chunk window.
+    ///
+    /// Distinguishes human typing, agent output, and burst dumps based on
+    /// chunk sizes, inter-chunk intervals, and the presence of backspaces.
+    pub fn classify_output_cadence(&self) -> OutputCadence {
+        let stats = &self.chunk_stats;
+        if stats.len() < MIN_CHUNKS_FOR_CLASSIFICATION {
+            return OutputCadence::Unknown;
+        }
+
+        // Compute averages over the window.
+        let total_visible: usize = stats.iter().map(|s| s.visible_chars).sum();
+        let avg_visible = total_visible as f64 / stats.len() as f64;
+
+        let backspace_count = stats.iter().filter(|s| s.has_backspace).count();
+        let backspace_ratio = backspace_count as f64 / stats.len() as f64;
+
+        // Compute average inter-chunk interval (in milliseconds).
+        let intervals: Vec<f64> = stats
+            .iter()
+            .zip(stats.iter().skip(1))
+            .map(|(a, b)| b.timestamp.duration_since(a.timestamp).as_secs_f64() * 1000.0)
+            .collect();
+        let avg_interval_ms = if intervals.is_empty() {
+            0.0
+        } else {
+            intervals.iter().sum::<f64>() / intervals.len() as f64
+        };
+
+        // Compute total window duration.
+        let window_duration_secs = if stats.len() >= 2 {
+            stats
+                .back()
+                .unwrap()
+                .timestamp
+                .duration_since(stats.front().unwrap().timestamp)
+                .as_secs_f64()
+        } else {
+            0.0
+        };
+
+        // Classification logic:
+        //
+        // Human: small chunks, moderate intervals, backspaces common.
+        if avg_visible < 5.0 && avg_interval_ms > 30.0 && backspace_ratio > 0.01 {
+            return OutputCadence::Human;
+        }
+
+        // Also classify as Human if chunks are tiny and intervals are human-speed,
+        // even without backspaces (careful typer).
+        if avg_visible < 5.0 && avg_interval_ms > 50.0 {
+            return OutputCadence::Human;
+        }
+
+        // Burst: very large chunks but not sustained (short window or few chunks).
+        let max_visible = stats.iter().map(|s| s.visible_chars).max().unwrap_or(0);
+        if max_visible > 1000 && (stats.len() <= 3 || window_duration_secs < AGENT_SUSTAINED_SECS) {
+            return OutputCadence::Burst;
+        }
+
+        // Agent: large chunks, rapid intervals, no backspaces, sustained.
+        if avg_visible > 50.0
+            && avg_interval_ms < 10.0
+            && backspace_ratio < 0.01
+            && window_duration_secs >= AGENT_SUSTAINED_SECS
+        {
+            return OutputCadence::Agent;
+        }
+
+        // Agent (relaxed): sustained large output even with moderate intervals.
+        // With a 20-chunk window, reaching 2s requires ~105ms+ intervals.
+        if avg_visible > 30.0
+            && avg_interval_ms < 200.0
+            && backspace_ratio < 0.01
+            && window_duration_secs >= AGENT_SUSTAINED_SECS
+        {
+            return OutputCadence::Agent;
+        }
+
+        // Burst: large output, short lived.
+        if avg_visible > 50.0 && window_duration_secs < AGENT_SUSTAINED_SECS {
+            return OutputCadence::Burst;
+        }
+
+        OutputCadence::Unknown
+    }
+
+    /// Check if recent output looks like a spinner pattern.
+    ///
+    /// Spinners are characterized by cursor-control-heavy output with low
+    /// visible text content -- the terminal is being rewritten in place.
+    pub fn is_spinner_pattern(&self) -> bool {
+        let stats = &self.chunk_stats;
+        if stats.len() < MIN_CHUNKS_FOR_CLASSIFICATION {
+            return false;
+        }
+
+        // Look at the most recent chunks (up to 10).
+        let recent: Vec<&ByteChunkStats> = stats.iter().rev().take(10).collect();
+
+        let cursor_control_count = recent.iter().filter(|s| s.has_cursor_control).count();
+        let cursor_control_ratio = cursor_control_count as f64 / recent.len() as f64;
+
+        let avg_visible =
+            recent.iter().map(|s| s.visible_chars).sum::<usize>() as f64 / recent.len() as f64;
+
+        // Spinner: high ratio of cursor control with low visible text per chunk.
+        // Typical spinner: overwrites a line with CSI sequences, writes 1-5 chars.
+        cursor_control_ratio > 0.5 && avg_visible < 20.0
+    }
+
+    /// Read-only access to the chunk stats window (for external analysis).
+    pub fn chunk_stats(&self) -> &VecDeque<ByteChunkStats> {
+        &self.chunk_stats
+    }
+
     /// Get the effective agent type (config override > detected > None).
     fn effective_agent_type(&self) -> Option<AgentType> {
         self.config.agent_type.or(self.detected_agent_type)
@@ -458,10 +616,35 @@ impl AgentStateInference {
     /// updates the recent lines buffer. Call [`Self::update_command_state`]
     /// separately with the latest `CommandState` from the tracker.
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
+        self.feed_bytes_at(bytes, Instant::now());
+    }
+
+    /// Feed bytes with an explicit timestamp (used by tests for mock timing).
+    fn feed_bytes_at(&mut self, bytes: &[u8], timestamp: Instant) {
+        // Collect chunk stats before stripping ANSI for cadence analysis.
+        let has_backspace = bytes.iter().any(|&b| b == 0x08 || b == 0x7F);
+        let has_cursor_control = Self::scan_cursor_control(bytes);
+
         // Stateful ANSI stripping: carries parse state across calls so that
         // escape sequences split across PTY read boundaries are consumed
         // correctly instead of leaking fragments into visible text.
         let text = self.ansi_stripper.feed(bytes);
+
+        let visible_chars = text.chars().filter(|c| !c.is_control()).count();
+
+        // Record chunk statistics for cadence analysis.
+        if !bytes.is_empty() {
+            self.chunk_stats.push_back(ByteChunkStats {
+                timestamp,
+                byte_count: bytes.len(),
+                has_backspace,
+                has_cursor_control,
+                visible_chars,
+            });
+            if self.chunk_stats.len() > MAX_CHUNK_STATS {
+                self.chunk_stats.pop_front();
+            }
+        }
 
         for ch in text.chars() {
             if ch == '\n' || ch == '\r' {
@@ -481,6 +664,36 @@ impl AgentStateInference {
 
         // Run inference and write if state changed.
         self.infer_and_write();
+    }
+
+    /// Scan raw bytes for CSI cursor control sequences (movement, erase).
+    ///
+    /// Looks for ESC \[ ... followed by a final byte that indicates cursor
+    /// movement (A-H, J, K) rather than graphics (m) or other attributes.
+    fn scan_cursor_control(bytes: &[u8]) -> bool {
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                // Found CSI; skip to final byte.
+                i += 2;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if (0x40..=0x7E).contains(&b) {
+                        // Final byte: check if it's a cursor control command.
+                        if matches!(
+                            b,
+                            b'A' | b'B' | b'C' | b'D' | b'E' | b'F' | b'G' | b'H' | b'J' | b'K'
+                        ) {
+                            return true;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            i += 1;
+        }
+        false
     }
 
     /// Update with the latest OSC 633 command state and telemetry from
@@ -1837,5 +2050,296 @@ mod tests {
         assert!(!engine.dirty);
         // last_write should not have advanced (no write happened).
         assert_eq!(engine.last_write, initial_write_time);
+    }
+
+    // -- Output cadence analysis -----------------------------------------------
+
+    #[test]
+    fn cadence_unknown_insufficient_data() {
+        let engine = make_engine(Some(AgentType::Claude));
+        assert_eq!(engine.classify_output_cadence(), OutputCadence::Unknown);
+    }
+
+    #[test]
+    fn cadence_unknown_two_chunks() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+        engine.feed_bytes_at(b"ab", t0);
+        engine.feed_bytes_at(b"cd", t0 + Duration::from_millis(100));
+        // Only 2 chunks -- below minimum.
+        assert_eq!(engine.classify_output_cadence(), OutputCadence::Unknown);
+    }
+
+    #[test]
+    fn cadence_human_typing() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Simulate human typing: 1-3 chars per chunk, 50-200ms apart,
+        // with occasional backspaces.
+        engine.feed_bytes_at(b"h", t0);
+        engine.feed_bytes_at(b"el", t0 + Duration::from_millis(80));
+        engine.feed_bytes_at(b"l", t0 + Duration::from_millis(150));
+        engine.feed_bytes_at(b"\x08", t0 + Duration::from_millis(300)); // backspace
+        engine.feed_bytes_at(b"lo", t0 + Duration::from_millis(420));
+        engine.feed_bytes_at(b" w", t0 + Duration::from_millis(550));
+        engine.feed_bytes_at(b"or", t0 + Duration::from_millis(700));
+        engine.feed_bytes_at(b"\x08", t0 + Duration::from_millis(800)); // backspace
+        engine.feed_bytes_at(b"rl", t0 + Duration::from_millis(950));
+        engine.feed_bytes_at(b"d", t0 + Duration::from_millis(1100));
+
+        assert_eq!(engine.classify_output_cadence(), OutputCadence::Human);
+    }
+
+    #[test]
+    fn cadence_human_typing_no_backspace() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Careful typer: small chunks, human speed, no backspaces.
+        for i in 0..10 {
+            engine.feed_bytes_at(b"ab", t0 + Duration::from_millis(i * 120));
+        }
+
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Human,
+            "Small chunks at human speed should classify as Human even without backspaces"
+        );
+    }
+
+    #[test]
+    fn cadence_agent_sustained_large_output() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Realistic agent scenario: 20 chunks of ~95 visible chars each,
+        // arriving every ~150ms over ~2.85 seconds. No backspaces.
+        let chunk = b"This is a line of agent output that is about one hundred characters long roughly speaking yes.\n";
+        for i in 0..20 {
+            engine.feed_bytes_at(chunk, t0 + Duration::from_millis(i * 150));
+        }
+
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Agent,
+            "Sustained large output over 2.85s should be classified as Agent"
+        );
+    }
+
+    #[test]
+    fn cadence_burst_large_single_dump() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Simulate burst: 3 very large chunks in quick succession.
+        let big_chunk: Vec<u8> = b"x".repeat(2000);
+        engine.feed_bytes_at(&big_chunk, t0);
+        engine.feed_bytes_at(&big_chunk, t0 + Duration::from_millis(5));
+        engine.feed_bytes_at(&big_chunk, t0 + Duration::from_millis(10));
+
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Burst,
+            "3 large chunks in 10ms should be Burst (not sustained)"
+        );
+    }
+
+    #[test]
+    fn cadence_burst_short_window() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Large visible output over a short window (< 2s).
+        let chunk: Vec<u8> = b"x".repeat(200);
+        for i in 0..5 {
+            engine.feed_bytes_at(&chunk, t0 + Duration::from_millis(i * 50));
+        }
+
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Burst,
+            "Large output over 200ms should be Burst"
+        );
+    }
+
+    #[test]
+    fn cadence_transition_human_to_agent_to_human() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Phase 1: Human typing.
+        for i in 0..10 {
+            let b: &[u8] = if i % 4 == 3 { b"\x08" } else { b"ab" };
+            engine.feed_bytes_at(b, t0 + Duration::from_millis(i * 100));
+        }
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Human,
+            "Phase 1 should be Human"
+        );
+
+        // Phase 2: Transition to agent -- flood with large chunks.
+        // Clear the window to simulate time passing and agent taking over.
+        engine.chunk_stats.clear();
+        let t1 = t0 + Duration::from_secs(5);
+        let agent_chunk = b"Agent is writing a long response with many characters per chunk and this continues on.\n";
+        for i in 0..20 {
+            engine.feed_bytes_at(agent_chunk, t1 + Duration::from_millis(i * 150));
+        }
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Agent,
+            "Phase 2 should be Agent"
+        );
+
+        // Phase 3: Back to human typing.
+        engine.chunk_stats.clear();
+        let t2 = t1 + Duration::from_secs(10);
+        for i in 0..10 {
+            let b: &[u8] = if i % 3 == 2 { b"\x7F" } else { b"k" };
+            engine.feed_bytes_at(b, t2 + Duration::from_millis(i * 120));
+        }
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Human,
+            "Phase 3 should be Human"
+        );
+    }
+
+    #[test]
+    fn cadence_burst_vs_agent() {
+        // Burst: large output but only a few chunks (< sustained duration).
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+        let big = b"x".repeat(5000);
+        engine.feed_bytes_at(&big, t0);
+        engine.feed_bytes_at(&big, t0 + Duration::from_millis(2));
+        engine.feed_bytes_at(&big, t0 + Duration::from_millis(4));
+        engine.feed_bytes_at(&big, t0 + Duration::from_millis(6));
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Burst,
+            "Large output over 6ms should be Burst"
+        );
+
+        // Agent: same size chunks but sustained over > 2 seconds.
+        engine.chunk_stats.clear();
+        let chunk = b"x".repeat(200);
+        for i in 0..20 {
+            engine.feed_bytes_at(&chunk, t0 + Duration::from_millis(i * 150));
+        }
+        assert_eq!(
+            engine.classify_output_cadence(),
+            OutputCadence::Agent,
+            "Large output sustained over 2.85s should be Agent"
+        );
+    }
+
+    // -- Spinner detection -----------------------------------------------------
+
+    #[test]
+    fn spinner_pattern_detected() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Simpler: chunks with CSI cursor movement and small visible text.
+        for i in 0..10 {
+            // ESC[H = cursor home (H is cursor control), then a single visible char.
+            let mut raw = b"\x1b[H".to_vec();
+            raw.push(b"-/|\\"[i as usize % 4]);
+            engine.feed_bytes_at(&raw, t0 + Duration::from_millis(i * 80));
+        }
+
+        assert!(
+            engine.is_spinner_pattern(),
+            "Cursor-control-heavy output with small visible content should be spinner"
+        );
+    }
+
+    #[test]
+    fn spinner_not_detected_for_normal_output() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+
+        // Normal output: no cursor control, lots of visible text.
+        for i in 0..10 {
+            let line = format!("This is line {} of normal output\n", i);
+            engine.feed_bytes_at(line.as_bytes(), t0 + Duration::from_millis(i * 50));
+        }
+
+        assert!(
+            !engine.is_spinner_pattern(),
+            "Normal text output should not be detected as spinner"
+        );
+    }
+
+    #[test]
+    fn spinner_not_detected_insufficient_data() {
+        let engine = make_engine(Some(AgentType::Claude));
+        assert!(
+            !engine.is_spinner_pattern(),
+            "Empty chunk window should not be spinner"
+        );
+    }
+
+    // -- Chunk stats collection ------------------------------------------------
+
+    #[test]
+    fn chunk_stats_populated_by_feed_bytes() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.feed_bytes(b"hello world\n");
+        assert_eq!(engine.chunk_stats.len(), 1);
+        assert_eq!(engine.chunk_stats[0].byte_count, 12);
+        assert!(!engine.chunk_stats[0].has_backspace);
+        assert!(!engine.chunk_stats[0].has_cursor_control);
+    }
+
+    #[test]
+    fn chunk_stats_backspace_detected() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.feed_bytes(b"helo\x08lo\n");
+        assert_eq!(engine.chunk_stats.len(), 1);
+        assert!(engine.chunk_stats[0].has_backspace);
+    }
+
+    #[test]
+    fn chunk_stats_del_detected() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.feed_bytes(b"helo\x7Flo\n");
+        assert!(engine.chunk_stats[0].has_backspace);
+    }
+
+    #[test]
+    fn chunk_stats_cursor_control_detected() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        // CSI A = cursor up.
+        engine.feed_bytes(b"\x1b[Ahello\n");
+        assert!(engine.chunk_stats[0].has_cursor_control);
+    }
+
+    #[test]
+    fn chunk_stats_no_cursor_control_for_sgr() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        // CSI 31m = set color (SGR), not cursor control.
+        engine.feed_bytes(b"\x1b[31mred\x1b[0m\n");
+        assert!(!engine.chunk_stats[0].has_cursor_control);
+    }
+
+    #[test]
+    fn chunk_stats_window_eviction() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        for i in 0..25 {
+            engine.feed_bytes(format!("line {}\n", i).as_bytes());
+        }
+        assert_eq!(engine.chunk_stats.len(), MAX_CHUNK_STATS);
+    }
+
+    #[test]
+    fn chunk_stats_visible_chars_count() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        // "hello" = 5 visible chars, \n is control, ANSI codes stripped.
+        engine.feed_bytes(b"\x1b[31mhello\x1b[0m\n");
+        assert_eq!(engine.chunk_stats[0].visible_chars, 5);
     }
 }
