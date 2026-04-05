@@ -114,6 +114,14 @@ fn classify_process(process: &Process) -> Option<AgentType> {
         .collect();
     let cmd_joined = cmd_lower.join(" ");
 
+    // WSL2 guard: Windows processes launched via WSL interop appear as Linux PIDs
+    // with their exe rooted at `/init` and their cmdline starting with "/init /mnt/c/...".
+    // Skip these to avoid false positives from Windows-side node.exe/python.exe
+    // instances that happen to have "claude" or "aider" in their command line.
+    if is_wsl2_interop_process(&cmd_lower) {
+        return None;
+    }
+
     // Claude Code: Node.js process with "claude" in the command line.
     if name.contains("node") && cmd_joined.contains("claude") {
         return Some(AgentType::Claude);
@@ -135,6 +143,26 @@ fn classify_process(process: &Process) -> Option<AgentType> {
     }
 
     None
+}
+
+/// Return `true` if this process is a Windows executable launched via WSL2
+/// binfmt_misc interop (i.e., the interpreter is `/init` and the binary path
+/// starts with `/mnt/`).
+///
+/// On WSL2, Windows `.exe` files run as Linux processes with `/init` as the
+/// actual ELF interpreter. The full command line looks like:
+///
+///   `/init /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ...`
+///
+/// We detect this by checking whether the first argument is `/init` and the
+/// second starts with `/mnt/`.
+fn is_wsl2_interop_process(cmd_lower: &[String]) -> bool {
+    if cmd_lower.len() < 2 {
+        return false;
+    }
+    // cmd_lower[0] is the interpreter path on WSL2 interop processes.
+    // Use the lowercase version; /init is already lowercase.
+    cmd_lower[0].ends_with("/init") && cmd_lower[1].starts_with("/mnt/")
 }
 
 #[cfg(test)]
@@ -202,5 +230,54 @@ mod tests {
         assert!(detector.shell_pid.is_none());
         detector.set_shell_pid(42);
         assert_eq!(detector.shell_pid, Some(42));
+    }
+
+    // ── WSL2 interop guard ────────────────────────────────────────────────
+
+    #[test]
+    fn wsl2_interop_process_detected() {
+        // Windows powershell.exe launched via WSL2 binfmt_misc interop:
+        // cmdline = ["/init", "/mnt/c/Windows/System32/.../powershell.exe", "-Command", "..."]
+        let cmd = vec![
+            "/init".to_string(),
+            "/mnt/c/windows/system32/windowspowershell/v1.0/powershell.exe".to_string(),
+            "-command".to_string(),
+            "some-script".to_string(),
+        ];
+        assert!(is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn wsl2_interop_windows_node_with_claude_not_false_positive() {
+        // A Windows node.exe with "claude" in the args should be filtered out.
+        let cmd = vec![
+            "/init".to_string(),
+            "/mnt/c/program files/nodejs/node.exe".to_string(),
+            "/mnt/c/users/alice/appdata/roaming/npm/node_modules/.bin/claude".to_string(),
+        ];
+        assert!(is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn linux_node_not_flagged_as_interop() {
+        // A native Linux node process should NOT be filtered.
+        let cmd = vec![
+            "/home/alice/.nvm/versions/node/v20/bin/node".to_string(),
+            "/usr/local/lib/node_modules/.bin/claude".to_string(),
+        ];
+        assert!(!is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn wsl2_interop_requires_mnt_prefix_on_second_arg() {
+        // /init without /mnt/ second arg is not WSL interop.
+        let cmd = vec!["/init".to_string(), "/usr/bin/bash".to_string()];
+        assert!(!is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn wsl2_interop_empty_cmd_not_flagged() {
+        assert!(!is_wsl2_interop_process(&[]));
+        assert!(!is_wsl2_interop_process(&["/init".to_string()]));
     }
 }

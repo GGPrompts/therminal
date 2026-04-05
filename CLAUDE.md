@@ -148,6 +148,30 @@ Therminal uses Ghostty-style `TERM_PROGRAM` detection. When spawning a PTY, thre
 
 Shell integration scripts live in `resources/shell-integration/` (bash, zsh, fish, PowerShell). Each script emits OSC 133 marks (A=PromptStart, B=PromptEnd, C=PreExec, D=CommandFinished) and OSC 7 for current directory. All scripts guard against double-sourcing via `__THERMINAL_SHELL_INTEGRATION`.
 
+## WSL2
+
+Therminal runs fine on WSL2. The quirks below are documented for future contributors.
+
+### What works without changes
+
+- **PTY & resize**: `portable-pty` uses `forkpty(3)` + `TIOCSWINSZ` ioctl — identical behaviour on WSL2 Linux PTYs. `SIGWINCH` delivery works correctly.
+- **`TERM` variable**: therminal does not call `alacritty_terminal::tty::setup_env()`, so `TERM` is inherited from the parent process. Under Windows Terminal this is typically `xterm-256color`; the `alacritty` terminfo entry is also present on Ubuntu-24.04 WSL2, so either works.
+- **Env var forwarding / `WSLENV`**: `portable-pty`'s `CommandBuilder::new()` initialises from `std::env::vars_os()`, so every env var in the therminal process — including `WSLENV`, `WSL_DISTRO_NAME`, `WSL_INTEROP`, and anything forwarded by Windows Terminal — is automatically inherited by child shells. No explicit forwarding code is needed.
+- **XDG directories**: `dirs` crate reads `$XDG_CONFIG_HOME`, `$XDG_RUNTIME_DIR`, etc., all of which are set correctly by WSL2's systemd/elogind shim. Config, data, cache, and socket paths resolve to expected Linux locations under `~/.config/`, `~/.cache/`, and `/run/user/<uid>/`.
+- **OSC 7 CWD reporting**: shell integration scripts emit `file://$(hostname)${PWD}`. When inside a Linux directory (`/home/...`) the interceptor strips the hostname and passes the Linux path to the status bar. Home-dir abbreviation to `~` works correctly.
+
+### WSL2-specific fixes applied
+
+- **Windows home abbreviation in status bar** (`crates/therminal-app/src/window/chrome.rs`): When navigating Windows-side directories (e.g., `/mnt/c/Users/alice/Documents`), the Linux `$HOME` prefix doesn't match, so the full path would appear. The `abbreviate_path()` function now detects WSL2 via `WSL_DISTRO_NAME` and reads `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` (forwarded by Windows Terminal) to abbreviate `/mnt/c/Users/<user>` to `~win`.
+- **Process detector false positives from Windows interop** (`crates/therminal-terminal/src/process_detector.rs`): Windows `.exe` files launched via WSL2 binfmt_misc interop appear as Linux PIDs whose cmdline begins with `/init /mnt/c/...`. A Windows `node.exe` with `claude` in its path would otherwise trigger the Claude agent detector. `is_wsl2_interop_process()` filters these out before classification.
+
+### Known limitations
+
+- **OSC 7 in `/mnt/c/` paths**: The hostname in the OSC 7 URI is the WSL2 distro hostname (e.g., `matt`), not `localhost`. The interceptor already handles arbitrary hostnames correctly (strips the hostname portion from `file://hostname/path`), so this is a non-issue.
+- **`USERPROFILE` forwarding**: The `~win` abbreviation in the status bar only works if `USERPROFILE` (or `HOMEDRIVE`+`HOMEPATH`) is forwarded from Windows. Windows Terminal forwards these by default; other launchers may not. If not forwarded, `/mnt/c/` paths appear unabbreviated — acceptable fallback.
+- **Windows process visibility**: `sysinfo` reads `/proc` and sees Windows interop processes as regular Linux PIDs. The interop guard in `process_detector.rs` prevents false agent detections, but `scan()` still traverses these PIDs during the BFS walk. This adds a small overhead on systems with many Windows interop processes. Not a correctness issue.
+- **GPU / wgpu on WSL2**: wgpu requires a Vulkan ICD. Under WSL2 this works via `d3d12` (WSL2 GPU paravirtualisation) when running with a GUI. Headless WSL2 sessions (no `DISPLAY` / `WAYLAND_DISPLAY`) will fail at window creation — this is expected; therminal is a GUI app.
+
 ## Code Style
 
 ### Module Size

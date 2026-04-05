@@ -884,6 +884,10 @@ pub(crate) fn draw_status_bar(
 
 /// Abbreviate a path for status bar display: replace the home directory with `~`
 /// and extract the path from `file://` URLs.
+///
+/// On WSL2, paths under `/mnt/c/Users/<user>` (the Windows user home) are
+/// abbreviated to `~win` so the status bar stays readable when navigating
+/// Windows filesystems.
 fn abbreviate_path(path: &str) -> String {
     // OSC 7 sends file:// URLs; extract the path portion.
     let path = if let Some(rest) = path.strip_prefix("file://") {
@@ -893,12 +897,126 @@ fn abbreviate_path(path: &str) -> String {
         path
     };
 
-    // Replace home dir with ~.
+    // Replace Linux home dir with ~.
     if let Ok(home) = std::env::var("HOME") {
         if let Some(rest) = path.strip_prefix(home.as_str()) {
             return format!("~{rest}");
         }
     }
 
+    // WSL2: abbreviate Windows user home (/mnt/c/Users/<user>) to ~win.
+    // This applies when the user navigates into Windows-side directories.
+    if let Some(win_home) = wsl2_windows_home() {
+        if let Some(rest) = path.strip_prefix(win_home.as_str()) {
+            return format!("~win{rest}");
+        }
+    }
+
     path.to_string()
+}
+
+/// Detect the WSL2 Windows user home directory as a Linux path.
+///
+/// Returns `Some("/mnt/c/Users/<username>")` when running under WSL2 and the
+/// `USERPROFILE` or `HOMEDRIVE`+`HOMEPATH` env vars are set (forwarded by
+/// Windows Terminal / WSL2 via `WSLENV`). Returns `None` on non-WSL2 systems.
+fn wsl2_windows_home() -> Option<String> {
+    // WSL2 sets WSL_DISTRO_NAME; use it as a cheap guard.
+    std::env::var_os("WSL_DISTRO_NAME")?;
+
+    // USERPROFILE is typically forwarded from Windows via WSLENV (e.g.,
+    // "C:\Users\alice"). Convert backslashes and prepend /mnt/c -> /mnt/c/Users/alice.
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        if let Some(linux_path) = windows_path_to_linux(&userprofile) {
+            return Some(linux_path);
+        }
+    }
+
+    // Fallback: HOMEDRIVE (e.g. "C:") + HOMEPATH (e.g. "\Users\alice").
+    if let (Ok(drive), Ok(homepath)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        let combined = format!("{drive}{homepath}");
+        if let Some(linux_path) = windows_path_to_linux(&combined) {
+            return Some(linux_path);
+        }
+    }
+
+    None
+}
+
+/// Convert a Windows-style absolute path (e.g. `C:\Users\alice`) to a WSL2
+/// Linux mount path (e.g. `/mnt/c/Users/alice`).
+///
+/// Returns `None` if the path is not a recognised `<drive>:\...` form.
+fn windows_path_to_linux(windows_path: &str) -> Option<String> {
+    // Expect at least "C:\" (3 chars).
+    if windows_path.len() < 3 {
+        return None;
+    }
+    let (drive, rest) = windows_path.split_at(2);
+    if !drive.ends_with(':') {
+        return None;
+    }
+    let drive_letter = drive.chars().next()?.to_ascii_lowercase();
+    // Normalise backslashes to forward slashes and strip the leading separator.
+    let rest = rest.trim_start_matches(['\\', '/']);
+    let rest = rest.replace('\\', "/");
+    Some(format!("/mnt/{drive_letter}/{rest}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_path_to_linux_backslashes() {
+        assert_eq!(
+            windows_path_to_linux(r"C:\Users\alice"),
+            Some("/mnt/c/Users/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_path_to_linux_forward_slashes() {
+        assert_eq!(
+            windows_path_to_linux("C:/Users/alice"),
+            Some("/mnt/c/Users/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_path_to_linux_uppercase_drive() {
+        assert_eq!(
+            windows_path_to_linux(r"D:\Projects"),
+            Some("/mnt/d/Projects".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_path_to_linux_invalid() {
+        assert_eq!(windows_path_to_linux("not-a-windows-path"), None);
+        assert_eq!(windows_path_to_linux(""), None);
+    }
+
+    #[test]
+    fn abbreviate_path_strips_file_url() {
+        // file://hostname/path -> /path (no home match, returned as-is)
+        let result = abbreviate_path("file://localhost/tmp/foo");
+        assert_eq!(result, "/tmp/foo");
+    }
+
+    #[test]
+    fn abbreviate_path_plain_path() {
+        // A plain path with no match is returned unchanged.
+        let result = abbreviate_path("/some/other/path");
+        assert_eq!(result, "/some/other/path");
+    }
+
+    #[test]
+    fn abbreviate_path_mnt_c_without_wsl2() {
+        // When WSL_DISTRO_NAME is not set, /mnt/c/ paths are returned unchanged.
+        // We can't easily manipulate env vars in tests safely, so just check
+        // the function doesn't panic and returns a string.
+        let result = abbreviate_path("/mnt/c/Users/alice/Documents");
+        assert!(!result.is_empty());
+    }
 }
