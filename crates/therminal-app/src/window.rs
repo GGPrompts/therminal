@@ -17,9 +17,11 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{TermDamage, TermMode};
 use anyhow::Result;
@@ -269,6 +271,21 @@ pub struct App {
     /// Pane where the current mouse drag started (for consistent drag routing).
     mouse_drag_pane: Option<PaneId>,
 
+    /// Whether a mouse-driven selection is currently in progress (dragging).
+    selection_in_progress: bool,
+
+    /// Pane that owns the current selection (for multi-pane awareness).
+    selection_pane: Option<PaneId>,
+
+    /// Timestamp of the last left-click (for double/triple click detection).
+    last_click_time: Option<Instant>,
+
+    /// Position of the last left-click in grid coords (col, row).
+    last_click_pos: Option<(usize, usize)>,
+
+    /// Click count (1 = single, 2 = double/word, 3 = triple/line).
+    click_count: u8,
+
     /// Current loaded configuration.
     config: TherminalConfig,
 
@@ -330,6 +347,11 @@ impl App {
             cursor_position: None,
             mouse_left_held: false,
             mouse_drag_pane: None,
+            selection_in_progress: false,
+            selection_pane: None,
+            last_click_time: None,
+            last_click_pos: None,
+            click_count: 0,
             config,
             binding_map,
             _config_watcher: config_watcher,
@@ -679,12 +701,10 @@ impl App {
                 info!("zoom pane: not yet implemented");
             }
             KeyAction::Copy => {
-                // TODO: implement clipboard copy (tn-oxa)
-                info!("copy: not yet implemented");
+                self.copy_selection();
             }
             KeyAction::Paste => {
-                // TODO: implement clipboard paste (tn-oxa)
-                info!("paste: not yet implemented");
+                self.paste_clipboard();
             }
             KeyAction::FontSizeUp => {
                 // TODO: implement font size up
@@ -991,6 +1011,157 @@ impl App {
         Some((col.min(max_col), row.min(max_row)))
     }
 
+    // ── Selection helpers ─────────────────────────────────────────────────
+
+    /// Determine the `Side` of a cell the cursor is on based on sub-cell pixel position.
+    fn pixel_to_side(&self, px: f64, pane_id: PaneId) -> Side {
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return Side::Left,
+        };
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
+            None => return Side::Left,
+        };
+        let pane = match layout.find_pane(pane_id) {
+            Some(p) => p,
+            None => return Side::Left,
+        };
+        let vp = pane.viewport;
+        let cell_x = (px as f32 - vp.x() - renderer.padding_x()) % renderer.cell_width;
+        if cell_x > renderer.cell_width / 2.0 {
+            Side::Right
+        } else {
+            Side::Left
+        }
+    }
+
+    /// Start a new selection on the given pane at the specified grid position.
+    fn start_selection(&mut self, pane_id: PaneId, col: usize, row: usize, ty: SelectionType) {
+        // Compute side before borrowing layout mutably.
+        let side = self.pixel_to_side(self.cursor_position.map(|(x, _)| x).unwrap_or(0.0), pane_id);
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane_mut(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let point = Point::new(Line(row as i32), Column(col));
+        let selection = Selection::new(ty, point, side);
+        pane.term.lock().selection = Some(selection);
+        self.selection_in_progress = true;
+        self.selection_pane = Some(pane_id);
+    }
+
+    /// Update the current in-progress selection to a new grid position.
+    fn update_selection(&mut self, pane_id: PaneId, col: usize, row: usize) {
+        // Compute side before borrowing layout mutably.
+        let side = self.pixel_to_side(self.cursor_position.map(|(x, _)| x).unwrap_or(0.0), pane_id);
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane_mut(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let point = Point::new(Line(row as i32), Column(col));
+        let mut term_guard = pane.term.lock();
+        if let Some(ref mut selection) = term_guard.selection {
+            selection.update(point, side);
+        }
+    }
+
+    /// Finalize the selection: extract selected text and copy to clipboard.
+    fn finalize_selection(&mut self) {
+        self.selection_in_progress = false;
+        let pane_id = match self.selection_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let term_guard = pane.term.lock();
+        if let Some(text) = term_guard.selection_to_string() {
+            if !text.is_empty() {
+                crate::clipboard::copy_to_clipboard(&text);
+            }
+        }
+    }
+
+    /// Copy the current selection to the clipboard (for Ctrl+Shift+C keybinding).
+    fn copy_selection(&mut self) {
+        let pane_id = match self.selection_pane.or(self.focused_pane) {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let term_guard = pane.term.lock();
+        if let Some(text) = term_guard.selection_to_string() {
+            if !text.is_empty() {
+                crate::clipboard::copy_to_clipboard(&text);
+            }
+        }
+    }
+
+    /// Paste clipboard contents to the focused pane's PTY (with bracketed paste support).
+    fn paste_clipboard(&mut self) {
+        let text = crate::clipboard::paste_from_clipboard();
+        if text.is_empty() {
+            return;
+        }
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let mode = self.pane_term_mode(focused);
+        let bracketed = mode.contains(TermMode::BRACKETED_PASTE);
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane_mut(focused) {
+            Some(p) => p,
+            None => return,
+        };
+        if bracketed {
+            let _ = pane.pty_writer.write_all(b"\x1b[200~");
+        }
+        let _ = pane.pty_writer.write_all(text.as_bytes());
+        if bracketed {
+            let _ = pane.pty_writer.write_all(b"\x1b[201~");
+        }
+    }
+
+    /// Clear the active selection on all panes.
+    fn clear_selection(&mut self) {
+        if let Some(pane_id) = self.selection_pane.take() {
+            if let Some(layout) = self.layout.as_mut() {
+                if let Some(pane) = layout.find_pane_mut(pane_id) {
+                    pane.term.lock().selection = None;
+                }
+            }
+        }
+        self.selection_in_progress = false;
+    }
+
+    // ── End selection helpers ─────────────────────────────────────────────
+
     /// Get the current terminal mode flags from the focused pane.
     #[allow(dead_code)]
     fn term_mode(&self) -> TermMode {
@@ -1125,6 +1296,11 @@ impl App {
     }
 
     /// Handle mouse button press/release -- routes to the pane under the pointer.
+    ///
+    /// Left-button handling:
+    ///   - In mouse-reporting mode: forward press/release to the PTY.
+    ///   - Otherwise: drive text selection (single / double / triple click,
+    ///     shift-extend, drag).
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
         let (px, py) = match self.cursor_position {
             Some(pos) => pos,
@@ -1163,6 +1339,50 @@ impl App {
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
 
+        // ── Selection logic (only when the terminal is NOT in mouse mode) ──
+        if button == MouseButton::Left && !mouse_mode {
+            if state == ElementState::Pressed {
+                let shift_held = self.modifiers.state().shift_key();
+
+                // Detect multi-click (double/triple) by timing and position.
+                let now = Instant::now();
+                let same_pos = self.last_click_pos == Some((col, row));
+                let quick = self
+                    .last_click_time
+                    .is_some_and(|t| now.duration_since(t) < Duration::from_millis(300));
+
+                if quick && same_pos && self.click_count < 3 {
+                    self.click_count += 1;
+                } else {
+                    self.click_count = 1;
+                }
+                self.last_click_time = Some(now);
+                self.last_click_pos = Some((col, row));
+
+                if shift_held && self.selection_pane == Some(target_pane) {
+                    // Shift+click: extend existing selection.
+                    self.update_selection(target_pane, col, row);
+                } else {
+                    // Start a new selection of the appropriate type.
+                    let ty = match self.click_count {
+                        2 => SelectionType::Semantic,
+                        3 => SelectionType::Lines,
+                        _ => SelectionType::Simple,
+                    };
+                    self.start_selection(target_pane, col, row, ty);
+                }
+
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            } else {
+                // Button released -- finalize selection (copy to clipboard).
+                self.finalize_selection();
+            }
+            return;
+        }
+
+        // ── Mouse-reporting mode: forward to PTY ────────────────────────
         if !mouse_mode {
             return;
         }
@@ -1201,6 +1421,15 @@ impl App {
                 Some(pos) => pos,
                 None => return,
             };
+
+            // If a selection drag is in progress, update the selection endpoint.
+            if self.selection_in_progress {
+                self.update_selection(target, col, row);
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
+            }
 
             let mode = self.pane_term_mode(target);
             if mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION) {
@@ -2284,7 +2513,18 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 // Check configured keybindings first.
-                if !self.handle_keybinding(key_event) {
+                if self.handle_keybinding(key_event) {
+                    // Keybinding consumed the event. Copy/Paste preserve
+                    // selection; other actions clear it.
+                    let action = lookup_binding(&self.binding_map, &self.modifiers, key_event);
+                    let preserves =
+                        matches!(action, Some(KeyAction::Copy) | Some(KeyAction::Paste));
+                    if !preserves {
+                        self.clear_selection();
+                    }
+                } else {
+                    // Regular keypress clears any active selection.
+                    self.clear_selection();
                     self.handle_key_input(key_event);
                 }
             }
