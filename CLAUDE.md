@@ -134,6 +134,18 @@ Therminal uses Ghostty-style `TERM_PROGRAM` detection. When spawning a PTY, thre
 
 Shell integration scripts live in `resources/shell-integration/` (bash, zsh, fish, PowerShell). Each script emits OSC 133 marks (A=PromptStart, B=PromptEnd, C=PreExec, D=CommandFinished) and OSC 7 for current directory. All scripts guard against double-sourcing via `__THERMINAL_SHELL_INTEGRATION`.
 
+## Code Style
+
+### Module Size
+Prefer small, focused modules over large monolithic files. When a file exceeds ~500 lines, consider splitting it into submodules with a clear single responsibility each. Use `mod.rs` or named modules to organize.
+
+For example, `therminal-app/src/window.rs` is overdue for splitting — mouse handling, keybinding dispatch, chrome rendering, and pane management should each be separate modules.
+
+### General
+- Keep functions short and focused — if a function needs a section comment, it's probably a candidate for extraction
+- No premature abstraction, but do extract when the same pattern appears in 3+ places
+- Rust idioms: prefer `?` over `.unwrap()`, use `thiserror` for public error types
+
 ## Building & Testing
 
 Run `./scripts/ci.sh` before committing code changes. This runs the same checks as GitHub Actions CI:
