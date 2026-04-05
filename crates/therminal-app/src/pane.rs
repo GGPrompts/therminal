@@ -572,13 +572,13 @@ impl LayoutNode {
 
     /// Determine the best split direction for a pane based on its viewport rect.
     ///
-    /// - If width > height * 1.5: Horizontal (side-by-side) to use the wide space
-    /// - If height > width * 1.5: Vertical (stacked) to use the tall space
+    /// - If width > height * 1.2: Horizontal (side-by-side) to use the wide space
+    /// - If height > width * 1.2: Vertical (stacked) to use the tall space
     /// - Otherwise: use `fallback` (caller alternates based on last split)
     pub fn auto_split_direction(rect: Rect, fallback: SplitDirection) -> SplitDirection {
-        if rect.width() > rect.height() * 1.5 {
+        if rect.width() > rect.height() * 1.2 {
             SplitDirection::Horizontal
-        } else if rect.height() > rect.width() * 1.5 {
+        } else if rect.height() > rect.width() * 1.2 {
             SplitDirection::Vertical
         } else {
             fallback

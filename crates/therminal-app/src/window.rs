@@ -2271,10 +2271,10 @@ fn draw_pane_header(
     // Pane index label (left-aligned).
     let index_text = format!(" {}", pane_index + 1);
     let index_color = GlyphColor::rgba(
-        PaletteColor::INK_DIM.r,
-        PaletteColor::INK_DIM.g,
-        PaletteColor::INK_DIM.b,
-        if is_focused { 255 } else { 160 },
+        PaletteColor::INK_MUTED.r,
+        PaletteColor::INK_MUTED.g,
+        PaletteColor::INK_MUTED.b,
+        if is_focused { 255 } else { 200 },
     );
 
     let mut index_buf = Buffer::new(&mut renderer.font_system, metrics);
@@ -2303,7 +2303,7 @@ fn draw_pane_header(
             PaletteColor::INK_MUTED.r,
             PaletteColor::INK_MUTED.g,
             PaletteColor::INK_MUTED.b,
-            180,
+            220,
         )
     };
 
@@ -2335,10 +2335,10 @@ fn draw_pane_header(
         if is_focused { 230 } else { 160 },
     );
     let button_color = GlyphColor::rgba(
-        PaletteColor::INK_DIM.r,
-        PaletteColor::INK_DIM.g,
-        PaletteColor::INK_DIM.b,
-        if is_focused { 200 } else { 130 },
+        PaletteColor::INK_MUTED.r,
+        PaletteColor::INK_MUTED.g,
+        PaletteColor::INK_MUTED.b,
+        if is_focused { 230 } else { 170 },
     );
 
     // Button layout from right edge: [X] [V] [H]
@@ -2555,10 +2555,10 @@ fn draw_status_bar(
     // Left: "therminal"
     let left_text = " therminal";
     let left_color = GlyphColor::rgba(
-        PaletteColor::INK_DIM.r,
-        PaletteColor::INK_DIM.g,
-        PaletteColor::INK_DIM.b,
-        200,
+        PaletteColor::INK_MUTED.r,
+        PaletteColor::INK_MUTED.g,
+        PaletteColor::INK_MUTED.b,
+        230,
     );
 
     let mut left_buf = Buffer::new(&mut renderer.font_system, metrics);
@@ -2580,9 +2580,9 @@ fn draw_status_bar(
         format!("{pane_count} panes")
     };
     let center_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
+        PaletteColor::INK.r,
+        PaletteColor::INK.g,
+        PaletteColor::INK.b,
         200,
     );
 
