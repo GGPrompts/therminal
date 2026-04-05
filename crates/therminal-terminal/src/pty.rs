@@ -1,9 +1,14 @@
 //! Cross-platform PTY management using portable-pty.
 //!
 //! Abstracts over forkpty (Unix) and ConPTY (Windows) via `portable_pty::native_pty_system()`.
+//! Shell integration scripts are auto-sourced on spawn via shell-specific injection
+//! (rcfile wrappers, ZDOTDIR, fish --init-command, PowerShell -Command).
+
+use std::path::{Path, PathBuf};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
+use tracing::{debug, warn};
 
 /// Result of spawning a shell in a new PTY.
 pub type SpawnResult = (Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>);
@@ -18,10 +23,281 @@ pub enum PtyError {
 
     #[error("failed to resize PTY: {0}")]
     Resize(#[source] anyhow::Error),
+
+    #[error("failed to prepare shell integration: {0}")]
+    Integration(String),
+}
+
+/// Known shell types for integration injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellType {
+    Bash,
+    Zsh,
+    Fish,
+    PowerShell,
+    Unknown,
+}
+
+/// Detect the shell type from a shell path or name.
+pub fn detect_shell_type(shell: &str) -> ShellType {
+    let basename = Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell);
+    match basename {
+        "bash" => ShellType::Bash,
+        "zsh" => ShellType::Zsh,
+        "fish" => ShellType::Fish,
+        "pwsh" | "powershell" | "pwsh.exe" | "powershell.exe" => ShellType::PowerShell,
+        _ => ShellType::Unknown,
+    }
+}
+
+/// Resolve the user's default shell path.
+///
+/// Checks `$SHELL` first (Unix), then falls back to passwd database lookup
+/// or `ComSpec` on Windows.
+fn get_default_shell() -> String {
+    #[cfg(unix)]
+    {
+        // Prefer $SHELL, same logic as portable-pty's CommandBuilder::get_shell.
+        if let Ok(shell) = std::env::var("SHELL") {
+            if !shell.is_empty() {
+                return shell;
+            }
+        }
+        // Fallback: passwd database.
+        unsafe {
+            let ent = libc::getpwuid(libc::getuid());
+            if !ent.is_null() {
+                let shell = std::ffi::CStr::from_ptr((*ent).pw_shell);
+                if let Ok(s) = shell.to_str() {
+                    if !s.is_empty() {
+                        return s.to_owned();
+                    }
+                }
+            }
+        }
+        "/bin/sh".to_owned()
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_owned())
+    }
+}
+
+/// Return the path to the shell-integration directory inside resources.
+fn shell_integration_dir() -> PathBuf {
+    therminal_runtime::paths::resources_dir().join("shell-integration")
+}
+
+/// Prepare a bash rcfile wrapper that sources the integration script then
+/// the user's real `.bashrc`.
+///
+/// Returns the path to the temp wrapper file. The file is written to the
+/// therminal cache directory so it persists across the session.
+fn prepare_bash_rcfile() -> Result<PathBuf, PtyError> {
+    let integration_script = shell_integration_dir().join("therminal.bash");
+    let cache_dir = therminal_runtime::paths::cache_dir();
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| PtyError::Integration(format!("create cache dir: {e}")))?;
+
+    let wrapper_path = cache_dir.join("bash_rcfile.bash");
+    let content = format!(
+        r#"# Therminal bash wrapper — auto-generated, do not edit.
+# Sources shell integration, then the user's real .bashrc.
+if [ -f {integration:?} ]; then
+    . {integration:?}
+fi
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+"#,
+        integration = integration_script.display()
+    );
+    std::fs::write(&wrapper_path, content)
+        .map_err(|e| PtyError::Integration(format!("write bash rcfile: {e}")))?;
+    Ok(wrapper_path)
+}
+
+/// Prepare a ZDOTDIR overlay for zsh that sources integration then delegates
+/// to the user's real zsh config.
+///
+/// Creates `$CACHE_DIR/zsh/.zshenv` and `$CACHE_DIR/zsh/.zshrc` that source
+/// the integration script and then the user's real files.
+fn prepare_zsh_zdotdir() -> Result<PathBuf, PtyError> {
+    let integration_script = shell_integration_dir().join("therminal.zsh");
+    let cache_dir = therminal_runtime::paths::cache_dir();
+    let zdotdir = cache_dir.join("zsh");
+    std::fs::create_dir_all(&zdotdir)
+        .map_err(|e| PtyError::Integration(format!("create zsh ZDOTDIR: {e}")))?;
+
+    // .zshenv — sourced first for ALL zsh invocations.
+    // Restore the real ZDOTDIR so subsequent config files are found.
+    let zshenv_content = r#"# Therminal zsh integration — auto-generated, do not edit.
+# Restore original ZDOTDIR so user config is found.
+if [ -n "${_THERMINAL_ORIG_ZDOTDIR+x}" ]; then
+    ZDOTDIR="$_THERMINAL_ORIG_ZDOTDIR"
+    unset _THERMINAL_ORIG_ZDOTDIR
+else
+    unset ZDOTDIR
+fi
+
+# Source the real .zshenv if it exists.
+if [ -f "${ZDOTDIR:-$HOME}/.zshenv" ]; then
+    . "${ZDOTDIR:-$HOME}/.zshenv"
+fi
+"#;
+    std::fs::write(zdotdir.join(".zshenv"), zshenv_content)
+        .map_err(|e| PtyError::Integration(format!("write .zshenv: {e}")))?;
+
+    // .zshrc — sourced for interactive shells.
+    let zshrc_content = format!(
+        r#"# Therminal zsh integration — auto-generated, do not edit.
+# Source integration script first.
+if [ -f {integration:?} ]; then
+    . {integration:?}
+fi
+
+# Source the real .zshrc if it exists.
+if [ -f "${{ZDOTDIR:-$HOME}}/.zshrc" ]; then
+    . "${{ZDOTDIR:-$HOME}}/.zshrc"
+fi
+"#,
+        integration = integration_script.display()
+    );
+    std::fs::write(zdotdir.join(".zshrc"), zshrc_content)
+        .map_err(|e| PtyError::Integration(format!("write .zshrc: {e}")))?;
+
+    // .zprofile — sourced for login shells before .zshrc
+    let zprofile_content = r#"# Therminal zsh integration — auto-generated, do not edit.
+# Source the real .zprofile if it exists.
+if [ -f "${ZDOTDIR:-$HOME}/.zprofile" ]; then
+    . "${ZDOTDIR:-$HOME}/.zprofile"
+fi
+"#;
+    std::fs::write(zdotdir.join(".zprofile"), zprofile_content)
+        .map_err(|e| PtyError::Integration(format!("write .zprofile: {e}")))?;
+
+    // .zlogin — sourced for login shells after .zshrc
+    let zlogin_content = r#"# Therminal zsh integration — auto-generated, do not edit.
+# Source the real .zlogin if it exists.
+if [ -f "${ZDOTDIR:-$HOME}/.zlogin" ]; then
+    . "${ZDOTDIR:-$HOME}/.zlogin"
+fi
+"#;
+    std::fs::write(zdotdir.join(".zlogin"), zlogin_content)
+        .map_err(|e| PtyError::Integration(format!("write .zlogin: {e}")))?;
+
+    Ok(zdotdir)
+}
+
+/// Set common env vars on a command builder.
+fn set_common_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM_PROGRAM", "therminal");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    cmd.env(
+        "THERMINAL_RESOURCES_DIR",
+        therminal_runtime::paths::resources_dir(),
+    );
+}
+
+/// Build a `CommandBuilder` for the given shell with integration auto-sourcing.
+///
+/// Each shell type gets a tailored injection strategy:
+/// - **Bash**: `--rcfile <wrapper>` where the wrapper sources integration + `~/.bashrc`.
+///   Also sets `BASH_ENV` for non-interactive subshells.
+/// - **Zsh**: `ZDOTDIR` redirect to a temp dir whose `.zshenv`/`.zshrc` source
+///   integration and then delegate to the user's real config.
+/// - **Fish**: `--init-command "source <integration_script>"`.
+/// - **PowerShell**: `-NoExit -Command ". <integration_script>"`.
+/// - **Unknown**: Falls back to `BASH_ENV` (works if shell is sh-compatible).
+fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuilder, PtyError> {
+    let integration_dir = shell_integration_dir();
+
+    match shell_type {
+        ShellType::Bash => {
+            let rcfile = prepare_bash_rcfile()?;
+            let integration_script = integration_dir.join("therminal.bash");
+            let mut cmd = CommandBuilder::new(shell);
+            // --rcfile makes bash read our wrapper instead of ~/.bashrc.
+            // We pass --login so profile files (.bash_profile etc.) are read,
+            // but --rcfile is only honored for non-login interactive shells.
+            // So we DON'T pass --login; the wrapper sources .bashrc explicitly.
+            cmd.args(["--rcfile", &rcfile.to_string_lossy()]);
+            set_common_env(&mut cmd);
+            // BASH_ENV is read by non-interactive bash (scripts, subshells).
+            cmd.env("BASH_ENV", &integration_script);
+            debug!(
+                shell = shell,
+                rcfile = %rcfile.display(),
+                "bash: using --rcfile wrapper for integration"
+            );
+            Ok(cmd)
+        }
+        ShellType::Zsh => {
+            let zdotdir = prepare_zsh_zdotdir()?;
+            let mut cmd = CommandBuilder::new(shell);
+            // Spawn as login shell for zsh.
+            cmd.args(["--login"]);
+            set_common_env(&mut cmd);
+            // Save original ZDOTDIR so our wrapper can restore it.
+            if let Ok(orig) = std::env::var("ZDOTDIR") {
+                cmd.env("_THERMINAL_ORIG_ZDOTDIR", &orig);
+            }
+            cmd.env("ZDOTDIR", &zdotdir);
+            debug!(
+                shell = shell,
+                zdotdir = %zdotdir.display(),
+                "zsh: using ZDOTDIR redirect for integration"
+            );
+            Ok(cmd)
+        }
+        ShellType::Fish => {
+            let integration_script = integration_dir.join("therminal.fish");
+            let source_cmd = format!("source {}", integration_script.display());
+            let mut cmd = CommandBuilder::new(shell);
+            // --login for login behavior, --init-command to source integration.
+            cmd.args(["--login", "--init-command", &source_cmd]);
+            set_common_env(&mut cmd);
+            debug!(shell = shell, "fish: using --init-command for integration");
+            Ok(cmd)
+        }
+        ShellType::PowerShell => {
+            let integration_script = integration_dir.join("therminal.ps1");
+            let dot_source = format!(". '{}'", integration_script.display());
+            let mut cmd = CommandBuilder::new(shell);
+            cmd.args(["-NoExit", "-Command", &dot_source]);
+            set_common_env(&mut cmd);
+            debug!(
+                shell = shell,
+                "powershell: using -NoExit -Command for integration"
+            );
+            Ok(cmd)
+        }
+        ShellType::Unknown => {
+            // Best-effort: set ENV (POSIX sh reads $ENV for interactive shells)
+            // and BASH_ENV. If the shell doesn't support these, integration
+            // won't auto-source, but nothing breaks.
+            let integration_script = integration_dir.join("therminal.bash");
+            let mut cmd = CommandBuilder::new_default_prog();
+            set_common_env(&mut cmd);
+            if integration_script.exists() {
+                cmd.env("ENV", &integration_script);
+                cmd.env("BASH_ENV", &integration_script);
+            }
+            warn!(
+                shell = shell,
+                "unknown shell type; integration may not auto-source"
+            );
+            Ok(cmd)
+        }
+    }
 }
 
 /// Spawn the user's default shell in a new PTY of the given size.
 ///
+/// Detects the shell type and injects integration scripts automatically.
 /// Returns the master side of the PTY (for reading/writing) and the child process handle.
 pub fn spawn_shell(cols: u16, rows: u16) -> Result<SpawnResult, PtyError> {
     let pty_system = portable_pty::native_pty_system();
@@ -35,16 +311,11 @@ pub fn spawn_shell(cols: u16, rows: u16) -> Result<SpawnResult, PtyError> {
 
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
 
-    let mut cmd = CommandBuilder::new_default_prog();
+    let shell = get_default_shell();
+    let shell_type = detect_shell_type(&shell);
+    debug!(?shell, ?shell_type, "detected shell for PTY spawn");
 
-    // Shell integration env vars — shells detect TERM_PROGRAM to auto-source
-    // integration scripts (Ghostty-style detection).
-    cmd.env("TERM_PROGRAM", "therminal");
-    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    cmd.env(
-        "THERMINAL_RESOURCES_DIR",
-        therminal_runtime::paths::resources_dir(),
-    );
+    let cmd = build_shell_command(&shell, shell_type)?;
 
     let child = pair.slave.spawn_command(cmd).map_err(PtyError::Spawn)?;
 
@@ -99,5 +370,95 @@ mod tests {
         // Confirm CARGO_PKG_VERSION resolves at compile time.
         let version = env!("CARGO_PKG_VERSION");
         assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn detect_shell_type_from_path() {
+        assert_eq!(detect_shell_type("/bin/bash"), ShellType::Bash);
+        assert_eq!(detect_shell_type("/usr/bin/bash"), ShellType::Bash);
+        assert_eq!(detect_shell_type("bash"), ShellType::Bash);
+        assert_eq!(detect_shell_type("/bin/zsh"), ShellType::Zsh);
+        assert_eq!(detect_shell_type("/usr/local/bin/zsh"), ShellType::Zsh);
+        assert_eq!(detect_shell_type("zsh"), ShellType::Zsh);
+        assert_eq!(detect_shell_type("/usr/bin/fish"), ShellType::Fish);
+        assert_eq!(detect_shell_type("fish"), ShellType::Fish);
+        assert_eq!(detect_shell_type("pwsh"), ShellType::PowerShell);
+        assert_eq!(detect_shell_type("powershell"), ShellType::PowerShell);
+        assert_eq!(detect_shell_type("/usr/bin/pwsh"), ShellType::PowerShell);
+        assert_eq!(detect_shell_type("/bin/sh"), ShellType::Unknown);
+        assert_eq!(detect_shell_type("ksh"), ShellType::Unknown);
+        assert_eq!(detect_shell_type("/usr/bin/tcsh"), ShellType::Unknown);
+    }
+
+    #[test]
+    fn prepare_bash_rcfile_creates_wrapper() {
+        let rcfile = prepare_bash_rcfile().expect("failed to prepare bash rcfile");
+        assert!(rcfile.exists(), "bash rcfile should exist at {rcfile:?}");
+        let content = std::fs::read_to_string(&rcfile).unwrap();
+        assert!(
+            content.contains("therminal.bash"),
+            "wrapper should source therminal.bash"
+        );
+        assert!(
+            content.contains(".bashrc"),
+            "wrapper should source user .bashrc"
+        );
+    }
+
+    #[test]
+    fn prepare_zsh_zdotdir_creates_config_files() {
+        let zdotdir = prepare_zsh_zdotdir().expect("failed to prepare zsh ZDOTDIR");
+        assert!(zdotdir.is_dir(), "ZDOTDIR should be a directory");
+
+        let zshenv = zdotdir.join(".zshenv");
+        assert!(zshenv.exists(), ".zshenv should exist");
+        let env_content = std::fs::read_to_string(&zshenv).unwrap();
+        assert!(
+            env_content.contains("_THERMINAL_ORIG_ZDOTDIR"),
+            ".zshenv should restore original ZDOTDIR"
+        );
+
+        let zshrc = zdotdir.join(".zshrc");
+        assert!(zshrc.exists(), ".zshrc should exist");
+        let rc_content = std::fs::read_to_string(&zshrc).unwrap();
+        assert!(
+            rc_content.contains("therminal.zsh"),
+            ".zshrc should source integration script"
+        );
+    }
+
+    #[test]
+    fn build_shell_command_bash() {
+        let cmd = build_shell_command("/bin/bash", ShellType::Bash)
+            .expect("failed to build bash command");
+        // The command should not be a default_prog (it has explicit args).
+        assert!(
+            !cmd.is_default_prog(),
+            "bash command should have explicit args"
+        );
+    }
+
+    #[test]
+    fn build_shell_command_unknown_falls_back() {
+        let cmd = build_shell_command("/bin/sh", ShellType::Unknown)
+            .expect("failed to build unknown shell command");
+        // Unknown shell uses default_prog as a fallback.
+        assert!(
+            cmd.is_default_prog(),
+            "unknown shell should use default_prog"
+        );
+    }
+
+    #[test]
+    fn shell_integration_dir_exists() {
+        let dir = shell_integration_dir();
+        assert!(
+            dir.is_dir(),
+            "shell-integration directory should exist at {dir:?}"
+        );
+        assert!(dir.join("therminal.bash").is_file());
+        assert!(dir.join("therminal.zsh").is_file());
+        assert!(dir.join("therminal.fish").is_file());
+        assert!(dir.join("therminal.ps1").is_file());
     }
 }

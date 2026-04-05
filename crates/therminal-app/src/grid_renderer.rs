@@ -536,6 +536,16 @@ impl GridRenderer {
         self.last_cursor_pos = None;
     }
 
+    /// Reset per-pane caches so stale state from a previous pane doesn't bleed
+    /// into the next one.  Call this before rendering each pane when a single
+    /// `GridRenderer` is shared across multiple panes.
+    pub fn reset_pane_caches(&mut self) {
+        self.row_cache.clear();
+        self.cell_buffers.clear();
+        self.last_cursor_pos = None;
+        self.hyperlink_map.clear();
+    }
+
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
     pub fn grid_size(&self, width: u32, height: u32) -> (usize, usize) {
         let usable_w = width as f32 - self.padding_x * 2.0;

@@ -114,6 +114,9 @@ pub struct App {
     /// Whether the left mouse button is currently held.
     mouse_left_held: bool,
 
+    /// Pane where the current mouse drag started (for consistent drag routing).
+    mouse_drag_pane: Option<PaneId>,
+
     /// Current loaded configuration.
     config: TherminalConfig,
 
@@ -166,6 +169,7 @@ impl App {
             last_resize_at: None,
             cursor_position: None,
             mouse_left_held: false,
+            mouse_drag_pane: None,
             config,
             _config_watcher: config_watcher,
         }
@@ -702,11 +706,17 @@ impl App {
     }
 
     /// Convert physical pixel coordinates to terminal grid (col, row) for the focused pane.
+    #[allow(dead_code)]
     fn pixel_to_grid(&self, px: f64, py: f64) -> Option<(usize, usize)> {
-        let renderer = self.grid_renderer.as_ref()?;
         let focused = self.focused_pane?;
+        self.pixel_to_grid_for_pane(px, py, focused)
+    }
+
+    /// Convert physical pixel coordinates to terminal grid (col, row) for a specific pane.
+    fn pixel_to_grid_for_pane(&self, px: f64, py: f64, pane_id: PaneId) -> Option<(usize, usize)> {
+        let renderer = self.grid_renderer.as_ref()?;
         let layout = self.layout.as_ref()?;
-        let pane = layout.find_pane(focused)?;
+        let pane = layout.find_pane(pane_id)?;
 
         let vp = pane.viewport;
         let col = ((px as f32 - vp.x() - 4.0) / renderer.cell_width).floor();
@@ -740,27 +750,42 @@ impl App {
     }
 
     /// Write bytes to the focused pane's PTY.
+    #[allow(dead_code)]
     fn pty_write(&mut self, bytes: &[u8]) {
         let focused = match self.focused_pane {
             Some(id) => id,
             None => return,
         };
+        self.pty_write_to_pane(bytes, focused);
+    }
+
+    /// Write bytes to a specific pane's PTY.
+    fn pty_write_to_pane(&mut self, bytes: &[u8], pane_id: PaneId) {
         let layout = match self.layout.as_mut() {
             Some(l) => l,
             None => return,
         };
-        if let Some(pane) = layout.find_pane_mut(focused) {
+        if let Some(pane) = layout.find_pane_mut(pane_id) {
             if let Err(e) = pane.pty_writer.write_all(bytes) {
                 warn!("Failed to write to pane {} PTY: {e}", pane.id);
             }
         }
     }
 
-    /// Handle mouse scroll.
+    /// Handle mouse scroll -- routes to the pane under the pointer.
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        // Resolve the hovered pane from cursor position.
+        let (px, py) = match self.cursor_position {
+            Some(pos) => pos,
+            None => return,
+        };
+        let target_pane = match self.pane_at_position(px, py) {
+            Some(id) => id,
+            None => return,
+        };
+
         let (col, row) = self
-            .cursor_position
-            .and_then(|(px, py)| self.pixel_to_grid(px, py))
+            .pixel_to_grid_for_pane(px, py, target_pane)
             .unwrap_or((0, 0));
 
         let lines = match delta {
@@ -779,7 +804,7 @@ impl App {
             return;
         }
 
-        let mode = self.focused_term_mode();
+        let mode = self.pane_term_mode(target_pane);
         let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
@@ -796,7 +821,7 @@ impl App {
             for _ in 0..steps {
                 seq.extend_from_slice(&input::encode_mouse_press(button, col, row, &mods));
             }
-            self.pty_write(&seq);
+            self.pty_write_to_pane(&seq, target_pane);
         } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             let steps = lines.abs().ceil() as usize;
             let arrow = if lines > 0.0 { b"\x1b[A" } else { b"\x1b[B" };
@@ -804,15 +829,11 @@ impl App {
             for _ in 0..steps {
                 seq.extend_from_slice(arrow);
             }
-            self.pty_write(&seq);
+            self.pty_write_to_pane(&seq, target_pane);
         } else {
-            // Normal scrollback.
-            let focused = match self.focused_pane {
-                Some(id) => id,
-                None => return,
-            };
+            // Normal scrollback -- scroll the hovered pane.
             if let Some(layout) = self.layout.as_ref() {
-                if let Some(pane) = layout.find_pane(focused) {
+                if let Some(pane) = layout.find_pane(target_pane) {
                     let scroll_lines = (lines * 3.0).round() as i32;
                     let mut term_guard = pane.term.lock();
                     term_guard.scroll_display(Scroll::Delta(scroll_lines));
@@ -830,31 +851,49 @@ impl App {
             Some(id) => id,
             None => return TermMode::empty(),
         };
+        self.pane_term_mode(focused)
+    }
+
+    /// Get a specific pane's TermMode.
+    fn pane_term_mode(&self, pane_id: PaneId) -> TermMode {
         let layout = match self.layout.as_ref() {
             Some(l) => l,
             None => return TermMode::empty(),
         };
-        match layout.find_pane(focused) {
+        match layout.find_pane(pane_id) {
             Some(pane) => *pane.term.lock().mode(),
             None => TermMode::empty(),
         }
     }
 
-    /// Handle mouse button press/release.
+    /// Handle mouse button press/release -- routes to the pane under the pointer.
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
-        let (col, row) = match self
-            .cursor_position
-            .and_then(|(px, py)| self.pixel_to_grid(px, py))
-        {
+        let (px, py) = match self.cursor_position {
+            Some(pos) => pos,
+            None => return,
+        };
+
+        // Resolve target pane from pointer position.
+        let target_pane = match self.pane_at_position(px, py) {
+            Some(id) => id,
+            None => return,
+        };
+
+        let (col, row) = match self.pixel_to_grid_for_pane(px, py, target_pane) {
             Some(pos) => pos,
             None => return,
         };
 
         if button == MouseButton::Left {
             self.mouse_left_held = state == ElementState::Pressed;
+            if state == ElementState::Pressed {
+                self.mouse_drag_pane = Some(target_pane);
+            } else {
+                self.mouse_drag_pane = None;
+            }
         }
 
-        let mode = self.focused_term_mode();
+        let mode = self.pane_term_mode(target_pane);
         let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
@@ -875,34 +914,53 @@ impl App {
             ElementState::Pressed => input::encode_mouse_press(input_button, col, row, &mods),
             ElementState::Released => input::encode_mouse_release(input_button, col, row, &mods),
         };
-        self.pty_write(&bytes);
+        self.pty_write_to_pane(&bytes, target_pane);
     }
 
-    /// Handle mouse motion.
+    /// Handle mouse motion -- routes drag events to the pane where the drag started,
+    /// and motion events to the pane under the pointer.
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         let (px, py) = (position.x, position.y);
         self.cursor_position = Some((px, py));
 
-        // Check if cursor is over a different pane and update focus on click.
-        // (Focus-follows-click happens in handle_mouse_input, but we track position here.)
+        if self.mouse_left_held {
+            // During a drag, route to the pane where the drag started so that
+            // selections and drag reporting stay consistent even if the pointer
+            // crosses a pane boundary.
+            let target = match self.mouse_drag_pane {
+                Some(id) => id,
+                None => return,
+            };
 
-        let (col, row) = match self.pixel_to_grid(px, py) {
-            Some(pos) => pos,
-            None => return,
-        };
+            let (col, row) = match self.pixel_to_grid_for_pane(px, py, target) {
+                Some(pos) => pos,
+                None => return,
+            };
 
-        let mode = self.focused_term_mode();
+            let mode = self.pane_term_mode(target);
+            if mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION) {
+                let mods = self.input_mods();
+                let bytes = input::encode_mouse_drag(InputMouseButton::Left, col, row, &mods);
+                self.pty_write_to_pane(&bytes, target);
+            }
+        } else {
+            // No button held -- route motion to the pane under the pointer.
+            let target = match self.pane_at_position(px, py) {
+                Some(id) => id,
+                None => return,
+            };
 
-        if self.mouse_left_held
-            && (mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION))
-        {
-            let mods = self.input_mods();
-            let bytes = input::encode_mouse_drag(InputMouseButton::Left, col, row, &mods);
-            self.pty_write(&bytes);
-        } else if mode.contains(TermMode::MOUSE_MOTION) {
-            let mods = self.input_mods();
-            let bytes = input::encode_mouse_motion(col, row, &mods);
-            self.pty_write(&bytes);
+            let (col, row) = match self.pixel_to_grid_for_pane(px, py, target) {
+                Some(pos) => pos,
+                None => return,
+            };
+
+            let mode = self.pane_term_mode(target);
+            if mode.contains(TermMode::MOUSE_MOTION) {
+                let mods = self.input_mods();
+                let bytes = input::encode_mouse_motion(col, row, &mods);
+                self.pty_write_to_pane(&bytes, target);
+            }
         }
     }
 
@@ -1117,6 +1175,9 @@ fn render_single_pane(
 
     term_guard.reset_damage();
     drop(term_guard);
+
+    // Clear per-pane caches so stale state from a previous pane doesn't bleed through.
+    renderer.reset_pane_caches();
 
     // Temporarily adjust renderer's padding to offset by the pane's viewport origin.
     let orig_pad_x = renderer.padding_x;

@@ -80,6 +80,7 @@ raw-window-handle = "0.6"
 pollster = "0.3"
 tempfile = "3"
 dirs = "5"
+libc = "0.2"
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }

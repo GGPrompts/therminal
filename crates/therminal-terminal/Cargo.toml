@@ -18,3 +18,6 @@ regex = { workspace = true }
 portable-pty = { workspace = true }
 anyhow = { workspace = true }
 sysinfo = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

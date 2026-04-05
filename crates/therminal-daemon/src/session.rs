@@ -48,12 +48,18 @@ fn next_pane_id() -> PaneId {
 
 // ── State snapshot (sent on attach) ─────────────────────────────────────
 
+/// Maximum number of scrollback lines included in a snapshot to avoid huge payloads.
+const MAX_SNAPSHOT_SCROLLBACK: usize = 10_000;
+
 /// A snapshot of a pane's terminal state, sent to the client on attach.
 #[derive(Debug, Clone)]
 pub struct PaneSnapshot {
     pub pane_id: PaneId,
     pub title: String,
-    /// Grid contents: Vec of rows, each row a Vec of (character, bold flag).
+    /// Scrollback history above the visible screen (oldest first).
+    /// Each row is a Vec of (character, bold flag). Capped at [`MAX_SNAPSHOT_SCROLLBACK`] lines.
+    pub scrollback: Vec<Vec<(char, bool)>>,
+    /// Visible grid contents: Vec of rows, each row a Vec of (character, bold flag).
     pub grid: Vec<Vec<(char, bool)>>,
     /// Cursor position (column, line) in the visible grid.
     pub cursor_col: usize,
@@ -189,31 +195,51 @@ impl Pane {
         self.pty_writer.flush()
     }
 
-    /// Take a snapshot of the current terminal state.
+    /// Take a snapshot of the current terminal state, including scrollback history.
     pub fn snapshot(&self) -> PaneSnapshot {
         let term = self.term.lock();
+        let grid = term.grid();
         let cols = term.columns();
         let rows = term.screen_lines();
-        let cursor_point = term.grid().cursor.point;
+        let cursor_point = grid.cursor.point;
+        let history_size = grid.history_size();
 
-        let mut grid = Vec::with_capacity(rows);
+        // Collect scrollback rows (oldest first), capped at MAX_SNAPSHOT_SCROLLBACK.
+        let scrollback_lines = history_size.min(MAX_SNAPSHOT_SCROLLBACK);
+        let mut scrollback = Vec::with_capacity(scrollback_lines);
+        // Scrollback rows are indexed with negative Line values:
+        //   Line(-(history_size as i32)) is the oldest, Line(-1) is the newest.
+        // We start from the oldest line we want to include.
+        let start = -(scrollback_lines as i32);
+        for line_idx in start..0 {
+            let line = alacritty_terminal::index::Line(line_idx);
+            let mut row = Vec::with_capacity(cols);
+            for col_idx in 0..cols {
+                let col = alacritty_terminal::index::Column(col_idx);
+                let cell = &grid[line][col];
+                row.push((cell.c, cell.flags.contains(CellFlags::BOLD)));
+            }
+            scrollback.push(row);
+        }
+
+        // Collect visible grid rows.
+        let mut visible = Vec::with_capacity(rows);
         for line_idx in 0..rows {
             let line = alacritty_terminal::index::Line(line_idx as i32);
             let mut row = Vec::with_capacity(cols);
             for col_idx in 0..cols {
                 let col = alacritty_terminal::index::Column(col_idx);
-                let cell = &term.grid()[line][col];
-                let ch = cell.c;
-                let bold = cell.flags.contains(CellFlags::BOLD);
-                row.push((ch, bold));
+                let cell = &grid[line][col];
+                row.push((cell.c, cell.flags.contains(CellFlags::BOLD)));
             }
-            grid.push(row);
+            visible.push(row);
         }
 
         PaneSnapshot {
             pane_id: self.id,
             title: String::new(), // Could extract from Term if needed
-            grid,
+            scrollback,
+            grid: visible,
             cursor_col: cursor_point.column.0,
             cursor_line: cursor_point.line.0 as usize,
             cols,
