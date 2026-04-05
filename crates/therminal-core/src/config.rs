@@ -999,10 +999,7 @@ agent_scan_interval = 0
         let core = config.to_core_font_config();
 
         // Default family is JetBrainsMono Nerd Font Mono (non-empty → Some).
-        assert_eq!(
-            core.family.as_deref(),
-            Some("JetBrainsMono Nerd Font Mono")
-        );
+        assert_eq!(core.family.as_deref(), Some("JetBrainsMono Nerd Font Mono"));
         assert_eq!(core.size, 17.0);
         assert_eq!(core.line_height_scale, 1.375);
         assert!(core.nerd_font);
@@ -1075,7 +1072,10 @@ size = 16.0
         assert_eq!(core.size, 16.0);
 
         // line_height_scale still uses the font default (not the core default).
-        assert_eq!(core.line_height_scale, FontConfig::default().line_height_scale);
+        assert_eq!(
+            core.line_height_scale,
+            FontConfig::default().line_height_scale
+        );
 
         // All other sections remain at their defaults.
         assert_eq!(config.general.title, "Therminal");
@@ -1176,7 +1176,11 @@ size = 16.0
         assert_eq!(loaded.colors.cursor.as_deref(), Some("#56a7ff"));
         // Verify parsed color values from loaded config.
         let bg = loaded.colors.background_color();
-        assert_eq!(bg, Color::VOID_1, "loaded background should parse to VOID_1");
+        assert_eq!(
+            bg,
+            Color::VOID_1,
+            "loaded background should parse to VOID_1"
+        );
         let fg = loaded.colors.foreground_color();
         assert_eq!(fg, Color::INK, "loaded foreground should parse to INK");
         // Verify trust
