@@ -1,27 +1,31 @@
 //! Winit 0.30 window with wgpu surface for Therminal.
 //!
-//! Implements the full terminal pipeline:
-//!   Keyboard (winit) -> encode_key() -> PTY write
+//! Implements the full terminal pipeline with split-pane support:
+//!   Keyboard (winit) -> encode_key() -> focused pane's PTY write
 //!   PTY read -> vte::ansi::Processor -> Term -> damage
-//!   Damage -> grid_renderer.render() -> wgpu surface -> winit window
-//!   Resize -> recalculate cols/rows -> resize PTY + Term
+//!   Damage -> grid_renderer.render() per pane -> wgpu surface -> winit window
+//!   Resize -> recalculate layout tree -> resize all pane PTYs + Terms
+//!
+//! Keyboard shortcuts (all Ctrl+Shift):
+//!   H  -- split focused pane horizontally (side-by-side)
+//!   V  -- split focused pane vertically (top/bottom)
+//!   ArrowLeft / ArrowRight -- move focus prev / next
+//!   W  -- close focused pane
+//!   =  -- grow focused pane's split ratio
+//!   -  -- shrink focused pane's split ratio
 
 use std::collections::HashSet;
-use std::io::{Read as IoRead, Write as IoWrite};
+use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use alacritty_terminal::event::{Event as TermEvent, EventListener};
-use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config as TermConfig, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi;
+use alacritty_terminal::term::{TermDamage, TermMode};
 use anyhow::Result;
-use portable_pty::MasterPty;
 use tracing::{debug, info, warn};
+use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -29,9 +33,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::grid_renderer::{cell_display_text, FontConfig, GridRenderer, RenderCell};
+use crate::grid_renderer::{cell_display_text, ColorVertex, FontConfig, GridRenderer, RenderCell};
+use crate::pane::{FocusDirection, LayoutNode, PaneId, PaneState, SplitDirection};
+use alacritty_terminal::grid::Dimensions;
 use therminal_core::config::TherminalConfig;
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
+use therminal_core::geometry::Rect;
+use therminal_core::palette::Color as PaletteColor;
 use therminal_terminal::input::{
     self, KeyCode, Modifiers as InputModifiers, MouseButton as InputMouseButton,
 };
@@ -41,46 +49,10 @@ use therminal_terminal::input::{
 /// Events sent from background threads to the winit event loop.
 #[derive(Debug)]
 enum UserEvent {
-    /// New bytes are available from the PTY; request a redraw.
+    /// New bytes are available from a pane's PTY; request a redraw.
     PtyOutput,
     /// Config file changed; apply new settings.
     ConfigChanged(Box<ConfigChanged>),
-}
-
-// ── EventListener for alacritty_terminal::Term ──────────────────────────
-
-/// Listener that forwards terminal events (title changes, bell, etc.)
-/// Currently a minimal implementation -- events are logged but not acted on.
-struct TherminalListener;
-
-impl EventListener for TherminalListener {
-    fn send_event(&self, event: TermEvent) {
-        match event {
-            TermEvent::Title(title) => debug!("Terminal title: {title}"),
-            TermEvent::Wakeup => { /* handled by PTY reader thread */ }
-            _ => debug!("Terminal event: {event:?}"),
-        }
-    }
-}
-
-// ── Dimensions adapter for alacritty_terminal ────────────────────────────
-
-/// Simple (cols, rows) pair implementing `alacritty_terminal::grid::Dimensions`.
-struct TermSize {
-    columns: usize,
-    screen_lines: usize,
-}
-
-impl Dimensions for TermSize {
-    fn total_lines(&self) -> usize {
-        self.screen_lines
-    }
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-    fn columns(&self) -> usize {
-        self.columns
-    }
 }
 
 // ── Background color (matches grid_renderer TERM_BG) ─────────────────────
@@ -90,6 +62,17 @@ const BG_COLOR: wgpu::Color = wgpu::Color {
     g: 0.0,
     b: 16.0 / 255.0,
     a: 1.0,
+};
+
+/// Color for focused pane border indicator.
+const FOCUS_BORDER_COLOR: [f32; 4] = {
+    let c = PaletteColor::ACCENT_COOL;
+    [
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        0.8,
+    ]
 };
 
 // ── GPU state ────────────────────────────────────────────────────────────
@@ -109,34 +92,26 @@ pub struct App {
     gpu: Option<GpuState>,
     grid_renderer: Option<GridRenderer>,
 
-    /// Shared terminal state (alacritty_terminal::Term behind FairMutex).
-    term: Option<Arc<FairMutex<Term<TherminalListener>>>>,
+    /// Root of the pane layout tree.
+    layout: Option<LayoutNode>,
 
-    /// VTE parser for feeding PTY bytes to the Term. Owned by the PTY
-    /// reader thread, so we don't store it here.
+    /// ID of the currently focused pane.
+    focused_pane: Option<PaneId>,
 
-    /// PTY master write handle -- keyboard input is written here.
-    pty_writer: Option<Box<dyn IoWrite + Send>>,
-
-    /// PTY master (kept alive so the PTY doesn't close).
-    _pty_master: Option<Box<dyn MasterPty + Send>>,
-
-    /// Proxy to wake the event loop from the PTY reader thread.
+    /// Proxy to wake the event loop from PTY reader threads.
     event_proxy: EventLoopProxy<UserEvent>,
 
     /// Current modifiers state from winit.
     modifiers: Modifiers,
 
-    /// Trailing-edge resize debounce: stores the most recent size that
-    /// arrived too soon after the last applied resize, plus the timestamp
-    /// of the last applied resize. Flushed on the next RedrawRequested.
+    /// Trailing-edge resize debounce.
     pending_resize: Option<PhysicalSize<u32>>,
     last_resize_at: Option<Instant>,
 
-    /// Current cursor position in physical pixels (updated on CursorMoved).
+    /// Current cursor position in physical pixels.
     cursor_position: Option<(f64, f64)>,
 
-    /// Whether the left mouse button is currently held (for drag reporting).
+    /// Whether the left mouse button is currently held.
     mouse_left_held: bool,
 
     /// Current loaded configuration.
@@ -148,7 +123,6 @@ pub struct App {
 
 impl App {
     fn new(event_proxy: EventLoopProxy<UserEvent>) -> Self {
-        // Load config from disk (or defaults if no file exists).
         let config = TherminalConfig::load();
         info!(
             font_size = config.font.size,
@@ -156,7 +130,6 @@ impl App {
             "loaded config"
         );
 
-        // Start config file watcher, forwarding events to the event loop.
         let config_watcher = match ConfigWatcher::start() {
             Ok((watcher, rx)) => {
                 let proxy = event_proxy.clone();
@@ -185,9 +158,8 @@ impl App {
             window: None,
             gpu: None,
             grid_renderer: None,
-            term: None,
-            pty_writer: None,
-            _pty_master: None,
+            layout: None,
+            focused_pane: None,
             event_proxy,
             modifiers: Modifiers::default(),
             pending_resize: None,
@@ -199,7 +171,7 @@ impl App {
         }
     }
 
-    /// Initialize wgpu, grid renderer, terminal, and PTY.
+    /// Initialize wgpu, grid renderer, and first pane.
     fn init_gpu(&mut self, window: Arc<Window>) {
         let size = window.inner_size();
         let backends = if cfg!(target_os = "linux") {
@@ -286,7 +258,6 @@ impl App {
         let mut font_config =
             FontConfig::new(self.config.font.family.clone(), self.config.font.size);
         font_config.fallback_families = self.config.font.extra_fallbacks.clone();
-        // Scale font size to physical pixels so glyphs fill the correct cell area.
         font_config.font_size *= scale;
         font_config.line_height = font_config.font_size * self.config.font.line_height_scale;
         info!(
@@ -303,39 +274,21 @@ impl App {
             font_config,
         );
 
-        // ── Terminal (alacritty_terminal::Term) ──────────────────────────
-        let (cols, rows) = grid_renderer.grid_size(config.width, config.height);
-        let term_config = TermConfig {
-            scrolling_history: self.config.general.scrollback_lines,
-            ..Default::default()
-        };
-        let term_size = TermSize {
-            columns: cols,
-            screen_lines: rows,
-        };
-        let term = Term::new(term_config, &term_size, TherminalListener);
-        let term = Arc::new(FairMutex::new(term));
-
-        info!("Terminal created: {cols}x{rows}");
-
-        // ── PTY ──────────────────────────────────────────────────────────
-        let (pty_master, _child) = therminal_terminal::pty::spawn_shell(cols as u16, rows as u16)
-            .expect("failed to spawn shell");
-
-        let pty_reader = pty_master
-            .try_clone_reader()
-            .expect("failed to clone PTY reader");
-        let pty_writer = pty_master.take_writer().expect("failed to get PTY writer");
-
-        // ── Spawn PTY reader thread ──────────────────────────────────────
-        let term_for_reader = Arc::clone(&term);
+        // ── First pane (fills entire window) ─────────────────────────────
+        let full_rect = Rect::new(0.0, 0.0, config.width as f32, config.height as f32);
+        let scrollback = self.config.general.scrollback_lines;
         let proxy = self.event_proxy.clone();
-        thread::Builder::new()
-            .name("pty-reader".into())
-            .spawn(move || {
-                pty_reader_loop(pty_reader, term_for_reader, proxy);
+        let pane = crate::pane::spawn_pane(full_rect, &grid_renderer, scrollback, |_pane_id| {
+            let p = proxy.clone();
+            Box::new(move || {
+                let _ = p.send_event(UserEvent::PtyOutput);
             })
-            .expect("failed to spawn PTY reader thread");
+        });
+        let pane_id = pane.id;
+        let layout = LayoutNode::Leaf(pane);
+
+        let init_width = config.width;
+        let init_height = config.height;
 
         self.window = Some(window);
         self.gpu = Some(GpuState {
@@ -345,12 +298,18 @@ impl App {
             config,
         });
         self.grid_renderer = Some(grid_renderer);
-        self.term = Some(term);
-        self.pty_writer = Some(pty_writer);
-        self._pty_master = Some(pty_master);
+        self.layout = Some(layout);
+        self.focused_pane = Some(pane_id);
+
+        let (cols, rows) = self
+            .grid_renderer
+            .as_ref()
+            .map(|r| r.grid_size(init_width, init_height))
+            .unwrap_or((80, 24));
+        info!("Initial pane {pane_id}: {cols}x{rows}");
     }
 
-    /// Resize the surface, terminal, and PTY to match the new window size.
+    /// Resize the surface and all panes.
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -371,40 +330,27 @@ impl App {
             return;
         }
 
-        // Resize grid renderer.
         if let Some(renderer) = self.grid_renderer.as_mut() {
             renderer.resize(&gpu.device, &gpu.queue, new_size.width, new_size.height);
-
-            // Recalculate terminal grid dimensions.
-            let (cols, rows) = renderer.grid_size(new_size.width, new_size.height);
-
-            // Resize alacritty_terminal Term.
-            if let Some(term) = self.term.as_ref() {
-                let mut term_guard = term.lock();
-                let term_size = TermSize {
-                    columns: cols,
-                    screen_lines: rows,
-                };
-                term_guard.resize(term_size);
-            }
-
-            // Resize PTY.
-            if let Some(master) = self._pty_master.as_ref() {
-                if let Err(e) =
-                    therminal_terminal::pty::resize(master.as_ref(), cols as u16, rows as u16)
-                {
-                    warn!("Failed to resize PTY: {e}");
-                }
-            }
-
-            debug!(
-                "Resized to {}x{} ({cols}x{rows} cells)",
-                new_size.width, new_size.height
-            );
         }
+
+        // Recalculate layout tree and resize all pane PTYs.
+        let full_rect = Rect::new(0.0, 0.0, new_size.width as f32, new_size.height as f32);
+        if let (Some(layout), Some(renderer)) = (self.layout.as_mut(), self.grid_renderer.as_ref())
+        {
+            layout.layout(full_rect);
+            layout.resize_all_panes(renderer);
+        }
+
+        debug!(
+            "Resized to {}x{} ({} panes)",
+            new_size.width,
+            new_size.height,
+            self.layout.as_ref().map_or(0, |l| l.pane_count()),
+        );
     }
 
-    /// Render a frame: read terminal content and submit to GPU.
+    /// Render a frame: render all panes and separators.
     fn render(&mut self) {
         let gpu = match self.gpu.as_ref() {
             Some(g) => g,
@@ -414,8 +360,8 @@ impl App {
             Some(r) => r,
             None => return,
         };
-        let term_arc = match self.term.as_ref() {
-            Some(t) => t,
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
             None => return,
         };
 
@@ -463,83 +409,16 @@ impl App {
             });
         }
 
-        // Lock the terminal, extract cells and damage info, then release lock.
-        let mut term_guard = term_arc.lock();
+        // Render each pane.
+        let focused = self.focused_pane;
+        let pane_count = layout.pane_count();
+        let show_focus = pane_count > 1;
 
-        // Get damage info.
-        let damaged_rows = match term_guard.damage() {
-            TermDamage::Full => None,
-            TermDamage::Partial(iter) => {
-                let set: HashSet<usize> = iter
-                    .filter_map(|bounds| {
-                        if bounds.is_damaged() {
-                            Some(bounds.line)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if set.is_empty() {
-                    // Nothing damaged -- render from cache.
-                    Some(set)
-                } else {
-                    Some(set)
-                }
-            }
-        };
-
-        let content = term_guard.renderable_content();
-        let screen_lines = term_guard.screen_lines();
-        let display_offset = content.display_offset;
-        let cursor = content.cursor;
-        let selection_range = content.selection;
-
-        // Collect cells into RenderCell snapshots.
-        let cells: Vec<RenderCell> = content
-            .display_iter
-            .filter_map(|indexed| {
-                let point = indexed.point;
-                let cell = indexed.cell;
-
-                // Convert grid line to viewport row index.
-                let viewport_line = point.line.0 + display_offset as i32;
-                let row = usize::try_from(viewport_line).ok()?;
-                if row >= screen_lines {
-                    return None;
-                }
-
-                // Skip wide char spacers.
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    return None;
-                }
-
-                let hyperlink = cell.hyperlink().map(|h| h.uri().to_owned());
-
-                Some(RenderCell {
-                    row,
-                    col: point.column.0,
-                    c: cell.c,
-                    text: cell_display_text(cell.c, cell.zerowidth()),
-                    fg: cell.fg,
-                    bg: cell.bg,
-                    flags: cell.flags,
-                    hyperlink,
-                })
-            })
-            .collect();
-
-        // Reset damage while we still hold the lock.
-        term_guard.reset_damage();
-        drop(term_guard);
-
-        // Render the grid.
-        renderer.render(
-            &cells,
-            &cursor,
-            screen_lines,
-            selection_range.as_ref(),
-            display_offset,
-            damaged_rows.as_ref(),
+        render_panes_recursive(
+            layout,
+            focused,
+            show_focus,
+            renderer,
             &gpu.device,
             &gpu.queue,
             &mut encoder,
@@ -552,14 +431,208 @@ impl App {
         output.present();
     }
 
-    /// Handle a keyboard event: encode it and write to the PTY.
-    fn handle_key_input(&mut self, key_event: &KeyEvent) {
-        let pty = match self.pty_writer.as_mut() {
-            Some(w) => w,
+    /// Check if this key event is a pane management shortcut (Ctrl+Shift+...).
+    /// Returns true if the event was consumed.
+    fn handle_pane_shortcut(&mut self, key_event: &KeyEvent) -> bool {
+        let state = self.modifiers.state();
+        if !state.control_key() || !state.shift_key() {
+            return false;
+        }
+
+        match &key_event.logical_key {
+            // Ctrl+Shift+H -> horizontal split
+            Key::Character(s) if s.as_str() == "H" => {
+                self.split_focused_pane(SplitDirection::Horizontal);
+                true
+            }
+            // Ctrl+Shift+V -> vertical split (note: may conflict with paste on some systems)
+            Key::Character(s) if s.as_str() == "V" => {
+                self.split_focused_pane(SplitDirection::Vertical);
+                true
+            }
+            // Ctrl+Shift+W -> close focused pane
+            Key::Character(s) if s.as_str() == "W" => {
+                self.close_focused_pane();
+                true
+            }
+            // Ctrl+Shift+= -> grow ratio
+            Key::Character(s) if s.as_str() == "+" || s.as_str() == "=" => {
+                self.adjust_focused_ratio(0.05);
+                true
+            }
+            // Ctrl+Shift+- -> shrink ratio
+            Key::Character(s) if s.as_str() == "_" || s.as_str() == "-" => {
+                self.adjust_focused_ratio(-0.05);
+                true
+            }
+            // Ctrl+Shift+Arrow -> move focus
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
+                self.move_focus(FocusDirection::Next);
+                true
+            }
+            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
+                self.move_focus(FocusDirection::Prev);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Split the currently focused pane.
+    fn split_focused_pane(&mut self, direction: SplitDirection) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let scrollback = self.config.general.scrollback_lines;
+        let proxy = self.event_proxy.clone();
+
+        let new_id = layout.split_pane(focused, direction, |viewport| {
+            crate::pane::spawn_pane(viewport, renderer, scrollback, |_pane_id| {
+                let p = proxy.clone();
+                Box::new(move || {
+                    let _ = p.send_event(UserEvent::PtyOutput);
+                })
+            })
+        });
+
+        if let Some(new_id) = new_id {
+            info!("Split pane {focused} {:?} -> new pane {new_id}", direction);
+            // Resize all panes after split.
+            let gpu = self.gpu.as_ref().unwrap();
+            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let layout = self.layout.as_mut().unwrap();
+            let renderer = self.grid_renderer.as_ref().unwrap();
+            layout.layout(full_rect);
+            layout.resize_all_panes(renderer);
+
+            // Focus the new pane.
+            self.focused_pane = Some(new_id);
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Close the currently focused pane.
+    fn close_focused_pane(&mut self) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
             None => return,
         };
 
-        // Map winit key to our platform-agnostic KeyCode.
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+
+        match layout.remove_pane(focused) {
+            None => {
+                // Last pane -- close the window.
+                info!("Last pane closed, exiting");
+                // We can't exit from here directly, but we can request the window close.
+                // The next event loop iteration will handle CloseRequested.
+                // Signal exit: layout=None causes exit at next RedrawRequested.
+                self.focused_pane = None;
+                self.layout = None;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            Some(true) => {
+                info!("Closed pane {focused}");
+                // Move focus to first available pane.
+                let layout = self.layout.as_mut().unwrap();
+                let ids = layout.pane_ids();
+                self.focused_pane = ids.first().copied();
+
+                // Relayout.
+                let gpu = self.gpu.as_ref().unwrap();
+                let full_rect =
+                    Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+                let renderer = self.grid_renderer.as_ref().unwrap();
+                layout.layout(full_rect);
+                layout.resize_all_panes(renderer);
+
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            Some(false) => {
+                // Pane not found (shouldn't happen).
+                warn!("Focused pane {focused} not found in layout");
+            }
+        }
+    }
+
+    /// Move focus to the next or previous pane.
+    fn move_focus(&mut self, direction: FocusDirection) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+
+        if let Some(new_id) = layout.adjacent_pane(focused, direction) {
+            self.focused_pane = Some(new_id);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Adjust the split ratio around the focused pane.
+    fn adjust_focused_ratio(&mut self, delta: f32) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+
+        if layout.adjust_ratio(focused, delta) {
+            // Relayout.
+            let gpu = self.gpu.as_ref().unwrap();
+            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let renderer = self.grid_renderer.as_ref().unwrap();
+            layout.layout(full_rect);
+            layout.resize_all_panes(renderer);
+
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Handle a keyboard event: encode it and write to the focused pane's PTY.
+    fn handle_key_input(&mut self, key_event: &KeyEvent) {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        let pane = match layout.find_pane_mut(focused) {
+            Some(p) => p,
+            None => return,
+        };
+
         let key_code = match &key_event.logical_key {
             Key::Named(named) => match named {
                 NamedKey::Enter => Some(KeyCode::Enter),
@@ -590,10 +663,7 @@ impl App {
                 NamedKey::F12 => Some(KeyCode::F12),
                 _ => None,
             },
-            Key::Character(s) => {
-                // For character keys, take the first char.
-                s.chars().next().map(KeyCode::Char)
-            }
+            Key::Character(s) => s.chars().next().map(KeyCode::Char),
             _ => None,
         };
 
@@ -602,7 +672,6 @@ impl App {
             None => return,
         };
 
-        // Map winit modifier state.
         let state = self.modifiers.state();
         let mods = InputModifiers {
             ctrl: state.control_key(),
@@ -610,42 +679,39 @@ impl App {
             shift: state.shift_key(),
         };
 
-        // Encode and write to PTY.
         if let Some(bytes) = input::encode_key(&key_code, &mods) {
-            if let Err(e) = pty.write_all(&bytes) {
-                warn!("Failed to write to PTY: {e}");
+            if let Err(e) = pane.pty_writer.write_all(&bytes) {
+                warn!("Failed to write to pane {} PTY: {e}", pane.id);
             }
         }
     }
 
-    /// Convert physical pixel coordinates to terminal grid (col, row).
-    ///
-    /// Returns `None` if the coordinates fall outside the grid area or
-    /// if the grid renderer is not initialized.
+    /// Convert physical pixel coordinates to terminal grid (col, row) for the focused pane.
     fn pixel_to_grid(&self, px: f64, py: f64) -> Option<(usize, usize)> {
         let renderer = self.grid_renderer.as_ref()?;
-        let col = ((px as f32 - renderer.padding_x) / renderer.cell_width).floor();
-        let row = ((py as f32 - renderer.padding_y) / renderer.cell_height).floor();
+        let focused = self.focused_pane?;
+        let layout = self.layout.as_ref()?;
+        let pane = layout.find_pane(focused)?;
+
+        let vp = pane.viewport;
+        let col = ((px as f32 - vp.x() - 4.0) / renderer.cell_width).floor();
+        let row = ((py as f32 - vp.y() - 4.0) / renderer.cell_height).floor();
         if col < 0.0 || row < 0.0 {
             return None;
         }
         let col = col as usize;
         let row = row as usize;
 
-        // Clamp to terminal grid bounds.
-        let term = self.term.as_ref()?;
-        let term_guard = term.lock();
+        let term_guard = pane.term.lock();
         let max_col = term_guard.columns().saturating_sub(1);
         let max_row = term_guard.screen_lines().saturating_sub(1);
         Some((col.min(max_col), row.min(max_row)))
     }
 
-    /// Get the current terminal mode flags, or empty if term is not initialized.
+    /// Get the current terminal mode flags from the focused pane.
+    #[allow(dead_code)]
     fn term_mode(&self) -> TermMode {
-        self.term
-            .as_ref()
-            .map(|t| *t.lock().mode())
-            .unwrap_or_default()
+        self.focused_term_mode()
     }
 
     /// Get input modifiers from the current winit modifier state.
@@ -658,17 +724,24 @@ impl App {
         }
     }
 
-    /// Write bytes to the PTY.
+    /// Write bytes to the focused pane's PTY.
     fn pty_write(&mut self, bytes: &[u8]) {
-        if let Some(pty) = self.pty_writer.as_mut() {
-            if let Err(e) = pty.write_all(bytes) {
-                warn!("Failed to write to PTY: {e}");
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.layout.as_mut() {
+            Some(l) => l,
+            None => return,
+        };
+        if let Some(pane) = layout.find_pane_mut(focused) {
+            if let Err(e) = pane.pty_writer.write_all(bytes) {
+                warn!("Failed to write to pane {} PTY: {e}", pane.id);
             }
         }
     }
 
-    /// Handle mouse scroll: either scroll the terminal scrollback or forward
-    /// as SGR mouse events to the running program.
+    /// Handle mouse scroll.
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
         let (col, row) = self
             .cursor_position
@@ -678,7 +751,6 @@ impl App {
         let lines = match delta {
             MouseScrollDelta::LineDelta(_x, y) => y,
             MouseScrollDelta::PixelDelta(pos) => {
-                // Convert pixel delta to approximate line count.
                 let cell_h = self
                     .grid_renderer
                     .as_ref()
@@ -692,13 +764,12 @@ impl App {
             return;
         }
 
-        let mode = self.term_mode();
+        let mode = self.focused_term_mode();
         let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
 
         if mouse_mode {
-            // Forward scroll as SGR mouse events to the running program.
             let mods = self.input_mods();
             let button = if lines > 0.0 {
                 InputMouseButton::ScrollUp
@@ -712,7 +783,6 @@ impl App {
             }
             self.pty_write(&seq);
         } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
-            // In alt screen with alternate scroll: send arrow key presses.
             let steps = lines.abs().ceil() as usize;
             let arrow = if lines > 0.0 { b"\x1b[A" } else { b"\x1b[B" };
             let mut seq = Vec::with_capacity(steps * 3);
@@ -721,15 +791,37 @@ impl App {
             }
             self.pty_write(&seq);
         } else {
-            // Normal scrollback navigation.
-            if let Some(term) = self.term.as_ref() {
-                let scroll_lines = (lines * 3.0).round() as i32;
-                let mut term_guard = term.lock();
-                term_guard.scroll_display(Scroll::Delta(scroll_lines));
+            // Normal scrollback.
+            let focused = match self.focused_pane {
+                Some(id) => id,
+                None => return,
+            };
+            if let Some(layout) = self.layout.as_ref() {
+                if let Some(pane) = layout.find_pane(focused) {
+                    let scroll_lines = (lines * 3.0).round() as i32;
+                    let mut term_guard = pane.term.lock();
+                    term_guard.scroll_display(Scroll::Delta(scroll_lines));
+                }
             }
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
+        }
+    }
+
+    /// Get focused pane's TermMode.
+    fn focused_term_mode(&self) -> TermMode {
+        let focused = match self.focused_pane {
+            Some(id) => id,
+            None => return TermMode::empty(),
+        };
+        let layout = match self.layout.as_ref() {
+            Some(l) => l,
+            None => return TermMode::empty(),
+        };
+        match layout.find_pane(focused) {
+            Some(pane) => *pane.term.lock().mode(),
+            None => TermMode::empty(),
         }
     }
 
@@ -743,12 +835,11 @@ impl App {
             None => return,
         };
 
-        // Track left button state for drag reporting.
         if button == MouseButton::Left {
             self.mouse_left_held = state == ElementState::Pressed;
         }
 
-        let mode = self.term_mode();
+        let mode = self.focused_term_mode();
         let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
@@ -772,17 +863,20 @@ impl App {
         self.pty_write(&bytes);
     }
 
-    /// Handle mouse motion for drag/motion reporting.
+    /// Handle mouse motion.
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         let (px, py) = (position.x, position.y);
         self.cursor_position = Some((px, py));
+
+        // Check if cursor is over a different pane and update focus on click.
+        // (Focus-follows-click happens in handle_mouse_input, but we track position here.)
 
         let (col, row) = match self.pixel_to_grid(px, py) {
             Some(pos) => pos,
             None => return,
         };
 
-        let mode = self.term_mode();
+        let mode = self.focused_term_mode();
 
         if self.mouse_left_held
             && (mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION))
@@ -797,18 +891,16 @@ impl App {
         }
     }
 
-    /// Apply a new configuration, updating renderer and window as needed.
+    /// Apply a new configuration.
     fn apply_config(&mut self, new_config: TherminalConfig) {
         let old_config = std::mem::replace(&mut self.config, new_config);
 
-        // Update window title if changed.
         if self.config.general.title != old_config.general.title {
             if let Some(w) = self.window.as_ref() {
                 w.set_title(&self.config.general.title);
             }
         }
 
-        // Update font if any font settings changed.
         let font_changed = self.config.font.family != old_config.font.family
             || (self.config.font.size - old_config.font.size).abs() > f32::EPSILON
             || (self.config.font.line_height_scale - old_config.font.line_height_scale).abs()
@@ -836,23 +928,14 @@ impl App {
                     gpu.config.height,
                 );
 
-                // Recalculate grid dimensions after font change.
-                let (cols, rows) = renderer.grid_size(gpu.config.width, gpu.config.height);
-                if let Some(term) = self.term.as_ref() {
-                    let mut term_guard = term.lock();
-                    let term_size = TermSize {
-                        columns: cols,
-                        screen_lines: rows,
-                    };
-                    term_guard.resize(term_size);
+                // Resize all panes after font change.
+                let full_rect =
+                    Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+                if let Some(layout) = self.layout.as_mut() {
+                    layout.layout(full_rect);
+                    layout.resize_all_panes(renderer);
                 }
-                if let Some(master) = self._pty_master.as_ref() {
-                    if let Err(e) =
-                        therminal_terminal::pty::resize(master.as_ref(), cols as u16, rows as u16)
-                    {
-                        warn!("Failed to resize PTY after config change: {e}");
-                    }
-                }
+
                 info!(
                     font_size = self.config.font.size,
                     family = %self.config.font.family,
@@ -861,11 +944,291 @@ impl App {
             }
         }
 
-        // Request a redraw to apply any visual changes.
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
     }
+
+    /// Find which pane contains the given physical pixel coordinates.
+    fn pane_at_position(&self, px: f64, py: f64) -> Option<PaneId> {
+        let layout = self.layout.as_ref()?;
+        self.find_pane_at(layout, px as f32, py as f32)
+    }
+
+    fn find_pane_at(&self, node: &LayoutNode, px: f32, py: f32) -> Option<PaneId> {
+        use therminal_core::geometry::Point;
+        match node {
+            LayoutNode::Leaf(pane) => {
+                if pane.viewport.contains(Point::new(px, py)) {
+                    Some(pane.id)
+                } else {
+                    None
+                }
+            }
+            LayoutNode::Split { first, second, .. } => self
+                .find_pane_at(first, px, py)
+                .or_else(|| self.find_pane_at(second, px, py)),
+        }
+    }
+}
+
+// ── Free functions for multi-pane rendering (avoids &self borrow conflicts) ──
+
+/// Recursively render all panes in the layout tree.
+#[allow(clippy::too_many_arguments)]
+fn render_panes_recursive(
+    node: &LayoutNode,
+    focused: Option<PaneId>,
+    show_focus: bool,
+    renderer: &mut GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    match node {
+        LayoutNode::Leaf(pane) => {
+            render_single_pane(
+                pane,
+                focused == Some(pane.id) && show_focus,
+                renderer,
+                device,
+                queue,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+        }
+        LayoutNode::Split { first, second, .. } => {
+            render_panes_recursive(
+                first,
+                focused,
+                show_focus,
+                renderer,
+                device,
+                queue,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+            render_panes_recursive(
+                second,
+                focused,
+                show_focus,
+                renderer,
+                device,
+                queue,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+        }
+    }
+}
+
+/// Render a single pane within its viewport rect.
+#[allow(clippy::too_many_arguments)]
+fn render_single_pane(
+    pane: &PaneState,
+    draw_focus_border: bool,
+    renderer: &mut GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    let vp = pane.viewport;
+    let mut term_guard = pane.term.lock();
+
+    let damaged_rows = match term_guard.damage() {
+        TermDamage::Full => None,
+        TermDamage::Partial(iter) => {
+            let set: HashSet<usize> = iter
+                .filter_map(|bounds| {
+                    if bounds.is_damaged() {
+                        Some(bounds.line)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Some(set)
+        }
+    };
+
+    let content = term_guard.renderable_content();
+    let screen_lines = term_guard.screen_lines();
+    let display_offset = content.display_offset;
+    let cursor = content.cursor;
+    let selection_range = content.selection;
+
+    let cells: Vec<RenderCell> = content
+        .display_iter
+        .filter_map(|indexed| {
+            let point = indexed.point;
+            let cell = indexed.cell;
+
+            let viewport_line = point.line.0 + display_offset as i32;
+            let row = usize::try_from(viewport_line).ok()?;
+            if row >= screen_lines {
+                return None;
+            }
+
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                return None;
+            }
+
+            let hyperlink = cell.hyperlink().map(|h| h.uri().to_owned());
+
+            Some(RenderCell {
+                row,
+                col: point.column.0,
+                c: cell.c,
+                text: cell_display_text(cell.c, cell.zerowidth()),
+                fg: cell.fg,
+                bg: cell.bg,
+                flags: cell.flags,
+                hyperlink,
+            })
+        })
+        .collect();
+
+    term_guard.reset_damage();
+    drop(term_guard);
+
+    // Temporarily adjust renderer's padding to offset by the pane's viewport origin.
+    let orig_pad_x = renderer.padding_x;
+    let orig_pad_y = renderer.padding_y;
+    renderer.padding_x = vp.x() + 4.0; // 4.0 is the standard internal padding
+    renderer.padding_y = vp.y() + 4.0;
+
+    renderer.render(
+        &cells,
+        &cursor,
+        screen_lines,
+        selection_range.as_ref(),
+        display_offset,
+        damaged_rows.as_ref(),
+        device,
+        queue,
+        encoder,
+        view,
+        surface_width,
+        surface_height,
+    );
+
+    renderer.padding_x = orig_pad_x;
+    renderer.padding_y = orig_pad_y;
+
+    // Draw focus indicator border for the focused pane.
+    if draw_focus_border {
+        draw_pane_focus_border(
+            pane,
+            renderer,
+            device,
+            encoder,
+            view,
+            surface_width,
+            surface_height,
+        );
+    }
+}
+
+/// Draw a subtle border around the focused pane.
+fn draw_pane_focus_border(
+    pane: &PaneState,
+    renderer: &GridRenderer,
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+
+    let vp = pane.viewport;
+    let t = 2.0_f32; // border thickness
+    let sw = surface_width as f32;
+    let sh = surface_height as f32;
+
+    let mut verts: Vec<ColorVertex> = Vec::new();
+
+    // Top edge
+    verts.extend_from_slice(&pixel_rect_to_ndc(
+        vp.x(),
+        vp.y(),
+        vp.width(),
+        t,
+        sw,
+        sh,
+        FOCUS_BORDER_COLOR,
+    ));
+    // Bottom edge
+    verts.extend_from_slice(&pixel_rect_to_ndc(
+        vp.x(),
+        vp.bottom() - t,
+        vp.width(),
+        t,
+        sw,
+        sh,
+        FOCUS_BORDER_COLOR,
+    ));
+    // Left edge
+    verts.extend_from_slice(&pixel_rect_to_ndc(
+        vp.x(),
+        vp.y(),
+        t,
+        vp.height(),
+        sw,
+        sh,
+        FOCUS_BORDER_COLOR,
+    ));
+    // Right edge
+    verts.extend_from_slice(&pixel_rect_to_ndc(
+        vp.right() - t,
+        vp.y(),
+        t,
+        vp.height(),
+        sw,
+        sh,
+        FOCUS_BORDER_COLOR,
+    ));
+
+    if verts.is_empty() {
+        return;
+    }
+
+    let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("focus_border_vbuf"),
+        contents: bytemuck::cast_slice(&verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("focus_border_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+
+    pass.set_pipeline(&renderer.rect_pipeline);
+    pass.set_vertex_buffer(0, vertex_buf.slice(..));
+    pass.draw(0..verts.len() as u32, 0..1);
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -896,7 +1259,6 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyOutput => {
-                // New PTY data available -- request a redraw.
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -921,8 +1283,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::Resized(new_size) => {
-                // Ignore zero-size resizes (e.g. minimize) — don't let them
-                // overwrite a valid pending size.
                 if new_size.width == 0 || new_size.height == 0 {
                     return;
                 }
@@ -939,7 +1299,6 @@ impl ApplicationHandler<UserEvent> for App {
                         w.request_redraw();
                     }
                 } else {
-                    // Stash for trailing-edge flush on next RedrawRequested.
                     self.pending_resize = Some(new_size);
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
@@ -959,11 +1318,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                // Flush any pending trailing-edge resize before rendering.
                 if let Some(size) = self.pending_resize.take() {
                     self.last_resize_at = Some(Instant::now());
                     self.resize(size);
                 }
+
+                // If layout was removed (last pane closed), exit.
+                if self.layout.is_none() {
+                    event_loop.exit();
+                    return;
+                }
+
                 self.render();
             }
 
@@ -980,6 +1345,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                // Focus-follows-click: if clicking in a different pane, switch focus.
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some((px, py)) = self.cursor_position {
+                        if let Some(pane_id) = self.pane_at_position(px, py) {
+                            if self.focused_pane != Some(pane_id) {
+                                self.focused_pane = Some(pane_id);
+                                if let Some(w) = self.window.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                    }
+                }
                 self.handle_mouse_input(state, button);
             }
 
@@ -991,71 +1369,13 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                 ..
             } => {
-                self.handle_key_input(key_event);
+                // Check pane management shortcuts first.
+                if !self.handle_pane_shortcut(key_event) {
+                    self.handle_key_input(key_event);
+                }
             }
 
             _ => {}
-        }
-    }
-}
-
-// ── PTY reader thread ────────────────────────────────────────────────────
-
-/// Reads PTY output in a loop, feeds bytes to the Term via the VTE parser,
-/// and wakes the event loop for redraw.
-///
-/// An optional [`TherminalInterceptor`] gets first crack at OSC/DCS/APC
-/// sequences before they reach the terminal handler.  This is how therminal
-/// detects AI-agent shell-integration escapes without forking alacritty_terminal.
-fn pty_reader_loop(
-    mut reader: Box<dyn IoRead + Send>,
-    term: Arc<FairMutex<Term<TherminalListener>>>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
-    use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
-
-    use therminal_terminal::region_index::RegionIndex;
-
-    let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
-    let (mut interceptor, event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
-    let mut region_index = RegionIndex::new();
-    let mut buf = [0u8; 4096];
-
-    info!("PTY reader thread started (with SequenceInterceptor + RegionIndex)");
-
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                info!("PTY closed (EOF)");
-                break;
-            }
-            Ok(n) => {
-                // Feed bytes to the terminal under the lock.
-                // The interceptor sees OSC/DCS/APC sequences first.
-                let current_line;
-                {
-                    let mut term_guard = term.lock();
-                    processor.advance_with_interceptor(
-                        &mut *term_guard,
-                        &mut interceptor,
-                        &buf[..n],
-                    );
-                    current_line = term_guard.grid().cursor.point.line.0 as usize;
-                }
-
-                // Drain intercepted events into the region index.
-                region_index.set_current_line(current_line);
-                while let Ok(event) = event_rx.try_recv() {
-                    region_index.push_event(&event);
-                }
-
-                // Wake the event loop to trigger a redraw.
-                let _ = proxy.send_event(UserEvent::PtyOutput);
-            }
-            Err(e) => {
-                warn!("PTY read error: {e}");
-                break;
-            }
         }
     }
 }

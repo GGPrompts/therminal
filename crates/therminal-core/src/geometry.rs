@@ -73,6 +73,40 @@ impl Rect {
     pub fn contains(self, p: Point) -> bool {
         p.x >= self.x() && p.x <= self.right() && p.y >= self.y() && p.y <= self.bottom()
     }
+    /// Split this rect into two halves side-by-side at the given ratio (0.0..1.0).
+    /// Returns (left, right). `gap` is the pixel-width separator between them.
+    pub fn split_horizontal_ratio(self, ratio: f32, gap: f32) -> (Rect, Rect) {
+        let ratio = ratio.clamp(0.05, 0.95);
+        let usable = self.size.width - gap;
+        let left_w = usable * ratio;
+        let right_w = usable * (1.0 - ratio);
+        let left = Rect::new(self.origin.x, self.origin.y, left_w, self.size.height);
+        let right = Rect::new(
+            self.origin.x + left_w + gap,
+            self.origin.y,
+            right_w,
+            self.size.height,
+        );
+        (left, right)
+    }
+
+    /// Split this rect into two halves stacked vertically at the given ratio (0.0..1.0).
+    /// Returns (top, bottom). `gap` is the pixel-height separator between them.
+    pub fn split_vertical_ratio(self, ratio: f32, gap: f32) -> (Rect, Rect) {
+        let ratio = ratio.clamp(0.05, 0.95);
+        let usable = self.size.height - gap;
+        let top_h = usable * ratio;
+        let bottom_h = usable * (1.0 - ratio);
+        let top = Rect::new(self.origin.x, self.origin.y, self.size.width, top_h);
+        let bottom = Rect::new(
+            self.origin.x,
+            self.origin.y + top_h + gap,
+            self.size.width,
+            bottom_h,
+        );
+        (top, bottom)
+    }
+
     pub fn split_horizontal(self, n: usize) -> Vec<Rect> {
         if n == 0 {
             return vec![];
