@@ -540,6 +540,10 @@ pub enum KeyAction {
     ZoomPane,
     /// Show the keybinding help overlay.
     ShowHelp,
+    /// Close all panes (batch kill).
+    CloseAllPanes,
+    /// Restore the last closed-all layout.
+    RestoreLayout,
 }
 
 impl KeyAction {
@@ -565,6 +569,8 @@ impl KeyAction {
             KeyAction::FocusRight => "Focus pane right",
             KeyAction::ZoomPane => "Toggle pane zoom",
             KeyAction::ShowHelp => "Show keybinding help",
+            KeyAction::CloseAllPanes => "Close all panes",
+            KeyAction::RestoreLayout => "Restore last layout",
         }
     }
 
@@ -583,7 +589,9 @@ impl KeyAction {
             | KeyAction::FocusDown
             | KeyAction::FocusLeft
             | KeyAction::FocusRight
-            | KeyAction::ZoomPane => "Pane Management",
+            | KeyAction::ZoomPane
+            | KeyAction::CloseAllPanes
+            | KeyAction::RestoreLayout => "Pane Management",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
         }
@@ -698,6 +706,15 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+/".to_string(),
                     action: KeyAction::ShowHelp,
+                },
+                // Batch pane operations
+                Keybinding {
+                    key: "ctrl+shift+q".to_string(),
+                    action: KeyAction::CloseAllPanes,
+                },
+                Keybinding {
+                    key: "ctrl+shift+u".to_string(),
+                    action: KeyAction::RestoreLayout,
                 },
             ],
         }

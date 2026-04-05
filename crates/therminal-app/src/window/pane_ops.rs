@@ -8,7 +8,7 @@ use std::io::Write as IoWrite;
 use alacritty_terminal::term::TermMode;
 use tracing::{info, warn};
 
-use crate::pane::{FocusDirection, LayoutNode, PaneId, SplitDirection};
+use crate::pane::{FocusDirection, LayoutNode, LayoutSnapshot, PaneId, SplitDirection};
 use therminal_core::geometry::Rect;
 use therminal_terminal::interceptor::InterceptorConfig;
 
@@ -384,5 +384,223 @@ impl App {
             }
         }
         self.selection_in_progress = false;
+    }
+
+    // ── Batch pane operations ─────────────────────────────────────────
+
+    /// Close all panes, snapshotting the layout tree for later restore.
+    /// Drops all PTYs immediately and does a single rebalance at the end.
+    pub(crate) fn close_all_panes(&mut self) {
+        let layout = match self.layout.take() {
+            Some(l) => l,
+            None => return,
+        };
+
+        // Snapshot the tree structure before destroying it.
+        self.saved_layout = Some(layout.snapshot());
+
+        // Drop the entire layout tree -- this drops all PaneState including
+        // PTY masters and writers, causing reader threads to hit EOF and exit.
+        drop(layout);
+
+        self.focused_pane = None;
+        self.selection_pane = None;
+        self.selection_in_progress = false;
+
+        info!("Closed all panes (layout snapshot saved)");
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Spawn N panes with auto-tiling layout.
+    /// Creates panes one at a time using the existing split infrastructure,
+    /// with a single relayout at the end.
+    #[allow(dead_code)]
+    pub(crate) fn spawn_n_panes(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+
+        // If no layout exists, we need to create the first pane via the
+        // normal init path. The first pane is created by the window setup,
+        // so we only handle extra splits here.
+        if self.layout.is_none() {
+            info!("No layout exists, cannot spawn panes without initial setup");
+            return;
+        }
+
+        for _ in 0..n {
+            self.split_focused_pane_auto();
+        }
+
+        info!("Spawned {n} additional panes via auto-split");
+    }
+
+    /// Restore a previously saved layout by respawning panes to match the snapshot.
+    pub(crate) fn restore_layout(&mut self) {
+        let snapshot = match self.saved_layout.take() {
+            Some(s) => s,
+            None => {
+                info!("No saved layout to restore");
+                return;
+            }
+        };
+
+        let leaf_count = LayoutNode::snapshot_leaf_count(&snapshot);
+        if leaf_count == 0 {
+            return;
+        }
+
+        // If there's already a layout, close it first (no re-snapshot).
+        if self.layout.is_some() {
+            let layout = self.layout.take().unwrap();
+            drop(layout);
+            self.focused_pane = None;
+        }
+
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let gpu = match self.gpu.as_ref() {
+            Some(g) => g,
+            None => return,
+        };
+
+        let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+
+        // Rebuild the layout tree from the snapshot by spawning new panes.
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_1337: self.config.terminal.osc_1337,
+        };
+        let scan_interval_secs = self.config.trust.agent_scan_interval;
+        let spawn_options = therminal_terminal::pty::SpawnOptions {
+            shell: self.config.general.shell.clone(),
+            env: self.config.general.env.clone(),
+        };
+        let proxy = self.event_proxy.clone();
+
+        match self.rebuild_from_snapshot(
+            &snapshot,
+            full_rect,
+            renderer,
+            scrollback,
+            &interceptor_cfg,
+            scan_interval_secs,
+            &spawn_options,
+            &proxy,
+        ) {
+            Some(node) => {
+                self.layout = Some(node);
+                // Relayout and resize.
+                let layout = self.layout.as_mut().unwrap();
+                let renderer = self.grid_renderer.as_ref().unwrap();
+                layout.layout(full_rect);
+                layout.resize_all_panes(renderer);
+
+                // Focus the first pane.
+                let ids = layout.pane_ids();
+                self.focused_pane = ids.first().copied();
+
+                info!(panes = ids.len(), "Restored layout from snapshot");
+            }
+            None => {
+                warn!("Failed to restore layout from snapshot");
+            }
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Recursively rebuild a LayoutNode tree from a snapshot.
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild_from_snapshot(
+        &self,
+        snapshot: &LayoutSnapshot,
+        rect: Rect,
+        renderer: &crate::grid_renderer::GridRenderer,
+        scrollback: usize,
+        interceptor_cfg: &InterceptorConfig,
+        scan_interval_secs: u64,
+        spawn_options: &therminal_terminal::pty::SpawnOptions,
+        proxy: &super::EventLoopProxy<super::UserEvent>,
+    ) -> Option<LayoutNode> {
+        use crate::pane::SEPARATOR_GAP;
+
+        match snapshot {
+            LayoutSnapshot::Leaf => {
+                let p = proxy.clone();
+                let cfg = interceptor_cfg.clone();
+                match crate::pane::spawn_pane(
+                    rect,
+                    renderer,
+                    scrollback,
+                    cfg,
+                    scan_interval_secs,
+                    spawn_options,
+                    |_pane_id| {
+                        let p = p.clone();
+                        Box::new(move || {
+                            let _ = p.send_event(super::UserEvent::PtyOutput);
+                        })
+                    },
+                ) {
+                    Ok(pane) => Some(LayoutNode::Leaf(pane)),
+                    Err(e) => {
+                        warn!(error = %e, "failed to spawn pane during layout restore");
+                        None
+                    }
+                }
+            }
+            LayoutSnapshot::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let (r1, r2) = match direction {
+                    SplitDirection::Horizontal => {
+                        rect.split_horizontal_ratio(*ratio, SEPARATOR_GAP)
+                    }
+                    SplitDirection::Vertical => rect.split_vertical_ratio(*ratio, SEPARATOR_GAP),
+                };
+
+                let first_node = self.rebuild_from_snapshot(
+                    first,
+                    r1,
+                    renderer,
+                    scrollback,
+                    interceptor_cfg,
+                    scan_interval_secs,
+                    spawn_options,
+                    proxy,
+                )?;
+                let second_node = self.rebuild_from_snapshot(
+                    second,
+                    r2,
+                    renderer,
+                    scrollback,
+                    interceptor_cfg,
+                    scan_interval_secs,
+                    spawn_options,
+                    proxy,
+                )?;
+
+                Some(LayoutNode::Split {
+                    direction: *direction,
+                    ratio: *ratio,
+                    first: Box::new(first_node),
+                    second: Box::new(second_node),
+                })
+            }
+        }
     }
 }

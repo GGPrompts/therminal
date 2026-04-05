@@ -37,7 +37,7 @@ use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
 use crate::menu::ContextMenu;
-use crate::pane::{LayoutNode, PaneId, SplitDirection};
+use crate::pane::{LayoutNode, LayoutSnapshot, PaneId, SplitDirection};
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
 use therminal_core::geometry::Rect;
@@ -132,6 +132,9 @@ pub struct App {
 
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,
+
+    /// Saved layout snapshot from close_all_panes(), for restore.
+    saved_layout: Option<LayoutSnapshot>,
 }
 
 impl App {
@@ -193,6 +196,7 @@ impl App {
             last_split_direction: SplitDirection::Horizontal,
             show_help_overlay: false,
             active_menu: None,
+            saved_layout: None,
         }
     }
 
@@ -607,6 +611,12 @@ impl App {
             KeyAction::ShowHelp => {
                 self.show_help_overlay = !self.show_help_overlay;
             }
+            KeyAction::CloseAllPanes => {
+                self.close_all_panes();
+            }
+            KeyAction::RestoreLayout => {
+                self.restore_layout();
+            }
         }
         true
     }
@@ -737,6 +747,8 @@ impl App {
             KeyAction::SplitVertical => self.split_focused_pane(SplitDirection::Vertical),
             KeyAction::SplitAuto => self.split_focused_pane_auto(),
             KeyAction::ClosePane => self.close_focused_pane(),
+            KeyAction::CloseAllPanes => self.close_all_panes(),
+            KeyAction::RestoreLayout => self.restore_layout(),
             KeyAction::Copy => self.copy_selection(),
             KeyAction::Paste => self.paste_clipboard(),
             _ => {
@@ -963,9 +975,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.resize(size);
                 }
 
-                // If layout was removed (last pane closed), exit.
+                // If layout was removed (last pane closed), exit --
+                // unless we have a saved layout snapshot (close-all with restore).
                 if self.layout.is_none() {
-                    event_loop.exit();
+                    if self.saved_layout.is_none() {
+                        event_loop.exit();
+                        return;
+                    }
+                    // No panes but layout can be restored; just present a blank frame.
                     return;
                 }
 
