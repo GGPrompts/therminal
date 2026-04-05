@@ -82,5 +82,10 @@ if [[ "${PS1}" != *'133;B'* ]]; then
     PS1="${PS1}\[$(__therminal_prompt_end)\]"
 fi
 
-# Install DEBUG trap for preexec.
-trap '__therminal_preexec' DEBUG
+# Install DEBUG trap for preexec, chaining any existing trap.
+__therminal_existing_debug_trap=$(trap -p DEBUG | sed "s/trap -- '\\(.*\\)' DEBUG/\\1/")
+if [[ -n "$__therminal_existing_debug_trap" ]]; then
+    trap "$__therminal_existing_debug_trap; __therminal_preexec" DEBUG
+else
+    trap '__therminal_preexec' DEBUG
+fi

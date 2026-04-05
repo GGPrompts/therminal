@@ -26,12 +26,14 @@ const APP_DIR: &str = "therminal";
 /// - macOS: `~/Library/Application Support/therminal`
 /// - Windows: `{FOLDERID_RoamingAppData}\therminal`
 ///
-/// # Panics
-///
-/// Panics if the platform has no discoverable config directory.
+/// Falls back to `/tmp/therminal` on headless systems where no home directory
+/// is available.
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()
-        .expect("unable to determine config directory for this platform")
+        .unwrap_or_else(|| {
+            warn!("unable to determine config directory; falling back to /tmp/therminal");
+            PathBuf::from("/tmp/therminal")
+        })
         .join(APP_DIR)
 }
 
@@ -41,12 +43,14 @@ pub fn config_dir() -> PathBuf {
 /// - macOS: `~/Library/Application Support/therminal`
 /// - Windows: `{FOLDERID_RoamingAppData}\therminal`
 ///
-/// # Panics
-///
-/// Panics if the platform has no discoverable data directory.
+/// Falls back to `/tmp/therminal` on headless systems where no home directory
+/// is available.
 pub fn data_dir() -> PathBuf {
     dirs::data_dir()
-        .expect("unable to determine data directory for this platform")
+        .unwrap_or_else(|| {
+            warn!("unable to determine data directory; falling back to /tmp/therminal");
+            PathBuf::from("/tmp/therminal")
+        })
         .join(APP_DIR)
 }
 
@@ -56,12 +60,14 @@ pub fn data_dir() -> PathBuf {
 /// - macOS: `~/Library/Caches/therminal`
 /// - Windows: `{FOLDERID_LocalAppData}\therminal`
 ///
-/// # Panics
-///
-/// Panics if the platform has no discoverable cache directory.
+/// Falls back to `/tmp/therminal` on headless systems where no home directory
+/// is available.
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
-        .expect("unable to determine cache directory for this platform")
+        .unwrap_or_else(|| {
+            warn!("unable to determine cache directory; falling back to /tmp/therminal");
+            PathBuf::from("/tmp/therminal")
+        })
         .join(APP_DIR)
 }
 

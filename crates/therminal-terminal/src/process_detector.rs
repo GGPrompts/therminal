@@ -78,7 +78,7 @@ impl ProcessDetector {
 
         self.system.refresh_processes(
             sysinfo::ProcessesToUpdate::All,
-            true, // update CPU usage
+            false, // skip CPU usage — we only need the process tree
         );
 
         let mut agents = Vec::new();

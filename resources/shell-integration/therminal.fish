@@ -4,7 +4,7 @@
 
 # Guard against double-sourcing.
 if set -q __THERMINAL_SHELL_INTEGRATION
-    exit 0
+    return 0
 end
 set -g __THERMINAL_SHELL_INTEGRATION 1
 
@@ -36,6 +36,7 @@ function __therminal_fish_prompt_end --on-event fish_prompt
     # Note: fish_prompt event fires once; we rely on the prompt function
     # outputting between A and B. The B mark goes to stderr so it appears
     # after the prompt text.
+    __therminal_osc '133;B' >&2
 end
 
 # PreExec (C) — fires when the user submits a command.

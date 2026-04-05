@@ -11,7 +11,8 @@ $env:__THERMINAL_SHELL_INTEGRATION = "1"
 # -- OSC helpers ---------------------------------------------------------------
 
 function __therminal_osc([string]$payload) {
-    [Console]::Write("`e]${payload}`e\")
+    $esc = [char]27
+    [Console]::Write("${esc}]${payload}${esc}\")
 }
 
 function __therminal_report_cwd {
@@ -71,15 +72,23 @@ function prompt {
 
 # PSReadLine's AcceptLine handler lets us emit C before command execution.
 if (Get-Module -Name PSReadLine -ErrorAction SilentlyContinue) {
+    # Capture any existing custom Enter handler so we can chain it.
     $__therminal_original_accept_line = $null
     try {
-        $__therminal_original_accept_line = (Get-PSReadLineKeyHandler -Key Enter |
-            Where-Object { $_.Function -eq 'AcceptLine' }).Function
+        $handler = Get-PSReadLineKeyHandler -Key Enter -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($handler -and $handler.ScriptBlock) {
+            $__therminal_original_accept_line = $handler.ScriptBlock
+        }
     } catch {}
 
     Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
         $script:__therminal_preexec_fired = $true
         __therminal_osc '133;C'
-        [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+        if ($null -ne $script:__therminal_original_accept_line) {
+            & $script:__therminal_original_accept_line
+        } else {
+            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+        }
     }
 }
