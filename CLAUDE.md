@@ -4,7 +4,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-**Phase 0, 1, and 2 complete.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection, output cadence analysis, persistent multiplexed sessions via daemon with socket-as-lock, zero-downtime handoff, IPC protocol (MessagePack framing), split panes, TOML config with hot-reload, and control mode. Next: Phase 3 (AI Detection + Hotspots).
+**Phases 0, 1, and 2 complete; Phase 3 UX in progress.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection, output cadence analysis, persistent multiplexed sessions via daemon with socket-as-lock, zero-downtime handoff, IPC protocol (MessagePack framing), split panes with mouse-drag separator resize, workspace tabs, pane swap, font size keybindings, keybinding help overlay, right-click context menus, TOML config with hot-reload, control mode, and an MCP server with trust tier enforcement.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ crates/
 ├── therminal-terminal/    # PTY, OSC parsing, state inference, agent detection, region index
 ├── therminal-core/        # Color palette, wgpu context, text renderer, TOML config, hot-reload
 ├── therminal-runtime/     # Cross-platform paths, runtime dir management
-├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server
+├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server, trust enforcement
 └── therminal-app/         # winit window, grid renderer, mouse input, PTY wiring
 vendor/
 ├── alacritty_terminal/    # Vendored v0.25.1
@@ -113,6 +113,65 @@ A full-width status bar at the bottom of the window (24px tall) with three secti
 **Config**: `general.show_status_bar` (default `true`) controls visibility. When disabled, panes use the full window height. `trust.show_agent_indicator` controls whether the agent name appears in the left section.
 
 Key files: `crates/therminal-app/src/window/chrome.rs` (rendering), `crates/therminal-app/src/pane.rs` (`PaneStatus`, PTY reader wiring).
+
+### Workspace Tabs
+
+Named workspaces (`WorkspaceManager` in `pane.rs`) let users group pane layouts under numbered slots. Each workspace independently owns a `LayoutNode` binary tree. Switching workspaces swaps the entire layout; the previous workspace's layout is preserved in memory.
+
+**Keybindings**: `Alt+1`..`Alt+9` switch to workspace N; `Alt+Shift+1`..`Alt+Shift+9` send the focused pane to workspace N (actions `SwitchWorkspace(n)` / `SendToWorkspace(n)` in config).
+
+### Pane Swap
+
+`LayoutNode::swap_pane(a, b)` walks the binary tree and swaps the positions of two leaves in place, preserving the split structure. Exposed via keyboard actions `SwapNext` (default `Alt+Shift+Right`) and `SwapPrev` (default `Alt+Shift+Left`).
+
+### Mouse-Drag Separator Resize
+
+Clicking and dragging a pane separator adjusts the `split_ratio` of the enclosing `LayoutNode::Split`. Implemented in `window/mouse.rs` (`try_start_separator_drag`, `update_separator_drag`, `end_separator_drag`). Hit-testing uses a 6 px threshold around each separator.
+
+### Font Size Keybindings
+
+`GridRenderer` exposes `adjust_font_size(delta)` (clamped to 8–32 pt) and `reset_font_size()`. Default keybindings: `Ctrl+Shift+=` increase, `Ctrl+Shift+-` decrease, `Ctrl+Shift+0` reset (actions `FontSizeUp`, `FontSizeDown`, `FontSizeReset`).
+
+### Keybinding Help Overlay
+
+`Ctrl+Shift+?` toggles a full-window overlay (`show_help_overlay` in `App`) rendered by `window/help_overlay.rs`. The overlay reads all active bindings from the config-driven binding map and groups them by category (General, Font, Pane Management). Pressing any key or clicking outside closes it.
+
+### Right-Click Context Menu
+
+`window/mouse.rs` detects right-click and calls `menu::show_context_menu()`, which renders a GPU-drawn floating menu (`crates/therminal-app/src/menu.rs`). Menu items cover common pane actions (split, close, zoom, copy, paste).
+
+### MCP Server
+
+`crates/therminal-daemon/src/mcp.rs` implements an MCP server (`rmcp` crate, stdio transport, Unix socket per session). It exposes tools for session and pane management:
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `list_sessions` | Observer | List all session IDs |
+| `get_session` | Observer | Get session metadata |
+| `read_pane_content` | Observer | Read visible pane content |
+| `create_session` | Writer | Spawn a new PTY session |
+| `write_to_pane` | Writer | Send input to a pane's PTY |
+| `destroy_session` | Admin | Kill a session |
+
+Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call.
+
+### Trust Tier Enforcement
+
+`crates/therminal-daemon/src/trust.rs` maps MCP tools to three permission categories (Observer, Writer, Admin) and enforces access control on every call:
+
+| Tier | Name | MCP Access |
+|------|------|-----------|
+| `Sandboxed` | Read-only | Observer tools only |
+| `Supervised` | Default | Observer + Writer tools |
+| `Trusted` | Full | All tools including Admin |
+
+Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallback. Destructive (Admin) tools are additionally subject to a sliding-window rate limiter (configurable `max_destructive_per_minute`). All allow/deny decisions are audit-logged via `tracing`.
+
+Key files: `crates/therminal-daemon/src/mcp.rs` (server), `crates/therminal-daemon/src/trust.rs` (enforcement + rate limiter).
+
+### Control Mode
+
+`crates/therminal-daemon/src/control.rs` implements a machine-readable text protocol (tmux `-CC` style). The `--help-control` CLI flag prints the full protocol reference. The `help` command within a control session returns the same reference inline.
 
 ## Configuration System
 

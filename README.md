@@ -35,12 +35,22 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 **Pane management & UX**
 - Split panes with binary layout tree and keyboard/shortcut controls
+- Mouse-drag separator resize (click and drag pane borders)
+- Workspace tabs (Alt+1..9 to switch, Alt+Shift+1..9 to send pane)
+- Pane swap (Alt+Shift+Arrow)
+- Font size keybindings (Ctrl+Shift+=/-/0)
 - Batch close and restore with layout snapshots
 - GPU-rendered right-click context menus
 - Keybinding help overlay (Ctrl+Shift+?)
 - Auto-tiled pane spawn (Alt+Enter)
 - TOML config with hot-reload via file watcher
-- Control mode (tmux -CC style machine-readable protocol)
+- Control mode (tmux -CC style machine-readable protocol, --help-control flag)
+
+**MCP server & trust**
+- MCP server in the daemon (rmcp, Unix socket, stdio transport)
+- Tools: list_sessions, get_session, read_pane_content, create_session, write_to_pane, destroy_session
+- Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at the MCP handler layer
+- Sliding-window rate limiter for destructive tools; all decisions audit-logged
 
 ## Building
 
@@ -106,7 +116,7 @@ crates/
   therminal-terminal/    PTY, OSC parsing, state inference, agent detection, region index
   therminal-core/        Color palette, wgpu context, text renderer, TOML config, hot-reload
   therminal-runtime/     Cross-platform paths, runtime dir management
-  therminal-daemon/      Session manager, event bus, multiplexer, IPC server, MCP server (stub)
+  therminal-daemon/      Session manager, event bus, multiplexer, IPC server, MCP server, trust enforcement
   therminal-app/         winit window, grid renderer, mouse input, PTY wiring
 vendor/
   alacritty_terminal/    Vendored v0.25.1

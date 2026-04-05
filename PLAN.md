@@ -344,7 +344,7 @@ Built the semantic foundation that everything else queries.
 - Output cadence analysis — classifies output as Human, Agent, Burst, or Unknown based on timing, chunk size, and backspace patterns
 - Spinner pattern detection (cursor-control-heavy output)
 
-### Phase 2: Session Daemon + Multiplexing
+### Phase 2: Session Daemon + Multiplexing ✅ COMPLETE
 
 #### Daemon Lifecycle (learned from thermal-desktop pain)
 
@@ -416,8 +416,26 @@ Note: daemon mode means double emulation (daemon headless + client render). WezT
 - TOML config (profiles, keybindings, colors)
 - Control mode (machine-readable protocol for scripting, like tmux -CC)
 
-### Phase 3: AI Detection + Hotspots
-Detection layers 1-3 are complete (OSC interception, process tree, output cadence). Remaining:
+#### Phase 2 UX extensions (shipped alongside Phase 3)
+- Workspace tabs (`WorkspaceManager`, Alt+1..9 / Alt+Shift+1..9)
+- Mouse-drag separator resize
+- Pane swap (Alt+Shift+Arrow, `SwapNext`/`SwapPrev` actions)
+- Font size keybindings (Ctrl+Shift+=/-/0)
+- Keybinding help overlay (Ctrl+Shift+?)
+- GPU-rendered right-click context menus
+- Status bar (agent indicator, CWD from OSC 7, exit code from OSC 633 D)
+
+### Phase 3: AI Detection + Hotspots (In Progress)
+
+Detection layers 1-3 are complete (OSC interception, process tree, output cadence). MCP server and trust tier enforcement are also complete.
+
+**Complete:**
+- MCP server in daemon (`mcp.rs`, `rmcp` crate, Unix socket / stdio transport)
+- Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at MCP layer (`trust.rs`)
+- Sliding-window rate limiter for destructive MCP tools
+- Audit logging for all MCP tool invocations
+
+**Remaining:**
 - Layer 4: Composite state machine combining all signals into six states (idle, processing, streaming, tool_use, awaiting_input, thinking)
 - Custom OSC 7777 extension for cooperative agent self-reporting
 - Hotspot detection engine (file paths, URLs, errors, git refs, issue refs, commands)
@@ -425,9 +443,7 @@ Detection layers 1-3 are complete (OSC interception, process tree, output cadenc
 - Hotspot rendering (underline + cursor change on hover, action palette on click)
 
 ### Phase 4: MCP Workspace Protocol
-- Built-in MCP server via rmcp over stdio
-- Full tool set (list_panes, read_content, query_history, geometry, hotspots, spawn, send_input, close)
-- Trust tier enforcement at MCP handler layer
+- Full tool set (list_panes, read_content, query_history, geometry, hotspots, spawn, send_input, close) — current set covers sessions and panes; expand to match PLAN tool table
 - MCP Resources for subscription-based clients
 - Coordinate schema with TabzChrome's workspace.browser.* tools
 
