@@ -9,8 +9,9 @@
 //! `[trust]` config section, and checked against the tool's required tier.
 //! Destructive tools are additionally rate-limited.
 //!
-//! The server listens on a dedicated Unix socket (separate from the IPC socket)
-//! and uses the `rmcp` crate for protocol handling.
+//! The server listens on a platform-appropriate IPC endpoint (Unix domain
+//! socket on Linux/macOS, named pipe on Windows) and uses the `rmcp` crate
+//! for protocol handling.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,6 +30,7 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tracing::{debug, error, info, warn};
 
@@ -1546,7 +1548,11 @@ impl ServerHandler for TherminalMcpServer {
 
 // ── Server lifecycle ────────────────────────────────────────────────────
 
-/// Start the MCP server, accepting connections on the given Unix socket.
+/// Start the MCP server, accepting connections on the platform-appropriate IPC
+/// endpoint.
+///
+/// - **Unix**: listens on a Unix domain socket at `<runtime_dir>/mcp.sock`
+/// - **Windows**: listens on a named pipe at `\\.\pipe\therminal-mcp`
 ///
 /// Each accepted connection is served independently. The server runs until
 /// the `shutdown` notify is triggered. Trust enforcement uses the provided
@@ -1565,8 +1571,73 @@ pub async fn start_mcp_server(
 
     let socket_path = config.resolved_socket_path();
 
+    #[cfg(unix)]
+    {
+        start_mcp_server_unix(
+            &socket_path,
+            session_mgr,
+            trust_config,
+            rate_limiter,
+            shutdown,
+        )
+        .await?;
+    }
+
+    #[cfg(windows)]
+    {
+        start_mcp_server_windows(
+            &socket_path,
+            session_mgr,
+            trust_config,
+            rate_limiter,
+            shutdown,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Spawn an MCP connection handler for a single client stream.
+///
+/// Accepts anything that can be split into an async reader + writer (Unix
+/// socket halves, named-pipe halves, etc.).
+fn spawn_mcp_connection<R, W>(
+    reader: R,
+    writer: W,
+    session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    trust_config: Arc<TrustConfig>,
+    rate_limiter: Arc<RateLimiter>,
+) where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    tokio::spawn(async move {
+        let server = TherminalMcpServer::new(session_mgr, trust_config, rate_limiter);
+        match server.serve((reader, writer)).await {
+            Ok(running) => {
+                if let Err(e) = running.waiting().await {
+                    debug!(error = %e, "MCP connection task ended");
+                }
+            }
+            Err(e) => {
+                debug!(error = %e, "MCP connection init failed");
+            }
+        }
+    });
+}
+
+/// Unix implementation: listen on a Unix domain socket.
+#[cfg(unix)]
+async fn start_mcp_server_unix(
+    socket_path: &Path,
+    session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    trust_config: Arc<TrustConfig>,
+    rate_limiter: Arc<RateLimiter>,
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
     // Clean stale socket
-    match std::fs::remove_file(&socket_path) {
+    match std::fs::remove_file(socket_path) {
         Ok(()) => debug!(path = %socket_path.display(), "removed stale MCP socket"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -1577,15 +1648,14 @@ pub async fn start_mcp_server(
         }
     }
 
-    let listener = UnixListener::bind(&socket_path)
+    let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("failed to bind MCP socket: {}", socket_path.display()))?;
 
-    // Set socket permissions on Unix (owner-only)
-    #[cfg(unix)]
+    // Set socket permissions (owner-only)
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&socket_path, perms).ok();
+        std::fs::set_permissions(socket_path, perms).ok();
     }
 
     info!(path = %socket_path.display(), "MCP server listening");
@@ -1595,23 +1665,14 @@ pub async fn start_mcp_server(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _addr)) => {
-                        let sm = Arc::clone(&session_mgr);
-                        let tc = Arc::clone(&trust_config);
-                        let rl = Arc::clone(&rate_limiter);
-                        tokio::spawn(async move {
-                            let server = TherminalMcpServer::new(sm, tc, rl);
-                            let (reader, writer) = stream.into_split();
-                            match server.serve((reader, writer)).await {
-                                Ok(running) => {
-                                    if let Err(e) = running.waiting().await {
-                                        debug!(error = %e, "MCP connection task ended");
-                                    }
-                                }
-                                Err(e) => {
-                                    debug!(error = %e, "MCP connection init failed");
-                                }
-                            }
-                        });
+                        let (reader, writer) = stream.into_split();
+                        spawn_mcp_connection(
+                            reader,
+                            writer,
+                            Arc::clone(&session_mgr),
+                            Arc::clone(&trust_config),
+                            Arc::clone(&rate_limiter),
+                        );
                     }
                     Err(e) => {
                         error!(error = %e, "MCP accept failed");
@@ -1627,11 +1688,83 @@ pub async fn start_mcp_server(
     }
 
     // Clean up socket
-    cleanup_socket(&socket_path);
+    cleanup_socket(socket_path);
     Ok(())
 }
 
-/// Remove the MCP socket file.
+/// Windows implementation: listen on a named pipe.
+///
+/// Named pipes on Windows are not like Unix sockets -- there is no persistent
+/// listener object. Instead, each pipe instance can serve exactly one client.
+/// The standard pattern is:
+///   1. Create a pipe instance with `ServerOptions::create()`.
+///   2. Call `connect()` to wait for a client.
+///   3. Hand the connected instance off to a handler.
+///   4. Immediately create a new pipe instance for the next client.
+#[cfg(windows)]
+async fn start_mcp_server_windows(
+    socket_path: &Path,
+    session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    trust_config: Arc<TrustConfig>,
+    rate_limiter: Arc<RateLimiter>,
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let pipe_name = socket_path.to_string_lossy();
+
+    // The first pipe instance is created outside the loop.
+    let mut pipe = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&*pipe_name)
+        .with_context(|| format!("failed to create MCP named pipe: {pipe_name}"))?;
+
+    info!(path = %pipe_name, "MCP server listening on named pipe");
+
+    loop {
+        tokio::select! {
+            result = pipe.connect() => {
+                match result {
+                    Ok(()) => {
+                        // Hand the connected pipe to a handler.
+                        let (reader, writer) = tokio::io::split(pipe);
+                        spawn_mcp_connection(
+                            reader,
+                            writer,
+                            Arc::clone(&session_mgr),
+                            Arc::clone(&trust_config),
+                            Arc::clone(&rate_limiter),
+                        );
+
+                        // Create a new pipe instance for the next client.
+                        pipe = ServerOptions::new()
+                            .create(&*pipe_name)
+                            .with_context(|| {
+                                format!(
+                                    "failed to create next MCP named pipe instance: {pipe_name}"
+                                )
+                            })?;
+                    }
+                    Err(e) => {
+                        error!(error = %e, "MCP named pipe connect failed");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+            _ = shutdown.notified() => {
+                info!("MCP server shutting down");
+                break;
+            }
+        }
+    }
+
+    // Named pipes are cleaned up automatically when all handles are dropped,
+    // so no explicit file removal is needed (unlike Unix sockets).
+    Ok(())
+}
+
+/// Remove the MCP socket file (Unix only).
+#[cfg(unix)]
 fn cleanup_socket(path: &Path) {
     if path.exists() {
         if let Err(e) = std::fs::remove_file(path) {
