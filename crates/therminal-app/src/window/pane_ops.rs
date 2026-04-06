@@ -133,6 +133,60 @@ impl App {
         }
     }
 
+    /// Open a horizontal split running `tail -F` on the focused pane's
+    /// agent event log JSONL file.
+    ///
+    /// Triggered by clicking the `[agent: <name>]` indicator in the status
+    /// bar. The new pane is small and narrow (horizontal split) so it acts
+    /// as a side panel without dominating the layout.
+    pub(crate) fn open_focused_agent_event_log_tail(&mut self) {
+        let focused = match self.focused_pane() {
+            Some(id) => id,
+            None => {
+                debug!("open_focused_agent_event_log_tail: no focused pane");
+                return;
+            }
+        };
+
+        // The session_id used for event logs corresponds 1:1 with the pane
+        // id in this single-process app. The daemon uses the same naming
+        // scheme, so this matches if/when the daemon is also writing logs.
+        let session_id = format!("pane-{focused}");
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+            let user = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "unknown".to_string());
+            format!("/tmp/therminal-{user}")
+        });
+        let log_path = std::path::PathBuf::from(runtime_dir)
+            .join("therminal")
+            .join("sessions")
+            .join(format!("{session_id}.events.jsonl"));
+        let log_path_str = log_path.to_string_lossy().into_owned();
+
+        info!(
+            "Opening agent event log tail pane for pane {} at {}",
+            focused, log_path_str
+        );
+
+        // Horizontal split keeps the tail pane narrow (top/bottom layout).
+        self.split_focused_pane(SplitDirection::Horizontal);
+
+        // After split, the new pane is focused. Send the tail command.
+        let new_pane = match self.focused_pane() {
+            Some(id) if id != focused => id,
+            _ => {
+                warn!("open_focused_agent_event_log_tail: split did not produce a new pane");
+                return;
+            }
+        };
+
+        // `tail -F` follows file rotation/recreation and tolerates a
+        // non-existent file (it will retry until the file appears).
+        let cmd = format!("tail -F {log_path_str}\n");
+        self.pty_write_to_pane(cmd.as_bytes(), new_pane);
+    }
+
     /// Close the currently focused pane.
     ///
     /// Includes a 100ms cooldown to prevent double-close from keyboard repeat

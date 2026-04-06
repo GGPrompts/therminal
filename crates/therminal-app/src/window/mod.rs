@@ -167,6 +167,11 @@ pub struct App {
     /// Pre-zoom layout tree, stored when a pane is zoomed to fullscreen.
     /// Contains the full layout with the zoomed pane replaced by `Empty`.
     zoomed_layout: Option<LayoutNode>,
+
+    /// Hit-test areas captured from the most recent status bar render.
+    /// Used by the mouse handler to detect clicks on chrome elements like
+    /// the agent indicator.
+    status_bar_hit_areas: chrome::StatusBarHitAreas,
 }
 
 /// State for an in-progress separator drag.
@@ -290,6 +295,7 @@ impl App {
             auto_tile_debouncer,
             visual_bell_start: None,
             zoomed_layout: None,
+            status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
         }
     }
 
@@ -543,6 +549,7 @@ impl App {
 
     /// Render a frame: render all panes and separators.
     fn render(&mut self) {
+        let mut new_status_bar_hit_areas = chrome::StatusBarHitAreas::default();
         let gpu = match self.gpu.as_ref() {
             Some(g) => g,
             None => return,
@@ -699,7 +706,7 @@ impl App {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("status_bar_encoder"),
                 });
-            chrome::draw_status_bar(
+            new_status_bar_hit_areas = chrome::draw_status_bar(
                 &status_info,
                 renderer,
                 &gpu.device,
@@ -874,6 +881,8 @@ impl App {
         }
 
         output.present();
+
+        self.status_bar_hit_areas = new_status_bar_hit_areas;
 
         // If visual bell is still active, schedule another redraw for animation.
         if bell_intensity > 0.0 {
@@ -1829,6 +1838,24 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         return;
                     }
+                }
+
+                // ── Status bar click: agent indicator → tail event log ─────
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && let Some((px, py)) = self.cursor_position
+                    && let Some(hit) = chrome::status_bar_hit_test(
+                        px as f32,
+                        py as f32,
+                        &self.status_bar_hit_areas,
+                    )
+                {
+                    match hit {
+                        chrome::StatusBarHit::AgentIndicator => {
+                            self.open_focused_agent_event_log_tail();
+                        }
+                    }
+                    return;
                 }
 
                 // ── Separator drag: release ends drag ──────────────────────

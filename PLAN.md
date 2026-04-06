@@ -425,43 +425,60 @@ Note: daemon mode means double emulation (daemon headless + client render). WezT
 - GPU-rendered right-click context menus
 - Status bar (agent indicator, CWD from OSC 7, exit code from OSC 633 D)
 
-### Phase 3: AI Detection + Hotspots (In Progress)
+### Phase 3: AI Detection + Hotspots ✅ COMPLETE
 
-Detection layers 1-3 are complete (OSC interception, process tree, output cadence). MCP server and trust tier enforcement are also complete.
+All four detection layers shipped, plus MCP server, hotspot engine, and rendering.
 
-**Complete:**
+**Completed:**
 - MCP server in daemon (`mcp.rs`, `rmcp` crate, Unix socket) with stdio bridge (`therminal mcp` subcommand for Claude Code integration)
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at MCP layer (`trust.rs`)
 - Sliding-window rate limiter for destructive MCP tools
 - Audit logging for all MCP tool invocations
 - MCP socket path configurable via `[mcp]` in `therminal.toml`
+- Layer 4: Composite state machine (`InferredStatus` enum) combining all signals into six states (Idle, Processing, Streaming, ToolUse, AwaitingInput, Thinking) with confidence tracking
+- Custom OSC 7777 extension for cooperative agent self-reporting (JSON payload: agent, state, tool, tokens, model)
+- Hotspot detection engine (file paths with :line:col, URLs, error locations, git refs, issue refs) with priority-based overlap suppression
+- OSC 8 hyperlink protocol (solid underline for OSC 8, dashed for regex URLs, dotted for hotspots)
+- Hotspot rendering: underline styles, pointer cursor on hover, GPU-rendered action palette on click
 
-**Remaining:**
-- Layer 4: Composite state machine combining all signals into six states (idle, processing, streaming, tool_use, awaiting_input, thinking)
-- Custom OSC 7777 extension for cooperative agent self-reporting
-- Hotspot detection engine (file paths, URLs, errors, git refs, issue refs, commands)
-- OSC 8 hyperlink protocol
-- Hotspot rendering (underline + cursor change on hover, action palette on click)
+### Phase 4: MCP Workspace Protocol ✅ COMPLETE
 
-### Phase 4: MCP Workspace Protocol
-- Full tool set (list_panes, read_content, query_history, geometry, hotspots, spawn, send_input, close) — current set covers sessions and panes; expand to match PLAN tool table
-- MCP Resources for subscription-based clients
-- Coordinate schema with TabzChrome's workspace.browser.* tools
+**Completed:**
+- 15 MCP tools across 5 domains (sessions, panes, semantic, workspaces, agents) with `workspace.terminal.*` naming convention
+- MCP Resources: `terminal://pane/{id}/content` (snapshot) and `terminal://pane/{id}/output` (live stream with subscriptions)
+- Trust tier enforcement with rate limiting and audit logging
+- Session/workspace state persistence and sync with daemon
 
-### Phase 5: Swarm Tiling + WebView Panes
-- Auto-tiling when subagents spawn/finish
-- Geometry-aware layout decisions
-- Agent registry with live status tracking
-- WebView panes via wry (optional feature flag, OS child windows)
-- PaneBackend abstraction: Terminal | WebView
+**Deferred:**
+- Coordinate schema with TabzChrome's `workspace.browser.*` tools (tracked: tn-auig)
 
-### Phase 6: Overlay Widgets + Polish
-- Port overlay system from thermal-conductor
-- Two-pass rendering (grid + semi-transparent overlay)
-- Widget pre-rasterization via tiny-skia
-- Semantic scrollback navigation UI
-- Trust tier escalation modals
-- TTS integration (optional)
+### Phase 5: Swarm Tiling + WebView Panes ✅ COMPLETE (WebView deferred)
+
+**Completed:**
+- Auto-tiling when subagents spawn/finish (`AutoTileDebouncer` with debounced spawn/exit)
+- Geometry-aware layout (`LayoutNode` binary tree with split ratio tracking)
+- Agent registry with live status tracking per pane (`AgentRegistry` with event channel)
+- PaneBackend abstraction: Terminal | WebView (trait-based)
+- WM-style split targeting: split largest pane, enforce minimums
+
+**Deferred:**
+- WebView panes via wry (tn-437, deferred to June 2026) — stub backend exists, wry integration pending
+
+### Phase 6: Overlay Widgets + Polish (In Progress)
+
+Overlay infrastructure exists (dual text renderers, caching, chrome rendering). Specific widgets remaining.
+
+**Completed:**
+- Overlay rendering infrastructure (dual atlas, text cache, shaped buffer management)
+- Chrome overlays: pane headers, separators, status bar, tab bar, CSD buttons, focus border
+
+**Remaining (tracked in beads):**
+- Two-pass GPU rendering with alpha-blended overlay layer (tn-9k2) — foundation for all widgets
+- Widget plugin/extension architecture (tn-8hdt) — trait-based plugin system so specific widgets (context gauge, tool cards, thinking indicator) live outside core. Keeps harness-specific integrations maintainable as the agent ecosystem grows.
+- Widget pre-rasterization via tiny-skia (tn-npd)
+- Semantic scrollback navigation UI (tn-bh9)
+- Trust tier escalation modals (tn-b99)
+- Optional TTS integration (tn-b58)
 
 ---
 
@@ -470,9 +487,9 @@ Detection layers 1-3 are complete (OSC interception, process tree, output cadenc
 - [x] License — MIT
 - [x] Config format — TOML (`therminal.toml`)
 - [x] CI — GitHub Actions cross-platform matrix
-- [ ] MCP schema design — coordinate with TabzChrome's existing 85 tools
-- [ ] Default theme — thermal aesthetic? Or neutral with thermal as an option?
-- [ ] Distribution — cargo install? Homebrew? Winget? Flatpak?
-- [ ] OSC 7777 spec — design and publish as open standard for cooperative agent reporting
+- [x] OSC 7777 spec — designed and implemented (JSON payload over `OSC 7777 ; {json} ST`); publish as open standard (tn-pjg1)
+- [ ] MCP schema design — coordinate with TabzChrome's existing 85 tools (tn-auig)
+- [ ] Default theme — thermal aesthetic? Or neutral with thermal as an option? (tn-8ytq)
+- [ ] Distribution — cargo install? Homebrew? Winget? Flatpak? (tn-jern)
 - [ ] libghostty-vt — monitor maturity for potential future backend swap
 - [ ] Atuin integration — SQLite schema compatibility for shell history portability

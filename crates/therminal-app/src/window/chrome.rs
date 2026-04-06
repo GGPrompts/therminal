@@ -706,7 +706,20 @@ pub(crate) struct StatusBarInfo {
     pub is_zoomed: bool,
 }
 
+/// Pixel rect (x, y, width, height) returned by chrome hit-test producers.
+pub(crate) type ChromeRect = (f32, f32, f32, f32);
+
+/// Hit-test areas produced by `draw_status_bar` for click handling.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct StatusBarHitAreas {
+    /// Bounding box of the `[agent: <name>]` indicator text, if drawn.
+    pub agent_indicator: Option<ChromeRect>,
+}
+
 /// Draw the window status bar at the bottom of the screen.
+///
+/// Returns a [`StatusBarHitAreas`] describing pixel bounds of clickable
+/// regions, so the mouse handler can route clicks back to the right action.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_status_bar(
     info: &StatusBarInfo,
@@ -717,7 +730,8 @@ pub(crate) fn draw_status_bar(
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
-) {
+) -> StatusBarHitAreas {
+    let mut hit_areas = StatusBarHitAreas::default();
     use crate::color_mapping::pixel_rect_to_ndc;
 
     let bar_h = crate::pane::STATUS_BAR_HEIGHT;
@@ -911,6 +925,30 @@ pub(crate) fn draw_status_bar(
         &mut renderer.overlay_cache,
     );
 
+    // Pre-shape the zoom prefix in isolation if both [ZOOM] and the agent
+    // indicator are present. We need its width later to compute the agent
+    // indicator's pixel rect (for click hit-testing) without re-borrowing
+    // the cache mutably during the Phase 2 immutable borrow window.
+    let needs_prefix_measure =
+        info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
+    if needs_prefix_measure {
+        let prefix = " [ZOOM]";
+        let prefix_key = format!("{prefix}|{:.0}", sw * 0.35);
+        ensure_shaped(
+            "sb_left_zoom_prefix",
+            &prefix_key,
+            metrics,
+            sw * 0.35,
+            bar_h,
+            prefix,
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(agent_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+
     // Phase 2: borrow cache immutably for TextArea references and measurements.
     let workspace_buf = cached_buf(&renderer.overlay_cache, "sb_workspace");
     let workspace_text_width = workspace_buf
@@ -958,8 +996,31 @@ pub(crate) fn draw_status_bar(
 
     // Only add left area if there is agent text.
     if !left_text_ref.is_empty() {
+        let left_buf = cached_buf(&renderer.overlay_cache, "sb_left");
+        let left_total_w = left_buf
+            .layout_runs()
+            .next()
+            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            .unwrap_or(0.0);
+
+        let agent_prefix_width = if needs_prefix_measure {
+            cached_buf(&renderer.overlay_cache, "sb_left_zoom_prefix")
+                .layout_runs()
+                .next()
+                .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        if info.show_agent_indicator && info.agent_name.is_some() {
+            let agent_x = workspace_text_width + agent_prefix_width;
+            let agent_w = (left_total_w - agent_prefix_width).max(0.0);
+            hit_areas.agent_indicator = Some((agent_x, bar_y, agent_w, bar_h));
+        }
+
         text_areas.push(TextArea {
-            buffer: cached_buf(&renderer.overlay_cache, "sb_left"),
+            buffer: left_buf,
             left: workspace_text_width,
             top: bar_y,
             scale: 1.0,
@@ -1029,6 +1090,33 @@ pub(crate) fn draw_status_bar(
             tracing::warn!("status bar text render failed: {}", e);
         }
     }
+
+    hit_areas
+}
+
+/// Hit-test the status bar at the given physical pixel coordinates.
+///
+/// Returns the kind of region that was clicked, if any.
+pub(crate) fn status_bar_hit_test(
+    px: f32,
+    py: f32,
+    hit_areas: &StatusBarHitAreas,
+) -> Option<StatusBarHit> {
+    if let Some((x, y, w, h)) = hit_areas.agent_indicator
+        && px >= x
+        && px < x + w
+        && py >= y
+        && py < y + h
+    {
+        return Some(StatusBarHit::AgentIndicator);
+    }
+    None
+}
+
+/// Result of a status bar hit-test.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StatusBarHit {
+    AgentIndicator,
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────
