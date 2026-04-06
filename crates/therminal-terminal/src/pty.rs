@@ -313,6 +313,9 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
             // THERMINAL_RESOURCES_DIR needs to be a WSL-accessible path.
             // Convert the Windows path to /mnt/<drive>/... format.
             let mut cmd = CommandBuilder::new(shell);
+            // Start in the Linux home directory instead of /mnt/c/...
+            cmd.arg("--cd");
+            cmd.arg("~");
             cmd.env("TERM_PROGRAM", "therminal");
             cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
