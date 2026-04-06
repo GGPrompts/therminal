@@ -76,6 +76,7 @@ impl TherminalConfig {
             Ok(contents) => match toml::from_str::<TherminalConfig>(&contents) {
                 Ok(config) => {
                     info!(?path, "loaded config");
+                    config.validate_paths();
                     config
                 }
                 Err(e) => {
@@ -142,6 +143,51 @@ impl TherminalConfig {
     /// Used by `therminal --print-config`.
     pub fn to_toml_string(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_else(|e| format!("# serialization error: {e}\n"))
+    }
+
+    /// Validate path-related config fields and emit warnings for suspicious
+    /// values.  Called after loading; never fails hard.
+    pub fn validate_paths(&self) {
+        // Validate mcp.socket_path if explicitly set.
+        if !self.mcp.socket_path.is_empty() {
+            let p = Path::new(&self.mcp.socket_path);
+            if p.is_relative() {
+                warn!(
+                    path = %self.mcp.socket_path,
+                    "mcp.socket_path is a relative path; consider using an absolute path"
+                );
+            }
+            // Check for characters that are generally invalid in paths.
+            if self.mcp.socket_path.contains('\0') {
+                warn!(
+                    path = %self.mcp.socket_path,
+                    "mcp.socket_path contains null bytes"
+                );
+            }
+        }
+
+        // Validate profile working directories.
+        for (name, profile) in &self.profiles {
+            if let Some(ref dir) = profile.working_directory
+                && !dir.is_empty()
+            {
+                let p = Path::new(dir);
+                if p.is_relative() {
+                    warn!(
+                        profile = %name,
+                        path = %dir,
+                        "profile working_directory is a relative path; consider using an absolute path"
+                    );
+                }
+                if !p.exists() {
+                    warn!(
+                        profile = %name,
+                        path = %dir,
+                        "profile working_directory does not exist"
+                    );
+                }
+            }
+        }
     }
 
     /// Build a [`CoreFontConfig`] from the config's font section.
@@ -1187,5 +1233,96 @@ EDITOR = "nvim"
         config.save_to(&path).unwrap();
         let loaded = TherminalConfig::load_from(&path);
         assert_eq!(loaded.profiles["dev"].shell.as_deref(), Some("/bin/zsh"));
+    }
+
+    // ── Path validation tests ───────────────────────────────────────────────
+
+    /// validate_paths does not panic on a default config (all paths empty).
+    #[test]
+    fn validate_paths_default_config_no_panic() {
+        let config = TherminalConfig::default();
+        config.validate_paths(); // should not panic
+    }
+
+    /// validate_paths does not panic when socket_path is an absolute path.
+    #[test]
+    fn validate_paths_absolute_socket_path_ok() {
+        let mut config = TherminalConfig::default();
+        config.mcp.socket_path = "/tmp/therminal-mcp.sock".to_string();
+        config.validate_paths(); // should not panic or produce errors
+    }
+
+    /// validate_paths warns (but does not panic) for a relative socket_path.
+    #[test]
+    fn validate_paths_relative_socket_path_warns() {
+        let mut config = TherminalConfig::default();
+        config.mcp.socket_path = "relative/mcp.sock".to_string();
+        // This should emit a tracing::warn but not panic.
+        config.validate_paths();
+    }
+
+    /// validate_paths warns for socket_path containing null bytes.
+    #[test]
+    fn validate_paths_socket_path_with_null_warns() {
+        let mut config = TherminalConfig::default();
+        config.mcp.socket_path = "/tmp/bad\0path.sock".to_string();
+        config.validate_paths(); // should warn but not panic
+    }
+
+    /// validate_paths warns when a profile working_directory does not exist.
+    #[test]
+    fn validate_paths_nonexistent_working_directory_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "test".to_string(),
+            ProfileConfig {
+                working_directory: Some("/nonexistent/path/that/does/not/exist".to_string()),
+                ..Default::default()
+            },
+        );
+        config.validate_paths(); // should warn but not panic
+    }
+
+    /// validate_paths warns for a relative working_directory.
+    #[test]
+    fn validate_paths_relative_working_directory_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "dev".to_string(),
+            ProfileConfig {
+                working_directory: Some("relative/dir".to_string()),
+                ..Default::default()
+            },
+        );
+        config.validate_paths(); // should warn but not panic
+    }
+
+    /// validate_paths accepts a working_directory that actually exists.
+    #[test]
+    fn validate_paths_existing_working_directory_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "test".to_string(),
+            ProfileConfig {
+                working_directory: Some(dir.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        );
+        config.validate_paths(); // should not warn about non-existence
+    }
+
+    /// validate_paths skips empty working_directory values.
+    #[test]
+    fn validate_paths_empty_working_directory_skipped() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "empty".to_string(),
+            ProfileConfig {
+                working_directory: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        config.validate_paths(); // should not warn
     }
 }
