@@ -30,50 +30,14 @@ fn make_pane_callbacks(proxy: &EventLoopProxy<UserEvent>, pane_id: PaneId) -> Pa
     }
 }
 
-/// Helper macro: get the active layout mutably from workspaces.
-macro_rules! ws_layout_mut {
-    ($self:expr) => {
-        match $self.workspaces.as_mut() {
-            Some(wm) => Some(wm.layout_mut()),
-            None => None,
-        }
-    };
-}
-
-/// Helper macro: get the active layout ref from workspaces.
-macro_rules! ws_layout {
-    ($self:expr) => {
-        match $self.workspaces.as_ref() {
-            Some(wm) => Some(wm.layout()),
-            None => None,
-        }
-    };
-}
-
-/// Helper macro: get focused pane id from workspaces.
-macro_rules! ws_focused {
-    ($self:expr) => {
-        $self.workspaces.as_ref().and_then(|wm| wm.focused_pane())
-    };
-}
-
-/// Helper macro: set focused pane id in workspaces.
-macro_rules! ws_set_focused {
-    ($self:expr, $val:expr) => {
-        if let Some(wm) = $self.workspaces.as_mut() {
-            wm.set_focused_pane($val);
-        }
-    };
-}
-
 impl App {
     /// Split the currently focused pane with auto-detected direction.
     pub(crate) fn split_focused_pane_auto(&mut self) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
-        let layout = match ws_layout!(self) {
+        let layout = match self.get_layout() {
             Some(l) => l,
             None => return,
         };
@@ -91,12 +55,8 @@ impl App {
 
     /// Split the currently focused pane.
     pub(crate) fn split_focused_pane(&mut self, direction: SplitDirection) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
-            None => return,
-        };
-        let layout = match ws_layout_mut!(self) {
-            Some(l) => l,
             None => return,
         };
         let renderer = match self.grid_renderer.as_ref() {
@@ -117,6 +77,11 @@ impl App {
             env: self.config.general.env.clone(),
         };
         let proxy = self.event_proxy.clone();
+        // Direct field access needed here: layout_mut + renderer + config must coexist.
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
 
         let new_id = layout.split_pane(
             focused,
@@ -141,37 +106,21 @@ impl App {
         if let Some(new_id) = new_id {
             info!("Split pane {focused} {:?} -> new pane {new_id}", direction);
             self.last_split_direction = direction;
-
-            // Resize all panes after split.
-            let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = crate::pane::content_area_rect(
-                gpu.config.width as f32,
-                gpu.config.height as f32,
-                self.config.general.show_status_bar,
-                self.config.general.show_tab_bar,
-            );
-            let layout = ws_layout_mut!(self).unwrap();
-            let renderer = self.grid_renderer.as_ref().unwrap();
-            layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
-
-            // Focus the new pane.
-            ws_set_focused!(self, Some(new_id));
-        }
-
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+            self.set_focused_pane(Some(new_id));
+            self.relayout_and_redraw();
+        } else {
+            self.request_redraw();
         }
     }
 
     /// Close the currently focused pane.
     pub(crate) fn close_focused_pane(&mut self) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
 
-        let layout = match ws_layout_mut!(self) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -180,37 +129,21 @@ impl App {
             None => {
                 // Last pane -- close the window.
                 info!("Last pane closed, exiting");
-                ws_set_focused!(self, None);
+                self.set_focused_pane(None);
                 self.workspaces = None;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                // Clear saved layout so the exit check in the event loop fires.
+                self.saved_layout = None;
+                self.request_redraw();
             }
             Some(true) => {
                 info!("Closed pane {focused}");
                 // Move focus to first available pane.
-                let new_focus = {
-                    let layout = ws_layout_mut!(self).unwrap();
-                    layout.pane_ids().first().copied()
-                };
-                ws_set_focused!(self, new_focus);
-
-                // Relayout.
-                let gpu = self.gpu.as_ref().unwrap();
-                let full_rect = crate::pane::content_area_rect(
-                    gpu.config.width as f32,
-                    gpu.config.height as f32,
-                    self.config.general.show_status_bar,
-                    self.config.general.show_tab_bar,
-                );
-                let layout = ws_layout_mut!(self).unwrap();
-                let renderer = self.grid_renderer.as_ref().unwrap();
-                layout.layout(full_rect);
-                layout.resize_all_panes(renderer);
-
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                let new_focus = self
+                    .get_layout()
+                    .map(|l| l.pane_ids())
+                    .and_then(|ids| ids.first().copied());
+                self.set_focused_pane(new_focus);
+                self.relayout_and_redraw();
             }
             Some(false) => {
                 // Pane not found (shouldn't happen).
@@ -221,10 +154,6 @@ impl App {
 
     /// Split a specific pane by ID.
     pub(crate) fn split_pane_by_id(&mut self, target_id: PaneId, direction: SplitDirection) {
-        let layout = match ws_layout_mut!(self) {
-            Some(l) => l,
-            None => return,
-        };
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,
@@ -243,6 +172,11 @@ impl App {
             env: self.config.general.env.clone(),
         };
         let proxy = self.event_proxy.clone();
+        // Direct field access needed here: layout_mut + renderer + config must coexist.
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
 
         let new_id =
             layout.split_pane(
@@ -271,30 +205,16 @@ impl App {
                 direction
             );
             self.last_split_direction = direction;
-
-            let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = crate::pane::content_area_rect(
-                gpu.config.width as f32,
-                gpu.config.height as f32,
-                self.config.general.show_status_bar,
-                self.config.general.show_tab_bar,
-            );
-            let layout = ws_layout_mut!(self).unwrap();
-            let renderer = self.grid_renderer.as_ref().unwrap();
-            layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
-
-            ws_set_focused!(self, Some(new_id));
-        }
-
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+            self.set_focused_pane(Some(new_id));
+            self.relayout_and_redraw();
+        } else {
+            self.request_redraw();
         }
     }
 
     /// Close a specific pane by ID.
     pub(crate) fn close_pane_by_id(&mut self, target_id: PaneId) {
-        let layout = match ws_layout_mut!(self) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -302,36 +222,23 @@ impl App {
         match layout.remove_pane(target_id) {
             None => {
                 info!("Last pane closed, exiting");
-                ws_set_focused!(self, None);
+                self.set_focused_pane(None);
                 self.workspaces = None;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                // Clear saved layout so the exit check in the event loop fires.
+                self.saved_layout = None;
+                self.request_redraw();
             }
             Some(true) => {
                 info!("Closed pane {target_id}");
                 // If we closed the focused pane, move focus.
-                if ws_focused!(self) == Some(target_id) {
-                    let layout = ws_layout_mut!(self).unwrap();
-                    let ids = layout.pane_ids();
-                    ws_set_focused!(self, ids.first().copied());
+                if self.focused_pane() == Some(target_id) {
+                    let new_focus = self
+                        .get_layout()
+                        .map(|l| l.pane_ids())
+                        .and_then(|ids| ids.first().copied());
+                    self.set_focused_pane(new_focus);
                 }
-
-                let gpu = self.gpu.as_ref().unwrap();
-                let full_rect = crate::pane::content_area_rect(
-                    gpu.config.width as f32,
-                    gpu.config.height as f32,
-                    self.config.general.show_status_bar,
-                    self.config.general.show_tab_bar,
-                );
-                let layout = ws_layout_mut!(self).unwrap();
-                let renderer = self.grid_renderer.as_ref().unwrap();
-                layout.layout(full_rect);
-                layout.resize_all_panes(renderer);
-
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                self.relayout_and_redraw();
             }
             Some(false) => {
                 warn!("Pane {target_id} not found in layout");
@@ -341,31 +248,29 @@ impl App {
 
     /// Move focus to the next or previous pane.
     pub(crate) fn move_focus(&mut self, direction: FocusDirection) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
-        let layout = match ws_layout!(self) {
+        let layout = match self.get_layout() {
             Some(l) => l,
             None => return,
         };
 
         if let Some(new_id) = layout.adjacent_pane(focused, direction) {
-            ws_set_focused!(self, Some(new_id));
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            self.set_focused_pane(Some(new_id));
+            self.request_redraw();
         }
     }
 
     /// Swap the focused pane with the adjacent pane in the given direction.
     /// Focus follows the moved pane (stays on the same pane ID).
     pub(crate) fn swap_focused_pane(&mut self, direction: FocusDirection) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
-        let layout = match ws_layout_mut!(self) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -373,33 +278,26 @@ impl App {
         if let Some(target_id) = layout.adjacent_pane(focused, direction) {
             if layout.swap_pane(focused, target_id) {
                 // Focus stays on the original pane ID (it moved to the new position).
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                self.request_redraw();
             }
         }
     }
 
     /// Adjust the split ratio around the focused pane.
     pub(crate) fn adjust_focused_ratio(&mut self, delta: f32) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
 
-        // Extract values before the mutable borrow of workspaces via layout.
-        let (width, height) = match self.gpu.as_ref() {
-            Some(gpu) => (gpu.config.width as f32, gpu.config.height as f32),
+        // Compute rect before the mutable borrow of workspaces via layout.
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
             None => return,
         };
-        let full_rect = crate::pane::content_area_rect(
-            width,
-            height,
-            self.config.general.show_status_bar,
-            self.config.general.show_tab_bar,
-        );
 
-        let layout = match ws_layout_mut!(self) {
+        // Direct field access needed: layout_mut + grid_renderer must coexist.
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
             None => return,
         };
@@ -409,7 +307,6 @@ impl App {
             if let Some(renderer) = self.grid_renderer.as_ref() {
                 layout.resize_all_panes(renderer);
             }
-
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -420,11 +317,11 @@ impl App {
 
     /// Copy the current selection to the clipboard (for Ctrl+Shift+C keybinding).
     pub(crate) fn copy_selection(&mut self) {
-        let pane_id = match self.selection_pane.or(ws_focused!(self)) {
+        let pane_id = match self.selection_pane.or(self.focused_pane()) {
             Some(id) => id,
             None => return,
         };
-        let layout = match ws_layout!(self) {
+        let layout = match self.get_layout() {
             Some(l) => l,
             None => return,
         };
@@ -446,13 +343,13 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
         let mode = self.pane_term_mode(focused);
         let bracketed = mode.contains(TermMode::BRACKETED_PASTE);
-        let layout = match ws_layout_mut!(self) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -507,7 +404,7 @@ impl App {
     /// Clear the active selection on all panes.
     pub(crate) fn clear_selection(&mut self) {
         if let Some(pane_id) = self.selection_pane.take() {
-            if let Some(layout) = ws_layout_mut!(self) {
+            if let Some(layout) = self.get_layout_mut() {
                 if let Some(pane) = layout.find_pane_mut(pane_id) {
                     pane.term.lock().selection = None;
                 }
@@ -533,15 +430,12 @@ impl App {
         // PTY masters and writers, causing reader threads to hit EOF and exit.
         drop(layout);
 
-        ws_set_focused!(self, None);
+        self.set_focused_pane(None);
         self.selection_pane = None;
         self.selection_in_progress = false;
 
         info!("Closed all panes (layout snapshot saved)");
-
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.request_redraw();
     }
 
     /// Spawn N panes with auto-tiling layout.
@@ -581,27 +475,20 @@ impl App {
         }
 
         // If there's already a layout, close it first (no re-snapshot).
-        if ws_layout!(self).is_some() {
+        if self.get_layout().is_some() {
             let layout = self.workspaces.as_mut().unwrap().take_layout();
             drop(layout);
-            ws_set_focused!(self, None);
+            self.set_focused_pane(None);
         }
 
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,
         };
-        let gpu = match self.gpu.as_ref() {
-            Some(g) => g,
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
             None => return,
         };
-
-        let full_rect = crate::pane::content_area_rect(
-            gpu.config.width as f32,
-            gpu.config.height as f32,
-            self.config.general.show_status_bar,
-            self.config.general.show_tab_bar,
-        );
 
         // Rebuild the layout tree from the snapshot by spawning new panes.
         let scrollback = self.config.general.scrollback_lines;
@@ -633,25 +520,20 @@ impl App {
                 if let Some(wm) = self.workspaces.as_mut() {
                     wm.set_layout(node);
                 }
-                // Relayout and resize.
-                let layout = ws_layout_mut!(self).unwrap();
-                let renderer = self.grid_renderer.as_ref().unwrap();
-                layout.layout(full_rect);
-                layout.resize_all_panes(renderer);
+                // Focus the first pane (must read IDs before relayout borrows layout).
+                let first_id = self
+                    .get_layout()
+                    .map(|l| l.pane_ids())
+                    .and_then(|ids| ids.first().copied());
+                let pane_count = self.get_layout().map(|l| l.pane_ids().len()).unwrap_or(0);
+                self.set_focused_pane(first_id);
+                self.relayout_and_redraw();
 
-                // Focus the first pane.
-                let ids = layout.pane_ids();
-                ws_set_focused!(self, ids.first().copied());
-
-                info!(panes = ids.len(), "Restored layout from snapshot");
+                info!(panes = pane_count, "Restored layout from snapshot");
             }
             None => {
                 warn!("Failed to restore layout from snapshot");
             }
-        }
-
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
         }
     }
 
@@ -737,26 +619,18 @@ impl App {
 
     /// Switch to workspace `n` (1-9).
     pub(crate) fn switch_workspace(&mut self, n: u8) {
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
+            None => return,
+        };
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
             None => return,
         };
-
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,
         };
-        let gpu = match self.gpu.as_ref() {
-            Some(g) => g,
-            None => return,
-        };
-
-        let full_rect = crate::pane::content_area_rect(
-            gpu.config.width as f32,
-            gpu.config.height as f32,
-            self.config.general.show_status_bar,
-            self.config.general.show_tab_bar,
-        );
 
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -795,47 +669,30 @@ impl App {
         });
 
         if switched {
-            // Relayout the newly active workspace.
-            let wm = self.workspaces.as_mut().unwrap();
-            let layout = wm.layout_mut();
-            let renderer = self.grid_renderer.as_ref().unwrap();
-            layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
-
             info!("Switched to workspace {n}");
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            self.relayout_and_redraw();
         }
     }
 
     /// Send the focused pane to workspace `n` (1-9).
     pub(crate) fn send_to_workspace(&mut self, n: u8) {
-        let focused = match ws_focused!(self) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
 
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
+            None => return,
+        };
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
             None => return,
         };
-
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,
         };
-        let gpu = match self.gpu.as_ref() {
-            Some(g) => g,
-            None => return,
-        };
-
-        let full_rect = crate::pane::content_area_rect(
-            gpu.config.width as f32,
-            gpu.config.height as f32,
-            self.config.general.show_status_bar,
-            self.config.general.show_tab_bar,
-        );
 
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -874,17 +731,8 @@ impl App {
         });
 
         if moved {
-            // Relayout the current workspace after pane removal.
-            let wm = self.workspaces.as_mut().unwrap();
-            let layout = wm.layout_mut();
-            let renderer = self.grid_renderer.as_ref().unwrap();
-            layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
-
             info!("Sent pane {focused} to workspace {n}");
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            self.relayout_and_redraw();
         }
     }
 }

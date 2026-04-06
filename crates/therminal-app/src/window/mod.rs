@@ -434,21 +434,15 @@ impl App {
             renderer.resize(&gpu.device, &gpu.queue, new_size.width, new_size.height);
         }
 
-        // Recalculate layout tree and resize all pane PTYs (minus status bar and tab bar).
-        let status_bar_h =
-            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
-        let full_rect = Rect::new(
-            0.0,
-            tab_bar_h,
-            new_size.width as f32,
-            new_size.height as f32 - status_bar_h - tab_bar_h,
-        );
-        if let (Some(wm), Some(renderer)) = (self.workspaces.as_mut(), self.grid_renderer.as_ref())
-        {
-            let layout = wm.layout_mut();
-            layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
+        // Recalculate layout tree and resize all pane PTYs.
+        if let Some(full_rect) = self.compute_layout_rect() {
+            if let (Some(wm), Some(renderer)) =
+                (self.workspaces.as_mut(), self.grid_renderer.as_ref())
+            {
+                let layout = wm.layout_mut();
+                layout.layout(full_rect);
+                layout.resize_all_panes(renderer);
+            }
         }
 
         debug!(
@@ -835,7 +829,7 @@ impl App {
         let bindings = &self.config.keybindings.bindings;
 
         // Check if the pane under the cursor has a selection.
-        let has_selection = if let Some(layout) = self.workspaces.as_ref().map(|wm| wm.layout()) {
+        let has_selection = if let Some(layout) = self.get_layout() {
             if let Some(pane) = layout.find_pane(pane_id) {
                 let term_guard = pane.term.lock();
                 term_guard
@@ -851,9 +845,7 @@ impl App {
 
         let menu = if has_selection {
             let text = self
-                .workspaces
-                .as_ref()
-                .map(|wm| wm.layout())
+                .get_layout()
                 .and_then(|l| l.find_pane(pane_id))
                 .and_then(|p| p.term.lock().selection_to_string())
                 .unwrap_or_default();
@@ -991,15 +983,11 @@ impl App {
                 }
 
                 // Resize all panes after font or padding change.
-                let status_bar_h =
-                    crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-                let tab_bar_h =
-                    crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
-                let full_rect = Rect::new(
-                    0.0,
-                    tab_bar_h,
+                let full_rect = crate::pane::content_area_rect(
                     gpu.config.width as f32,
-                    gpu.config.height as f32 - status_bar_h - tab_bar_h,
+                    gpu.config.height as f32,
+                    self.config.general.show_status_bar,
+                    self.config.general.show_tab_bar,
                 );
                 if let Some(wm) = self.workspaces.as_mut() {
                     let layout = wm.layout_mut();
@@ -1033,58 +1021,22 @@ impl App {
 
     /// Adjust font size by `delta` points, resize panes, and request a redraw.
     fn adjust_font_size_action(&mut self, delta: f32) {
-        let status_bar_h =
-            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
             let new_size = renderer.adjust_font_size(delta);
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
-
-            let full_rect = Rect::new(
-                0.0,
-                tab_bar_h,
-                gpu.config.width as f32,
-                gpu.config.height as f32 - status_bar_h - tab_bar_h,
-            );
-            if let Some(wm) = self.workspaces.as_mut() {
-                let lay = wm.layout_mut();
-                lay.layout(full_rect);
-                lay.resize_all_panes(renderer);
-            }
-
             info!(font_size = new_size, "font size adjusted");
         }
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.relayout_and_redraw();
     }
 
     /// Reset font size to startup default, resize panes, and request a redraw.
     fn reset_font_size_action(&mut self) {
-        let status_bar_h =
-            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
             let new_size = renderer.reset_font_size();
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
-
-            let full_rect = Rect::new(
-                0.0,
-                tab_bar_h,
-                gpu.config.width as f32,
-                gpu.config.height as f32 - status_bar_h - tab_bar_h,
-            );
-            if let Some(wm) = self.workspaces.as_mut() {
-                let layout = wm.layout_mut();
-                layout.layout(full_rect);
-                layout.resize_all_panes(renderer);
-            }
-
             info!(font_size = new_size, "font size reset to default");
         }
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.relayout_and_redraw();
     }
 
     /// Build PTY spawn options from the current config (shell override + env).
@@ -1092,6 +1044,72 @@ impl App {
         therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+        }
+    }
+
+    // ── Workspace facade methods ─────────────────────────────────────────
+    // Centralized accessors that replace the ws_layout!, ws_layout_mut!,
+    // ws_focused!, and ws_set_focused! macros.
+
+    /// Get a shared reference to the active workspace's layout tree.
+    pub(crate) fn get_layout(&self) -> Option<&LayoutNode> {
+        self.workspaces.as_ref().map(|wm| wm.layout())
+    }
+
+    /// Get a mutable reference to the active workspace's layout tree.
+    pub(crate) fn get_layout_mut(&mut self) -> Option<&mut LayoutNode> {
+        self.workspaces.as_mut().map(|wm| wm.layout_mut())
+    }
+
+    /// Get the focused pane ID in the active workspace.
+    pub(crate) fn focused_pane(&self) -> Option<PaneId> {
+        self.workspaces.as_ref().and_then(|wm| wm.focused_pane())
+    }
+
+    /// Set the focused pane ID in the active workspace.
+    pub(crate) fn set_focused_pane(&mut self, id: Option<PaneId>) {
+        if let Some(wm) = self.workspaces.as_mut() {
+            wm.set_focused_pane(id);
+        }
+    }
+
+    /// Compute the content area rect from GPU dimensions and config flags.
+    /// Returns `None` if the GPU state is not yet initialized.
+    pub(crate) fn compute_layout_rect(&self) -> Option<Rect> {
+        let gpu = self.gpu.as_ref()?;
+        Some(crate::pane::content_area_rect(
+            gpu.config.width as f32,
+            gpu.config.height as f32,
+            self.config.general.show_status_bar,
+            self.config.general.show_tab_bar,
+        ))
+    }
+
+    /// Relayout the active workspace's tree and resize all pane PTYs,
+    /// then request a window redraw. No-op if GPU, renderer, or layout
+    /// is unavailable.
+    pub(crate) fn relayout_and_redraw(&mut self) {
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
+            None => return,
+        };
+        if let Some(layout) = self.get_layout_mut() {
+            layout.layout(full_rect);
+        }
+        // Separate borrow scope: layout_mut + renderer.
+        if let (Some(wm), Some(renderer)) = (self.workspaces.as_mut(), self.grid_renderer.as_ref())
+        {
+            wm.layout_mut().resize_all_panes(renderer);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Request a window redraw (convenience wrapper).
+    pub(crate) fn request_redraw(&self) {
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 }
@@ -1380,9 +1398,7 @@ impl ApplicationHandler<UserEvent> for App {
                             header_handled = true;
                             match action {
                                 HeaderAction::Focus(pane_id) => {
-                                    if let Some(wm) = self.workspaces.as_mut() {
-                                        wm.set_focused_pane(Some(pane_id));
-                                    }
+                                    self.set_focused_pane(Some(pane_id));
                                 }
                                 HeaderAction::Close(pane_id) => {
                                     self.close_pane_by_id(pane_id);
@@ -1406,12 +1422,8 @@ impl ApplicationHandler<UserEvent> for App {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         if let Some((px, py)) = self.cursor_position {
                             if let Some(pane_id) = self.pane_at_position(px, py) {
-                                if self.workspaces.as_ref().and_then(|wm| wm.focused_pane())
-                                    != Some(pane_id)
-                                {
-                                    if let Some(wm) = self.workspaces.as_mut() {
-                                        wm.set_focused_pane(Some(pane_id));
-                                    }
+                                if self.focused_pane() != Some(pane_id) {
+                                    self.set_focused_pane(Some(pane_id));
                                     if let Some(w) = self.window.as_ref() {
                                         w.request_redraw();
                                     }

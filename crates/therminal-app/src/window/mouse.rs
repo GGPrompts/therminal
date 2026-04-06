@@ -40,7 +40,7 @@ impl App {
     /// Convert physical pixel coordinates to terminal grid (col, row) for the focused pane.
     #[allow(dead_code)]
     pub(crate) fn pixel_to_grid(&self, px: f64, py: f64) -> Option<(usize, usize)> {
-        let focused = self.workspaces.as_ref()?.focused_pane()?;
+        let focused = self.focused_pane()?;
         self.pixel_to_grid_for_pane(px, py, focused)
     }
 
@@ -52,7 +52,7 @@ impl App {
         pane_id: PaneId,
     ) -> Option<(usize, usize)> {
         let renderer = self.grid_renderer.as_ref()?;
-        let layout = self.workspaces.as_ref().map(|wm| wm.layout())?;
+        let layout = self.get_layout()?;
         let pane_count = layout.pane_count();
         let pane = layout.find_pane(pane_id)?;
 
@@ -79,7 +79,7 @@ impl App {
             Some(r) => r,
             None => return Side::Left,
         };
-        let layout = match self.workspaces.as_ref().map(|wm| wm.layout()) {
+        let layout = match self.get_layout() {
             Some(l) => l,
             None => return Side::Left,
         };
@@ -100,7 +100,7 @@ impl App {
 
     /// Find which pane contains the given physical pixel coordinates.
     pub(crate) fn pane_at_position(&self, px: f64, py: f64) -> Option<PaneId> {
-        let layout = self.workspaces.as_ref().map(|wm| wm.layout())?;
+        let layout = self.get_layout()?;
         self.find_pane_at(layout, px as f32, py as f32)
     }
 
@@ -124,7 +124,7 @@ impl App {
     /// Test if a click at (px, py) lands on a pane header and which button (if any).
     /// Returns `None` if not in a header or if there's only one pane (headers hidden).
     pub(crate) fn header_hit_test(&self, px: f64, py: f64) -> Option<HeaderAction> {
-        let layout = self.workspaces.as_ref().map(|wm| wm.layout())?;
+        let layout = self.get_layout()?;
         let pane_count = layout.pane_count();
         if pane_count <= 1 {
             return None;
@@ -175,7 +175,7 @@ impl App {
     ) {
         // Compute side before borrowing layout mutably.
         let side = self.pixel_to_side(self.cursor_position.map(|(x, _)| x).unwrap_or(0.0), pane_id);
-        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -194,7 +194,7 @@ impl App {
     pub(crate) fn update_selection(&mut self, pane_id: PaneId, col: usize, row: usize) {
         // Compute side before borrowing layout mutably.
         let side = self.pixel_to_side(self.cursor_position.map(|(x, _)| x).unwrap_or(0.0), pane_id);
-        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -216,7 +216,7 @@ impl App {
             Some(id) => id,
             None => return,
         };
-        let layout = match self.workspaces.as_ref().map(|wm| wm.layout()) {
+        let layout = match self.get_layout() {
             Some(l) => l,
             None => return,
         };
@@ -483,16 +483,14 @@ impl App {
             self.pty_write_to_pane(&seq, target_pane);
         } else {
             // Normal scrollback -- scroll the hovered pane.
-            if let Some(layout) = self.workspaces.as_ref().map(|wm| wm.layout()) {
+            if let Some(layout) = self.get_layout() {
                 if let Some(pane) = layout.find_pane(target_pane) {
                     let scroll_lines = (lines * 3.0).round() as i32;
                     let mut term_guard = pane.term.lock();
                     term_guard.scroll_display(Scroll::Delta(scroll_lines));
                 }
             }
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            self.request_redraw();
         }
     }
 
@@ -500,7 +498,7 @@ impl App {
 
     /// Get focused pane's TermMode.
     pub(crate) fn focused_term_mode(&self) -> TermMode {
-        let focused = match self.workspaces.as_ref().and_then(|wm| wm.focused_pane()) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return TermMode::empty(),
         };
@@ -509,7 +507,7 @@ impl App {
 
     /// Get a specific pane's TermMode.
     pub(crate) fn pane_term_mode(&self, pane_id: PaneId) -> TermMode {
-        let layout = match self.workspaces.as_ref().map(|wm| wm.layout()) {
+        let layout = match self.get_layout() {
             Some(l) => l,
             None => return TermMode::empty(),
         };
@@ -532,7 +530,7 @@ impl App {
     /// Write bytes to the focused pane's PTY.
     #[allow(dead_code)]
     pub(crate) fn pty_write(&mut self, bytes: &[u8]) {
-        let focused = match self.workspaces.as_ref().and_then(|wm| wm.focused_pane()) {
+        let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
@@ -541,7 +539,7 @@ impl App {
 
     /// Write bytes to a specific pane's PTY.
     pub(crate) fn pty_write_to_pane(&mut self, bytes: &[u8], pane_id: PaneId) {
-        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+        let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
@@ -668,7 +666,7 @@ impl App {
         crate::pane::SplitDirection,
         therminal_core::geometry::Rect,
     )> {
-        let layout = self.workspaces.as_ref().map(|wm| wm.layout())?;
+        let layout = self.get_layout()?;
         let area = self.layout_area_rect()?;
         layout.separator_hit_test(px, py, Self::SEPARATOR_HIT_TOLERANCE, area)
     }
@@ -757,26 +755,10 @@ impl App {
 
         let new_ratio = new_ratio.clamp(0.1, 0.9);
 
-        // Compute area rect before borrowing layout mutably.
-        let area = self.layout_area_rect();
-        if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+        if let Some(layout) = self.get_layout_mut() {
             layout.set_ratio_at_path(&path, new_ratio);
-            // Re-layout and resize panes.
-            if let Some(area) = area {
-                layout.layout(area);
-            }
         }
-        // Resize panes (needs shared borrow of both layout and renderer).
-        if let (Some(layout), Some(renderer)) = (
-            self.workspaces.as_mut().map(|wm| wm.layout_mut()),
-            self.grid_renderer.as_ref(),
-        ) {
-            layout.resize_all_panes(renderer);
-        }
-
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.relayout_and_redraw();
     }
 
     /// End a separator drag and restore cursor.
@@ -796,21 +778,10 @@ impl App {
     /// Handle double-click on separator: reset to 50/50.
     pub(crate) fn try_separator_double_click(&mut self, px: f32, py: f32) -> bool {
         if let Some((path, _, _)) = self.separator_hit(px, py) {
-            let area = self.layout_area_rect();
-            if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            if let Some(layout) = self.get_layout_mut() {
                 layout.set_ratio_at_path(&path, 0.5);
-                if let Some(area) = area {
-                    layout.layout(area);
-                }
             }
-            if let (Some(wm), Some(renderer)) =
-                (self.workspaces.as_mut(), self.grid_renderer.as_ref())
-            {
-                wm.layout_mut().resize_all_panes(renderer);
-            }
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            self.relayout_and_redraw();
             true
         } else {
             false
