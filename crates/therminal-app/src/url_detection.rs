@@ -3,7 +3,7 @@
 //! Scans visible cells for http(s) URLs that don't already have an OSC 8
 //! hyperlink and annotates them so the renderer can underline/color them.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use crate::grid_renderer::{HyperlinkSource, RenderCell};
 
@@ -68,10 +68,11 @@ pub(crate) fn detect_urls_in_cells(cells: &mut [RenderCell], screen_lines: usize
                 .unwrap_or(char_starts.len());
 
             // Tag each cell in the URL column range that doesn't already have a hyperlink.
+            let url_arc: Arc<str> = Arc::from(url);
             for &idx in row_idxs {
                 let col = cells[idx].col;
                 if col >= start_col && col < end_col && cells[idx].hyperlink.is_none() {
-                    cells[idx].hyperlink = Some(url.to_owned());
+                    cells[idx].hyperlink = Some(Arc::clone(&url_arc));
                     cells[idx].hyperlink_source = Some(HyperlinkSource::Regex);
                 }
             }

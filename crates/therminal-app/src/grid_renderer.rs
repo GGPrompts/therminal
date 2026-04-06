@@ -7,6 +7,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use alacritty_terminal::index::{Column, Line, Point};
@@ -139,11 +140,11 @@ pub struct RenderCell {
     /// Cell flags (BOLD, INVERSE, WIDE_CHAR, etc.).
     pub flags: Flags,
     /// Hyperlink URI from OSC 8 or regex URL detection.
-    pub hyperlink: Option<String>,
+    pub hyperlink: Option<Arc<str>>,
     /// Source of the hyperlink (OSC 8 vs regex), controls underline style.
     pub hyperlink_source: Option<HyperlinkSource>,
     /// Hotspot annotation for this cell: (kind, full matched text).
-    pub hotspot: Option<(crate::hotspot_detection::HotspotKind, String)>,
+    pub hotspot: Option<(crate::hotspot_detection::HotspotKind, Arc<str>)>,
 }
 
 /// Build the full rendered text for a terminal cell.
@@ -286,12 +287,12 @@ pub struct GridRenderer {
 
     /// Hyperlink URL map: (pane_id, row, col) -> URL string.
     /// Rebuilt each frame from cell hyperlinks (OSC 8) and regex URL detection.
-    pub hyperlink_map: HashMap<(PaneId, usize, usize), String>,
+    pub hyperlink_map: HashMap<(PaneId, usize, usize), Arc<str>>,
 
     /// Hotspot map: (pane_id, row, col) -> (HotspotKind, matched text).
     /// Rebuilt each frame from detected hotspots (file paths, errors, git refs, etc.).
     pub hotspot_map:
-        HashMap<(PaneId, usize, usize), (crate::hotspot_detection::HotspotKind, String)>,
+        HashMap<(PaneId, usize, usize), (crate::hotspot_detection::HotspotKind, Arc<str>)>,
 
     /// The pane currently being rendered. Set before each pane's render pass
     /// so that hotspot/hyperlink map entries are keyed to the correct pane.
@@ -938,7 +939,7 @@ impl GridRenderer {
                 for cell in &row.cells {
                     if let Some(ref url) = cell.hyperlink {
                         self.hyperlink_map
-                            .insert((pane_id, cell.row, cell.col), url.clone());
+                            .insert((pane_id, cell.row, cell.col), Arc::clone(url));
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
                         let y =
                             self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
@@ -983,7 +984,7 @@ impl GridRenderer {
                         }
                         self.hotspot_map.insert(
                             (pane_id, cell.row, cell.col),
-                            (kind.clone(), full_text.clone()),
+                            (kind.clone(), Arc::clone(full_text)),
                         );
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
                         let y =

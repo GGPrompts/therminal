@@ -561,7 +561,7 @@ impl App {
     // ── Hyperlink hover and click helpers ───────────────────────────────
 
     /// Look up the hyperlink URL at a given grid (row, col) for a specific pane.
-    fn hyperlink_at(&self, pane_id: PaneId, row: usize, col: usize) -> Option<String> {
+    fn hyperlink_at(&self, pane_id: PaneId, row: usize, col: usize) -> Option<std::sync::Arc<str>> {
         self.grid_renderer
             .as_ref()
             .and_then(|r| r.hyperlink_map.get(&(pane_id, row, col)).cloned())
@@ -593,7 +593,7 @@ impl App {
         pane_id: PaneId,
         row: usize,
         col: usize,
-    ) -> Option<(crate::hotspot_detection::HotspotKind, String)> {
+    ) -> Option<(crate::hotspot_detection::HotspotKind, std::sync::Arc<str>)> {
         self.grid_renderer
             .as_ref()
             .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
@@ -609,7 +609,8 @@ impl App {
             Some(pos) => pos,
             None => return false,
         };
-        let menu = crate::menu::build_hotspot_palette(kind, text, (px as f32, py as f32));
+        let menu =
+            crate::menu::build_hotspot_palette(kind, text.to_string(), (px as f32, py as f32));
         self.active_menu = Some(menu);
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();

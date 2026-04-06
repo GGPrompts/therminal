@@ -6,7 +6,7 @@
 //! (Rust, TypeScript), git refs, and issue references. Follows the same
 //! row-scanning pattern as `url_detection.rs`.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 
@@ -34,8 +34,8 @@ pub enum HotspotKind {
 pub struct Hotspot {
     /// What kind of actionable item this is.
     pub kind: HotspotKind,
-    /// The matched text.
-    pub text: String,
+    /// The matched text (shared across all cells the hotspot covers).
+    pub text: Arc<str>,
     /// Viewport row (0-based).
     pub row: usize,
     /// First column of the match (0-based, inclusive).
@@ -131,7 +131,7 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
                 let (sc, ec) = byte_to_cols(m.start(), m.end());
                 hotspots.push(Hotspot {
                     kind: HotspotKind::ErrorLocation,
-                    text: m.as_str().to_owned(),
+                    text: Arc::from(m.as_str()),
                     row,
                     start_col: sc,
                     end_col: ec,
@@ -145,7 +145,7 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
                 let (sc, ec) = byte_to_cols(m.start(), m.end());
                 hotspots.push(Hotspot {
                     kind: HotspotKind::ErrorLocation,
-                    text: m.as_str().to_owned(),
+                    text: Arc::from(m.as_str()),
                     row,
                     start_col: sc,
                     end_col: ec,
@@ -173,7 +173,7 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
             }
             hotspots.push(Hotspot {
                 kind: HotspotKind::FilePath,
-                text: txt.to_owned(),
+                text: Arc::from(txt),
                 row,
                 start_col: sc,
                 end_col: ec,
@@ -186,7 +186,7 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
                 let (sc, ec) = byte_to_cols(m.start(), m.end());
                 hotspots.push(Hotspot {
                     kind: HotspotKind::GitRef,
-                    text: m.as_str().to_owned(),
+                    text: Arc::from(m.as_str()),
                     row,
                     start_col: sc,
                     end_col: ec,
@@ -206,7 +206,7 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
             }
             hotspots.push(Hotspot {
                 kind: HotspotKind::GitRef,
-                text: m.as_str().to_owned(),
+                text: Arc::from(m.as_str()),
                 row,
                 start_col: sc,
                 end_col: ec,
@@ -218,7 +218,7 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
             let (sc, ec) = byte_to_cols(m.start(), m.end());
             hotspots.push(Hotspot {
                 kind: HotspotKind::IssueRef,
-                text: m.as_str().to_owned(),
+                text: Arc::from(m.as_str()),
                 row,
                 start_col: sc,
                 end_col: ec,
@@ -251,7 +251,7 @@ mod tests {
                 flags: Flags::empty(),
                 hyperlink: None,
                 hyperlink_source: None,
-                hotspot: None, // (HotspotKind, String) tuple when annotated
+                hotspot: None, // (HotspotKind, Arc<str>) tuple when annotated
             })
             .collect()
     }
@@ -265,7 +265,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::FilePath)
             .collect();
         assert_eq!(fp.len(), 1);
-        assert_eq!(fp[0].text, "/home/user/src/main.rs:42:5");
+        assert_eq!(&*fp[0].text, "/home/user/src/main.rs:42:5");
     }
 
     #[test]
@@ -277,7 +277,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::FilePath)
             .collect();
         assert_eq!(fp.len(), 1);
-        assert_eq!(fp[0].text, "./src/lib.rs:10");
+        assert_eq!(&*fp[0].text, "./src/lib.rs:10");
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::ErrorLocation)
             .collect();
         assert_eq!(el.len(), 1);
-        assert_eq!(el[0].text, "crates/therminal-app/src/main.rs:42:5");
+        assert_eq!(&*el[0].text, "crates/therminal-app/src/main.rs:42:5");
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::ErrorLocation)
             .collect();
         assert_eq!(el.len(), 1);
-        assert_eq!(el[0].text, "src/app.ts(42,15)");
+        assert_eq!(&*el[0].text, "src/app.ts(42,15)");
     }
 
     #[test]
@@ -313,7 +313,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::GitRef)
             .collect();
         assert_eq!(gr.len(), 1);
-        assert_eq!(gr[0].text, "a1b2c3d4e5f6789");
+        assert_eq!(&*gr[0].text, "a1b2c3d4e5f6789");
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::GitRef)
             .collect();
         assert_eq!(gr.len(), 1);
-        assert_eq!(gr[0].text, "main");
+        assert_eq!(&*gr[0].text, "main");
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::IssueRef)
             .collect();
         assert_eq!(ir.len(), 1);
-        assert_eq!(ir[0].text, "#1234");
+        assert_eq!(&*ir[0].text, "#1234");
     }
 
     #[test]
@@ -349,7 +349,7 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::IssueRef)
             .collect();
         assert_eq!(ir.len(), 1);
-        assert_eq!(ir[0].text, "JIRA-456");
+        assert_eq!(&*ir[0].text, "JIRA-456");
     }
 
     #[test]
