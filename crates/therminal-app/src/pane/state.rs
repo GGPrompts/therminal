@@ -1,17 +1,12 @@
 //! Per-pane terminal state: dimensions adapter, shared status, and pane state.
 
-use std::io::Write as IoWrite;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::Term;
-use portable_pty::MasterPty;
 use therminal_core::geometry::Rect;
-use tracing::warn;
 
 use super::PaneId;
-use super::PaneListener;
+use super::backend::{PaneBackend, PaneBackendKind};
 use super::geometry::PANE_HEADER_HEIGHT;
 use crate::grid_renderer::GridRenderer;
 
@@ -50,19 +45,16 @@ pub struct PaneStatus {
 
 // ── Per-pane state ──────────────────────────────────────────────────────
 
-/// State for a single terminal pane.
+/// State for a single pane. Shared fields live here; backend-specific
+/// state (PTY, Term, WebView handle, etc.) lives in `backend`.
 pub struct PaneState {
     pub id: PaneId,
-    pub term: Arc<FairMutex<Term<PaneListener>>>,
-    pub pty_writer: Box<dyn IoWrite + Send>,
-    pub pty_master: Box<dyn MasterPty + Send>,
     /// Current viewport rect in physical pixels (set by layout computation).
     pub viewport: Rect,
-    /// Scrollback configuration.
-    #[allow(dead_code)]
-    pub scrollback_lines: usize,
     /// Shared status updated by the PTY reader thread.
     pub status: Arc<Mutex<PaneStatus>>,
+    /// The backend powering this pane (terminal, webview, etc.).
+    pub backend: PaneBackendKind,
 }
 
 impl PaneState {
@@ -80,23 +72,24 @@ impl PaneState {
         header_h: f32,
     ) {
         self.viewport = rect;
-        let (cols, rows) = grid_size_for_rect_with_header(rect, renderer, header_h);
-        if cols == 0 || rows == 0 {
-            return;
-        }
-        {
-            let mut term_guard = self.term.lock();
-            let size = PaneTermSize {
-                columns: cols,
-                screen_lines: rows,
-            };
-            term_guard.resize(size);
-        }
-        if let Err(e) =
-            therminal_terminal::pty::resize(self.pty_master.as_ref(), cols as u16, rows as u16)
-        {
-            warn!("Failed to resize pane {} PTY: {e}", self.id);
-        }
+        self.backend.resize_to_viewport(rect, renderer, header_h);
+    }
+
+    /// Write input data to this pane's backend.
+    pub fn write_input(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.backend.write_input(data)
+    }
+
+    /// Get the backend type identifier.
+    #[allow(dead_code)]
+    pub fn backend_type(&self) -> &str {
+        self.backend.backend_type()
+    }
+
+    /// Get visible content from the backend (for MCP queries).
+    #[allow(dead_code)]
+    pub fn get_content(&self) -> String {
+        self.backend.get_content()
     }
 }
 

@@ -233,6 +233,10 @@ pub struct GeneralConfig {
     /// Use client-side decorations (custom title bar with window controls).
     /// Default: true on Linux and Windows, false on macOS.
     pub use_csd: bool,
+    /// Automatically split panes when AI agents spawn subprocesses.
+    pub auto_tile: bool,
+    /// Debounce interval (ms) for auto-tile spawn/exit events to avoid layout thrashing.
+    pub auto_tile_debounce_ms: u64,
 }
 
 /// Platform-specific default for client-side decorations.
@@ -255,6 +259,8 @@ impl Default for GeneralConfig {
             show_status_bar: true,
             show_tab_bar: true,
             use_csd: default_use_csd(),
+            auto_tile: true,
+            auto_tile_debounce_ms: 200,
         }
     }
 }

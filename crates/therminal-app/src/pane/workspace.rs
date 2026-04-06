@@ -442,6 +442,7 @@ mod tests {
 
     use super::*;
     use crate::pane::PaneListener;
+    use crate::pane::backend::PaneBackendKind;
     use crate::pane::state::PaneTermSize;
 
     /// Helper to create a minimal test leaf node (no real PTY).
@@ -465,12 +466,14 @@ mod tests {
         let writer = pair.master.take_writer().unwrap();
         LayoutNode::Leaf(PaneState {
             id,
-            term: Arc::new(FairMutex::new(term)),
-            pty_writer: writer,
-            pty_master: pair.master,
             viewport: rect,
-            scrollback_lines: 1000,
             status: Arc::new(Mutex::new(super::super::state::PaneStatus::default())),
+            backend: PaneBackendKind::Terminal {
+                term: Arc::new(FairMutex::new(term)),
+                pty_writer: writer,
+                pty_master: pair.master,
+                scrollback_lines: 1000,
+            },
         })
     }
 

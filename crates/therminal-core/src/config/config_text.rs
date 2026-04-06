@@ -37,6 +37,14 @@ pub(super) fn default_config_text() -> String {
         "# use_csd = {}  # client-side decorations (default: true on Linux/Windows)\n",
         d.general.use_csd
     ));
+    out.push_str(&format!(
+        "# auto_tile = {}  # auto-split panes when AI agents spawn subprocesses\n",
+        d.general.auto_tile
+    ));
+    out.push_str(&format!(
+        "# auto_tile_debounce_ms = {}  # debounce interval (ms) for spawn/exit events\n",
+        d.general.auto_tile_debounce_ms
+    ));
     out.push_str("# [general.env]  # extra PTY environment variables\n");
     out.push_str("# MY_VAR = \"value\"\n");
     out.push('\n');

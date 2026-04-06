@@ -21,7 +21,6 @@ mod pane_ops;
 mod render;
 
 use std::collections::HashMap;
-use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -37,7 +36,7 @@ use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
 use crate::menu::ContextMenu;
-use crate::pane::{LayoutNode, PaneId, SplitDirection, WorkspaceManager};
+use crate::pane::{AutoTileDebouncer, LayoutNode, PaneId, SplitDirection, WorkspaceManager};
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
 use therminal_core::geometry::Rect;
@@ -79,6 +78,9 @@ pub struct App {
 
     /// Workspace manager holding all workspace layouts.
     workspaces: Option<WorkspaceManager>,
+
+    /// Shared agent registry for auto-tiling (reader threads register/unregister agents).
+    agent_registry: Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
 
     /// Proxy to wake the event loop from PTY reader threads.
     event_proxy: EventLoopProxy<UserEvent>,
@@ -150,6 +152,9 @@ pub struct App {
     /// Cooldown timestamp for destructive actions (close pane/window) to prevent
     /// double-close from keyboard repeat firing two events in the same batch.
     last_close_action: Option<Instant>,
+
+    /// Auto-tile debouncer for agent spawn/exit events.
+    auto_tile_debouncer: Option<AutoTileDebouncer>,
 }
 
 /// State for an in-progress separator drag.
@@ -197,11 +202,25 @@ impl App {
 
         let binding_map = build_binding_map(&config);
 
+        // Create the shared agent registry and auto-tile debouncer.
+        let mut agent_registry = therminal_terminal::agent_registry::AgentRegistry::new();
+        let auto_tile_debouncer = if config.general.auto_tile {
+            agent_registry
+                .take_event_rx()
+                .map(|rx| AutoTileDebouncer::new(rx, config.general.auto_tile_debounce_ms))
+        } else {
+            // Consume the receiver so it doesn't fill up, even if auto-tile is off.
+            let _ = agent_registry.take_event_rx();
+            None
+        };
+        let agent_registry = Arc::new(std::sync::Mutex::new(agent_registry));
+
         Self {
             window: None,
             gpu: None,
             grid_renderer: None,
             workspaces: None,
+            agent_registry,
             event_proxy,
             modifiers: Modifiers::default(),
             pending_resize: None,
@@ -226,6 +245,7 @@ impl App {
             last_separator_click: None,
             last_tab_bar_click: None,
             last_close_action: None,
+            auto_tile_debouncer,
         }
     }
 
@@ -356,6 +376,7 @@ impl App {
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = self.build_spawn_options();
         let proxy = self.event_proxy.clone();
+        let registry = Some(Arc::clone(&self.agent_registry));
         let pane = match crate::pane::spawn_pane(
             full_rect,
             &grid_renderer,
@@ -363,6 +384,7 @@ impl App {
             interceptor_cfg,
             scan_interval_secs,
             &spawn_options,
+            registry,
             |pane_id| {
                 let p1 = proxy.clone();
                 let p2 = proxy.clone();
@@ -565,15 +587,19 @@ impl App {
 
             let (cwd, last_exit_code, agent_name, dimensions) = if let Some(pane) = focused_pane {
                 let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
-                let term_guard = pane.term.lock();
-                let cols = alacritty_terminal::grid::Dimensions::columns(&*term_guard);
-                let rows = alacritty_terminal::grid::Dimensions::screen_lines(&*term_guard);
-                drop(term_guard);
+                let dims = if let Some(term) = pane.backend.term() {
+                    let term_guard = term.lock();
+                    let cols = alacritty_terminal::grid::Dimensions::columns(&*term_guard);
+                    let rows = alacritty_terminal::grid::Dimensions::screen_lines(&*term_guard);
+                    (cols, rows)
+                } else {
+                    (80, 24)
+                };
                 (
                     status.cwd.clone(),
                     status.last_exit_code,
                     status.agent_name.clone(),
-                    (cols, rows),
+                    dims,
                 )
             } else {
                 (None, None, None, (80, 24))
@@ -865,7 +891,7 @@ impl App {
         };
 
         if let Some(bytes) = input::encode_key(&key_code, &mods)
-            && let Err(e) = pane.pty_writer.write_all(&bytes)
+            && let Err(e) = pane.write_input(&bytes)
         {
             warn!("Failed to write to pane {} PTY: {e}", pane.id);
         }
@@ -885,9 +911,9 @@ impl App {
         // Check if the pane under the cursor has a selection.
         let has_selection = if let Some(layout) = self.get_layout() {
             if let Some(pane) = layout.find_pane(pane_id) {
-                let term_guard = pane.term.lock();
-                term_guard
-                    .selection_to_string()
+                pane.backend
+                    .term()
+                    .and_then(|t| t.lock().selection_to_string())
                     .map(|s| !s.is_empty())
                     .unwrap_or(false)
             } else {
@@ -901,7 +927,8 @@ impl App {
             let text = self
                 .get_layout()
                 .and_then(|l| l.find_pane(pane_id))
-                .and_then(|p| p.term.lock().selection_to_string())
+                .and_then(|p| p.backend.term())
+                .and_then(|t| t.lock().selection_to_string())
                 .unwrap_or_default();
             crate::menu::build_selection_menu(text, bindings, (px, py))
         } else {
@@ -1279,7 +1306,19 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // Poll auto-tile debouncer for agent spawn/exit actions.
+                self.poll_auto_tile();
+
                 self.render();
+
+                // If the debouncer has pending events, schedule another redraw
+                // so we can check again after the debounce interval expires.
+                if let Some(ref debouncer) = self.auto_tile_debouncer
+                    && debouncer.has_pending()
+                    && let Some(w) = self.window.as_ref()
+                {
+                    w.request_redraw();
+                }
             }
 
             WindowEvent::ModifiersChanged(new_modifiers) => {

@@ -11,6 +11,7 @@ use tracing::info;
 
 use super::PaneId;
 use super::PaneListener;
+use super::backend::PaneBackendKind;
 use super::state::{PaneState, PaneStatus, grid_size_for_rect};
 use crate::grid_renderer::GridRenderer;
 
@@ -42,11 +43,16 @@ struct ReaderState {
 
 /// Handler that runs the interceptor + process detector and wakes the event loop.
 struct AppPtyHandler {
+    pane_id: PaneId,
     wake: Box<dyn Fn() + Send + 'static>,
     on_exit: Option<Box<dyn FnOnce() + Send + 'static>>,
     interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
     scan_interval_secs: u64,
     status: Arc<Mutex<PaneStatus>>,
+    /// Shared agent registry for auto-tiling.
+    agent_registry: Option<Arc<Mutex<therminal_terminal::agent_registry::AgentRegistry>>>,
+    /// Whether we currently have an agent registered for this pane.
+    has_registered_agent: bool,
     /// Lazily initialised on the reader thread.
     reader_state: Option<ReaderState>,
 }
@@ -128,6 +134,24 @@ impl PtyReaderHandler for AppPtyHandler {
             if !agents.is_empty() {
                 tracing::debug!("detected agents: {:?}", agents);
             }
+
+            // Update agent registry for auto-tiling.
+            if let Some(ref registry) = self.agent_registry
+                && let Ok(mut reg) = registry.lock()
+            {
+                if let Some(agent) = agents.first() {
+                    reg.register(
+                        self.pane_id,
+                        agent.name.clone(),
+                        agent.agent_type,
+                        Some(agent.pid),
+                    );
+                    self.has_registered_agent = true;
+                } else if self.has_registered_agent {
+                    reg.unregister(self.pane_id);
+                    self.has_registered_agent = false;
+                }
+            }
         }
 
         (self.wake)();
@@ -135,12 +159,28 @@ impl PtyReaderHandler for AppPtyHandler {
 
     fn on_eof(&mut self) {
         info!("Pane PTY closed (EOF)");
+        // Unregister from agent registry on exit.
+        if self.has_registered_agent
+            && let Some(ref registry) = self.agent_registry
+            && let Ok(mut reg) = registry.lock()
+        {
+            reg.unregister(self.pane_id);
+            self.has_registered_agent = false;
+        }
         if let Some(on_exit) = self.on_exit.take() {
             on_exit();
         }
     }
 
     fn on_error(&mut self, _error: &std::io::Error) {
+        // Unregister from agent registry on error.
+        if self.has_registered_agent
+            && let Some(ref registry) = self.agent_registry
+            && let Ok(mut reg) = registry.lock()
+        {
+            reg.unregister(self.pane_id);
+            self.has_registered_agent = false;
+        }
         if let Some(on_exit) = self.on_exit.take() {
             on_exit();
         }
@@ -155,6 +195,7 @@ impl PtyReaderHandler for AppPtyHandler {
 ///
 /// `interceptor_config` controls which OSC sequence families are intercepted.
 /// `scan_interval_secs` sets the process-detector scan interval (0 = disabled).
+/// `agent_registry` is an optional shared registry for auto-tiling integration.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_pane<F>(
     viewport: Rect,
@@ -163,6 +204,7 @@ pub fn spawn_pane<F>(
     interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
     scan_interval_secs: u64,
     spawn_options: &therminal_terminal::pty::SpawnOptions,
+    agent_registry: Option<Arc<Mutex<therminal_terminal::agent_registry::AgentRegistry>>>,
     callback_fn: F,
 ) -> Result<PaneState, anyhow::Error>
 where
@@ -179,11 +221,14 @@ where
     let callbacks = callback_fn(id);
 
     let handler = AppPtyHandler {
+        pane_id: id,
         wake: callbacks.wake,
         on_exit: Some(callbacks.on_exit),
         interceptor_config,
         scan_interval_secs,
         status: Arc::clone(&status),
+        agent_registry,
+        has_registered_agent: false,
         reader_state: None,
     };
 
@@ -205,11 +250,13 @@ where
 
     Ok(PaneState {
         id,
-        term,
-        pty_writer,
-        pty_master,
         viewport,
-        scrollback_lines,
         status,
+        backend: PaneBackendKind::Terminal {
+            term,
+            pty_writer,
+            pty_master,
+            scrollback_lines,
+        },
     })
 }

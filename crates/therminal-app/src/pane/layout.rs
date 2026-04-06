@@ -745,10 +745,11 @@ mod tests {
 
     use super::*;
     use crate::pane::PaneListener;
+    use crate::pane::backend::PaneBackendKind;
     use crate::pane::state::PaneTermSize;
 
-    /// Helper to create a minimal test leaf node (no real PTY).
-    fn test_leaf(id: super::super::PaneId, rect: Rect) -> LayoutNode {
+    /// Helper to create a minimal PaneState for tests (no real PTY semantics).
+    fn test_pane_state(id: super::super::PaneId, rect: Rect) -> PaneState {
         let term = Term::new(
             TermConfig::default(),
             &PaneTermSize {
@@ -766,15 +767,22 @@ mod tests {
             })
             .unwrap();
         let writer = pair.master.take_writer().unwrap();
-        LayoutNode::Leaf(PaneState {
+        PaneState {
             id,
-            term: Arc::new(FairMutex::new(term)),
-            pty_writer: writer,
-            pty_master: pair.master,
             viewport: rect,
-            scrollback_lines: 1000,
             status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
-        })
+            backend: PaneBackendKind::Terminal {
+                term: Arc::new(FairMutex::new(term)),
+                pty_writer: writer,
+                pty_master: pair.master,
+                scrollback_lines: 1000,
+            },
+        }
+    }
+
+    /// Helper to create a minimal test leaf node (no real PTY).
+    fn test_leaf(id: super::super::PaneId, rect: Rect) -> LayoutNode {
+        LayoutNode::Leaf(test_pane_state(id, rect))
     }
 
     #[test]
@@ -792,31 +800,7 @@ mod tests {
         let mut node = test_leaf(1, rect);
 
         let new_id = node.split_pane(1, SplitDirection::Horizontal, |r| {
-            let pair = portable_pty::native_pty_system()
-                .openpty(portable_pty::PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .unwrap();
-            let writer = pair.master.take_writer().unwrap();
-            Some(PaneState {
-                id: 2,
-                term: Arc::new(FairMutex::new(Term::new(
-                    TermConfig::default(),
-                    &PaneTermSize {
-                        columns: 80,
-                        screen_lines: 24,
-                    },
-                    PaneListener,
-                ))),
-                pty_writer: writer,
-                pty_master: pair.master,
-                viewport: r,
-                scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
-            })
+            Some(test_pane_state(2, r))
         });
 
         assert_eq!(new_id, Some(2));
@@ -926,39 +910,14 @@ mod tests {
 
     #[test]
     fn deep_nesting_split_and_close_rebalances() {
-        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        // Use a large rect so all 5 horizontal splits succeed without hitting MIN_PANE_WIDTH.
+        let rect = Rect::new(0.0, 0.0, 6400.0, 600.0);
         let mut root = test_leaf(1, rect);
 
         for id in 2u64..=6 {
-            let pair = portable_pty::native_pty_system()
-                .openpty(portable_pty::PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .unwrap();
-            let writer = pair.master.take_writer().unwrap();
-            let new_pane = PaneState {
-                id,
-                term: Arc::new(FairMutex::new(Term::new(
-                    TermConfig::default(),
-                    &PaneTermSize {
-                        columns: 80,
-                        screen_lines: 24,
-                    },
-                    PaneListener,
-                ))),
-                pty_writer: writer,
-                pty_master: pair.master,
-                viewport: rect,
-                scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
-            };
             let rightmost_id = *root.pane_ids().last().unwrap();
             root.split_pane(rightmost_id, SplitDirection::Horizontal, |r| {
-                let _ = r;
-                Some(new_pane)
+                Some(test_pane_state(id, r))
             });
         }
 
@@ -1283,32 +1242,8 @@ mod tests {
         let mut node = make_leaf(1);
         node.layout(tiny_rect);
 
-        let pair = portable_pty::native_pty_system()
-            .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let writer = pair.master.take_writer().unwrap();
         let result = node.split_pane(1, SplitDirection::Horizontal, |r| {
-            Some(PaneState {
-                id: 2,
-                term: Arc::new(FairMutex::new(Term::new(
-                    TermConfig::default(),
-                    &PaneTermSize {
-                        columns: 80,
-                        screen_lines: 24,
-                    },
-                    PaneListener,
-                ))),
-                pty_writer: writer,
-                pty_master: pair.master,
-                viewport: r,
-                scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
-            })
+            Some(test_pane_state(2, r))
         });
         assert_eq!(result, None, "split should be refused when too small");
         assert_eq!(node.pane_count(), 1, "should still have 1 pane");
@@ -1322,32 +1257,8 @@ mod tests {
         let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
         root.layout(rect);
 
-        let pair = portable_pty::native_pty_system()
-            .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let writer = pair.master.take_writer().unwrap();
         root.split_pane(2, SplitDirection::Horizontal, |r| {
-            Some(PaneState {
-                id: 3,
-                term: Arc::new(FairMutex::new(Term::new(
-                    TermConfig::default(),
-                    &PaneTermSize {
-                        columns: 80,
-                        screen_lines: 24,
-                    },
-                    PaneListener,
-                ))),
-                pty_writer: writer,
-                pty_master: pair.master,
-                viewport: r,
-                scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
-            })
+            Some(test_pane_state(3, r))
         });
 
         assert_eq!(root.pane_count(), 3);

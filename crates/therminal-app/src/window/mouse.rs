@@ -3,7 +3,6 @@
 //! All mouse input routing lives here, including selection state management,
 //! pixel-to-grid coordinate conversion, and header hit-testing.
 
-use std::io::Write as IoWrite;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Scroll;
@@ -67,7 +66,8 @@ impl App {
         let col = col as usize;
         let row = row as usize;
 
-        let term_guard = pane.term.lock();
+        let term = pane.backend.term()?;
+        let term_guard = term.lock();
         let max_col = term_guard.columns().saturating_sub(1);
         let max_row = term_guard.screen_lines().saturating_sub(1);
         Some((col.min(max_col), row.min(max_row)))
@@ -185,7 +185,9 @@ impl App {
         };
         let point = Point::new(Line(row as i32), Column(col));
         let selection = Selection::new(ty, point, side);
-        pane.term.lock().selection = Some(selection);
+        if let Some(term) = pane.backend.term() {
+            term.lock().selection = Some(selection);
+        }
         self.selection_in_progress = true;
         self.selection_pane = Some(pane_id);
     }
@@ -203,9 +205,11 @@ impl App {
             None => return,
         };
         let point = Point::new(Line(row as i32), Column(col));
-        let mut term_guard = pane.term.lock();
-        if let Some(ref mut selection) = term_guard.selection {
-            selection.update(point, side);
+        if let Some(term) = pane.backend.term() {
+            let mut term_guard = term.lock();
+            if let Some(ref mut selection) = term_guard.selection {
+                selection.update(point, side);
+            }
         }
     }
 
@@ -224,11 +228,13 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let term_guard = pane.term.lock();
-        if let Some(text) = term_guard.selection_to_string()
-            && !text.is_empty()
-        {
-            crate::clipboard::copy_to_clipboard(&text);
+        if let Some(term) = pane.backend.term() {
+            let term_guard = term.lock();
+            if let Some(text) = term_guard.selection_to_string()
+                && !text.is_empty()
+            {
+                crate::clipboard::copy_to_clipboard(&text);
+            }
         }
     }
 
@@ -494,9 +500,10 @@ impl App {
             // Normal scrollback -- scroll the hovered pane.
             if let Some(layout) = self.get_layout()
                 && let Some(pane) = layout.find_pane(target_pane)
+                && let Some(term) = pane.backend.term()
             {
                 let scroll_lines = (lines * 3.0).round() as i32;
-                let mut term_guard = pane.term.lock();
+                let mut term_guard = term.lock();
                 term_guard.scroll_display(Scroll::Delta(scroll_lines));
             }
             self.request_redraw();
@@ -521,7 +528,11 @@ impl App {
             None => return TermMode::empty(),
         };
         match layout.find_pane(pane_id) {
-            Some(pane) => *pane.term.lock().mode(),
+            Some(pane) => pane
+                .backend
+                .term()
+                .map(|t| *t.lock().mode())
+                .unwrap_or_else(TermMode::empty),
             None => TermMode::empty(),
         }
     }
@@ -553,7 +564,7 @@ impl App {
             None => return,
         };
         if let Some(pane) = layout.find_pane_mut(pane_id)
-            && let Err(e) = pane.pty_writer.write_all(bytes)
+            && let Err(e) = pane.write_input(bytes)
         {
             warn!("Failed to write to pane {} PTY: {e}", pane.id);
         }

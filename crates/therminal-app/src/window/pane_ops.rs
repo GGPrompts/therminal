@@ -3,7 +3,7 @@
 //! All pane manipulation methods that modify the layout tree or interact
 //! with pane PTYs for clipboard/selection operations.
 
-use std::io::Write as IoWrite;
+use std::sync::Arc;
 
 use alacritty_terminal::term::TermMode;
 use tracing::{debug, info, warn};
@@ -79,6 +79,7 @@ impl App {
             ..Default::default()
         };
         let proxy = self.event_proxy.clone();
+        let registry = Some(Arc::clone(&self.agent_registry));
         // Direct field access needed here: layout_mut + renderer + config must coexist.
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
@@ -95,6 +96,7 @@ impl App {
                 interceptor_cfg.clone(),
                 scan_interval_secs,
                 &spawn_options,
+                registry.clone(),
                 |pane_id| make_pane_callbacks(&proxy, pane_id),
             ) {
                 Ok(pane) => Some(pane),
@@ -196,6 +198,7 @@ impl App {
             ..Default::default()
         };
         let proxy = self.event_proxy.clone();
+        let registry = Some(Arc::clone(&self.agent_registry));
         // Direct field access needed here: layout_mut + renderer + config must coexist.
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
@@ -213,6 +216,7 @@ impl App {
                     interceptor_cfg.clone(),
                     scan_interval_secs,
                     &spawn_options,
+                    registry.clone(),
                     |pane_id| make_pane_callbacks(&proxy, pane_id),
                 ) {
                     Ok(pane) => Some(pane),
@@ -416,11 +420,13 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let term_guard = pane.term.lock();
-        if let Some(text) = term_guard.selection_to_string()
-            && !text.is_empty()
-        {
-            crate::clipboard::copy_to_clipboard(&text);
+        if let Some(term) = pane.backend.term() {
+            let term_guard = term.lock();
+            if let Some(text) = term_guard.selection_to_string()
+                && !text.is_empty()
+            {
+                crate::clipboard::copy_to_clipboard(&text);
+            }
         }
     }
 
@@ -445,11 +451,11 @@ impl App {
             None => return,
         };
         if bracketed {
-            let _ = pane.pty_writer.write_all(b"\x1b[200~");
+            let _ = pane.write_input(b"\x1b[200~");
         }
-        let _ = pane.pty_writer.write_all(text.as_bytes());
+        let _ = pane.write_input(text.as_bytes());
         if bracketed {
-            let _ = pane.pty_writer.write_all(b"\x1b[201~");
+            let _ = pane.write_input(b"\x1b[201~");
         }
     }
 
@@ -493,8 +499,9 @@ impl App {
         if let Some(pane_id) = self.selection_pane.take()
             && let Some(layout) = self.get_layout_mut()
             && let Some(pane) = layout.find_pane_mut(pane_id)
+            && let Some(term) = pane.backend.term()
         {
-            pane.term.lock().selection = None;
+            term.lock().selection = None;
         }
         self.selection_in_progress = false;
     }
@@ -657,6 +664,7 @@ impl App {
         match snapshot {
             LayoutSnapshot::Leaf => {
                 let cfg = interceptor_cfg.clone();
+                let registry = Some(Arc::clone(&self.agent_registry));
                 match crate::pane::spawn_pane(
                     rect,
                     renderer,
@@ -664,6 +672,7 @@ impl App {
                     cfg,
                     scan_interval_secs,
                     spawn_options,
+                    registry,
                     |pane_id| make_pane_callbacks(proxy, pane_id),
                 ) {
                     Ok(pane) => Some(LayoutNode::Leaf(pane)),
@@ -749,6 +758,7 @@ impl App {
             ..Default::default()
         };
         let proxy = self.event_proxy.clone();
+        let registry = Some(Arc::clone(&self.agent_registry));
 
         let switched = wm.switch_to(n as usize, || {
             match crate::pane::spawn_pane(
@@ -758,6 +768,7 @@ impl App {
                 interceptor_cfg.clone(),
                 scan_interval_secs,
                 &spawn_options,
+                registry.clone(),
                 |pane_id| make_pane_callbacks(&proxy, pane_id),
             ) {
                 Ok(pane) => {
@@ -812,6 +823,7 @@ impl App {
             ..Default::default()
         };
         let proxy = self.event_proxy.clone();
+        let registry = Some(Arc::clone(&self.agent_registry));
 
         let moved = wm.send_pane_to(focused, n as usize, || {
             match crate::pane::spawn_pane(
@@ -821,6 +833,7 @@ impl App {
                 interceptor_cfg.clone(),
                 scan_interval_secs,
                 &spawn_options,
+                registry.clone(),
                 |pane_id| make_pane_callbacks(&proxy, pane_id),
             ) {
                 Ok(pane) => {
@@ -837,6 +850,101 @@ impl App {
         if moved {
             info!("Sent pane {focused} to workspace {n}");
             self.relayout_and_redraw();
+        }
+    }
+
+    // ── Auto-tile ───────────────────────────────────────────────────────
+
+    /// Poll the auto-tile debouncer and apply any ready actions.
+    pub(crate) fn poll_auto_tile(&mut self) {
+        let actions = match self.auto_tile_debouncer.as_mut() {
+            Some(debouncer) => debouncer.poll(),
+            None => return,
+        };
+
+        for action in actions {
+            match action {
+                crate::pane::AutoTileAction::Split {
+                    parent_pane_id,
+                    agent_name,
+                    ..
+                } => {
+                    info!(
+                        parent_pane_id,
+                        agent_name, "Auto-tiling: splitting pane for agent"
+                    );
+                    // Determine split direction from parent pane's viewport.
+                    let direction = self
+                        .get_layout()
+                        .and_then(|l| l.find_pane(parent_pane_id))
+                        .map(|p| {
+                            LayoutNode::auto_split_direction(p.viewport, SplitDirection::Horizontal)
+                        })
+                        .unwrap_or(SplitDirection::Horizontal);
+
+                    // Perform the split (reuses existing split_pane_by_id logic).
+                    let renderer = match self.grid_renderer.as_ref() {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let scrollback = self.config.general.scrollback_lines;
+                    let interceptor_cfg = InterceptorConfig {
+                        osc_633: self.config.terminal.osc_633,
+                        osc_133: self.config.terminal.osc_133,
+                        osc_7: self.config.terminal.osc_7,
+                        osc_1337: self.config.terminal.osc_1337,
+                        osc_7777: self.config.terminal.osc_7777,
+                    };
+                    let scan_interval_secs = self.config.trust.agent_scan_interval;
+                    let spawn_options = therminal_terminal::pty::SpawnOptions {
+                        shell: self.config.general.shell.clone(),
+                        env: self.config.general.env.clone(),
+                        ..Default::default()
+                    };
+                    let proxy = self.event_proxy.clone();
+                    let registry = Some(Arc::clone(&self.agent_registry));
+                    let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+                        Some(l) => l,
+                        None => continue,
+                    };
+
+                    let new_id = layout.split_pane(parent_pane_id, direction, |viewport| {
+                        match crate::pane::spawn_pane(
+                            viewport,
+                            renderer,
+                            scrollback,
+                            interceptor_cfg.clone(),
+                            scan_interval_secs,
+                            &spawn_options,
+                            registry.clone(),
+                            |pane_id| make_pane_callbacks(&proxy, pane_id),
+                        ) {
+                            Ok(pane) => Some(pane),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to spawn pane for auto-tile split"
+                                );
+                                None
+                            }
+                        }
+                    });
+
+                    if let Some(new_id) = new_id {
+                        info!(parent_pane_id, new_id, "Auto-tile split complete");
+                        // Register the auto-tiled pane so we can reclaim it later.
+                        if let Some(ref mut debouncer) = self.auto_tile_debouncer {
+                            debouncer.register_auto_tiled(parent_pane_id, new_id);
+                        }
+                        // Don't change focus for auto-tiled panes.
+                        self.relayout_and_redraw();
+                    }
+                }
+                crate::pane::AutoTileAction::Reclaim { pane_id } => {
+                    info!(pane_id, "Auto-tiling: reclaiming pane after agent exit");
+                    self.close_pane_by_id(pane_id);
+                }
+            }
         }
     }
 }

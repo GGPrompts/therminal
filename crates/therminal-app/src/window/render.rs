@@ -131,7 +131,11 @@ fn render_single_pane(
     surface_height: u32,
 ) {
     let vp = pane.viewport;
-    let mut term_guard = pane.term.lock();
+    let term = match pane.backend.term() {
+        Some(t) => t,
+        None => return, // Non-terminal panes don't render via this path.
+    };
+    let mut term_guard = term.lock();
 
     let screen_lines = term_guard.screen_lines();
     let damaged_rows = match term_guard.damage() {

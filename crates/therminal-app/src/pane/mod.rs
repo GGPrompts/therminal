@@ -1,10 +1,12 @@
-//! Pane layout tree and per-pane terminal state.
+//! Pane layout tree and per-pane state.
 //!
-//! Implements a binary tree of splits where each leaf is a terminal pane
-//! with its own PTY, Term, and VTE parser. Supports horizontal/vertical
+//! Implements a binary tree of splits where each leaf is a pane with a
+//! pluggable backend (terminal, webview, etc.). Supports horizontal/vertical
 //! splits, focus navigation, ratio-based resize, and pane close with
 //! tree rebalancing.
 
+pub mod auto_tile;
+pub mod backend;
 pub mod geometry;
 pub mod layout;
 pub mod spawn;
@@ -46,6 +48,10 @@ impl EventListener for PaneListener {
 // Some re-exports are only consumed within submodules or tests, but we keep
 // them here so external callers can use the flat `crate::pane::Foo` path.
 
+#[allow(unused_imports)]
+pub use self::auto_tile::{AutoTileAction, AutoTileDebouncer};
+#[allow(unused_imports)]
+pub use self::backend::{PaneBackend, PaneBackendKind};
 #[allow(unused_imports)]
 pub use self::geometry::{
     CSD_BUTTON_HEIGHT, CSD_BUTTON_WIDTH, CSD_TAB_BAR_HEIGHT, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
