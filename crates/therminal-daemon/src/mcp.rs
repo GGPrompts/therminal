@@ -110,6 +110,12 @@ struct GetHotspotsParam {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListWorkspacesParam {
+    /// Optional session ID to filter workspaces by. If omitted, returns workspaces from all sessions.
+    session_id: Option<u64>,
+}
+
 fn default_timeout_ms() -> u64 {
     30_000
 }
@@ -252,6 +258,25 @@ struct HotspotInfo {
 struct GetHotspotsResult {
     pane_id: u64,
     hotspots: Vec<HotspotInfo>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceInfoResult {
+    /// Workspace slot number (1-9).
+    workspace_id: u64,
+    /// Human-readable workspace name.
+    name: String,
+    /// Number of panes in this workspace.
+    pane_count: usize,
+    /// Whether this is the currently active workspace.
+    is_active: bool,
+    /// Pane IDs assigned to this workspace.
+    pane_ids: Vec<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ListWorkspacesResult {
+    workspaces: Vec<WorkspaceInfoResult>,
 }
 
 // Reserved for terminal.semantic.query_history (Phase 4).
@@ -570,6 +595,35 @@ impl TherminalMcpServer {
             }
         }
         let result = ListPanesResult { panes };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    async fn handle_list_workspaces(
+        &self,
+        params: ListWorkspacesParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+        let mut workspaces = Vec::new();
+
+        for (session_id, session) in mgr.iter_sessions() {
+            if let Some(filter_id) = params.session_id
+                && *session_id != filter_id
+            {
+                continue;
+            }
+            let active_ws = session.active_workspace;
+            for ws in &session.workspace_state {
+                workspaces.push(WorkspaceInfoResult {
+                    workspace_id: ws.id,
+                    name: ws.name.clone(),
+                    pane_count: ws.pane_ids.len(),
+                    is_active: ws.id == active_ws,
+                    pane_ids: ws.pane_ids.clone(),
+                });
+            }
+        }
+
+        let result = ListWorkspacesResult { workspaces };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -1098,6 +1152,11 @@ fn tool_definitions() -> Vec<Tool> {
             "Scan visible pane content for actionable hotspots: file paths, URLs, git refs (hashes and branches), and issue references. Returns matches with type, position, text, and type-specific metadata.",
             schema_for_type::<GetHotspotsParam>(),
         ),
+        Tool::new(
+            "terminal.workspaces.list",
+            "List workspace tabs with their names, pane counts, and active status. Optionally filter by session ID.",
+            schema_for_type::<ListWorkspacesParam>(),
+        ),
     ]
 }
 
@@ -1188,6 +1247,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.semantic.get_hotspots" => {
                 let params: GetHotspotsParam = parse_args(args)?;
                 self.handle_get_hotspots(params).await
+            }
+            "terminal.workspaces.list" => {
+                let params: ListWorkspacesParam = parse_args(args)?;
+                self.handle_list_workspaces(params).await
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),

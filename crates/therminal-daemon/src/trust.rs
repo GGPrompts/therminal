@@ -47,7 +47,8 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.get_content"
         | "terminal.panes.wait_for_output"
         | "terminal.semantic.query_history"
-        | "terminal.semantic.get_hotspots" => Some(ToolCategory::Observer),
+        | "terminal.semantic.get_hotspots"
+        | "terminal.workspaces.list" => Some(ToolCategory::Observer),
         "terminal.sessions.create" | "terminal.panes.write" | "terminal.panes.create" => {
             Some(ToolCategory::Writer)
         }
@@ -262,6 +263,10 @@ mod tests {
         );
         assert_eq!(
             tool_category("terminal.semantic.get_hotspots"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            tool_category("terminal.workspaces.list"),
             Some(ToolCategory::Observer)
         );
         assert_eq!(
