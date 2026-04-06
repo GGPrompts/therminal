@@ -674,9 +674,7 @@ mod tests {
         );
         // Should not panic. Whether consumed/emitted is implementation detail;
         // if an event is emitted it must be an empty-string notification.
-        if consumed
-            && let Ok(InterceptedEvent::DesktopNotification(t)) = rx.try_recv()
-        {
+        if consumed && let Ok(InterceptedEvent::DesktopNotification(t)) = rx.try_recv() {
             assert_eq!(t, "");
         }
     }

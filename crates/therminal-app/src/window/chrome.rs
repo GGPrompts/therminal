@@ -1905,8 +1905,7 @@ mod tests {
         // any prefix offset is already baked in. Verify a click at the shifted
         // x range still hits.
         let zoom_prefix_width = 60.0;
-        let areas =
-            hit_areas_with_indicator((10.0 + zoom_prefix_width, 100.0, 80.0, 24.0));
+        let areas = hit_areas_with_indicator((10.0 + zoom_prefix_width, 100.0, 80.0, 24.0));
         // A click at the un-shifted x must miss.
         assert!(status_bar_hit_test(50.0, 110.0, &areas).is_none());
         // A click within the shifted rect must hit.
