@@ -8,9 +8,10 @@ use std::collections::HashSet;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermDamage;
 
-use crate::grid_renderer::{cell_display_text, GridRenderer, RenderCell};
+use crate::grid_renderer::{cell_display_text, GridRenderer, HyperlinkSource, RenderCell};
 use crate::hotspot_detection::detect_hotspots;
 use crate::pane::{LayoutNode, PaneId, PaneState};
+use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
@@ -171,6 +172,11 @@ fn render_single_pane(
             }
 
             let hyperlink = cell.hyperlink().map(|h| h.uri().to_owned());
+            let hyperlink_source = if hyperlink.is_some() {
+                Some(HyperlinkSource::Osc8)
+            } else {
+                None
+            };
 
             Some(RenderCell {
                 row,
@@ -181,6 +187,7 @@ fn render_single_pane(
                 bg: cell.bg,
                 flags: cell.flags,
                 hyperlink,
+                hyperlink_source,
                 hotspot: None,
             })
         })
@@ -188,6 +195,9 @@ fn render_single_pane(
 
     term_guard.reset_damage();
     drop(term_guard);
+
+    // Annotate cells with regex-detected URLs (skips cells that already have OSC 8 links).
+    detect_urls_in_cells(&mut cells, screen_lines);
 
     // Annotate cells with detected hotspots (file paths, errors, git refs, etc.).
     let hotspots = detect_hotspots(&cells, screen_lines);

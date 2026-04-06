@@ -250,6 +250,7 @@ mod tests {
                 bg: AnsiColor::Named(alacritty_terminal::vte::ansi::NamedColor::Background),
                 flags: Flags::empty(),
                 hyperlink: None,
+                hyperlink_source: None,
                 hotspot: None,
             })
             .collect()

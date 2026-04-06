@@ -317,6 +317,13 @@ impl App {
             } else {
                 // Button released -- finalize selection (copy to clipboard).
                 self.finalize_selection();
+
+                // Single click on a hyperlinked cell: open the URL.
+                if self.click_count == 1 && self.last_click_pos == Some((col, row)) {
+                    if let Some(url) = self.hyperlink_at(row, col) {
+                        self.open_hyperlink(&url);
+                    }
+                }
             }
             return;
         }
@@ -398,6 +405,11 @@ impl App {
                 Some(pos) => pos,
                 None => return,
             };
+
+            // Hyperlink hover: show pointer cursor when over a hyperlinked cell.
+            if !self.separator_cursor_active {
+                self.update_hyperlink_hover(row, col);
+            }
 
             let mode = self.pane_term_mode(target);
             if mode.contains(TermMode::MOUSE_MOTION) {
@@ -543,20 +555,56 @@ impl App {
         self.focused_term_mode()
     }
 
+    // ── Hyperlink hover and click helpers ───────────────────────────────
+
+    /// Look up the hyperlink URL at a given grid (row, col) from the renderer's map.
+    fn hyperlink_at(&self, row: usize, col: usize) -> Option<String> {
+        self.grid_renderer
+            .as_ref()
+            .and_then(|r| r.hyperlink_map.get(&(row, col)).cloned())
+    }
+
+    /// Update cursor icon based on whether the hovered cell has a hyperlink.
+    fn update_hyperlink_hover(&mut self, row: usize, col: usize) {
+        use winit::window::CursorIcon;
+
+        let on_link = self.hyperlink_at(row, col).is_some();
+        if on_link && !self.hyperlink_cursor_active {
+            self.hyperlink_cursor_active = true;
+            if let Some(w) = self.window.as_ref() {
+                w.set_cursor(CursorIcon::Pointer);
+            }
+        } else if !on_link && self.hyperlink_cursor_active {
+            self.hyperlink_cursor_active = false;
+            if let Some(w) = self.window.as_ref() {
+                w.set_cursor(CursorIcon::Default);
+            }
+        }
+    }
+
+    /// Open a hyperlink URL using the platform default handler.
+    fn open_hyperlink(&self, url: &str) {
+        if let Err(e) = open::that(url) {
+            warn!("Failed to open hyperlink {url}: {e}");
+        }
+    }
+
     // ── Separator drag helpers ────────────────────────────────────────
 
     /// Hit-tolerance in pixels for separator detection.
     const SEPARATOR_HIT_TOLERANCE: f32 = 4.0;
 
-    /// Compute the layout area rect (window minus status bar).
+    /// Compute the layout area rect (window minus status bar and tab bar).
     fn layout_area_rect(&self) -> Option<therminal_core::geometry::Rect> {
         let gpu = self.gpu.as_ref()?;
+        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         Some(therminal_core::geometry::Rect::new(
             0.0,
-            0.0,
+            tab_bar_h,
             gpu.config.width as f32,
             gpu.config.height as f32
-                - crate::pane::effective_status_bar_height(self.config.general.show_status_bar),
+                - crate::pane::effective_status_bar_height(self.config.general.show_status_bar)
+                - tab_bar_h,
         ))
     }
 

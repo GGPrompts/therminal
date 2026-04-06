@@ -133,7 +133,12 @@ impl App {
 
             // Resize all panes after split.
             let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = crate::pane::content_area_rect(
+                gpu.config.width as f32,
+                gpu.config.height as f32,
+                self.config.general.show_status_bar,
+                self.config.general.show_tab_bar,
+            );
             let layout = ws_layout_mut!(self).unwrap();
             let renderer = self.grid_renderer.as_ref().unwrap();
             layout.layout(full_rect);
@@ -181,8 +186,12 @@ impl App {
 
                 // Relayout.
                 let gpu = self.gpu.as_ref().unwrap();
-                let full_rect =
-                    self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+                let full_rect = crate::pane::content_area_rect(
+                    gpu.config.width as f32,
+                    gpu.config.height as f32,
+                    self.config.general.show_status_bar,
+                    self.config.general.show_tab_bar,
+                );
                 let layout = ws_layout_mut!(self).unwrap();
                 let renderer = self.grid_renderer.as_ref().unwrap();
                 layout.layout(full_rect);
@@ -258,7 +267,12 @@ impl App {
             self.last_split_direction = direction;
 
             let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = crate::pane::content_area_rect(
+                gpu.config.width as f32,
+                gpu.config.height as f32,
+                self.config.general.show_status_bar,
+                self.config.general.show_tab_bar,
+            );
             let layout = ws_layout_mut!(self).unwrap();
             let renderer = self.grid_renderer.as_ref().unwrap();
             layout.layout(full_rect);
@@ -298,8 +312,12 @@ impl App {
                 }
 
                 let gpu = self.gpu.as_ref().unwrap();
-                let full_rect =
-                    self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+                let full_rect = crate::pane::content_area_rect(
+                    gpu.config.width as f32,
+                    gpu.config.height as f32,
+                    self.config.general.show_status_bar,
+                    self.config.general.show_tab_bar,
+                );
                 let layout = ws_layout_mut!(self).unwrap();
                 let renderer = self.grid_renderer.as_ref().unwrap();
                 layout.layout(full_rect);
@@ -362,18 +380,29 @@ impl App {
             Some(id) => id,
             None => return,
         };
+
+        // Extract values before the mutable borrow of workspaces via layout.
+        let (width, height) = match self.gpu.as_ref() {
+            Some(gpu) => (gpu.config.width as f32, gpu.config.height as f32),
+            None => return,
+        };
+        let full_rect = crate::pane::content_area_rect(
+            width,
+            height,
+            self.config.general.show_status_bar,
+            self.config.general.show_tab_bar,
+        );
+
         let layout = match ws_layout_mut!(self) {
             Some(l) => l,
             None => return,
         };
 
         if layout.adjust_ratio(focused, delta) {
-            // Relayout.
-            let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
-            let renderer = self.grid_renderer.as_ref().unwrap();
             layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
+            if let Some(renderer) = self.grid_renderer.as_ref() {
+                layout.resize_all_panes(renderer);
+            }
 
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
@@ -526,7 +555,12 @@ impl App {
             None => return,
         };
 
-        let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+        let full_rect = crate::pane::content_area_rect(
+            gpu.config.width as f32,
+            gpu.config.height as f32,
+            self.config.general.show_status_bar,
+            self.config.general.show_tab_bar,
+        );
 
         // Rebuild the layout tree from the snapshot by spawning new panes.
         let scrollback = self.config.general.scrollback_lines;
@@ -682,8 +716,12 @@ impl App {
             None => return,
         };
 
-        let full_rect =
-            self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+        let full_rect = crate::pane::content_area_rect(
+            gpu.config.width as f32,
+            gpu.config.height as f32,
+            self.config.general.show_status_bar,
+            self.config.general.show_tab_bar,
+        );
 
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -762,13 +800,11 @@ impl App {
             None => return,
         };
 
-        let status_bar_h =
-            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let full_rect = Rect::new(
-            0.0,
-            0.0,
+        let full_rect = crate::pane::content_area_rect(
             gpu.config.width as f32,
-            gpu.config.height as f32 - status_bar_h,
+            gpu.config.height as f32,
+            self.config.general.show_status_bar,
+            self.config.general.show_tab_bar,
         );
 
         let scrollback = self.config.general.scrollback_lines;

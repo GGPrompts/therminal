@@ -429,8 +429,7 @@ impl App {
         // Recalculate layout tree and resize all pane PTYs (minus status bar and tab bar).
         let status_bar_h =
             crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let tab_bar_h =
-            crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
+        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         let full_rect = Rect::new(
             0.0,
             tab_bar_h,
@@ -918,8 +917,7 @@ impl App {
 
         let status_bar_changed =
             self.config.general.show_status_bar != old_config.general.show_status_bar;
-        let tab_bar_changed =
-            self.config.general.show_tab_bar != old_config.general.show_tab_bar;
+        let tab_bar_changed = self.config.general.show_tab_bar != old_config.general.show_tab_bar;
 
         let needs_relayout =
             font_changed || padding_changed || status_bar_changed || tab_bar_changed;
@@ -1003,22 +1001,21 @@ impl App {
         }
     }
 
-    /// Compute the content area rect (window minus status bar and tab bar).
-    fn content_area_rect(&self, width: f32, height: f32) -> Rect {
+    /// Adjust font size by `delta` points, resize panes, and request a redraw.
+    fn adjust_font_size_action(&mut self, delta: f32) {
         let status_bar_h =
             crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
         let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
-        Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
-    }
-
-    /// Adjust font size by `delta` points, resize panes, and request a redraw.
-    fn adjust_font_size_action(&mut self, delta: f32) {
         if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
             let new_size = renderer.adjust_font_size(delta);
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
 
-            let full_rect = self
-                .content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = Rect::new(
+                0.0,
+                tab_bar_h,
+                gpu.config.width as f32,
+                gpu.config.height as f32 - status_bar_h - tab_bar_h,
+            );
             if let Some(wm) = self.workspaces.as_mut() {
                 let lay = wm.layout_mut();
                 lay.layout(full_rect);
@@ -1034,12 +1031,19 @@ impl App {
 
     /// Reset font size to startup default, resize panes, and request a redraw.
     fn reset_font_size_action(&mut self) {
+        let status_bar_h =
+            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
             let new_size = renderer.reset_font_size();
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
 
-            let full_rect = self
-                .content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = Rect::new(
+                0.0,
+                tab_bar_h,
+                gpu.config.width as f32,
+                gpu.config.height as f32 - status_bar_h - tab_bar_h,
+            );
             if let Some(wm) = self.workspaces.as_mut() {
                 let layout = wm.layout_mut();
                 layout.layout(full_rect);
@@ -1288,8 +1292,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .as_ref()
                                 .map(|wm| wm.workspace_ids())
                                 .unwrap_or_default();
-                            if let Some(ws_id) =
-                                chrome::tab_bar_hit_test(px as f32, &workspace_ids)
+                            if let Some(ws_id) = chrome::tab_bar_hit_test(px as f32, &workspace_ids)
                             {
                                 self.switch_workspace(ws_id as u8);
                             }

@@ -110,6 +110,15 @@ pub fn clear_color_for_mode(pre_multiplied: bool) -> [f32; 4] {
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────
 
+/// Where a hyperlink came from — affects visual rendering style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HyperlinkSource {
+    /// Explicit OSC 8 hyperlink from the terminal application (solid underline).
+    Osc8,
+    /// Regex-detected URL in terminal text (dashed underline).
+    Regex,
+}
+
 /// A lightweight snapshot of a terminal cell, suitable for lock-free rendering.
 /// Created while holding the term lock, consumed by the renderer after release.
 #[derive(Clone)]
@@ -130,6 +139,8 @@ pub struct RenderCell {
     pub flags: Flags,
     /// Hyperlink URI from OSC 8 or regex URL detection.
     pub hyperlink: Option<String>,
+    /// Source of the hyperlink (OSC 8 vs regex), controls underline style.
+    pub hyperlink_source: Option<HyperlinkSource>,
     /// Hotspot kind for this cell, if it's part of an actionable pattern.
     pub hotspot: Option<crate::hotspot_detection::HotspotKind>,
 }
@@ -717,6 +728,7 @@ impl GridRenderer {
                     bg: cell.bg,
                     flags: cell.flags,
                     hyperlink: cell.hyperlink.clone(),
+                    hyperlink_source: cell.hyperlink_source,
                     hotspot: cell.hotspot.clone(),
                 });
             }
@@ -885,10 +897,14 @@ impl GridRenderer {
         }
 
         // ── Hyperlink underline rects + map rebuild ────────────────────
+        // OSC 8 hyperlinks get a solid underline; regex-detected URLs get a
+        // dashed underline (alternating 3px on / 2px off segments).
         self.hyperlink_map.clear();
         {
             let link_color = PaletteColor::ACCENT_COOL.to_f32_array();
             let underline_h = 1.0_f32;
+            let dash_on = 3.0_f32;
+            let dash_off = 2.0_f32;
             for row in self.row_cache.iter().flatten() {
                 for cell in &row.cells {
                     if let Some(ref url) = cell.hyperlink {
@@ -902,7 +918,19 @@ impl GridRenderer {
                         } else {
                             self.cell_width
                         };
-                        bg_rects.push(([x, y, w, underline_h], link_color));
+                        let is_regex = cell.hyperlink_source == Some(HyperlinkSource::Regex);
+                        if is_regex {
+                            // Dashed underline: emit short segments across the cell width.
+                            let mut offset = 0.0;
+                            while offset < w {
+                                let seg_w = (w - offset).min(dash_on);
+                                bg_rects.push(([x + offset, y, seg_w, underline_h], link_color));
+                                offset += dash_on + dash_off;
+                            }
+                        } else {
+                            // Solid underline for OSC 8 hyperlinks.
+                            bg_rects.push(([x, y, w, underline_h], link_color));
+                        }
                     }
                 }
             }

@@ -882,6 +882,262 @@ pub(crate) fn draw_status_bar(
     }
 }
 
+// ── Tab bar ───────────────────────────────────────────────────────────
+
+/// Data collected for the workspace tab bar.
+pub(crate) struct TabBarInfo {
+    /// IDs of all existing workspaces (sorted).
+    pub workspace_ids: Vec<usize>,
+    /// Currently active workspace number.
+    pub active_workspace: usize,
+}
+
+/// Width of a single tab in the tab bar.
+const TAB_WIDTH: f32 = 48.0;
+
+/// Tab bar background color (same as status bar).
+const TAB_BAR_BG_COLOR: [f32; 4] = STATUS_BAR_BG_COLOR;
+
+/// Active tab background color (PLATE from palette).
+const TAB_ACTIVE_BG_COLOR: [f32; 4] = HEADER_BG_COLOR;
+
+/// Active tab underline color (FOCUS from palette).
+const TAB_ACTIVE_UNDERLINE_COLOR: [f32; 4] = FOCUS_BORDER_COLOR;
+
+/// Draw the workspace tab bar at the top of the window.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_tab_bar(
+    info: &TabBarInfo,
+    renderer: &mut GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+    use glyphon::{
+        Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea,
+        TextBounds,
+    };
+
+    let bar_h = crate::pane::TAB_BAR_HEIGHT;
+    let sw = surface_width as f32;
+    let sh = surface_height as f32;
+
+    // ── Full-width background rect ──────────────────────────────────────
+    let bg_verts = pixel_rect_to_ndc(0.0, 0.0, sw, bar_h, sw, sh, TAB_BAR_BG_COLOR);
+
+    let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("tabbar_bg_vbuf"),
+        contents: bytemuck::cast_slice(&bg_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("tabbar_bg_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, vertex_buf.slice(..));
+        pass.draw(0..6, 0..1);
+    }
+
+    // ── Per-tab rects (active tab gets highlighted bg + underline) ──────
+    let mut tab_verts: Vec<ColorVertex> = Vec::new();
+    for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
+        let tab_x = i as f32 * TAB_WIDTH;
+        if ws_id == info.active_workspace {
+            // Active tab background.
+            tab_verts.extend_from_slice(&pixel_rect_to_ndc(
+                tab_x,
+                0.0,
+                TAB_WIDTH,
+                bar_h,
+                sw,
+                sh,
+                TAB_ACTIVE_BG_COLOR,
+            ));
+            // Active tab underline (2px at bottom of tab).
+            tab_verts.extend_from_slice(&pixel_rect_to_ndc(
+                tab_x,
+                bar_h - 2.0,
+                TAB_WIDTH,
+                2.0,
+                sw,
+                sh,
+                TAB_ACTIVE_UNDERLINE_COLOR,
+            ));
+        }
+    }
+
+    if !tab_verts.is_empty() {
+        let tab_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tabbar_tabs_vbuf"),
+            contents: bytemuck::cast_slice(&tab_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("tabbar_tabs_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, tab_buf.slice(..));
+        pass.draw(0..tab_verts.len() as u32, 0..1);
+    }
+
+    // ── Tab label text ──────────────────────────────────────────────────
+    let font_size = (bar_h * 0.55).max(10.0);
+    let line_height = bar_h;
+    let metrics = Metrics::new(font_size, line_height);
+
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_width as i32,
+        bottom: surface_height as i32,
+    };
+
+    let active_color = GlyphColor::rgba(
+        PaletteColor::INK.r,
+        PaletteColor::INK.g,
+        PaletteColor::INK.b,
+        255,
+    );
+    let inactive_color = GlyphColor::rgba(
+        PaletteColor::INK_MUTED.r,
+        PaletteColor::INK_MUTED.g,
+        PaletteColor::INK_MUTED.b,
+        200,
+    );
+
+    // Build text buffers for each tab.
+    let mut tab_bufs: Vec<(Buffer, f32, GlyphColor)> = Vec::new();
+    for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
+        let tab_x = i as f32 * TAB_WIDTH;
+        let is_active = ws_id == info.active_workspace;
+        let color = if is_active {
+            active_color
+        } else {
+            inactive_color
+        };
+        let label = format!(" {ws_id}");
+
+        let mut buf = Buffer::new(&mut renderer.font_system, metrics);
+        buf.set_size(&mut renderer.font_system, Some(TAB_WIDTH), Some(bar_h));
+        buf.set_text(
+            &mut renderer.font_system,
+            &label,
+            Attrs::new()
+                .family(Family::Name(&renderer.font_config.family))
+                .color(color),
+            Shaping::Basic,
+        );
+        buf.shape_until_scroll(&mut renderer.font_system, false);
+
+        // Center the label within the tab.
+        let text_width = buf
+            .layout_runs()
+            .next()
+            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            .unwrap_or(0.0);
+        let centered_x = tab_x + ((TAB_WIDTH - text_width) / 2.0).max(0.0);
+
+        tab_bufs.push((buf, centered_x, color));
+    }
+
+    renderer.viewport.update(
+        queue,
+        Resolution {
+            width: surface_width,
+            height: surface_height,
+        },
+    );
+
+    let text_areas: Vec<TextArea<'_>> = tab_bufs
+        .iter()
+        .map(|(buf, x, color)| TextArea {
+            buffer: buf,
+            left: *x,
+            top: 0.0,
+            scale: 1.0,
+            bounds,
+            default_color: *color,
+            custom_glyphs: &[],
+        })
+        .collect();
+
+    if let Err(e) = renderer.overlay_text_renderer.prepare(
+        device,
+        queue,
+        &mut renderer.font_system,
+        &mut renderer.overlay_atlas,
+        &renderer.viewport,
+        text_areas,
+        &mut renderer.swash_cache,
+    ) {
+        tracing::warn!("tab bar text prepare failed: {}", e);
+    }
+
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("tabbar_text_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        if let Err(e) = renderer.overlay_text_renderer.render(
+            &renderer.overlay_atlas,
+            &renderer.viewport,
+            &mut pass,
+        ) {
+            tracing::warn!("tab bar text render failed: {}", e);
+        }
+    }
+}
+
+/// Return the workspace ID for a click at the given x-position in the tab bar,
+/// given the list of workspace IDs displayed.
+pub(crate) fn tab_bar_hit_test(px: f32, workspace_ids: &[usize]) -> Option<usize> {
+    if workspace_ids.is_empty() {
+        return None;
+    }
+    let tab_index = (px / TAB_WIDTH).floor() as usize;
+    workspace_ids.get(tab_index).copied()
+}
+
 /// Abbreviate a path for status bar display: replace the home directory with `~`
 /// and extract the path from `file://` URLs.
 ///

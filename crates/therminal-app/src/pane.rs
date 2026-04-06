@@ -51,6 +51,9 @@ pub fn effective_header_height(pane_count: usize) -> f32 {
 /// Height of the window status bar in physical pixels.
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
+/// Height of the workspace tab bar in physical pixels.
+pub const TAB_BAR_HEIGHT: f32 = 24.0;
+
 /// Return the effective status bar height: 0 when disabled, STATUS_BAR_HEIGHT otherwise.
 pub fn effective_status_bar_height(show: bool) -> f32 {
     if show {
@@ -58,6 +61,27 @@ pub fn effective_status_bar_height(show: bool) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Return the effective tab bar height: 0 when disabled, TAB_BAR_HEIGHT otherwise.
+pub fn effective_tab_bar_height(show: bool) -> f32 {
+    if show {
+        TAB_BAR_HEIGHT
+    } else {
+        0.0
+    }
+}
+
+/// Compute the content area rect (window area minus status bar and tab bar).
+pub fn content_area_rect(
+    width: f32,
+    height: f32,
+    show_status_bar: bool,
+    show_tab_bar: bool,
+) -> therminal_core::geometry::Rect {
+    let status_bar_h = effective_status_bar_height(show_status_bar);
+    let tab_bar_h = effective_tab_bar_height(show_tab_bar);
+    therminal_core::geometry::Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
 }
 
 /// Minimum pane width in physical pixels.

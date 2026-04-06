@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Regex-based URL detection for terminal cells.
 //!
 //! Scans visible cells for http(s) URLs that don't already have an OSC 8
@@ -7,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-use crate::grid_renderer::RenderCell;
+use crate::grid_renderer::{HyperlinkSource, RenderCell};
 
 /// Compiled regex for detecting URLs in visible terminal text.
 /// Matches http:// and https:// URLs, stopping at common terminal delimiters.
@@ -74,6 +72,7 @@ pub(crate) fn detect_urls_in_cells(cells: &mut [RenderCell], screen_lines: usize
                 let col = cells[idx].col;
                 if col >= start_col && col < end_col && cells[idx].hyperlink.is_none() {
                     cells[idx].hyperlink = Some(url.to_owned());
+                    cells[idx].hyperlink_source = Some(HyperlinkSource::Regex);
                 }
             }
         }
