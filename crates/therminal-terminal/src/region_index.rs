@@ -486,6 +486,113 @@ mod tests {
         assert_eq!(r.metadata.get("value"), Some(&"/tmp".to_string()));
     }
 
+    /// Helper: build a closed region with explicit start/end and kind.
+    fn make_region(kind: RegionKind, start: usize, end: usize) -> Region {
+        Region {
+            kind,
+            start_line: start,
+            end_line: Some(end),
+            timestamp: Instant::now(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn region_before_after_empty_index() {
+        let idx = RegionIndex::new();
+        assert!(idx.region_before(10, &[]).is_none());
+        assert!(idx.region_after(10, &[]).is_none());
+    }
+
+    #[test]
+    fn region_before_after_single_region() {
+        let mut idx = RegionIndex::new();
+        idx.regions.push(make_region(RegionKind::Output, 5, 10));
+
+        // Before its start: region_after should find it; region_before should not.
+        assert!(idx.region_before(5, &[]).is_none());
+        assert_eq!(idx.region_after(4, &[]).unwrap().start_line, 5);
+
+        // Inside it: start_line is 5; region_before(7) sees start<7 -> finds it.
+        assert_eq!(idx.region_before(7, &[]).unwrap().start_line, 5);
+        // region_after(7) needs start>7 -> none.
+        assert!(idx.region_after(7, &[]).is_none());
+
+        // After its end: region_before finds it, region_after does not.
+        assert_eq!(idx.region_before(20, &[]).unwrap().start_line, 5);
+        assert!(idx.region_after(20, &[]).is_none());
+    }
+
+    #[test]
+    fn region_before_after_multiple_adjacent() {
+        let mut idx = RegionIndex::new();
+        idx.regions.push(make_region(RegionKind::Output, 0, 4));
+        idx.regions.push(make_region(RegionKind::Output, 5, 9));
+        idx.regions.push(make_region(RegionKind::Output, 10, 14));
+
+        // Cursor at line 7: nearest before = start 5, nearest after = start 10.
+        assert_eq!(idx.region_before(7, &[]).unwrap().start_line, 5);
+        assert_eq!(idx.region_after(7, &[]).unwrap().start_line, 10);
+
+        // Cursor at line 6: before = 5, after = 10.
+        assert_eq!(idx.region_before(6, &[]).unwrap().start_line, 5);
+        assert_eq!(idx.region_after(6, &[]).unwrap().start_line, 10);
+    }
+
+    #[test]
+    fn region_before_after_kind_filter_errors_only() {
+        let mut idx = RegionIndex::new();
+        idx.regions.push(make_region(RegionKind::Output, 0, 4));
+        idx.regions.push(make_region(RegionKind::Error, 5, 9));
+        idx.regions.push(make_region(RegionKind::Output, 10, 14));
+        idx.regions.push(make_region(RegionKind::Error, 15, 19));
+        idx.regions.push(make_region(RegionKind::Output, 20, 24));
+
+        // From line 12, nearest Error before is start 5, nearest Error after is start 15.
+        let before = idx.region_before(12, &[RegionKind::Error]).unwrap();
+        assert_eq!(before.start_line, 5);
+        assert_eq!(before.kind, RegionKind::Error);
+
+        let after = idx.region_after(12, &[RegionKind::Error]).unwrap();
+        assert_eq!(after.start_line, 15);
+        assert_eq!(after.kind, RegionKind::Error);
+
+        // No Error after the last error.
+        assert!(idx.region_after(20, &[RegionKind::Error]).is_none());
+        // No Error before the first one.
+        assert!(idx.region_before(5, &[RegionKind::Error]).is_none());
+    }
+
+    #[test]
+    fn region_before_after_boundary_strictness() {
+        let mut idx = RegionIndex::new();
+        idx.regions.push(make_region(RegionKind::Output, 5, 10));
+        idx.regions.push(make_region(RegionKind::Output, 15, 20));
+
+        // Cursor exactly on a region's start_line: strictly-before excludes it,
+        // strictly-after also excludes it.
+        assert!(idx.region_before(5, &[]).is_none());
+        assert_eq!(idx.region_after(5, &[]).unwrap().start_line, 15);
+
+        assert_eq!(idx.region_before(15, &[]).unwrap().start_line, 5);
+        assert!(idx.region_after(15, &[]).is_none());
+    }
+
+    #[test]
+    fn region_before_after_past_last_and_before_first() {
+        let mut idx = RegionIndex::new();
+        idx.regions.push(make_region(RegionKind::Output, 10, 14));
+        idx.regions.push(make_region(RegionKind::Output, 20, 24));
+
+        // Past the last region: before finds the latest, after finds nothing.
+        assert_eq!(idx.region_before(100, &[]).unwrap().start_line, 20);
+        assert!(idx.region_after(100, &[]).is_none());
+
+        // Before the first region: before finds nothing, after finds the earliest.
+        assert!(idx.region_before(0, &[]).is_none());
+        assert_eq!(idx.region_after(0, &[]).unwrap().start_line, 10);
+    }
+
     #[test]
     fn osc133_works_same_as_osc633() {
         let mut idx = RegionIndex::new();
