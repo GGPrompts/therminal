@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{PaneId, SessionId};
+use crate::{PaneId, SessionId, WorkspaceId};
 
 /// Build hash embedded at compile time (git short hash + timestamp).
 /// Informational only — not used for handoff decisions.
@@ -120,6 +120,23 @@ pub enum IpcRequest {
     /// path where the old daemon will send PTY FDs via SCM_RIGHTS, then
     /// initiates graceful shutdown.
     RequestHandoffFds,
+    /// Set the full workspace topology for a session.
+    ///
+    /// The app sends this on workspace create, switch, rename, pane move,
+    /// and pane close. The daemon replaces its stored workspace state for
+    /// the given session with the provided list.
+    SetWorkspaceState {
+        session_id: SessionId,
+        workspaces: Vec<WorkspaceInfo>,
+        active_workspace: WorkspaceId,
+    },
+    /// Get the daemon's stored workspace topology for a session.
+    ///
+    /// Used by the app on attach to restore workspace layout, and by MCP
+    /// tools to query workspace state without the app being connected.
+    GetWorkspaces {
+        session_id: SessionId,
+    },
 }
 
 /// Typed IPC responses.
@@ -183,6 +200,14 @@ pub enum IpcResponse {
         handoff_socket: String,
         /// Number of panes (FDs) that will be sent.
         pane_count: usize,
+    },
+    /// Workspace state updated.
+    WorkspaceStateSet { session_id: SessionId },
+    /// Workspace topology for a session.
+    Workspaces {
+        session_id: SessionId,
+        workspaces: Vec<WorkspaceInfo>,
+        active_workspace: WorkspaceId,
     },
     /// Generic error response.
     Error { message: String },
@@ -251,6 +276,26 @@ pub struct HandoffPaneMeta {
 pub struct HandoffPayload {
     /// Ordered list of pane metadata, one per FD.
     pub panes: Vec<HandoffPaneMeta>,
+}
+
+// ── Workspace topology ──────────────────────────────────────────────────
+
+/// Metadata for a single workspace (tab) within a session.
+///
+/// The daemon stores this so MCP tools can query workspace topology
+/// without the app being connected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    /// Workspace slot number (1-9).
+    pub id: WorkspaceId,
+    /// Human-readable workspace name (e.g. "build", "logs").
+    pub name: String,
+    /// Display order (lower = leftmost tab). Usually matches `id`.
+    pub order: u32,
+    /// Pane IDs currently assigned to this workspace.
+    pub pane_ids: Vec<PaneId>,
+    /// The focused pane within this workspace, if any.
+    pub focused_pane: Option<PaneId>,
 }
 
 // ── Persisted state (session/layout persistence across daemon restarts) ──

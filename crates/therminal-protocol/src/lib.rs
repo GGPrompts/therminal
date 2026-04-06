@@ -27,6 +27,9 @@ pub type WindowId = u64;
 /// Unique identifier for a pane.
 pub type PaneId = u64;
 
+/// Workspace slot number (1-9), used to group panes into named tabs.
+pub type WorkspaceId = u64;
+
 /// Semantic region types for scrollback tagging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RegionKind {

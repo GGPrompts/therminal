@@ -51,7 +51,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         "terminal.sessions.create" | "terminal.panes.write" | "terminal.panes.create" => {
             Some(ToolCategory::Writer)
         }
-        "terminal.sessions.destroy" => Some(ToolCategory::Admin),
+        "terminal.sessions.destroy" | "terminal.panes.destroy" => Some(ToolCategory::Admin),
         _ => None,
     }
 }
@@ -278,6 +278,10 @@ mod tests {
         );
         assert_eq!(
             tool_category("terminal.sessions.destroy"),
+            Some(ToolCategory::Admin)
+        );
+        assert_eq!(
+            tool_category("terminal.panes.destroy"),
             Some(ToolCategory::Admin)
         );
         assert_eq!(tool_category("nonexistent"), None);

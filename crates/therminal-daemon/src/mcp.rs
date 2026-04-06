@@ -192,6 +192,14 @@ struct SpawnPaneResult {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+struct DestroyPaneResult {
+    /// Whether the pane was successfully destroyed.
+    success: bool,
+    /// Human-readable status message.
+    message: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 struct WaitForOutputResult {
     /// Whether the pattern was matched before timeout.
     matched: bool,
@@ -484,6 +492,26 @@ impl TherminalMcpServer {
                 Ok(CallToolResult::error(vec![Content::text(format!(
                     "session {session_id} has no panes to split from"
                 ))]))
+            }
+        }
+    }
+
+    async fn handle_destroy_pane(&self, params: PaneIdParam) -> Result<CallToolResult, ErrorData> {
+        let mut mgr = self.session_mgr.lock().await;
+        match mgr.kill_pane(params.pane_id) {
+            Ok(()) => {
+                let result = DestroyPaneResult {
+                    success: true,
+                    message: format!("pane {} destroyed", params.pane_id),
+                };
+                Ok(CallToolResult::success(vec![json_content(&result)?]))
+            }
+            Err(e) => {
+                let result = DestroyPaneResult {
+                    success: false,
+                    message: format!("failed to destroy pane: {e}"),
+                };
+                Ok(CallToolResult::error(vec![json_content(&result)?]))
             }
         }
     }
@@ -1031,6 +1059,11 @@ fn tool_definitions() -> Vec<Tool> {
             schema_for_type::<SpawnPaneParam>(),
         ),
         Tool::new(
+            "terminal.panes.destroy",
+            "Destroy a terminal pane and its PTY. If the pane is the last in its window, the window is removed. If the session has no remaining windows, the session is also destroyed.",
+            schema_for_type::<PaneIdParam>(),
+        ),
+        Tool::new(
             "terminal.panes.list",
             "List all panes with their dimensions, session membership, and title. Optionally filter by session ID.",
             schema_for_type::<ListPanesParam>(),
@@ -1123,6 +1156,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.panes.create" => {
                 let params: SpawnPaneParam = parse_args(args)?;
                 self.handle_spawn_pane(params).await
+            }
+            "terminal.panes.destroy" => {
+                let params: PaneIdParam = parse_args(args)?;
+                self.handle_destroy_pane(params).await
             }
             "terminal.panes.list" => {
                 let params: ListPanesParam = parse_args(args)?;
