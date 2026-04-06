@@ -771,9 +771,14 @@ impl Default for KeybindingsConfig {
                     key: "ctrl+shift+z".to_string(),
                     action: KeyAction::ZoomPane,
                 },
-                // Help overlay
+                // Help overlay (both / and ? for cross-platform compat —
+                // Windows may not unshift the key in key_without_modifiers)
                 Keybinding {
                     key: "ctrl+shift+/".to_string(),
+                    action: KeyAction::ShowHelp,
+                },
+                Keybinding {
+                    key: "ctrl+shift+?".to_string(),
                     action: KeyAction::ShowHelp,
                 },
                 // Batch pane operations

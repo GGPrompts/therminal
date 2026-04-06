@@ -127,7 +127,7 @@ pub(crate) fn lookup_binding(
         _ => return None,
     };
 
-    let lookup = (ctrl, shift, alt, super_key, bk.clone());
+    let lookup = (ctrl, shift, alt, super_key, bk);
     if let Some(action) = map.get(&lookup) {
         return Some(action.clone());
     }
@@ -138,17 +138,10 @@ pub(crate) fn lookup_binding(
     // unshifted key rather than a hardcoded US-layout table.
     if shift {
         if let Some(unshifted_bk) = key_without_modifiers_binding(key_event) {
-            let fallback = (ctrl, shift, alt, super_key, unshifted_bk.clone());
+            let fallback = (ctrl, shift, alt, super_key, unshifted_bk);
             if let Some(action) = map.get(&fallback) {
                 return Some(action.clone());
             }
-            tracing::debug!(
-                ?bk,
-                ?unshifted_bk,
-                ctrl,
-                alt,
-                "shifted keybinding lookup miss"
-            );
         }
     }
 

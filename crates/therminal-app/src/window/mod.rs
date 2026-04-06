@@ -730,6 +730,9 @@ impl App {
             }
             KeyAction::ShowHelp => {
                 self.show_help_overlay = !self.show_help_overlay;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
             }
             KeyAction::CloseAllPanes => {
                 self.close_all_panes();
