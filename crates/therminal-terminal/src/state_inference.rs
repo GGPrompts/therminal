@@ -181,6 +181,8 @@ impl AgentType {
 pub enum InferredStatus {
     Idle,
     Processing,
+    Streaming,
+    Thinking,
     ToolUse { tool_name: String },
     AwaitingInput,
 }
@@ -190,6 +192,8 @@ impl InferredStatus {
         match self {
             InferredStatus::Idle => "idle",
             InferredStatus::Processing => "processing",
+            InferredStatus::Streaming => "streaming",
+            InferredStatus::Thinking => "thinking",
             InferredStatus::ToolUse { .. } => "tool_use",
             InferredStatus::AwaitingInput => "awaiting_input",
         }
@@ -597,6 +601,40 @@ impl AgentStateInference {
         // Spinner: high ratio of cursor control with low visible text per chunk.
         // Typical spinner: overwrites a line with CSI sequences, writes 1-5 chars.
         cursor_control_ratio > 0.5 && avg_visible < 20.0
+    }
+
+    /// Check if recent output is a sustained high-throughput stream.
+    ///
+    /// Streaming is characterized by >500 visible chars/sec sustained over
+    /// at least 2 seconds with no backspaces -- e.g., an agent writing a
+    /// long code block or explanation.
+    pub fn is_streaming_cadence(&self) -> bool {
+        let stats = &self.chunk_stats;
+        if stats.len() < MIN_CHUNKS_FOR_CLASSIFICATION {
+            return false;
+        }
+
+        let window_duration_secs = if stats.len() >= 2 {
+            stats
+                .back()
+                .unwrap()
+                .timestamp
+                .duration_since(stats.front().unwrap().timestamp)
+                .as_secs_f64()
+        } else {
+            return false;
+        };
+
+        if window_duration_secs < AGENT_SUSTAINED_SECS {
+            return false;
+        }
+
+        let total_visible: usize = stats.iter().map(|s| s.visible_chars).sum();
+        let chars_per_sec = total_visible as f64 / window_duration_secs;
+
+        let has_backspace = stats.iter().any(|s| s.has_backspace);
+
+        chars_per_sec > 500.0 && !has_backspace
     }
 
     /// Read-only access to the chunk stats window (for external analysis).
@@ -1089,11 +1127,17 @@ impl AgentStateInference {
             }
         }
 
-        // Check for spinner/thinking patterns.
+        // Check for spinner/thinking patterns -- these indicate the agent is
+        // "thinking" (no substantive output, just an animation).
         for line in lines_iter.take(6) {
             if self.patterns.spinner.is_match(line) {
-                return InferredStatus::Processing;
+                return InferredStatus::Thinking;
             }
+        }
+
+        // Check cadence: sustained high-throughput monotonic output = Streaming.
+        if self.is_streaming_cadence() {
+            return InferredStatus::Streaming;
         }
 
         // Default during execution: processing.
@@ -1129,8 +1173,13 @@ impl AgentStateInference {
         // Check for spinner/thinking.
         for line in lines_iter.take(4) {
             if self.patterns.spinner.is_match(line) {
-                return InferredStatus::Processing;
+                return InferredStatus::Thinking;
             }
+        }
+
+        // Check cadence: sustained high-throughput monotonic output = Streaming.
+        if self.is_streaming_cadence() {
+            return InferredStatus::Streaming;
         }
 
         default
@@ -1559,20 +1608,20 @@ mod tests {
     // -- Pattern matching ----------------------------------------------------
 
     #[test]
-    fn detect_spinner_processing() {
+    fn detect_spinner_thinking() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // Simulate spinner output.
+        // Simulate spinner output -- maps to Thinking, not Processing.
         engine.push_line("⠋ Processing your request...".to_string());
         let status = engine.infer_status();
-        assert_eq!(status, InferredStatus::Processing);
+        assert_eq!(status, InferredStatus::Thinking);
     }
 
     #[test]
-    fn detect_thinking_processing() {
+    fn detect_thinking_dots() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.push_line("Thinking...".to_string());
         let status = engine.infer_status();
-        assert_eq!(status, InferredStatus::Processing);
+        assert_eq!(status, InferredStatus::Thinking);
     }
 
     #[test]
@@ -2011,8 +2060,8 @@ mod tests {
         // Now simulate a status change while throttled (last_write is very recent).
         engine.push_line("⠋ Processing...".to_string());
         engine.infer_and_write();
-        // Status changed to Processing, dirty was set, but throttle blocked the write.
-        assert_eq!(engine.last_status, InferredStatus::Processing);
+        // Status changed to Thinking (spinner detected), dirty was set, but throttle blocked the write.
+        assert_eq!(engine.last_status, InferredStatus::Thinking);
         assert!(engine.dirty, "dirty flag should persist when throttled");
         assert_eq!(
             engine.last_write, initial_write_time,
@@ -2340,5 +2389,165 @@ mod tests {
         // "hello" = 5 visible chars, \n is control, ANSI codes stripped.
         engine.feed_bytes(b"\x1b[31mhello\x1b[0m\n");
         assert_eq!(engine.chunk_stats[0].visible_chars, 5);
+    }
+
+    // -- Streaming state -------------------------------------------------------
+
+    #[test]
+    fn streaming_cadence_high_throughput() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let base = Instant::now();
+        // Simulate sustained high-throughput output: 600 visible chars over
+        // chunks spanning 3 seconds with no backspaces.
+        for i in 0..10 {
+            let chunk = "a".repeat(200);
+            let ts = base + Duration::from_millis(300 * i);
+            engine.feed_bytes_at(format!("{chunk}\n").as_bytes(), ts);
+        }
+        assert!(
+            engine.is_streaming_cadence(),
+            "Sustained >500 chars/sec without backspaces should be streaming"
+        );
+    }
+
+    #[test]
+    fn streaming_not_detected_with_backspaces() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let base = Instant::now();
+        for i in 0..10 {
+            let mut chunk = "a".repeat(200);
+            chunk.push('\x08'); // backspace
+            let ts = base + Duration::from_millis(300 * i);
+            engine.feed_bytes_at(chunk.as_bytes(), ts);
+        }
+        assert!(
+            !engine.is_streaming_cadence(),
+            "Output with backspaces should not be classified as streaming"
+        );
+    }
+
+    #[test]
+    fn streaming_not_detected_low_throughput() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let base = Instant::now();
+        // Small chunks spread over a long time: well under 500 chars/sec.
+        for i in 0..5 {
+            let ts = base + Duration::from_millis(1000 * i);
+            engine.feed_bytes_at(b"hi\n", ts);
+        }
+        assert!(
+            !engine.is_streaming_cadence(),
+            "Low throughput should not be classified as streaming"
+        );
+    }
+
+    #[test]
+    fn streaming_not_detected_short_window() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let base = Instant::now();
+        // High throughput but too short to be sustained.
+        for i in 0..3 {
+            let chunk = "a".repeat(500);
+            let ts = base + Duration::from_millis(100 * i);
+            engine.feed_bytes_at(format!("{chunk}\n").as_bytes(), ts);
+        }
+        assert!(
+            !engine.is_streaming_cadence(),
+            "Short window should not be classified as streaming even at high throughput"
+        );
+    }
+
+    #[test]
+    fn infer_streaming_during_execution() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.last_command_state = Some(CommandState::Executing);
+        let base = Instant::now();
+        // Sustained high-throughput output without spinner patterns.
+        for i in 0..10 {
+            let chunk = "x".repeat(200);
+            let ts = base + Duration::from_millis(300 * i);
+            engine.feed_bytes_at(format!("{chunk}\n").as_bytes(), ts);
+        }
+        let status = engine.infer_status();
+        assert_eq!(
+            status,
+            InferredStatus::Streaming,
+            "High-throughput cadence during execution should infer Streaming"
+        );
+    }
+
+    #[test]
+    fn infer_streaming_from_output_fallback() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        // No command state -- falls through to infer_from_output_or.
+        let base = Instant::now();
+        for i in 0..10 {
+            let chunk = "y".repeat(200);
+            let ts = base + Duration::from_millis(300 * i);
+            engine.feed_bytes_at(format!("{chunk}\n").as_bytes(), ts);
+        }
+        let status = engine.infer_status();
+        assert_eq!(
+            status,
+            InferredStatus::Streaming,
+            "High-throughput cadence without OSC 633 should infer Streaming"
+        );
+    }
+
+    // -- Thinking state --------------------------------------------------------
+
+    #[test]
+    fn infer_thinking_during_execution_spinner() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.last_command_state = Some(CommandState::Executing);
+        engine.push_line("⠙ Working on it...".to_string());
+        let status = engine.infer_status();
+        assert_eq!(
+            status,
+            InferredStatus::Thinking,
+            "Spinner during execution should infer Thinking"
+        );
+    }
+
+    #[test]
+    fn infer_thinking_from_output_fallback() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        // No command state.
+        engine.push_line("Thinking...".to_string());
+        let status = engine.infer_status();
+        assert_eq!(
+            status,
+            InferredStatus::Thinking,
+            "Spinner pattern without OSC 633 should infer Thinking"
+        );
+    }
+
+    #[test]
+    fn thinking_does_not_override_tool_use() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.last_command_state = Some(CommandState::Executing);
+        // Tool call pattern takes priority over spinner.
+        engine.push_line("Read(/home/user/file.rs)".to_string());
+        engine.push_line("⠋ reading...".to_string());
+        let status = engine.infer_status();
+        assert_eq!(
+            status,
+            InferredStatus::ToolUse {
+                tool_name: "Read".to_string()
+            },
+            "Tool use should take priority over thinking"
+        );
+    }
+
+    // -- Status string coverage ------------------------------------------------
+
+    #[test]
+    fn status_str_streaming() {
+        assert_eq!(InferredStatus::Streaming.status_str(), "streaming");
+    }
+
+    #[test]
+    fn status_str_thinking() {
+        assert_eq!(InferredStatus::Thinking.status_str(), "thinking");
     }
 }
