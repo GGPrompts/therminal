@@ -35,6 +35,8 @@ pub enum ShellType {
     Zsh,
     Fish,
     PowerShell,
+    /// WSL — launches a Linux shell inside Windows Subsystem for Linux.
+    Wsl,
     Unknown,
 }
 
@@ -49,6 +51,7 @@ pub fn detect_shell_type(shell: &str) -> ShellType {
         "zsh" => ShellType::Zsh,
         "fish" => ShellType::Fish,
         "pwsh" | "powershell" | "pwsh.exe" | "powershell.exe" => ShellType::PowerShell,
+        "wsl" | "wsl.exe" => ShellType::Wsl,
         _ => ShellType::Unknown,
     }
 }
@@ -82,9 +85,17 @@ fn get_default_shell() -> String {
     }
     #[cfg(windows)]
     {
-        // Prefer PowerShell over cmd.exe for a modern shell experience.
-        // Check for pwsh (PowerShell 7+) first, then fall back to
-        // Windows PowerShell 5.1, then cmd.exe as last resort.
+        // On Windows, prefer WSL if available (gives a full Linux shell),
+        // then PowerShell, then cmd.exe as last resort.
+        if std::process::Command::new("wsl.exe")
+            .arg("--status")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return "wsl.exe".to_owned();
+        }
         for candidate in &["pwsh.exe", "powershell.exe"] {
             if std::process::Command::new(candidate)
                 .arg("--version")
@@ -292,6 +303,32 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
                 shell = shell,
                 "powershell: using -NoExit -Command for integration"
             );
+            Ok(cmd)
+        }
+        ShellType::Wsl => {
+            // WSL launches a Linux shell on Windows. The Linux shell will
+            // detect TERM_PROGRAM=therminal and auto-source integration
+            // scripts from the user's dotfiles (if installed in WSL).
+            //
+            // THERMINAL_RESOURCES_DIR needs to be a WSL-accessible path.
+            // Convert the Windows path to /mnt/<drive>/... format.
+            let mut cmd = CommandBuilder::new(shell);
+            cmd.env("TERM_PROGRAM", "therminal");
+            cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+
+            // Convert Windows resources path to WSL path for the Linux shell.
+            let resources = therminal_runtime::paths::resources_dir();
+            let resources_str = resources.to_string_lossy();
+            // Convert C:\foo\bar -> /mnt/c/foo/bar
+            if resources_str.len() >= 3 && resources_str.as_bytes()[1] == b':' {
+                let drive = (resources_str.as_bytes()[0] as char).to_ascii_lowercase();
+                let rest = resources_str[2..].replace('\\', "/");
+                cmd.env("THERMINAL_RESOURCES_DIR", format!("/mnt/{drive}{rest}"));
+            } else {
+                cmd.env("THERMINAL_RESOURCES_DIR", &resources);
+            }
+
+            debug!(shell = shell, "wsl: launching with TERM_PROGRAM forwarding");
             Ok(cmd)
         }
         ShellType::Unknown => {
