@@ -636,6 +636,11 @@ impl App {
             gpu.config.height,
         );
 
+        // ── Overlay pass: chrome backgrounds ────────────────────────────
+        // Collect chrome overlay quads (status bar bg, visual bell) into a
+        // shared OverlayLayer and render them in a single batched pass.
+        let mut chrome_overlay = crate::overlay::OverlayLayer::new();
+
         // ── Status bar ──────────────────────────────────────────────────
         if self.config.general.show_status_bar {
             // Gather status info from the focused pane.
@@ -681,6 +686,13 @@ impl App {
                 active_workspace,
                 is_zoomed: self.zoomed_layout.is_some(),
             };
+
+            // Push status bar background to overlay layer.
+            chrome::push_status_bar_bg_overlay(
+                gpu.config.width,
+                gpu.config.height,
+                &mut chrome_overlay,
+            );
 
             let mut encoder = gpu
                 .device
@@ -838,8 +850,20 @@ impl App {
             }
         };
         if bell_intensity > 0.0 {
-            chrome::draw_visual_bell_overlay(
+            // Push visual bell quad to overlay layer (Modal tier, on top of everything).
+            chrome::push_visual_bell_overlay(
                 bell_intensity,
+                gpu.config.width,
+                gpu.config.height,
+                &mut chrome_overlay,
+            );
+        }
+
+        // ── Overlay pass: render all batched chrome/modal quads ─────────
+        // This is the second GPU pass — composites semi-transparent overlay
+        // geometry on top of the grid content in a single batched draw call.
+        if !chrome_overlay.is_empty() {
+            chrome_overlay.render(
                 renderer,
                 &gpu.device,
                 &gpu.queue,

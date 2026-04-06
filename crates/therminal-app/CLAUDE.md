@@ -25,6 +25,7 @@ src/
 │   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView)
 │   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
 ├── grid_renderer.rs     # wgpu text rendering, glyph cache, rect drawing
+├── overlay.rs           # OverlayLayer: two-pass alpha-blended overlay compositor
 ├── color_mapping.rs     # ANSI color to thermal palette / glyphon RGBA conversion
 ├── hotspot_detection.rs # File paths, errors, git refs, issue refs
 ├── url_detection.rs     # HTTP(S) URL regex detection
@@ -43,6 +44,26 @@ src/
 - `relayout_and_redraw()` — atomic layout + resize_all_panes + request_redraw
 
 Note: `get_layout()` borrows all of `self`, so methods needing simultaneous access to `self.grid_renderer` or `self.config` use direct field access instead.
+
+## Two-Pass Render Architecture
+
+Each frame is composited in two GPU passes, both writing to the same swapchain texture with `LoadOp::Load` for the second pass so the grid content is preserved:
+
+1. **Grid pass** — terminal cell content (backgrounds, glyphs, cursor, selection). Driven by `GridRenderer` and `render_panes_recursive` in `window/render.rs`. Each pane is rendered with its own command encoder so per-pane glyphon prepare/render cycles don't clobber the shared atlas before the GPU executes them. Pane headers, separators, and focus borders are drawn here as part of the per-pane sequence because they require glyphon text rendering which has its own prepare/render lifecycle.
+
+2. **Overlay pass** — semi-transparent chrome backgrounds, widget quads, and modal scrims composited via `OverlayLayer` (`overlay.rs`). Quads are collected per-frame, sorted by depth tier, batched into a single vertex buffer, and rendered in one draw call against the existing alpha-blended `rect_pipeline`.
+
+### `OverlayLayer`
+
+`OverlayLayer` is the per-frame collector for the overlay pass. It exposes `push_rect()` and `push_quad()` to add geometry, then `render()` to flush. Quads carry an `OverlayTier`:
+
+- **Chrome (0)** — status bar, tab bar, pane headers, separators, focus borders.
+- **Widget (1)** — Phase 6 overlay widgets (context gauges, tool call cards, thinking indicators).
+- **Modal (2)** — help overlay, context menus, visual bell, toast notifications.
+
+Tiers are sorted before vertex generation so higher tiers always composite on top of lower tiers. Within a tier, submission order is preserved.
+
+Currently the status bar background and visual bell are routed through `OverlayLayer` as the proof of concept. Foundation helpers `push_focus_border_overlay`, `push_header_bg_overlay`, and `push_separator_overlay` exist in `chrome.rs` for future migration of pane chrome backgrounds — they will be wired in once the corresponding text rendering can also be batched. New Phase 6 widgets should push their backgrounds via `OverlayLayer::push_rect` with the `Widget` tier.
 
 ## Status Bar
 

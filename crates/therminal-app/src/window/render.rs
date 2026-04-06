@@ -66,6 +66,13 @@ fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec
 // ── Recursive pane rendering ───────────────────────────────────────────
 
 /// Recursively render all panes in the layout tree.
+///
+/// Pass 1 of the two-pass renderer: terminal grid cells. Pane headers,
+/// separators, and focus borders are still drawn directly here as part
+/// of the per-pane sequence (they require glyphon text rendering which
+/// needs its own prepare/render cycle). The semi-transparent overlay
+/// pass for chrome backgrounds and modal widgets is composited in
+/// `OverlayLayer::render()` after all pane content has been submitted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_panes_recursive(
     node: &LayoutNode,
@@ -84,9 +91,6 @@ pub(crate) fn render_panes_recursive(
         LayoutNode::Leaf(pane) => {
             let idx = *pane_counter;
             *pane_counter += 1;
-            // Each pane gets its own encoder so that glyphon prepare()/render()
-            // for one pane doesn't overwrite another pane's glyph data in the
-            // shared atlas before the GPU executes the draw commands.
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pane_encoder"),
             });
@@ -138,7 +142,6 @@ pub(crate) fn render_panes_recursive(
                 surface_height,
             );
 
-            // Draw separator line between the two children.
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("separator_encoder"),
             });

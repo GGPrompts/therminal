@@ -3,6 +3,7 @@ mod color_mapping;
 mod grid_renderer;
 mod mcp_stdio;
 mod menu;
+mod overlay;
 mod pane;
 mod url_detection;
 mod window;
