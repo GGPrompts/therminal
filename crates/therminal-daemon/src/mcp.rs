@@ -669,6 +669,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: WriteToPaneParam = parse_args(args)?;
                 self.handle_write_to_pane(params).await
             }
+            "terminal.panes.get_geometry" => {
+                let params: GetPaneGeometryParam = parse_args(args)?;
+                self.handle_get_pane_geometry(params).await
+            }
             "terminal.panes.get_content" => {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_read_pane_content(params).await
