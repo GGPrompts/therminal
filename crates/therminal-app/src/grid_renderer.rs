@@ -309,6 +309,12 @@ pub struct GridRenderer {
     cursor_override: Option<[f32; 4]>,
     /// Override for selection color (from config.colors.selection).
     selection_override: Option<[f32; 4]>,
+
+    /// Cache for overlay text buffers (status bar, pane headers, tab bar).
+    /// Key: slot name (e.g. "header_index_0", "status_center", "tab_1").
+    /// Value: (cache_key, shaped Buffer). The cache_key encodes text + width + style
+    /// so we only re-shape when inputs actually change.
+    pub(crate) overlay_cache: HashMap<String, (String, Buffer)>,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -497,6 +503,7 @@ impl GridRenderer {
             fg_override: None,
             cursor_override: None,
             selection_override: None,
+            overlay_cache: HashMap::new(),
         }
     }
 
