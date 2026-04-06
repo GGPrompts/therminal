@@ -6,7 +6,7 @@
 //! visual element (inverted block).
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use alacritty_terminal::index::{Column, Line, Point};
@@ -163,6 +163,21 @@ struct CachedRow {
     cells: Vec<RenderCell>,
 }
 
+/// Lightweight key capturing the properties that affect glyph shaping for a cell.
+///
+/// When a damaged row is rebuilt, each cell's shape key is compared against the
+/// previously stored key.  If they match, the existing glyphon `Buffer` is kept
+/// instead of being dropped and recreated — avoiding an expensive
+/// `Buffer::new()` + `shape_until_scroll()` round-trip through cosmic-text.
+#[derive(Clone, PartialEq)]
+struct CellShapeKey {
+    text: String,
+    bold: bool,
+    italic: bool,
+    wide: bool,
+    fg: [f32; 4],
+}
+
 // ── Rect rendering (for cursor and cell backgrounds) ───────────────────────
 
 const RECT_SHADER: &str = r#"
@@ -269,6 +284,10 @@ pub struct GridRenderer {
 
     // Per-pane persistent per-cell glyphon Buffers — only rebuilt for damaged rows.
     pane_cell_buffers: HashMap<PaneId, Vec<Vec<Option<Buffer>>>>,
+
+    // Per-pane cell shape keys mirroring cell_buffers — used to skip reshaping
+    // cells whose text, flags, and color haven't changed.
+    pane_cell_shape_keys: HashMap<PaneId, Vec<Vec<Option<CellShapeKey>>>>,
 
     // Per-pane last cursor position to rebuild affected cell buffers when cursor moves.
     pane_last_cursor_pos: HashMap<PaneId, (usize, usize)>,
@@ -489,6 +508,7 @@ impl GridRenderer {
             padding_y,
             pane_row_cache: HashMap::new(),
             pane_cell_buffers: HashMap::new(),
+            pane_cell_shape_keys: HashMap::new(),
             pane_last_cursor_pos: HashMap::new(),
             current_pane: None,
             frame_count: 0,
@@ -599,6 +619,7 @@ impl GridRenderer {
 
         self.pane_row_cache.clear();
         self.pane_cell_buffers.clear();
+        self.pane_cell_shape_keys.clear();
         self.pane_last_cursor_pos.clear();
     }
 
@@ -659,6 +680,7 @@ impl GridRenderer {
         self.overlay_atlas.trim();
         self.pane_row_cache.clear();
         self.pane_cell_buffers.clear();
+        self.pane_cell_shape_keys.clear();
         self.pane_last_cursor_pos.clear();
     }
 
@@ -687,6 +709,7 @@ impl GridRenderer {
     pub fn remove_pane_cache(&mut self, pane_id: PaneId) {
         self.pane_row_cache.remove(&pane_id);
         self.pane_cell_buffers.remove(&pane_id);
+        self.pane_cell_shape_keys.remove(&pane_id);
         self.pane_last_cursor_pos.remove(&pane_id);
     }
 
@@ -707,6 +730,7 @@ impl GridRenderer {
         // Ensure cache entries exist for this pane.
         self.pane_row_cache.entry(pane_id).or_default();
         self.pane_cell_buffers.entry(pane_id).or_default();
+        self.pane_cell_shape_keys.entry(pane_id).or_default();
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -734,7 +758,7 @@ impl GridRenderer {
     ///
     /// Takes pre-collected `RenderCell` snapshots (only from damaged rows when
     /// partial damage is available) and cursor info.
-    /// `damaged_rows`: None means full redraw; Some(set) means only those rows changed.
+    /// `damaged_rows`: None means full redraw; Some(slice) means only rows marked `true` changed.
     pub fn render(
         &mut self,
         cells: &[RenderCell],
@@ -742,7 +766,7 @@ impl GridRenderer {
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
-        damaged_rows: Option<&HashSet<usize>>,
+        damaged_rows: Option<&[bool]>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -778,7 +802,7 @@ impl GridRenderer {
         for (row_idx, row_cells) in new_row_cells.into_iter().enumerate() {
             let is_damaged = match damaged_rows {
                 None => true,
-                Some(set) => set.contains(&row_idx),
+                Some(d) => d.get(row_idx).copied().unwrap_or(false),
             };
             if is_damaged {
                 if row_cells.is_empty() {
@@ -818,7 +842,7 @@ impl GridRenderer {
         surface_width: u32,
         surface_height: u32,
     ) {
-        let empty = HashSet::new();
+        let empty: Vec<bool> = Vec::new();
         self.render_from_cache(
             cursor,
             screen_lines,
@@ -841,7 +865,7 @@ impl GridRenderer {
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
-        damaged_rows: Option<&HashSet<usize>>,
+        damaged_rows: Option<&[bool]>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -860,6 +884,10 @@ impl GridRenderer {
         let pane_id = self.current_pane.unwrap_or(0);
         let row_cache = self.pane_row_cache.remove(&pane_id).unwrap_or_default();
         let mut cell_buffers = self.pane_cell_buffers.remove(&pane_id).unwrap_or_default();
+        let mut cell_shape_keys = self
+            .pane_cell_shape_keys
+            .remove(&pane_id)
+            .unwrap_or_default();
         let prev_cursor = self.pane_last_cursor_pos.get(&pane_id).copied();
 
         // ── Collect background rects from all cached rows ───────────────
@@ -1069,6 +1097,10 @@ impl GridRenderer {
             cell_buffers.push(Vec::new());
         }
         cell_buffers.truncate(screen_lines);
+        while cell_shape_keys.len() < screen_lines {
+            cell_shape_keys.push(Vec::new());
+        }
+        cell_shape_keys.truncate(screen_lines);
 
         let full_rebuild = damaged_rows.is_none();
 
@@ -1081,7 +1113,7 @@ impl GridRenderer {
                 true
             } else {
                 let in_damage_set = damaged_rows
-                    .map(|set| set.contains(&row_idx))
+                    .map(|d| d.get(row_idx).copied().unwrap_or(false))
                     .unwrap_or(false);
                 let is_cursor_row = row_idx == cursor_row;
                 let was_cursor_row = prev_cursor.map(|(r, _)| r == row_idx).unwrap_or(false);
@@ -1096,6 +1128,7 @@ impl GridRenderer {
                 Some(r) => r,
                 None => {
                     cell_buffers[row_idx].clear();
+                    cell_shape_keys[row_idx].clear();
                     continue;
                 }
             };
@@ -1103,6 +1136,7 @@ impl GridRenderer {
             let row_cells = &row.cells;
             if row_cells.is_empty() {
                 cell_buffers[row_idx].clear();
+                cell_shape_keys[row_idx].clear();
                 continue;
             }
 
@@ -1110,10 +1144,12 @@ impl GridRenderer {
             while cell_buffers[row_idx].len() < max_col {
                 cell_buffers[row_idx].push(None);
             }
-
-            for slot in cell_buffers[row_idx].iter_mut() {
-                *slot = None;
+            while cell_shape_keys[row_idx].len() < max_col {
+                cell_shape_keys[row_idx].push(None);
             }
+
+            // Track which columns have visible content so we can clear stale buffers.
+            let mut occupied_cols = vec![false; max_col];
 
             for cell in row_cells {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -1134,10 +1170,39 @@ impl GridRenderer {
                 };
 
                 if cell.c == ' ' && !is_block_cursor {
+                    if cell.col < cell_buffers[row_idx].len() {
+                        cell_buffers[row_idx][cell.col] = None;
+                        cell_shape_keys[row_idx][cell.col] = None;
+                    }
+                    if cell.col < occupied_cols.len() {
+                        occupied_cols[cell.col] = true;
+                    }
                     continue;
                 }
 
-                let buf_width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                if cell.col < occupied_cols.len() {
+                    occupied_cols[cell.col] = true;
+                }
+
+                let new_key = CellShapeKey {
+                    text: cell.text.clone(),
+                    bold: cell.flags.contains(Flags::BOLD),
+                    italic: cell.flags.contains(Flags::ITALIC),
+                    wide: cell.flags.contains(Flags::WIDE_CHAR),
+                    fg,
+                };
+
+                // If the existing buffer was shaped with identical parameters, keep it.
+                if let Some(old_key) = cell_shape_keys[row_idx]
+                    .get(cell.col)
+                    .and_then(|k| k.as_ref())
+                {
+                    if *old_key == new_key {
+                        continue;
+                    }
+                }
+
+                let buf_width = if new_key.wide {
                     self.cell_width * 2.0
                 } else {
                     self.cell_width
@@ -1162,7 +1227,21 @@ impl GridRenderer {
                 };
                 buf.set_text(&mut self.font_system, &cell.text, attrs, shaping);
                 buf.shape_until_scroll(&mut self.font_system, false);
+
+                cell_shape_keys[row_idx][cell.col] = Some(new_key);
             }
+
+            // Clear buffers for columns no longer occupied.
+            for col in 0..cell_buffers[row_idx].len() {
+                if col < occupied_cols.len() && !occupied_cols[col] {
+                    cell_buffers[row_idx][col] = None;
+                    cell_shape_keys[row_idx][col] = None;
+                }
+            }
+
+            // Truncate trailing slots if the row shrank.
+            cell_buffers[row_idx].truncate(max_col);
+            cell_shape_keys[row_idx].truncate(max_col);
         }
 
         self.pane_last_cursor_pos
@@ -1316,6 +1395,7 @@ impl GridRenderer {
         // ── Restore per-pane caches back into the HashMaps ──────────────
         self.pane_row_cache.insert(pane_id, row_cache);
         self.pane_cell_buffers.insert(pane_id, cell_buffers);
+        self.pane_cell_shape_keys.insert(pane_id, cell_shape_keys);
     }
 }
 

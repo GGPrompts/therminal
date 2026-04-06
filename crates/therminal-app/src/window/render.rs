@@ -3,8 +3,6 @@
 //! Contains the recursive pane traversal that renders each pane's terminal
 //! content, headers, and separators.
 
-use std::collections::HashSet;
-
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermDamage;
 
@@ -133,19 +131,17 @@ fn render_single_pane(
     let vp = pane.viewport;
     let mut term_guard = pane.term.lock();
 
+    let screen_lines = term_guard.screen_lines();
     let damaged_rows = match term_guard.damage() {
         TermDamage::Full => None,
         TermDamage::Partial(iter) => {
-            let set: HashSet<usize> = iter
-                .filter_map(|bounds| {
-                    if bounds.is_damaged() {
-                        Some(bounds.line)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            Some(set)
+            let mut damaged = vec![false; screen_lines];
+            for bounds in iter {
+                if bounds.is_damaged() && bounds.line < screen_lines {
+                    damaged[bounds.line] = true;
+                }
+            }
+            Some(damaged)
         }
     };
 
@@ -154,7 +150,6 @@ fn render_single_pane(
     renderer.set_current_pane(pane.id);
 
     let content = term_guard.renderable_content();
-    let screen_lines = term_guard.screen_lines();
     let display_offset = content.display_offset;
     let cursor = content.cursor;
     let selection_range = content.selection;
@@ -163,8 +158,8 @@ fn render_single_pane(
     // When partial damage reports an empty set, nothing changed — use
     // the existing cached state without collecting cells or running
     // URL/hotspot detection.
-    if let Some(ref set) = damaged_rows {
-        if set.is_empty() {
+    if let Some(ref damaged) = damaged_rows {
+        if !damaged.iter().any(|&d| d) {
             term_guard.reset_damage();
             drop(term_guard);
 
@@ -263,11 +258,11 @@ fn render_single_pane(
     // ── Damage-aware URL/hotspot detection ───────────────────────────────
     // When partial damage is available, only run detection on damaged rows
     // to avoid re-scanning the entire visible area every frame.
-    if let Some(ref damage_set) = damaged_rows {
+    if let Some(ref damage_vec) = damaged_rows {
         // Filter to only damaged-row cells for detection.
         let mut damaged_cells: Vec<RenderCell> = cells
             .iter()
-            .filter(|c| damage_set.contains(&c.row))
+            .filter(|c| damage_vec.get(c.row).copied().unwrap_or(false))
             .cloned()
             .collect();
 
@@ -343,7 +338,7 @@ fn render_single_pane(
         screen_lines,
         selection_range.as_ref(),
         display_offset,
-        damaged_rows.as_ref(),
+        damaged_rows.as_deref(),
         device,
         queue,
         encoder,
