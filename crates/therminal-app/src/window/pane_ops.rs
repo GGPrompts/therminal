@@ -508,8 +508,11 @@ impl App {
 
     // ── Batch pane operations ─────────────────────────────────────────
 
-    /// Close all panes, snapshotting the layout tree for later restore.
-    /// Drops all PTYs immediately and does a single rebalance at the end.
+    /// Close all panes in the current workspace.
+    ///
+    /// If other workspaces still have panes, removes the now-empty workspace
+    /// and switches to the nearest one. Only exits the app when no panes
+    /// remain across all workspaces.
     pub(crate) fn close_all_panes(&mut self) {
         if let Some(last) = self.last_close_action
             && last.elapsed() < std::time::Duration::from_millis(100)
@@ -524,22 +527,29 @@ impl App {
             None => return,
         };
 
-        // Snapshot the tree structure before destroying it.
-        wm.save_layout();
-
-        // Take and drop the layout tree -- this drops all PaneState including
-        // PTY masters and writers, causing reader threads to hit EOF and exit.
+        // Drop the active workspace's layout (kills all PTYs in this tab).
         let layout = wm.take_layout();
         drop(layout);
 
-        // Keep workspaces alive (saved_layout lives there now).
-        // workspaces == None means "exit", not "waiting for restore".
-        self.set_focused_pane(None);
+        if wm.gc_empty_workspaces() {
+            // Other workspaces have panes — switch to one.
+            info!(
+                "Closed all panes in workspace, switched to workspace {}",
+                wm.active_id()
+            );
+            let focus = wm.focused_pane();
+            self.set_focused_pane(focus);
+            self.relayout_and_redraw();
+        } else {
+            // No panes anywhere — exit.
+            info!("Closed all panes, exiting");
+            self.set_focused_pane(None);
+            self.workspaces = None;
+            self.request_redraw();
+        }
+
         self.selection_pane = None;
         self.selection_in_progress = false;
-
-        info!("Closed all panes (layout snapshot saved)");
-        self.request_redraw();
     }
 
     /// Spawn N panes with auto-tiling layout.

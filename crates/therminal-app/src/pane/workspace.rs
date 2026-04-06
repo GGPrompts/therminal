@@ -296,6 +296,7 @@ impl WorkspaceManager {
     }
 
     /// Save a snapshot of the current layout for later restore.
+    #[allow(dead_code)]
     pub fn save_layout(&mut self) {
         let layout = &self.workspaces[self.active_idx].layout;
         self.saved_layout = Some(layout.snapshot());
