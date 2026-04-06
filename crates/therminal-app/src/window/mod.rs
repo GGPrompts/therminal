@@ -54,6 +54,8 @@ use mouse::HeaderAction;
 enum UserEvent {
     /// New bytes are available from a pane's PTY; request a redraw.
     PtyOutput,
+    /// A pane's PTY has closed (shell exited); remove the pane.
+    PaneExited(crate::pane::PaneId),
     /// Config file changed; apply new settings.
     ConfigChanged(Box<ConfigChanged>),
 }
@@ -356,11 +358,17 @@ impl App {
             interceptor_cfg,
             scan_interval_secs,
             &spawn_options,
-            |_pane_id| {
-                let p = proxy.clone();
-                Box::new(move || {
-                    let _ = p.send_event(UserEvent::PtyOutput);
-                })
+            |pane_id| {
+                let p1 = proxy.clone();
+                let p2 = proxy.clone();
+                crate::pane::PaneCallbacks {
+                    wake: Box::new(move || {
+                        let _ = p1.send_event(UserEvent::PtyOutput);
+                    }),
+                    on_exit: Box::new(move || {
+                        let _ = p2.send_event(UserEvent::PaneExited(pane_id));
+                    }),
+                }
             },
         ) {
             Ok(p) => p,
@@ -1118,6 +1126,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
+            }
+            UserEvent::PaneExited(pane_id) => {
+                info!(pane_id, "pane PTY exited, closing pane");
+                self.close_pane_by_id(pane_id);
             }
             UserEvent::ConfigChanged(changed) => {
                 info!("applying config change (hot-reload)");

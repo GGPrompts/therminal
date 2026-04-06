@@ -8,11 +8,27 @@ use std::io::Write as IoWrite;
 use alacritty_terminal::term::TermMode;
 use tracing::{info, warn};
 
-use crate::pane::{FocusDirection, LayoutNode, LayoutSnapshot, PaneId, SplitDirection};
+use crate::pane::{
+    FocusDirection, LayoutNode, LayoutSnapshot, PaneCallbacks, PaneId, SplitDirection,
+};
 use therminal_core::geometry::Rect;
 use therminal_terminal::interceptor::InterceptorConfig;
 
-use super::App;
+use super::{App, EventLoopProxy, UserEvent};
+
+/// Build `PaneCallbacks` from an event-loop proxy.
+fn make_pane_callbacks(proxy: &EventLoopProxy<UserEvent>, pane_id: PaneId) -> PaneCallbacks {
+    let p1 = proxy.clone();
+    let p2 = proxy.clone();
+    PaneCallbacks {
+        wake: Box::new(move || {
+            let _ = p1.send_event(UserEvent::PtyOutput);
+        }),
+        on_exit: Box::new(move || {
+            let _ = p2.send_event(UserEvent::PaneExited(pane_id));
+        }),
+    }
+}
 
 /// Helper macro: get the active layout mutably from workspaces.
 macro_rules! ws_layout_mut {
@@ -112,12 +128,7 @@ impl App {
                 interceptor_cfg.clone(),
                 scan_interval_secs,
                 &spawn_options,
-                |_pane_id| {
-                    let p = proxy.clone();
-                    Box::new(move || {
-                        let _ = p.send_event(super::UserEvent::PtyOutput);
-                    })
-                },
+                |pane_id| make_pane_callbacks(&proxy, pane_id),
             ) {
                 Ok(pane) => Some(pane),
                 Err(e) => {
@@ -244,12 +255,7 @@ impl App {
                     interceptor_cfg.clone(),
                     scan_interval_secs,
                     &spawn_options,
-                    |_pane_id| {
-                        let p = proxy.clone();
-                        Box::new(move || {
-                            let _ = p.send_event(super::UserEvent::PtyOutput);
-                        })
-                    },
+                    |pane_id| make_pane_callbacks(&proxy, pane_id),
                 ) {
                     Ok(pane) => Some(pane),
                     Err(e) => {
@@ -666,7 +672,6 @@ impl App {
 
         match snapshot {
             LayoutSnapshot::Leaf => {
-                let p = proxy.clone();
                 let cfg = interceptor_cfg.clone();
                 match crate::pane::spawn_pane(
                     rect,
@@ -675,12 +680,7 @@ impl App {
                     cfg,
                     scan_interval_secs,
                     spawn_options,
-                    |_pane_id| {
-                        let p = p.clone();
-                        Box::new(move || {
-                            let _ = p.send_event(super::UserEvent::PtyOutput);
-                        })
-                    },
+                    |pane_id| make_pane_callbacks(proxy, pane_id),
                 ) {
                     Ok(pane) => Some(LayoutNode::Leaf(pane)),
                     Err(e) => {
@@ -781,12 +781,7 @@ impl App {
                 interceptor_cfg.clone(),
                 scan_interval_secs,
                 &spawn_options,
-                |_pane_id| {
-                    let p = proxy.clone();
-                    Box::new(move || {
-                        let _ = p.send_event(super::UserEvent::PtyOutput);
-                    })
-                },
+                |pane_id| make_pane_callbacks(&proxy, pane_id),
             ) {
                 Ok(pane) => {
                     let id = pane.id;
@@ -865,12 +860,7 @@ impl App {
                 interceptor_cfg.clone(),
                 scan_interval_secs,
                 &spawn_options,
-                |_pane_id| {
-                    let p = proxy.clone();
-                    Box::new(move || {
-                        let _ = p.send_event(super::UserEvent::PtyOutput);
-                    })
-                },
+                |pane_id| make_pane_callbacks(&proxy, pane_id),
             ) {
                 Ok(pane) => {
                     let id = pane.id;

@@ -1144,13 +1144,21 @@ pub fn next_pane_id() -> PaneId {
     NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Callbacks for pane lifecycle events.
+pub struct PaneCallbacks {
+    /// Called repeatedly when new PTY data arrives (wake the event loop).
+    pub wake: Box<dyn Fn() + Send + 'static>,
+    /// Called once when the PTY closes (shell exited).
+    pub on_exit: Box<dyn FnOnce() + Send + 'static>,
+}
+
 /// Spawn a new pane with its own PTY, Term, and reader thread.
 ///
-/// `proxy_fn` is called with the pane_id to create a wake callback that
-/// notifies the event loop when new PTY data arrives.
+/// `callback_fn` is called with the pane_id to create wake and exit callbacks.
 ///
 /// `interceptor_config` controls which OSC sequence families are intercepted.
 /// `scan_interval_secs` sets the process-detector scan interval (0 = disabled).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pane<F>(
     viewport: Rect,
     renderer: &GridRenderer,
@@ -1158,10 +1166,10 @@ pub fn spawn_pane<F>(
     interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
     scan_interval_secs: u64,
     spawn_options: &therminal_terminal::pty::SpawnOptions,
-    proxy_fn: F,
+    callback_fn: F,
 ) -> Result<PaneState, anyhow::Error>
 where
-    F: FnOnce(PaneId) -> Box<dyn Fn() + Send + 'static>,
+    F: FnOnce(PaneId) -> PaneCallbacks,
 {
     let id = next_pane_id();
     let (cols, rows) = grid_size_for_rect(viewport, renderer);
@@ -1196,7 +1204,9 @@ where
 
     // Spawn PTY reader thread for this pane.
     let term_for_reader = Arc::clone(&term);
-    let wake = proxy_fn(id);
+    let callbacks = callback_fn(id);
+    let wake = callbacks.wake;
+    let on_exit = callbacks.on_exit;
     thread::Builder::new()
         .name(format!("pty-reader-{id}"))
         .spawn(move || {
@@ -1208,6 +1218,7 @@ where
                 scan_interval_secs,
                 status_for_reader,
             );
+            on_exit();
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn pane PTY reader thread: {e}"))?;
 
