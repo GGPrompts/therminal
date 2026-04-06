@@ -70,9 +70,16 @@ static TS_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Git short/long hash: 7–40 hex characters, word-bounded.
 static GIT_HASH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9a-f]{7,40}\b").unwrap());
 
-/// Git branch name in `git branch` output: lines starting with `* ` or `  `.
-static GIT_BRANCH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[* ] {1,2}([A-Za-z0-9_/\-\.]+)").unwrap());
+/// Git branch name in `git branch` output: current branch line starts with `* `.
+/// Requires `* ` prefix (current branch indicator) or that the name contains
+/// `/` or `-` (which real branch names almost always do) to avoid false
+/// positives on indented prose.
+static GIT_BRANCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:\* ([A-Za-z0-9_/\-\.]+)|  ([A-Za-z0-9_\.][-A-Za-z0-9_/\.]*[/\-][A-Za-z0-9_/\-\.]*))",
+    )
+    .unwrap()
+});
 
 /// Issue/PR reference: `#1234` or `PREFIX-123` (2–8 uppercase prefix).
 static ISSUE_REF_RE: LazyLock<Regex> =
@@ -182,7 +189,9 @@ pub(crate) fn detect_hotspots(cells: &[RenderCell], screen_lines: usize) -> Vec<
 
         // ── Git branch names ─────────────────────────────────────────
         for cap in GIT_BRANCH_RE.captures_iter(&text) {
-            if let Some(m) = cap.get(1) {
+            // Group 1: `* branch` (current branch), Group 2: `  branch/with-sep`
+            let m = cap.get(1).or_else(|| cap.get(2));
+            if let Some(m) = m {
                 let (sc, ec) = byte_to_cols(m.start(), m.end());
                 hotspots.push(Hotspot {
                     kind: HotspotKind::GitRef,
@@ -317,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_git_branch() {
+    fn detects_git_branch_current() {
         let cells = cells_from_str(0, "* main");
         let hotspots = detect_hotspots(&cells, 1);
         let gr: Vec<_> = hotspots
@@ -326,6 +335,29 @@ mod tests {
             .collect();
         assert_eq!(gr.len(), 1);
         assert_eq!(&*gr[0].text, "main");
+    }
+
+    #[test]
+    fn detects_git_branch_with_separator() {
+        let cells = cells_from_str(0, "  feature/my-branch");
+        let hotspots = detect_hotspots(&cells, 1);
+        let gr: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::GitRef)
+            .collect();
+        assert_eq!(gr.len(), 1);
+        assert_eq!(&*gr[0].text, "feature/my-branch");
+    }
+
+    #[test]
+    fn no_false_positive_on_indented_prose() {
+        let cells = cells_from_str(0, "  This is a normal paragraph line");
+        let hotspots = detect_hotspots(&cells, 1);
+        let gr: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::GitRef)
+            .collect();
+        assert_eq!(gr.len(), 0, "indented prose should not match as git branch");
     }
 
     #[test]
