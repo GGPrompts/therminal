@@ -319,9 +319,12 @@ impl App {
                 self.finalize_selection();
 
                 // Single click on a hyperlinked cell: open the URL.
+                // Single click on a hotspot cell: open the action palette.
                 if self.click_count == 1 && self.last_click_pos == Some((col, row)) {
                     if let Some(url) = self.hyperlink_at(row, col) {
                         self.open_hyperlink(&url);
+                    } else {
+                        self.handle_hotspot_click(row, col);
                     }
                 }
             }
@@ -564,22 +567,53 @@ impl App {
             .and_then(|r| r.hyperlink_map.get(&(row, col)).cloned())
     }
 
-    /// Update cursor icon based on whether the hovered cell has a hyperlink.
+    /// Update cursor icon based on whether the hovered cell has a hyperlink or hotspot.
     fn update_hyperlink_hover(&mut self, row: usize, col: usize) {
         use winit::window::CursorIcon;
 
         let on_link = self.hyperlink_at(row, col).is_some();
-        if on_link && !self.hyperlink_cursor_active {
+        let on_hotspot = self.hotspot_at(row, col).is_some();
+        let want_pointer = on_link || on_hotspot;
+        if want_pointer && !self.hyperlink_cursor_active {
             self.hyperlink_cursor_active = true;
             if let Some(w) = self.window.as_ref() {
                 w.set_cursor(CursorIcon::Pointer);
             }
-        } else if !on_link && self.hyperlink_cursor_active {
+        } else if !want_pointer && self.hyperlink_cursor_active {
             self.hyperlink_cursor_active = false;
             if let Some(w) = self.window.as_ref() {
                 w.set_cursor(CursorIcon::Default);
             }
         }
+    }
+
+    /// Look up the hotspot at a given grid (row, col) from the renderer's map.
+    fn hotspot_at(
+        &self,
+        row: usize,
+        col: usize,
+    ) -> Option<(crate::hotspot_detection::HotspotKind, String)> {
+        self.grid_renderer
+            .as_ref()
+            .and_then(|r| r.hotspot_map.get(&(row, col)).cloned())
+    }
+
+    /// Handle a click on a hotspot cell: open an action palette.
+    fn handle_hotspot_click(&mut self, row: usize, col: usize) -> bool {
+        let (kind, text) = match self.hotspot_at(row, col) {
+            Some(h) => h,
+            None => return false,
+        };
+        let (px, py) = match self.cursor_position {
+            Some(pos) => pos,
+            None => return false,
+        };
+        let menu = crate::menu::build_hotspot_palette(kind, text, (px as f32, py as f32));
+        self.active_menu = Some(menu);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        true
     }
 
     /// Open a hyperlink URL using the platform default handler.

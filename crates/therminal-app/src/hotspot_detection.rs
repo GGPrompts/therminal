@@ -251,7 +251,7 @@ mod tests {
                 flags: Flags::empty(),
                 hyperlink: None,
                 hyperlink_source: None,
-                hotspot: None,
+                hotspot: None, // (HotspotKind, String) tuple when annotated
             })
             .collect()
     }

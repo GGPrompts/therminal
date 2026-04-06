@@ -255,6 +255,110 @@ pub(crate) fn build_selection_menu(
     }
 }
 
+// ── Hotspot action palette ────────────────────────────────────────────
+
+/// Build an action palette for a detected hotspot.
+///
+/// Shows contextual actions based on the hotspot kind (file path, error
+/// location, git ref, issue ref). Actions use `HotspotCopy` / `HotspotOpenInEditor`
+/// / `HotspotOpenExternal` KeyAction variants.
+pub(crate) fn build_hotspot_palette(
+    kind: crate::hotspot_detection::HotspotKind,
+    text: String,
+    position: (f32, f32),
+) -> ContextMenu {
+    use crate::hotspot_detection::HotspotKind;
+
+    let sections = match kind {
+        HotspotKind::FilePath | HotspotKind::ErrorLocation => {
+            // Parse path and optional line:col for display.
+            let (path, line_suffix) = parse_file_path_parts(&text);
+            let mut items = vec![
+                MenuItem {
+                    label: "Open in editor",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotOpenInEditor(text.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Copy path",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(path.to_string()),
+                    enabled: true,
+                },
+            ];
+            if !line_suffix.is_empty() {
+                items.push(MenuItem {
+                    label: "Copy path:line",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(text.clone()),
+                    enabled: true,
+                });
+            }
+            vec![MenuSection(items)]
+        }
+        HotspotKind::GitRef => {
+            vec![MenuSection(vec![
+                MenuItem {
+                    label: "Copy hash",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(text.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Show in git log",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(format!("git log {text}")),
+                    enabled: true,
+                },
+            ])]
+        }
+        HotspotKind::IssueRef => {
+            vec![MenuSection(vec![
+                MenuItem {
+                    label: "Copy ref",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(text.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Open issue",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotOpenExternal(text.clone()),
+                    enabled: true,
+                },
+            ])]
+        }
+        HotspotKind::Url => {
+            // URLs are handled by hyperlink click, but included for completeness.
+            vec![MenuSection(vec![MenuItem {
+                label: "Open URL",
+                hotkey_hint: None,
+                action: KeyAction::HotspotOpenExternal(text.clone()),
+                enabled: true,
+            }])]
+        }
+    };
+
+    ContextMenu {
+        sections,
+        position,
+        selected_index: None,
+        context: MenuContext::Pane { pane_id: 0 },
+    }
+}
+
+/// Split a file path like `src/main.rs:42:5` into (`src/main.rs`, `:42:5`).
+fn parse_file_path_parts(text: &str) -> (&str, &str) {
+    // Find the first colon that is followed by a digit (line number).
+    if let Some(idx) = text.find(':') {
+        if text[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) {
+            return (&text[..idx], &text[idx..]);
+        }
+    }
+    (text, "")
+}
+
 // ── Menu rendering constants ──────────────────────────────────────────
 
 /// Horizontal padding inside the menu.

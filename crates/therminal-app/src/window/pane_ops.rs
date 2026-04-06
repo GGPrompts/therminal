@@ -463,6 +463,41 @@ impl App {
         }
     }
 
+    /// Open a file path in the user's `$EDITOR` or via `xdg-open` / `open`.
+    ///
+    /// The path may include `:line` or `:line:col` suffixes. If `$EDITOR` supports
+    /// `+line` syntax (vim, nvim, nano, code, etc.), we pass it; otherwise we
+    /// fall back to `xdg-open` / `open` with just the file path.
+    pub(crate) fn open_in_editor(&self, path_with_loc: &str) {
+        use std::process::Command;
+
+        // Split path from optional :line:col.
+        let (path, line) = match path_with_loc.find(':') {
+            Some(idx) if path_with_loc[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
+                let rest = &path_with_loc[idx + 1..];
+                let line_str = rest.split(':').next().unwrap_or("1");
+                (&path_with_loc[..idx], line_str)
+            }
+            _ => (path_with_loc, "1"),
+        };
+
+        if let Ok(editor) = std::env::var("EDITOR") {
+            // Many editors support +line syntax.
+            let arg = format!("+{line}");
+            match Command::new(&editor).arg(&arg).arg(path).spawn() {
+                Ok(_) => return,
+                Err(e) => {
+                    tracing::warn!("failed to launch $EDITOR ({editor}): {e}");
+                }
+            }
+        }
+
+        // Fallback: xdg-open / open.
+        if let Err(e) = open::that(path) {
+            tracing::warn!("failed to open {path}: {e}");
+        }
+    }
+
     /// Clear the active selection on all panes.
     pub(crate) fn clear_selection(&mut self) {
         if let Some(pane_id) = self.selection_pane.take() {

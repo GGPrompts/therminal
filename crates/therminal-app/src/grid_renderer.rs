@@ -141,8 +141,8 @@ pub struct RenderCell {
     pub hyperlink: Option<String>,
     /// Source of the hyperlink (OSC 8 vs regex), controls underline style.
     pub hyperlink_source: Option<HyperlinkSource>,
-    /// Hotspot kind for this cell, if it's part of an actionable pattern.
-    pub hotspot: Option<crate::hotspot_detection::HotspotKind>,
+    /// Hotspot annotation for this cell: (kind, full matched text).
+    pub hotspot: Option<(crate::hotspot_detection::HotspotKind, String)>,
 }
 
 /// Build the full rendered text for a terminal cell.
@@ -286,6 +286,10 @@ pub struct GridRenderer {
     /// Hyperlink URL map: (row, col) -> URL string.
     /// Rebuilt each frame from cell hyperlinks (OSC 8) and regex URL detection.
     pub hyperlink_map: HashMap<(usize, usize), String>,
+
+    /// Hotspot map: (row, col) -> (HotspotKind, matched text).
+    /// Rebuilt each frame from detected hotspots (file paths, errors, git refs, etc.).
+    pub hotspot_map: HashMap<(usize, usize), (crate::hotspot_detection::HotspotKind, String)>,
 
     // ── Color overrides from config ──────────────────────────────────────
     /// Override for background clear color (from config.colors.background).
@@ -477,6 +481,7 @@ impl GridRenderer {
             frame_time_idx: 0,
             frame_time_sum: 0,
             hyperlink_map: HashMap::new(),
+            hotspot_map: HashMap::new(),
             bg_override: None,
             fg_override: None,
             cursor_override: None,
@@ -668,6 +673,7 @@ impl GridRenderer {
         self.cell_buffers.clear();
         self.last_cursor_pos = None;
         self.hyperlink_map.clear();
+        self.hotspot_map.clear();
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -930,6 +936,45 @@ impl GridRenderer {
                         } else {
                             // Solid underline for OSC 8 hyperlinks.
                             bg_rects.push(([x, y, w, underline_h], link_color));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Hotspot dotted underline rects + map rebuild ──────────────────
+        // Hotspots (file paths, errors, git refs, issue refs) get a dotted
+        // underline (2px dot / 2px gap) to distinguish from hyperlink styles.
+        self.hotspot_map.clear();
+        {
+            let hotspot_color = PaletteColor::ACCENT_WARM.to_f32_array();
+            let underline_h = 1.0_f32;
+            let dot_on = 2.0_f32;
+            let dot_off = 2.0_f32;
+            for row in self.row_cache.iter().flatten() {
+                for cell in &row.cells {
+                    if let Some((ref kind, ref full_text)) = cell.hotspot {
+                        // Skip cells that already have a hyperlink (hyperlinks take priority).
+                        if cell.hyperlink.is_some() {
+                            continue;
+                        }
+                        self.hotspot_map
+                            .insert((cell.row, cell.col), (kind.clone(), full_text.clone()));
+                        let x = self.padding_x + cell.col as f32 * self.cell_width;
+                        let y =
+                            self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
+                                - underline_h;
+                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                            self.cell_width * 2.0
+                        } else {
+                            self.cell_width
+                        };
+                        // Dotted underline: 2px on / 2px off pattern.
+                        let mut offset = 0.0;
+                        while offset < w {
+                            let seg_w = (w - offset).min(dot_on);
+                            bg_rects.push(([x + offset, y, seg_w, underline_h], hotspot_color));
+                            offset += dot_on + dot_off;
                         }
                     }
                 }

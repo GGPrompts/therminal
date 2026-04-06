@@ -207,7 +207,7 @@ fn render_single_pane(
                 && cell.col >= hotspot.start_col
                 && cell.col < hotspot.end_col
             {
-                cell.hotspot = Some(hotspot.kind.clone());
+                cell.hotspot = Some((hotspot.kind.clone(), hotspot.text.clone()));
             }
         }
     }

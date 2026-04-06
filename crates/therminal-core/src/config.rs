@@ -592,6 +592,13 @@ pub enum KeyAction {
     SwitchWorkspace(u8),
     /// Send focused pane to workspace N (1-9).
     SendToWorkspace(u8),
+    // ── Hotspot actions (used by action palette, not keybindable) ────────
+    /// Copy a hotspot text to the clipboard.
+    HotspotCopy(String),
+    /// Open a file path in the user's `$EDITOR` or via `xdg-open`.
+    HotspotOpenInEditor(String),
+    /// Open an issue/URL via `xdg-open`.
+    HotspotOpenExternal(String),
 }
 
 impl KeyAction {
@@ -623,6 +630,9 @@ impl KeyAction {
             KeyAction::SwapPrev => "Swap pane with previous",
             KeyAction::SwitchWorkspace(_) => "Switch workspace",
             KeyAction::SendToWorkspace(_) => "Send pane to workspace",
+            KeyAction::HotspotCopy(_) => "Copy to clipboard",
+            KeyAction::HotspotOpenInEditor(_) => "Open in editor",
+            KeyAction::HotspotOpenExternal(_) => "Open externally",
         }
     }
 
@@ -650,6 +660,9 @@ impl KeyAction {
             | KeyAction::SendToWorkspace(_) => "Pane Management",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
+            KeyAction::HotspotCopy(_)
+            | KeyAction::HotspotOpenInEditor(_)
+            | KeyAction::HotspotOpenExternal(_) => "Hotspot",
         }
     }
 }

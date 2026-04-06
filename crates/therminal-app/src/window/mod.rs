@@ -731,6 +731,10 @@ impl App {
             KeyAction::SendToWorkspace(n) => {
                 self.send_to_workspace(n);
             }
+            // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
+            KeyAction::HotspotCopy(_)
+            | KeyAction::HotspotOpenInEditor(_)
+            | KeyAction::HotspotOpenExternal(_) => {}
         }
         true
     }
@@ -866,6 +870,17 @@ impl App {
             KeyAction::RestoreLayout => self.restore_layout(),
             KeyAction::Copy => self.copy_selection(),
             KeyAction::Paste => self.paste_clipboard(),
+            KeyAction::HotspotCopy(ref text) => {
+                crate::clipboard::copy_to_clipboard(text);
+            }
+            KeyAction::HotspotOpenInEditor(ref text) => {
+                self.open_in_editor(text);
+            }
+            KeyAction::HotspotOpenExternal(ref text) => {
+                if let Err(e) = open::that(text) {
+                    info!("failed to open externally {text}: {e}");
+                }
+            }
             _ => {
                 info!("menu action {:?} not handled", action);
             }
