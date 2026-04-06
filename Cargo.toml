@@ -37,7 +37,7 @@ winit = "0.30"
 # Terminal
 alacritty_terminal = "0.25"
 vte = "0.15"
-portable-pty = "0.8"
+portable-pty = "0.9"
 
 # IPC
 interprocess = "2"
@@ -69,10 +69,10 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
 
 # Process inspection
-sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system", "multithread"] }
 
 # Config
-toml = "0.8"
+toml = "1.1"
 notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 
 # MCP
