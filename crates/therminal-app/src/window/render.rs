@@ -216,12 +216,19 @@ fn render_single_pane(
     // doesn't bleed through. This forces a full rebuild (damaged_rows = None) since
     // the cache was just wiped. In single-pane mode, keep the cache for incremental
     // rendering -- without this, undamaged rows disappear after the cache clear.
+    //
+    // Note: hotspot_map and hyperlink_map are NOT cleared here -- they are cleared
+    // once per frame via clear_frame_maps() and accumulate across all panes.
     let damaged_rows = if pane_count > 1 {
         renderer.reset_pane_caches();
         None // force full rebuild after cache clear
     } else {
         damaged_rows
     };
+
+    // Tell the renderer which pane we're about to render, so map entries
+    // are keyed to the correct pane.
+    renderer.set_current_pane(pane.id);
 
     // ── Draw pane header strip (only when multiple panes) ────────────────
     let header_h = crate::pane::effective_header_height(pane_count);

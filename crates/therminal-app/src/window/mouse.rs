@@ -321,10 +321,10 @@ impl App {
                 // Single click on a hyperlinked cell: open the URL.
                 // Single click on a hotspot cell: open the action palette.
                 if self.click_count == 1 && self.last_click_pos == Some((col, row)) {
-                    if let Some(url) = self.hyperlink_at(row, col) {
+                    if let Some(url) = self.hyperlink_at(target_pane, row, col) {
                         self.open_hyperlink(&url);
                     } else {
-                        self.handle_hotspot_click(row, col);
+                        self.handle_hotspot_click(target_pane, row, col);
                     }
                 }
             }
@@ -411,7 +411,7 @@ impl App {
 
             // Hyperlink hover: show pointer cursor when over a hyperlinked cell.
             if !self.separator_cursor_active {
-                self.update_hyperlink_hover(row, col);
+                self.update_hyperlink_hover(target, row, col);
             }
 
             let mode = self.pane_term_mode(target);
@@ -560,19 +560,19 @@ impl App {
 
     // ── Hyperlink hover and click helpers ───────────────────────────────
 
-    /// Look up the hyperlink URL at a given grid (row, col) from the renderer's map.
-    fn hyperlink_at(&self, row: usize, col: usize) -> Option<String> {
+    /// Look up the hyperlink URL at a given grid (row, col) for a specific pane.
+    fn hyperlink_at(&self, pane_id: PaneId, row: usize, col: usize) -> Option<String> {
         self.grid_renderer
             .as_ref()
-            .and_then(|r| r.hyperlink_map.get(&(row, col)).cloned())
+            .and_then(|r| r.hyperlink_map.get(&(pane_id, row, col)).cloned())
     }
 
     /// Update cursor icon based on whether the hovered cell has a hyperlink or hotspot.
-    fn update_hyperlink_hover(&mut self, row: usize, col: usize) {
+    fn update_hyperlink_hover(&mut self, pane_id: PaneId, row: usize, col: usize) {
         use winit::window::CursorIcon;
 
-        let on_link = self.hyperlink_at(row, col).is_some();
-        let on_hotspot = self.hotspot_at(row, col).is_some();
+        let on_link = self.hyperlink_at(pane_id, row, col).is_some();
+        let on_hotspot = self.hotspot_at(pane_id, row, col).is_some();
         let want_pointer = on_link || on_hotspot;
         if want_pointer && !self.hyperlink_cursor_active {
             self.hyperlink_cursor_active = true;
@@ -587,20 +587,21 @@ impl App {
         }
     }
 
-    /// Look up the hotspot at a given grid (row, col) from the renderer's map.
+    /// Look up the hotspot at a given grid (row, col) for a specific pane.
     fn hotspot_at(
         &self,
+        pane_id: PaneId,
         row: usize,
         col: usize,
     ) -> Option<(crate::hotspot_detection::HotspotKind, String)> {
         self.grid_renderer
             .as_ref()
-            .and_then(|r| r.hotspot_map.get(&(row, col)).cloned())
+            .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
     }
 
     /// Handle a click on a hotspot cell: open an action palette.
-    fn handle_hotspot_click(&mut self, row: usize, col: usize) -> bool {
-        let (kind, text) = match self.hotspot_at(row, col) {
+    fn handle_hotspot_click(&mut self, pane_id: PaneId, row: usize, col: usize) -> bool {
+        let (kind, text) = match self.hotspot_at(pane_id, row, col) {
             Some(h) => h,
             None => return false,
         };

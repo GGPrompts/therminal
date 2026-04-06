@@ -527,6 +527,10 @@ impl App {
         // Submit the clear pass immediately so pane renders can use fresh encoders.
         gpu.queue.submit(std::iter::once(encoder.finish()));
 
+        // Clear hotspot/hyperlink maps once per frame so all panes can
+        // contribute entries that persist until the next frame.
+        renderer.clear_frame_maps();
+
         let mut pane_counter = 0;
         render::render_panes_recursive(
             layout,

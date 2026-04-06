@@ -23,6 +23,7 @@ use therminal_core::palette::Color as PaletteColor;
 use therminal_core::text::glyphon_color_mode_for_surface;
 
 use crate::color_mapping::*;
+use crate::pane::PaneId;
 use tracing::debug;
 
 // ── Font configuration ────────────────────────────────────────────────────
@@ -283,13 +284,18 @@ pub struct GridRenderer {
     frame_time_idx: usize,
     frame_time_sum: u64,
 
-    /// Hyperlink URL map: (row, col) -> URL string.
+    /// Hyperlink URL map: (pane_id, row, col) -> URL string.
     /// Rebuilt each frame from cell hyperlinks (OSC 8) and regex URL detection.
-    pub hyperlink_map: HashMap<(usize, usize), String>,
+    pub hyperlink_map: HashMap<(PaneId, usize, usize), String>,
 
-    /// Hotspot map: (row, col) -> (HotspotKind, matched text).
+    /// Hotspot map: (pane_id, row, col) -> (HotspotKind, matched text).
     /// Rebuilt each frame from detected hotspots (file paths, errors, git refs, etc.).
-    pub hotspot_map: HashMap<(usize, usize), (crate::hotspot_detection::HotspotKind, String)>,
+    pub hotspot_map:
+        HashMap<(PaneId, usize, usize), (crate::hotspot_detection::HotspotKind, String)>,
+
+    /// The pane currently being rendered. Set before each pane's render pass
+    /// so that hotspot/hyperlink map entries are keyed to the correct pane.
+    current_pane_id: Option<PaneId>,
 
     // ── Color overrides from config ──────────────────────────────────────
     /// Override for background clear color (from config.colors.background).
@@ -482,6 +488,7 @@ impl GridRenderer {
             frame_time_sum: 0,
             hyperlink_map: HashMap::new(),
             hotspot_map: HashMap::new(),
+            current_pane_id: None,
             bg_override: None,
             fg_override: None,
             cursor_override: None,
@@ -668,12 +675,28 @@ impl GridRenderer {
     /// Reset per-pane caches so stale state from a previous pane doesn't bleed
     /// into the next one.  Call this before rendering each pane when a single
     /// `GridRenderer` is shared across multiple panes.
+    ///
+    /// Note: `hotspot_map` and `hyperlink_map` are NOT cleared here -- they
+    /// accumulate entries from all panes during a frame and are cleared once
+    /// at the start of the full render pass via `clear_frame_maps()`.
     pub fn reset_pane_caches(&mut self) {
         self.row_cache.clear();
         self.cell_buffers.clear();
         self.last_cursor_pos = None;
-        self.hyperlink_map.clear();
+    }
+
+    /// Clear the hotspot and hyperlink maps at the start of a new frame,
+    /// before any panes are rendered. This allows all panes to contribute
+    /// entries that persist until the next frame.
+    pub fn clear_frame_maps(&mut self) {
         self.hotspot_map.clear();
+        self.hyperlink_map.clear();
+    }
+
+    /// Set the pane ID for the pane about to be rendered. Map entries
+    /// inserted during `render()` will be keyed to this pane.
+    pub fn set_current_pane(&mut self, pane_id: PaneId) {
+        self.current_pane_id = Some(pane_id);
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -905,7 +928,7 @@ impl GridRenderer {
         // ── Hyperlink underline rects + map rebuild ────────────────────
         // OSC 8 hyperlinks get a solid underline; regex-detected URLs get a
         // dashed underline (alternating 3px on / 2px off segments).
-        self.hyperlink_map.clear();
+        let pane_id = self.current_pane_id.unwrap_or(0);
         {
             let link_color = PaletteColor::ACCENT_COOL.to_f32_array();
             let underline_h = 1.0_f32;
@@ -914,7 +937,8 @@ impl GridRenderer {
             for row in self.row_cache.iter().flatten() {
                 for cell in &row.cells {
                     if let Some(ref url) = cell.hyperlink {
-                        self.hyperlink_map.insert((cell.row, cell.col), url.clone());
+                        self.hyperlink_map
+                            .insert((pane_id, cell.row, cell.col), url.clone());
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
                         let y =
                             self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
@@ -945,7 +969,6 @@ impl GridRenderer {
         // ── Hotspot dotted underline rects + map rebuild ──────────────────
         // Hotspots (file paths, errors, git refs, issue refs) get a dotted
         // underline (2px dot / 2px gap) to distinguish from hyperlink styles.
-        self.hotspot_map.clear();
         {
             let hotspot_color = PaletteColor::ACCENT_WARM.to_f32_array();
             let underline_h = 1.0_f32;
@@ -958,8 +981,10 @@ impl GridRenderer {
                         if cell.hyperlink.is_some() {
                             continue;
                         }
-                        self.hotspot_map
-                            .insert((cell.row, cell.col), (kind.clone(), full_text.clone()));
+                        self.hotspot_map.insert(
+                            (pane_id, cell.row, cell.col),
+                            (kind.clone(), full_text.clone()),
+                        );
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
                         let y =
                             self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
