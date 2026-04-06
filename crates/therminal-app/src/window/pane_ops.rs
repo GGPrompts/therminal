@@ -9,8 +9,8 @@ use alacritty_terminal::term::TermMode;
 use tracing::{debug, info, warn};
 
 use crate::pane::{
-    FocusDirection, LayoutNode, LayoutSnapshot, PaneCallbacks, PaneId, SpatialDirection,
-    SplitDirection,
+    FocusDirection, LayoutNode, LayoutSnapshot, PaneCallbacks, PaneId, PaneRemoveResult,
+    SpatialDirection, SplitDirection,
 };
 use therminal_core::geometry::Rect;
 use therminal_terminal::interceptor::InterceptorConfig;
@@ -133,20 +133,29 @@ impl App {
             None => return,
         };
 
-        let layout = match self.get_layout_mut() {
-            Some(l) => l,
+        // Use remove_pane_any which searches all workspaces and handles cleanup.
+        let wm = match self.workspaces.as_mut() {
+            Some(wm) => wm,
             None => return,
         };
 
-        match layout.remove_pane(focused) {
-            None => {
-                // Last pane -- close the window.
-                info!("Last pane closed, exiting");
-                self.set_focused_pane(None);
-                self.workspaces = None;
-                self.request_redraw();
+        match wm.remove_pane_any(focused) {
+            PaneRemoveResult::LastInWorkspace => {
+                if wm.gc_empty_workspaces() {
+                    // Switched to another workspace that still has panes.
+                    info!("Last pane in workspace closed, switched to workspace {}", wm.active_id());
+                    let focus = wm.focused_pane();
+                    self.set_focused_pane(focus);
+                    self.relayout_and_redraw();
+                } else {
+                    // Truly the last pane across all workspaces.
+                    info!("Last pane closed, exiting");
+                    self.set_focused_pane(None);
+                    self.workspaces = None;
+                    self.request_redraw();
+                }
             }
-            Some(true) => {
+            PaneRemoveResult::Removed => {
                 info!("Closed pane {focused}");
                 // Move focus to first available pane.
                 let new_focus = self
@@ -156,8 +165,8 @@ impl App {
                 self.set_focused_pane(new_focus);
                 self.relayout_and_redraw();
             }
-            Some(false) => {
-                // Pane not found (shouldn't happen).
+            PaneRemoveResult::NotFound => {
+                // Pane not found (shouldn't happen for focused pane).
                 warn!("Focused pane {focused} not found in layout");
             }
         }
@@ -236,40 +245,55 @@ impl App {
         }
         self.last_close_action = Some(std::time::Instant::now());
 
-        let pane_count_before = self.get_layout().map(|l| l.pane_count()).unwrap_or(0);
-
-        info!(
-            target_id,
-            pane_count_before,
-            focused = ?self.focused_pane(),
-            "close_pane_by_id called"
-        );
-
-        let layout = match self.get_layout_mut() {
-            Some(l) => l,
+        let wm = match self.workspaces.as_mut() {
+            Some(wm) => wm,
             None => {
                 warn!(
                     target_id,
-                    "close_pane_by_id: no layout (already torn down?)"
+                    "close_pane_by_id: no workspaces (already torn down?)"
                 );
                 return;
             }
         };
 
-        match layout.remove_pane(target_id) {
-            None => {
-                info!("Last pane closed, exiting");
-                self.set_focused_pane(None);
-                self.workspaces = None;
-                self.request_redraw();
+        let pane_count_before = wm.total_pane_count();
+        info!(
+            target_id,
+            pane_count_before,
+            focused = ?wm.focused_pane(),
+            "close_pane_by_id called"
+        );
+
+        // Search all workspaces for the pane, not just the active one.
+        match wm.remove_pane_any(target_id) {
+            PaneRemoveResult::LastInWorkspace => {
+                // Last pane in some workspace — check if others remain.
+                if wm.total_pane_count() == 0 && !wm.gc_empty_workspaces() {
+                    // Truly the last pane across all workspaces.
+                    info!("Last pane closed, exiting");
+                    self.set_focused_pane(None);
+                    self.workspaces = None;
+                    self.request_redraw();
+                } else {
+                    // Other workspaces have panes; clean up the empty one.
+                    wm.gc_empty_workspaces();
+                    info!(
+                        "Pane {target_id} was last in its workspace, switched to workspace {}",
+                        wm.active_id()
+                    );
+                    // Update focused pane from the now-active workspace.
+                    let focus = wm.focused_pane();
+                    self.set_focused_pane(focus);
+                    self.relayout_and_redraw();
+                }
             }
-            Some(true) => {
-                let pane_count_after = self.get_layout().map(|l| l.pane_count()).unwrap_or(0);
+            PaneRemoveResult::Removed => {
+                let pane_count_after = wm.total_pane_count();
                 info!(
                     target_id,
                     pane_count_before, pane_count_after, "Closed pane"
                 );
-                // If we closed the focused pane, move focus.
+                // If we closed the focused pane of the active workspace, move focus.
                 if self.focused_pane() == Some(target_id) {
                     let new_focus = self
                         .get_layout()
@@ -279,10 +303,10 @@ impl App {
                 }
                 self.relayout_and_redraw();
             }
-            Some(false) => {
+            PaneRemoveResult::NotFound => {
                 warn!(
                     target_id,
-                    pane_count_before, "Pane not found in layout (double-close or stale event?)"
+                    pane_count_before, "Pane not found in any workspace (double-close or stale event?)"
                 );
             }
         }

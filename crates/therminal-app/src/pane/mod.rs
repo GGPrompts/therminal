@@ -59,4 +59,4 @@ pub use self::spawn::{PaneCallbacks, next_pane_id, spawn_pane};
 #[allow(unused_imports)]
 pub use self::state::{PaneState, PaneStatus, grid_size_for_rect, grid_size_for_rect_with_header};
 #[allow(unused_imports)]
-pub use self::workspace::{Workspace, WorkspaceManager};
+pub use self::workspace::{PaneRemoveResult, Workspace, WorkspaceManager};

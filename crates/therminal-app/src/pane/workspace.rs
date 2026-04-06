@@ -6,6 +6,17 @@ use super::layout::{LayoutNode, LayoutSnapshot};
 use super::state::PaneState;
 use therminal_protocol::daemon::WorkspaceInfo;
 
+/// Result of removing a pane from across all workspaces.
+#[derive(Debug, PartialEq)]
+pub enum PaneRemoveResult {
+    /// The pane was the last one in its workspace.
+    LastInWorkspace,
+    /// The pane was removed; other panes remain in that workspace.
+    Removed,
+    /// The pane was not found in any workspace.
+    NotFound,
+}
+
 /// A workspace holds an independent pane layout with its own focused pane.
 pub struct Workspace {
     /// Workspace number (1-9).
@@ -330,6 +341,73 @@ impl WorkspaceManager {
     #[allow(dead_code)]
     pub fn rename_active(&mut self, name: String) {
         self.workspaces[self.active_idx].name = name;
+    }
+
+    /// Total pane count across all workspaces.
+    pub fn total_pane_count(&self) -> usize {
+        self.workspaces.iter().map(|ws| ws.layout.pane_count()).sum()
+    }
+
+    /// Remove a pane from whichever workspace contains it.
+    ///
+    /// Returns:
+    /// - `PaneRemoveResult::LastInWorkspace` if it was the last pane in that workspace
+    /// - `PaneRemoveResult::Removed` if removed (other panes remain)
+    /// - `PaneRemoveResult::NotFound` if the pane wasn't in any workspace
+    pub fn remove_pane_any(&mut self, pane_id: PaneId) -> PaneRemoveResult {
+        let idx = match self
+            .workspaces
+            .iter()
+            .position(|ws| ws.layout.pane_ids().contains(&pane_id))
+        {
+            Some(idx) => idx,
+            None => return PaneRemoveResult::NotFound,
+        };
+        let result = self.workspaces[idx].layout.remove_pane(pane_id);
+        match result {
+            None => {
+                // Root leaf — remove_pane doesn't clear it, so we do.
+                self.workspaces[idx].layout = LayoutNode::Empty;
+                self.workspaces[idx].focused_pane = None;
+                PaneRemoveResult::LastInWorkspace
+            }
+            Some(true) => {
+                // Update focus if we removed the focused pane.
+                if self.workspaces[idx].focused_pane == Some(pane_id) {
+                    let ids = self.workspaces[idx].layout.pane_ids();
+                    self.workspaces[idx].focused_pane = ids.first().copied();
+                }
+                PaneRemoveResult::Removed
+            }
+            Some(false) => PaneRemoveResult::NotFound, // shouldn't happen
+        }
+    }
+
+    /// Remove any workspace whose layout is Empty, provided other workspaces
+    /// exist. If the active workspace is removed, switches to the nearest.
+    /// Returns true if a workspace was removed.
+    pub fn gc_empty_workspaces(&mut self) -> bool {
+        if self.workspaces.len() <= 1 {
+            return false;
+        }
+        let idx = match self.workspaces.iter().position(|ws| {
+            matches!(ws.layout, LayoutNode::Empty) || ws.layout.pane_count() == 0
+        }) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        let was_active = idx == self.active_idx;
+        self.workspaces.remove(idx);
+        // Adjust active_idx after removal.
+        if self.active_idx >= self.workspaces.len() {
+            self.active_idx = self.workspaces.len() - 1;
+        } else if self.active_idx > idx {
+            self.active_idx -= 1;
+        }
+        if was_active {
+            // active_idx now points to the nearest workspace.
+        }
+        true
     }
 
     /// Remove the active workspace if its layout is Empty and there are other
