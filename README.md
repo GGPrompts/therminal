@@ -107,6 +107,25 @@ cargo run --bin therminal
 ./scripts/ci.sh    # fmt check, clippy, build, test
 ```
 
+### Windows-native build
+
+For native Windows fullscreen, snap/tiling, and window-manager integration, build and run Therminal on Windows rather than through WSLg.
+
+From PowerShell on Windows:
+
+```powershell
+# Build release and copy therminal.exe to the Desktop
+.\scripts\build-windows.ps1
+
+# Build debug without copying
+.\scripts\build-windows.ps1 -Debug -NoCopy
+
+# Copy to a custom path
+.\scripts\build-windows.ps1 -Destination "$env:USERPROFILE\Desktop\therminal-dev.exe"
+```
+
+This script is intentionally separate from [`scripts/ci.sh`](scripts/ci.sh): CI remains host-local, while `build-windows.ps1` is the recommended Windows-native workflow.
+
 ## Architecture
 
 Cargo workspace with six crates:
