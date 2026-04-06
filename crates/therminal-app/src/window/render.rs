@@ -149,11 +149,75 @@ fn render_single_pane(
         }
     };
 
+    // Tell the renderer which pane we're about to render. Per-pane caches
+    // are keyed by pane ID, so this must happen before any render call.
+    renderer.set_current_pane(pane.id);
+
     let content = term_guard.renderable_content();
     let screen_lines = term_guard.screen_lines();
     let display_offset = content.display_offset;
     let cursor = content.cursor;
     let selection_range = content.selection;
+
+    // ── Skip undamaged frames entirely ──────────────────────────────────
+    // When partial damage reports an empty set, nothing changed — use
+    // the existing cached state without collecting cells or running
+    // URL/hotspot detection.
+    if let Some(ref set) = damaged_rows {
+        if set.is_empty() {
+            term_guard.reset_damage();
+            drop(term_guard);
+
+            // Draw pane header (multi-pane) even when content is unchanged.
+            let header_h = crate::pane::effective_header_height(pane_count);
+            if pane_count > 1 {
+                draw_pane_header(
+                    pane,
+                    pane_index,
+                    draw_focus_border,
+                    renderer,
+                    device,
+                    queue,
+                    encoder,
+                    view,
+                    surface_width,
+                    surface_height,
+                );
+            }
+
+            let internal_pad_x = renderer.padding_x();
+            let internal_pad_y = renderer.padding_y();
+            renderer
+                .set_viewport_offset(vp.x() + internal_pad_x, vp.y() + internal_pad_y + header_h);
+
+            renderer.render_cached(
+                &cursor,
+                screen_lines,
+                selection_range.as_ref(),
+                display_offset,
+                device,
+                queue,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+            renderer.restore_padding();
+
+            if draw_focus_border {
+                draw_pane_focus_border(
+                    pane,
+                    renderer,
+                    device,
+                    encoder,
+                    view,
+                    surface_width,
+                    surface_height,
+                );
+            }
+            return;
+        }
+    }
 
     let mut cells: Vec<RenderCell> = content
         .display_iter
@@ -196,39 +260,59 @@ fn render_single_pane(
     term_guard.reset_damage();
     drop(term_guard);
 
-    // Annotate cells with regex-detected URLs (skips cells that already have OSC 8 links).
-    detect_urls_in_cells(&mut cells, screen_lines);
+    // ── Damage-aware URL/hotspot detection ───────────────────────────────
+    // When partial damage is available, only run detection on damaged rows
+    // to avoid re-scanning the entire visible area every frame.
+    if let Some(ref damage_set) = damaged_rows {
+        // Filter to only damaged-row cells for detection.
+        let mut damaged_cells: Vec<RenderCell> = cells
+            .iter()
+            .filter(|c| damage_set.contains(&c.row))
+            .cloned()
+            .collect();
 
-    // Annotate cells with detected hotspots (file paths, errors, git refs, etc.).
-    let hotspots = detect_hotspots(&cells, screen_lines);
-    for hotspot in &hotspots {
-        for cell in cells.iter_mut() {
-            if cell.row == hotspot.row
-                && cell.col >= hotspot.start_col
-                && cell.col < hotspot.end_col
-            {
-                cell.hotspot = Some((hotspot.kind.clone(), hotspot.text.clone()));
+        detect_urls_in_cells(&mut damaged_cells, screen_lines);
+        let hotspots = detect_hotspots(&damaged_cells, screen_lines);
+
+        // Apply detected URLs back to the main cells vec.
+        for dc in &damaged_cells {
+            if dc.hyperlink.is_some() {
+                if let Some(cell) = cells
+                    .iter_mut()
+                    .find(|c| c.row == dc.row && c.col == dc.col)
+                {
+                    cell.hyperlink.clone_from(&dc.hyperlink);
+                    cell.hyperlink_source = dc.hyperlink_source;
+                }
+            }
+        }
+
+        // Apply detected hotspots to the main cells vec.
+        for hotspot in &hotspots {
+            for cell in cells.iter_mut() {
+                if cell.row == hotspot.row
+                    && cell.col >= hotspot.start_col
+                    && cell.col < hotspot.end_col
+                {
+                    cell.hotspot = Some((hotspot.kind.clone(), hotspot.text.clone()));
+                }
+            }
+        }
+    } else {
+        // Full damage — detect on all cells.
+        detect_urls_in_cells(&mut cells, screen_lines);
+        let hotspots = detect_hotspots(&cells, screen_lines);
+        for hotspot in &hotspots {
+            for cell in cells.iter_mut() {
+                if cell.row == hotspot.row
+                    && cell.col >= hotspot.start_col
+                    && cell.col < hotspot.end_col
+                {
+                    cell.hotspot = Some((hotspot.kind.clone(), hotspot.text.clone()));
+                }
             }
         }
     }
-
-    // In multi-pane mode, clear per-pane caches so stale state from a previous pane
-    // doesn't bleed through. This forces a full rebuild (damaged_rows = None) since
-    // the cache was just wiped. In single-pane mode, keep the cache for incremental
-    // rendering -- without this, undamaged rows disappear after the cache clear.
-    //
-    // Note: hotspot_map and hyperlink_map are NOT cleared here -- they are cleared
-    // once per frame via clear_frame_maps() and accumulate across all panes.
-    let damaged_rows = if pane_count > 1 {
-        renderer.reset_pane_caches();
-        None // force full rebuild after cache clear
-    } else {
-        damaged_rows
-    };
-
-    // Tell the renderer which pane we're about to render, so map entries
-    // are keyed to the correct pane.
-    renderer.set_current_pane(pane.id);
 
     // ── Draw pane header strip (only when multiple panes) ────────────────
     let header_h = crate::pane::effective_header_height(pane_count);
