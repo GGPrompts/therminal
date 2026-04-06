@@ -14,14 +14,14 @@ $repoRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot
 }
 
-if (-not (Test-Path (Join-Path $repoRoot "Cargo.toml"))) {
-    throw "Repo root does not contain Cargo.toml: $repoRoot"
-}
-
 # --- UNC path handling ---
 # Building from a UNC path (e.g. \\wsl.localhost\...) breaks cargo, cmd.exe,
 # and MSVC tools. Mirror the source to a native Windows temp directory.
-$localBuildDir = Join-Path $env:TEMP "therminal-build"
+# This must happen BEFORE the Cargo.toml check because PowerShell 5.1
+# cannot Test-Path on \\wsl.localhost\ UNC paths.
+# Use a non-temp location to avoid WDAC/AppLocker blocking build-script
+# executables. %TEMP% is commonly restricted by Application Control policies.
+$localBuildDir = Join-Path $env:USERPROFILE "therminal-build"
 if ($repoRoot -match '^\\\\') {
     Write-Host "=== UNC source detected, syncing to $localBuildDir ==="
     & robocopy $repoRoot $localBuildDir /MIR /XD target .git /XF "*.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
@@ -32,16 +32,27 @@ if ($repoRoot -match '^\\\\') {
     # Copy Cargo.lock separately (robocopy /XF excluded all .lock files above,
     # but we need Cargo.lock for reproducible builds)
     $cargoLock = Join-Path $repoRoot "Cargo.lock"
-    if (Test-Path $cargoLock) {
-        Copy-Item -Force $cargoLock (Join-Path $localBuildDir "Cargo.lock")
-    }
+    & robocopy (Split-Path $cargoLock) $localBuildDir "Cargo.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
     $repoRoot = $localBuildDir
     Write-Host "=== building from $repoRoot ==="
 }
 
+if (-not (Test-Path (Join-Path $repoRoot "Cargo.toml"))) {
+    throw "Repo root does not contain Cargo.toml: $repoRoot"
+}
+
+# --- Ensure cargo is on PATH ---
+# When invoked from WSL, the user's Windows PATH additions (e.g. .cargo\bin)
+# may not be inherited. Add the default rustup location if needed.
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    throw @"
-Windows cargo was not found on PATH.
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
+    $cargoBin = Join-Path $cargoHome "bin"
+    if (Test-Path (Join-Path $cargoBin "cargo.exe")) {
+        $env:PATH = "$cargoBin;$env:PATH"
+        Write-Host "=== Added $cargoBin to PATH ==="
+    } else {
+        throw @"
+Windows cargo was not found on PATH or in $cargoBin.
 
 This script performs a native Windows build, so it needs a Windows Rust toolchain.
 Your WSL cargo installation is not visible to Windows PowerShell.
@@ -49,6 +60,21 @@ Your WSL cargo installation is not visible to Windows PowerShell.
 Install Rust on Windows, reopen PowerShell, and try again:
   winget install --id Rustlang.Rustup -e
 "@
+    }
+}
+
+# --- Windows Defender exclusion for build artifacts ---
+# Build-script executables in target/ are often blocked by WDAC/SmartScreen.
+# Attempt to add an exclusion (requires admin; silently skipped otherwise).
+$targetDir = Join-Path $repoRoot "target"
+try {
+    Add-MpExclusion -Path $targetDir -ErrorAction Stop
+    Write-Host "=== Added Defender exclusion for $targetDir ==="
+} catch {
+    # Not admin or not applicable — check if WDAC is the issue
+    Write-Host "=== Note: Could not add Defender exclusion (not admin). ==="
+    Write-Host "    If build fails with 'Application Control policy' errors, run:"
+    Write-Host "    PowerShell (Admin): Add-MpExclusion -Path '$targetDir'"
 }
 
 Set-Location $repoRoot
