@@ -113,6 +113,8 @@ struct DaemonPtyHandler {
     interceptor: TherminalInterceptor,
     interceptor_rx: std::sync::mpsc::Receiver<InterceptedEvent>,
     region_index: Arc<Mutex<RegionIndex>>,
+    /// Shared cwd updated from OSC 7 events.
+    cwd: Arc<Mutex<String>>,
 }
 
 impl PtyReaderHandler for DaemonPtyHandler {
@@ -131,8 +133,13 @@ impl PtyReaderHandler for DaemonPtyHandler {
             processor.advance_with_interceptor(&mut *term_guard, &mut self.interceptor, data);
         }
 
-        // Drain intercepted events into the region index.
+        // Drain intercepted events into the region index and update cwd.
         while let Ok(event) = self.interceptor_rx.try_recv() {
+            if let InterceptedEvent::CurrentDirectory(ref path) = event
+                && let Ok(mut cwd) = self.cwd.lock()
+            {
+                *cwd = path.clone();
+            }
             if let Ok(mut idx) = self.region_index.lock() {
                 idx.push_event(&event);
             }
@@ -265,6 +272,10 @@ pub struct Pane {
     region_index: Arc<Mutex<RegionIndex>>,
     cols: u16,
     rows: u16,
+    /// Current working directory, updated from OSC 7 events.
+    cwd: Arc<Mutex<String>>,
+    /// Shell command used when this pane was spawned.
+    shell: String,
 }
 
 impl Pane {
@@ -281,6 +292,9 @@ impl Pane {
         let region_index = Arc::new(Mutex::new(RegionIndex::new()));
         let (interceptor, interceptor_rx) = TherminalInterceptor::with_defaults();
 
+        // Initialize cwd from spawn options; OSC 7 events will update it later.
+        let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
+
         let handler = DaemonPtyHandler {
             event_tx,
             session_id,
@@ -288,6 +302,7 @@ impl Pane {
             interceptor,
             interceptor_rx,
             region_index: Arc::clone(&region_index),
+            cwd: Arc::clone(&cwd),
         };
 
         let mut core = PtyPaneCore::spawn(
@@ -311,6 +326,8 @@ impl Pane {
             region_index,
             cols,
             rows,
+            cwd,
+            shell: spawn_options.shell.clone(),
         })
     }
 
@@ -333,6 +350,9 @@ impl Pane {
         let region_index = Arc::new(Mutex::new(RegionIndex::new()));
         let (interceptor, interceptor_rx) = TherminalInterceptor::with_defaults();
 
+        // FD handoff panes don't have spawn options; cwd will be updated by OSC 7.
+        let cwd = Arc::new(Mutex::new(String::new()));
+
         let handler = DaemonPtyHandler {
             event_tx: event_tx.clone(),
             session_id,
@@ -340,6 +360,7 @@ impl Pane {
             interceptor,
             interceptor_rx,
             region_index: Arc::clone(&region_index),
+            cwd: Arc::clone(&cwd),
         };
 
         // Create headless Term.
@@ -389,6 +410,8 @@ impl Pane {
             region_index,
             cols,
             rows,
+            cwd,
+            shell: String::new(), // Unknown for handoff panes
         })
     }
 
@@ -405,6 +428,16 @@ impl Pane {
     /// Get the number of rows.
     pub fn rows(&self) -> u16 {
         self.rows
+    }
+
+    /// Get the current working directory (from OSC 7 or initial spawn).
+    pub fn cwd(&self) -> String {
+        self.cwd.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Get the shell command used when this pane was spawned.
+    pub fn shell(&self) -> &str {
+        &self.shell
     }
 
     /// Write bytes to the pane's PTY (forwarding keystrokes).

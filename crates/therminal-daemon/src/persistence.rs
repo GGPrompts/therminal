@@ -74,8 +74,8 @@ pub fn snapshot(mgr: &SessionManager) -> PersistedState {
         for window in &session.windows {
             for pane in &window.panes {
                 panes.push(PersistedPane {
-                    cwd: String::new(), // Will be filled by cwd tracking when available
-                    shell: String::new(),
+                    cwd: pane.cwd(),
+                    shell: pane.shell().to_owned(),
                     cols: pane.cols(),
                     rows: pane.rows(),
                 });
@@ -241,5 +241,53 @@ mod tests {
         let mgr = SessionManager::new(tx);
         let state = snapshot(&mgr);
         assert!(state.sessions.is_empty());
+    }
+
+    /// Verify that snapshot -> restore -> snapshot preserves cwd and shell values.
+    ///
+    /// Creates a persisted state with specific cwd and shell, restores it
+    /// (spawning real PTYs), then snapshots and checks the values survived.
+    #[test]
+    fn snapshot_preserves_cwd_and_shell() {
+        let persisted = PersistedState {
+            sessions: vec![PersistedSession {
+                name: Some("persist-test".into()),
+                panes: vec![
+                    PersistedPane {
+                        cwd: "/tmp".into(),
+                        shell: "/bin/sh".into(),
+                        cols: 80,
+                        rows: 24,
+                    },
+                    PersistedPane {
+                        cwd: "/var".into(),
+                        shell: String::new(),
+                        cols: 120,
+                        rows: 40,
+                    },
+                ],
+                workspaces: vec![],
+                active_workspace: 1,
+            }],
+        };
+
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut mgr = SessionManager::new(tx);
+        let restored = mgr.restore_from_persisted(&persisted);
+        assert_eq!(restored, 2, "should restore two panes");
+
+        let state = snapshot(&mgr);
+        assert_eq!(state.sessions.len(), 1);
+        let session = &state.sessions[0];
+        assert_eq!(session.name.as_deref(), Some("persist-test"));
+        assert_eq!(session.panes.len(), 2);
+
+        // The first pane was spawned with cwd="/tmp" and shell="/bin/sh".
+        assert_eq!(session.panes[0].cwd, "/tmp");
+        assert_eq!(session.panes[0].shell, "/bin/sh");
+
+        // The second pane was spawned with cwd="/var" and default shell.
+        assert_eq!(session.panes[1].cwd, "/var");
+        assert_eq!(session.panes[1].shell, "");
     }
 }
