@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 /// Cached clipboard instance. Created once, reused for all operations.
 /// This avoids repeated Wayland → X11 fallback attempts and the associated
 /// log noise on WSL2.
-static CLIPBOARD: OnceLock<Mutex<arboard::Clipboard>> = OnceLock::new();
+static CLIPBOARD: OnceLock<Option<Mutex<arboard::Clipboard>>> = OnceLock::new();
 
 /// Detect WSL2 via the `WSL_DISTRO_NAME` environment variable.
 fn is_wsl2() -> bool {
@@ -30,49 +30,53 @@ fn is_wsl2() -> bool {
 /// with the X11 backend directly (WSLg's Wayland compositor doesn't
 /// support `wlr-data-control`, but its XWayland server works fine).
 fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
-    Some(CLIPBOARD.get_or_init(|| {
-        // On WSL2, force X11 backend by hiding WAYLAND_DISPLAY during init.
-        let wayland_display = if is_wsl2() {
-            let val = std::env::var_os("WAYLAND_DISPLAY");
-            if val.is_some() {
-                debug!("WSL2 detected: forcing X11 clipboard backend");
-                // SAFETY: This runs during static init (OnceLock), before any
-                // other threads access WAYLAND_DISPLAY.
-                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
-            }
-            val
-        } else {
-            None
-        };
+    CLIPBOARD
+        .get_or_init(|| {
+            // On WSL2, force X11 backend by hiding WAYLAND_DISPLAY during init.
+            let wayland_display = if is_wsl2() {
+                let val = std::env::var_os("WAYLAND_DISPLAY");
+                if val.is_some() {
+                    debug!("WSL2 detected: forcing X11 clipboard backend");
+                    // SAFETY: This runs during static init (OnceLock), before any
+                    // other threads access WAYLAND_DISPLAY.
+                    unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+                }
+                val
+            } else {
+                None
+            };
 
-        let result = arboard::Clipboard::new();
+            let result = arboard::Clipboard::new();
 
-        // Restore WAYLAND_DISPLAY so other code (wgpu, winit) still sees it.
-        if let Some(val) = wayland_display {
-            // SAFETY: Restoring the value we just removed; still in the same
-            // single-threaded init path.
-            unsafe { std::env::set_var("WAYLAND_DISPLAY", val) };
-        }
+            // Restore WAYLAND_DISPLAY so other code (wgpu, winit) still sees it.
+            if let Some(val) = wayland_display {
+                // SAFETY: Restoring the value we just removed; still in the same
+                // single-threaded init path.
+                unsafe { std::env::set_var("WAYLAND_DISPLAY", val) };
+            }
 
-        match result {
-            Ok(cb) => {
-                debug!("clipboard initialized");
-                Mutex::new(cb)
+            match result {
+                Ok(cb) => {
+                    debug!("clipboard initialized");
+                    Some(Mutex::new(cb))
+                }
+                Err(e) => {
+                    warn!("clipboard unavailable: {e}");
+                    // Try one more time without any display vars as last resort.
+                    match arboard::Clipboard::new() {
+                        Ok(cb) => {
+                            debug!("clipboard initialized on retry");
+                            Some(Mutex::new(cb))
+                        }
+                        Err(e2) => {
+                            warn!("clipboard completely unavailable: {e2}");
+                            None
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                warn!("clipboard unavailable: {e}");
-                // Return a clipboard anyway — OnceLock needs a value.
-                // We'll get errors on actual use, which is fine.
-                // Try one more time without any display vars as last resort.
-                Mutex::new(arboard::Clipboard::new().unwrap_or_else(|_| {
-                    // This path is essentially unreachable on platforms with
-                    // any clipboard support, but arboard::Clipboard::new()
-                    // can't actually fail on macOS/Windows.
-                    panic!("clipboard completely unavailable: {e}");
-                }))
-            }
-        }
-    }))
+        })
+        .as_ref()
 }
 
 /// Copy `text` to the system clipboard.
@@ -81,6 +85,7 @@ fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
 /// clipboard errors as fatal.
 pub fn copy_to_clipboard(text: &str) {
     let Some(cb_mutex) = get_clipboard() else {
+        warn!("clipboard unavailable, cannot copy");
         return;
     };
     let Ok(mut cb) = cb_mutex.lock() else {
@@ -100,6 +105,7 @@ pub fn copy_to_clipboard(text: &str) {
 /// non-text data.
 pub fn paste_from_clipboard() -> String {
     let Some(cb_mutex) = get_clipboard() else {
+        warn!("clipboard unavailable, cannot paste");
         return String::new();
     };
     let Ok(mut cb) = cb_mutex.lock() else {
@@ -169,7 +175,6 @@ pub fn handle_osc52(sequence: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     fn osc52(text: &str) -> String {
         let encoded = base64::engine::general_purpose::STANDARD.encode(text);
@@ -179,7 +184,8 @@ mod tests {
     #[test]
     fn parse_osc52_recognised() {
         // handle_osc52 should return true for a well-formed OSC 52 sequence
-        // even if the clipboard call fails in a headless CI environment.
+        // even when the clipboard is unavailable (e.g. headless CI).
+        // The clipboard write is best-effort; only the parsing matters here.
         assert!(handle_osc52(&osc52("hello")));
     }
 
