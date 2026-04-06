@@ -1,6 +1,6 @@
 //! Workspace manager: named workspace slots with independent pane layouts.
 
-use super::layout::LayoutNode;
+use super::layout::{LayoutNode, LayoutSnapshot};
 use super::state::PaneState;
 use super::PaneId;
 use super::SplitDirection;
@@ -22,6 +22,9 @@ pub struct WorkspaceManager {
     workspaces: Vec<Workspace>,
     /// Index into `workspaces` for the currently active workspace.
     active_idx: usize,
+    /// Saved layout snapshot from close_all_panes(), for restore.
+    /// This is the single source of truth for whether a restore is pending.
+    saved_layout: Option<LayoutSnapshot>,
 }
 
 impl WorkspaceManager {
@@ -35,6 +38,7 @@ impl WorkspaceManager {
         Self {
             workspaces: vec![ws],
             active_idx: 0,
+            saved_layout: None,
         }
     }
 
@@ -270,6 +274,23 @@ impl WorkspaceManager {
         let mut ids: Vec<usize> = self.workspaces.iter().map(|ws| ws.id).collect();
         ids.sort();
         ids
+    }
+
+    /// Save a snapshot of the current layout for later restore.
+    pub fn save_layout(&mut self) {
+        let layout = &self.workspaces[self.active_idx].layout;
+        self.saved_layout = Some(layout.snapshot());
+    }
+
+    /// Take the saved layout snapshot, if any.
+    pub fn take_saved_layout(&mut self) -> Option<LayoutSnapshot> {
+        self.saved_layout.take()
+    }
+
+    /// Whether a saved layout snapshot exists (restore is possible).
+    #[allow(dead_code)]
+    pub fn has_saved_layout(&self) -> bool {
+        self.saved_layout.is_some()
     }
 
     /// Returns true if the manager has no workspaces (shouldn't normally happen).

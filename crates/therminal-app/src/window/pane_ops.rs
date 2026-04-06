@@ -131,8 +131,6 @@ impl App {
                 info!("Last pane closed, exiting");
                 self.set_focused_pane(None);
                 self.workspaces = None;
-                // Clear saved layout so the exit check in the event loop fires.
-                self.saved_layout = None;
                 self.request_redraw();
             }
             Some(true) => {
@@ -224,8 +222,6 @@ impl App {
                 info!("Last pane closed, exiting");
                 self.set_focused_pane(None);
                 self.workspaces = None;
-                // Clear saved layout so the exit check in the event loop fires.
-                self.saved_layout = None;
                 self.request_redraw();
             }
             Some(true) => {
@@ -418,18 +414,21 @@ impl App {
     /// Close all panes, snapshotting the layout tree for later restore.
     /// Drops all PTYs immediately and does a single rebalance at the end.
     pub(crate) fn close_all_panes(&mut self) {
-        let layout = match self.workspaces.as_mut().map(|wm| wm.take_layout()) {
-            Some(l) => l,
+        let wm = match self.workspaces.as_mut() {
+            Some(wm) => wm,
             None => return,
         };
 
         // Snapshot the tree structure before destroying it.
-        self.saved_layout = Some(layout.snapshot());
+        wm.save_layout();
 
-        // Drop the entire layout tree -- this drops all PaneState including
+        // Take and drop the layout tree -- this drops all PaneState including
         // PTY masters and writers, causing reader threads to hit EOF and exit.
+        let layout = wm.take_layout();
         drop(layout);
 
+        // Keep workspaces alive (saved_layout lives there now).
+        // workspaces == None means "exit", not "waiting for restore".
         self.set_focused_pane(None);
         self.selection_pane = None;
         self.selection_in_progress = false;
@@ -461,7 +460,11 @@ impl App {
 
     /// Restore a previously saved layout by respawning panes to match the snapshot.
     pub(crate) fn restore_layout(&mut self) {
-        let snapshot = match self.saved_layout.take() {
+        let snapshot = match self
+            .workspaces
+            .as_mut()
+            .and_then(|wm| wm.take_saved_layout())
+        {
             Some(s) => s,
             None => {
                 info!("No saved layout to restore");

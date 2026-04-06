@@ -37,7 +37,7 @@ use winit::window::{Window, WindowId};
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
 use crate::menu::ContextMenu;
-use crate::pane::{LayoutNode, LayoutSnapshot, PaneId, SplitDirection, WorkspaceManager};
+use crate::pane::{LayoutNode, PaneId, SplitDirection, WorkspaceManager};
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
 use therminal_core::geometry::Rect;
@@ -132,9 +132,6 @@ pub struct App {
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,
 
-    /// Saved layout snapshot from close_all_panes(), for restore.
-    saved_layout: Option<LayoutSnapshot>,
-
     /// Active separator drag state (path to split node, direction, parent rect).
     separator_drag: Option<SeparatorDrag>,
 
@@ -216,7 +213,6 @@ impl App {
             last_split_direction: SplitDirection::Horizontal,
             show_help_overlay: false,
             active_menu: None,
-            saved_layout: None,
             separator_drag: None,
             separator_cursor_active: false,
             hyperlink_cursor_active: false,
@@ -1212,14 +1208,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.resize(size);
                 }
 
-                // If layout was removed (last pane closed), exit --
-                // unless we have a saved layout snapshot (close-all with restore).
+                // workspaces == None means all panes are gone and no restore
+                // is pending — exit the window.
                 if self.workspaces.is_none() {
-                    if self.saved_layout.is_none() {
-                        event_loop.exit();
-                        return;
-                    }
-                    // No panes but layout can be restored; just present a blank frame.
+                    event_loop.exit();
                     return;
                 }
 
