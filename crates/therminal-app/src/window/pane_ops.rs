@@ -9,7 +9,8 @@ use alacritty_terminal::term::TermMode;
 use tracing::{info, warn};
 
 use crate::pane::{
-    FocusDirection, LayoutNode, LayoutSnapshot, PaneCallbacks, PaneId, SplitDirection,
+    FocusDirection, LayoutNode, LayoutSnapshot, PaneCallbacks, PaneId, SpatialDirection,
+    SplitDirection,
 };
 use therminal_core::geometry::Rect;
 use therminal_terminal::interceptor::InterceptorConfig;
@@ -212,9 +213,24 @@ impl App {
 
     /// Close a specific pane by ID.
     pub(crate) fn close_pane_by_id(&mut self, target_id: PaneId) {
+        let pane_count_before = self.get_layout().map(|l| l.pane_count()).unwrap_or(0);
+
+        info!(
+            target_id,
+            pane_count_before,
+            focused = ?self.focused_pane(),
+            "close_pane_by_id called"
+        );
+
         let layout = match self.get_layout_mut() {
             Some(l) => l,
-            None => return,
+            None => {
+                warn!(
+                    target_id,
+                    "close_pane_by_id: no layout (already torn down?)"
+                );
+                return;
+            }
         };
 
         match layout.remove_pane(target_id) {
@@ -225,7 +241,11 @@ impl App {
                 self.request_redraw();
             }
             Some(true) => {
-                info!("Closed pane {target_id}");
+                let pane_count_after = self.get_layout().map(|l| l.pane_count()).unwrap_or(0);
+                info!(
+                    target_id,
+                    pane_count_before, pane_count_after, "Closed pane"
+                );
                 // If we closed the focused pane, move focus.
                 if self.focused_pane() == Some(target_id) {
                     let new_focus = self
@@ -237,12 +257,15 @@ impl App {
                 self.relayout_and_redraw();
             }
             Some(false) => {
-                warn!("Pane {target_id} not found in layout");
+                warn!(
+                    target_id,
+                    pane_count_before, "Pane not found in layout (double-close or stale event?)"
+                );
             }
         }
     }
 
-    /// Move focus to the next or previous pane.
+    /// Move focus to the next or previous pane (cycling order).
     pub(crate) fn move_focus(&mut self, direction: FocusDirection) {
         let focused = match self.focused_pane() {
             Some(id) => id,
@@ -254,6 +277,23 @@ impl App {
         };
 
         if let Some(new_id) = layout.adjacent_pane(focused, direction) {
+            self.set_focused_pane(Some(new_id));
+            self.request_redraw();
+        }
+    }
+
+    /// Move focus to the nearest pane in a spatial direction.
+    pub(crate) fn move_focus_spatial(&mut self, direction: SpatialDirection) {
+        let focused = match self.focused_pane() {
+            Some(id) => id,
+            None => return,
+        };
+        let layout = match self.get_layout() {
+            Some(l) => l,
+            None => return,
+        };
+
+        if let Some(new_id) = layout.spatial_adjacent_pane(focused, direction) {
             self.set_focused_pane(Some(new_id));
             self.request_redraw();
         }

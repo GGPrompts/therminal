@@ -341,18 +341,19 @@ impl LayoutNode {
                 continue;
             }
 
-            // Score: prefer candidates along the primary axis, penalise
-            // perpendicular offset so diagonals don't beat direct neighbours.
+            // Score: prefer candidates aligned on the primary axis.  The
+            // cross-axis penalty is 2x so that a pane directly beside/above
+            // the focused one always beats a diagonal candidate.
             let dist = match direction {
                 SpatialDirection::Up | SpatialDirection::Down => {
                     let primary = (c.y - fc.y).abs();
                     let cross = (c.x - fc.x).abs();
-                    primary + cross * 0.5
+                    primary + cross * 2.0
                 }
                 SpatialDirection::Left | SpatialDirection::Right => {
                     let primary = (c.x - fc.x).abs();
                     let cross = (c.y - fc.y).abs();
-                    primary + cross * 0.5
+                    primary + cross * 2.0
                 }
             };
 
@@ -1418,5 +1419,193 @@ mod tests {
     fn swap_pane_single_leaf_returns_false() {
         let mut root = make_leaf(1);
         assert!(!root.swap_pane(1, 2));
+    }
+
+    // ── Spatial navigation tests ──────────────────────────────────────────
+
+    #[test]
+    fn spatial_nav_two_panes_horizontal() {
+        // [1 | 2]  -- side by side
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+
+        // From pane 1, right should reach pane 2.
+        assert_eq!(
+            root.spatial_adjacent_pane(1, SpatialDirection::Right),
+            Some(2)
+        );
+        // From pane 2, left should reach pane 1.
+        assert_eq!(
+            root.spatial_adjacent_pane(2, SpatialDirection::Left),
+            Some(1)
+        );
+        // No pane above or below in a horizontal-only split.
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Up), None);
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Down), None);
+    }
+
+    #[test]
+    fn spatial_nav_two_panes_vertical() {
+        // [1]
+        // ---
+        // [2]
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+
+        assert_eq!(
+            root.spatial_adjacent_pane(1, SpatialDirection::Down),
+            Some(2)
+        );
+        assert_eq!(root.spatial_adjacent_pane(2, SpatialDirection::Up), Some(1));
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Left), None);
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Right), None);
+    }
+
+    #[test]
+    fn spatial_nav_three_panes_l_shape() {
+        // [1 | 2]
+        //   [3]       -- pane 3 spans the bottom half
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let top = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        let mut root = make_split(SplitDirection::Vertical, 0.5, top, make_leaf(3));
+        root.layout(rect);
+
+        // From 1, right -> 2
+        assert_eq!(
+            root.spatial_adjacent_pane(1, SpatialDirection::Right),
+            Some(2)
+        );
+        // From 1, down -> 3
+        assert_eq!(
+            root.spatial_adjacent_pane(1, SpatialDirection::Down),
+            Some(3)
+        );
+        // From 3, up -> 1 (nearest, since 1 center.x is closer to 3 center.x)
+        // Pane 3 center is at (400, 450). Pane 1 center is at (200, 150).
+        // Pane 2 center is at (600, 150). Both are "up". Distance to 1: primary=300, cross=200*0.5=100 => 400.
+        // Distance to 2: primary=300, cross=200*0.5=100 => 400. Tie broken by iteration order -> 1.
+        let up_from_3 = root.spatial_adjacent_pane(3, SpatialDirection::Up);
+        assert!(
+            up_from_3 == Some(1) || up_from_3 == Some(2),
+            "up from 3 should be 1 or 2"
+        );
+        // From 2, down -> 3
+        assert_eq!(
+            root.spatial_adjacent_pane(2, SpatialDirection::Down),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn spatial_nav_four_pane_grid() {
+        // [1 | 2]
+        // [3 | 4]
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let top = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        let bottom = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
+        let mut root = make_split(SplitDirection::Vertical, 0.5, top, bottom);
+        root.layout(rect);
+
+        // Right navigation
+        assert_eq!(
+            root.spatial_adjacent_pane(1, SpatialDirection::Right),
+            Some(2)
+        );
+        assert_eq!(
+            root.spatial_adjacent_pane(3, SpatialDirection::Right),
+            Some(4)
+        );
+
+        // Left navigation
+        assert_eq!(
+            root.spatial_adjacent_pane(2, SpatialDirection::Left),
+            Some(1)
+        );
+        assert_eq!(
+            root.spatial_adjacent_pane(4, SpatialDirection::Left),
+            Some(3)
+        );
+
+        // Down navigation
+        assert_eq!(
+            root.spatial_adjacent_pane(1, SpatialDirection::Down),
+            Some(3)
+        );
+        assert_eq!(
+            root.spatial_adjacent_pane(2, SpatialDirection::Down),
+            Some(4)
+        );
+
+        // Up navigation
+        assert_eq!(root.spatial_adjacent_pane(3, SpatialDirection::Up), Some(1));
+        assert_eq!(root.spatial_adjacent_pane(4, SpatialDirection::Up), Some(2));
+
+        // No wrap: top-left pane has nothing above or to the left.
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Up), None);
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Left), None);
+
+        // No wrap: bottom-right pane has nothing below or to the right.
+        assert_eq!(root.spatial_adjacent_pane(4, SpatialDirection::Down), None);
+        assert_eq!(root.spatial_adjacent_pane(4, SpatialDirection::Right), None);
+    }
+
+    #[test]
+    fn spatial_nav_unknown_id_returns_none() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+
+        assert_eq!(
+            root.spatial_adjacent_pane(99, SpatialDirection::Right),
+            None
+        );
+    }
+
+    #[test]
+    fn spatial_nav_single_pane_returns_none() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_leaf(1);
+        root.layout(rect);
+
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Up), None);
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Down), None);
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Left), None);
+        assert_eq!(root.spatial_adjacent_pane(1, SpatialDirection::Right), None);
+    }
+
+    #[test]
+    fn spatial_nav_asymmetric_five_panes() {
+        // Layout:
+        //   [1 | 2]
+        //   [3 | 4]
+        //     [5]       -- full width bottom
+        let rect = Rect::new(0.0, 0.0, 900.0, 900.0);
+        let top = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        let mid = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
+        let upper = make_split(SplitDirection::Vertical, 0.5, top, mid);
+        let mut root = make_split(SplitDirection::Vertical, 0.67, upper, make_leaf(5));
+        root.layout(rect);
+
+        // From 3, down -> 5
+        assert_eq!(
+            root.spatial_adjacent_pane(3, SpatialDirection::Down),
+            Some(5)
+        );
+        // From 4, down -> 5
+        assert_eq!(
+            root.spatial_adjacent_pane(4, SpatialDirection::Down),
+            Some(5)
+        );
+        // From 5, up -> closest of 3 or 4 (center of 5 is at ~450, center
+        // of 3 is at ~225, center of 4 is at ~675; 3 is closer in x).
+        let up_from_5 = root.spatial_adjacent_pane(5, SpatialDirection::Up);
+        assert!(
+            up_from_5 == Some(3) || up_from_5 == Some(4),
+            "up from 5 should be 3 or 4, got {up_from_5:?}"
+        );
+        // From 5, nothing below.
+        assert_eq!(root.spatial_adjacent_pane(5, SpatialDirection::Down), None);
     }
 }

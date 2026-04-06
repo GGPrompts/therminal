@@ -719,11 +719,23 @@ impl App {
             KeyAction::ClosePane => self.close_focused_pane(),
             KeyAction::ResizeGrow => self.adjust_focused_ratio(0.05),
             KeyAction::ResizeShrink => self.adjust_focused_ratio(-0.05),
-            KeyAction::FocusNext | KeyAction::FocusRight | KeyAction::FocusDown => {
+            KeyAction::FocusNext => {
                 self.move_focus(crate::pane::FocusDirection::Next);
             }
-            KeyAction::FocusPrev | KeyAction::FocusLeft | KeyAction::FocusUp => {
+            KeyAction::FocusPrev => {
                 self.move_focus(crate::pane::FocusDirection::Prev);
+            }
+            KeyAction::FocusUp => {
+                self.move_focus_spatial(crate::pane::SpatialDirection::Up);
+            }
+            KeyAction::FocusDown => {
+                self.move_focus_spatial(crate::pane::SpatialDirection::Down);
+            }
+            KeyAction::FocusLeft => {
+                self.move_focus_spatial(crate::pane::SpatialDirection::Left);
+            }
+            KeyAction::FocusRight => {
+                self.move_focus_spatial(crate::pane::SpatialDirection::Right);
             }
             KeyAction::SwapNext => {
                 self.swap_focused_pane(crate::pane::FocusDirection::Next);

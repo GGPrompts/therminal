@@ -53,7 +53,7 @@ pub use self::geometry::{
     content_area_rect_csd, effective_header_height, effective_status_bar_height,
     effective_tab_bar_height, effective_tab_bar_height_csd,
 };
-pub use self::layout::{FocusDirection, LayoutNode, LayoutSnapshot};
+pub use self::layout::{FocusDirection, LayoutNode, LayoutSnapshot, SpatialDirection};
 #[allow(unused_imports)]
 pub use self::spawn::{PaneCallbacks, next_pane_id, spawn_pane};
 #[allow(unused_imports)]
