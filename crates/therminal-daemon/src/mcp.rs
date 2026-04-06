@@ -31,7 +31,7 @@ use tracing::{debug, error, info, warn};
 use therminal_core::config::TrustConfig;
 
 use crate::session::SessionManager;
-use crate::trust::{check_tool_access, AgentIdentity, RateLimiter, TrustCheckResult};
+use crate::trust::{AgentIdentity, RateLimiter, TrustCheckResult, check_tool_access};
 
 // ── Tool parameter types ────────────────────────────────────────────────
 
@@ -283,32 +283,32 @@ impl TherminalMcpServer {
 fn tool_definitions() -> Vec<Tool> {
     vec![
         Tool::new(
-            "list_sessions",
+            "terminal.sessions.list",
             "List all active terminal session IDs",
             schema_for_type::<()>(),
         ),
         Tool::new(
-            "get_session",
+            "terminal.sessions.get",
             "Get details about a specific terminal session (name, creation time)",
             schema_for_type::<SessionIdParam>(),
         ),
         Tool::new(
-            "create_session",
+            "terminal.sessions.create",
             "Create a new terminal session with a shell and PTY. Returns the new session ID.",
             schema_for_type::<CreateSessionParam>(),
         ),
         Tool::new(
-            "destroy_session",
+            "terminal.sessions.destroy",
             "Destroy a terminal session and all its panes",
             schema_for_type::<SessionIdParam>(),
         ),
         Tool::new(
-            "write_to_pane",
+            "terminal.panes.write",
             "Write text input to a pane's PTY (send keystrokes or commands to the terminal)",
             schema_for_type::<WriteToPaneParam>(),
         ),
         Tool::new(
-            "read_pane_content",
+            "terminal.panes.get_content",
             "Read the current visible content of a terminal pane (grid snapshot with cursor position)",
             schema_for_type::<PaneIdParam>(),
         ),
@@ -354,24 +354,24 @@ impl ServerHandler for TherminalMcpServer {
         }
 
         match name {
-            "list_sessions" => self.handle_list_sessions().await,
-            "get_session" => {
+            "terminal.sessions.list" => self.handle_list_sessions().await,
+            "terminal.sessions.get" => {
                 let params: SessionIdParam = parse_args(args)?;
                 self.handle_get_session(params).await
             }
-            "create_session" => {
+            "terminal.sessions.create" => {
                 let params: CreateSessionParam = parse_args(args)?;
                 self.handle_create_session(params).await
             }
-            "destroy_session" => {
+            "terminal.sessions.destroy" => {
                 let params: SessionIdParam = parse_args(args)?;
                 self.handle_destroy_session(params).await
             }
-            "write_to_pane" => {
+            "terminal.panes.write" => {
                 let params: WriteToPaneParam = parse_args(args)?;
                 self.handle_write_to_pane(params).await
             }
-            "read_pane_content" => {
+            "terminal.panes.get_content" => {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_read_pane_content(params).await
             }

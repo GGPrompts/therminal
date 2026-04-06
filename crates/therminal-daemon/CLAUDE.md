@@ -70,14 +70,46 @@ Tools exposed:
 
 | Tool | Category | Description |
 |------|----------|-------------|
-| `list_sessions` | Observer | List all session IDs |
-| `get_session` | Observer | Get session metadata |
-| `read_pane_content` | Observer | Read visible pane content |
-| `create_session` | Writer | Spawn a new PTY session |
-| `write_to_pane` | Writer | Send input to a pane's PTY |
-| `destroy_session` | Admin | Kill a session |
+| `terminal.sessions.list` | Observer | List all session IDs |
+| `terminal.sessions.get` | Observer | Get session metadata |
+| `terminal.sessions.create` | Writer | Spawn a new PTY session |
+| `terminal.sessions.destroy` | Admin | Kill a session |
+| `terminal.panes.get_content` | Observer | Read visible pane content |
+| `terminal.panes.write` | Writer | Send input to a pane's PTY |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
+
+## MCP Tool Naming
+
+All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-separated namespaces.
+
+### Domains
+
+| Domain | Scope |
+|--------|-------|
+| `terminal.sessions` | Session lifecycle (list, get, create, destroy) |
+| `terminal.panes` | Pane I/O and state (get_content, write) |
+| `terminal.semantic` | Reserved for semantic region queries (Phase 4) |
+
+### Standard Verbs
+
+| Verb | Meaning |
+|------|---------|
+| `list` | Return all IDs/summaries for a domain |
+| `get` | Return details for a single resource by ID |
+| `get_content` | Return content/payload for a resource (distinct from metadata) |
+| `create` | Spawn a new resource |
+| `destroy` | Tear down a resource (destructive, Admin tier) |
+| `write` | Send input/data to a resource |
+| `query` | Search or filter within a domain |
+
+### Adding New Tools
+
+1. Pick the correct domain. If none fits, propose a new `terminal.<domain>` in a PR.
+2. Use a standard verb from the table above. Compound verbs use underscores (e.g. `get_content`).
+3. Add the tool name to `tool_category()` in `trust.rs` with the appropriate tier.
+4. Add the `Tool::new()` entry in `tool_definitions()` and the match arm in `call_tool()` in `mcp.rs`.
+5. Update the tool table in this file.
 
 ## Trust Tier Enforcement
 

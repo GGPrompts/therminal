@@ -16,11 +16,11 @@ use tracing::{info, warn};
 /// Permission level required to invoke a given MCP tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
-    /// Read-only tools: list_sessions, get_session, read_pane_content.
+    /// Read-only tools: terminal.sessions.list, terminal.sessions.get, terminal.panes.get_content.
     Observer,
-    /// Write tools: create_session, write_to_pane.
+    /// Write tools: terminal.sessions.create, terminal.panes.write.
     Writer,
-    /// Destructive tools: destroy_session.
+    /// Destructive tools: terminal.sessions.destroy.
     Admin,
 }
 
@@ -40,9 +40,11 @@ impl ToolCategory {
 /// Returns `None` for unknown tool names (handled separately as invalid).
 pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
     match tool_name {
-        "list_sessions" | "get_session" | "read_pane_content" => Some(ToolCategory::Observer),
-        "create_session" | "write_to_pane" => Some(ToolCategory::Writer),
-        "destroy_session" => Some(ToolCategory::Admin),
+        "terminal.sessions.list" | "terminal.sessions.get" | "terminal.panes.get_content" => {
+            Some(ToolCategory::Observer)
+        }
+        "terminal.sessions.create" | "terminal.panes.write" => Some(ToolCategory::Writer),
+        "terminal.sessions.destroy" => Some(ToolCategory::Admin),
         _ => None,
     }
 }
@@ -172,11 +174,11 @@ pub fn check_tool_access(
     }
 
     // Rate-limit destructive operations.
-    if category == ToolCategory::Admin {
-        if let Err(reason) = rate_limiter.check_and_record(&agent.name) {
-            audit_log_denied(agent, tool_name, &reason);
-            return TrustCheckResult::Denied(reason);
-        }
+    if category == ToolCategory::Admin
+        && let Err(reason) = rate_limiter.check_and_record(&agent.name)
+    {
+        audit_log_denied(agent, tool_name, &reason);
+        return TrustCheckResult::Denied(reason);
     }
 
     audit_log(agent, tool_name, "allowed");
@@ -227,15 +229,30 @@ mod tests {
 
     #[test]
     fn tool_categories() {
-        assert_eq!(tool_category("list_sessions"), Some(ToolCategory::Observer));
-        assert_eq!(tool_category("get_session"), Some(ToolCategory::Observer));
         assert_eq!(
-            tool_category("read_pane_content"),
+            tool_category("terminal.sessions.list"),
             Some(ToolCategory::Observer)
         );
-        assert_eq!(tool_category("create_session"), Some(ToolCategory::Writer));
-        assert_eq!(tool_category("write_to_pane"), Some(ToolCategory::Writer));
-        assert_eq!(tool_category("destroy_session"), Some(ToolCategory::Admin));
+        assert_eq!(
+            tool_category("terminal.sessions.get"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            tool_category("terminal.panes.get_content"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            tool_category("terminal.sessions.create"),
+            Some(ToolCategory::Writer)
+        );
+        assert_eq!(
+            tool_category("terminal.panes.write"),
+            Some(ToolCategory::Writer)
+        );
+        assert_eq!(
+            tool_category("terminal.sessions.destroy"),
+            Some(ToolCategory::Admin)
+        );
         assert_eq!(tool_category("nonexistent"), None);
     }
 
@@ -294,7 +311,7 @@ mod tests {
         };
         let limiter = RateLimiter::new(5);
         assert!(matches!(
-            check_tool_access("list_sessions", &agent, &config, &limiter),
+            check_tool_access("terminal.sessions.list", &agent, &config, &limiter),
             TrustCheckResult::Allowed
         ));
     }
@@ -310,7 +327,7 @@ mod tests {
         };
         let limiter = RateLimiter::new(5);
         assert!(matches!(
-            check_tool_access("create_session", &agent, &config, &limiter),
+            check_tool_access("terminal.sessions.create", &agent, &config, &limiter),
             TrustCheckResult::Denied(_)
         ));
     }
@@ -326,7 +343,7 @@ mod tests {
         };
         let limiter = RateLimiter::new(5);
         assert!(matches!(
-            check_tool_access("destroy_session", &agent, &config, &limiter),
+            check_tool_access("terminal.sessions.destroy", &agent, &config, &limiter),
             TrustCheckResult::Denied(_)
         ));
     }
@@ -342,7 +359,7 @@ mod tests {
         };
         let limiter = RateLimiter::new(5);
         assert!(matches!(
-            check_tool_access("destroy_session", &agent, &config, &limiter),
+            check_tool_access("terminal.sessions.destroy", &agent, &config, &limiter),
             TrustCheckResult::Allowed
         ));
     }
@@ -358,11 +375,11 @@ mod tests {
         };
         let limiter = RateLimiter::new(1);
         assert!(matches!(
-            check_tool_access("destroy_session", &agent, &config, &limiter),
+            check_tool_access("terminal.sessions.destroy", &agent, &config, &limiter),
             TrustCheckResult::Allowed
         ));
         assert!(matches!(
-            check_tool_access("destroy_session", &agent, &config, &limiter),
+            check_tool_access("terminal.sessions.destroy", &agent, &config, &limiter),
             TrustCheckResult::Denied(_)
         ));
     }
