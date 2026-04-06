@@ -264,14 +264,17 @@ pub struct GridRenderer {
     pub(crate) padding_x: f32,
     pub(crate) padding_y: f32,
 
-    // Per-row cache of cell data for damage-based rendering.
-    row_cache: Vec<Option<CachedRow>>,
+    // Per-pane row cache of cell data for damage-based rendering.
+    pane_row_cache: HashMap<PaneId, Vec<Option<CachedRow>>>,
 
-    // Persistent per-cell glyphon Buffers — only rebuilt for damaged rows.
-    cell_buffers: Vec<Vec<Option<Buffer>>>,
+    // Per-pane persistent per-cell glyphon Buffers — only rebuilt for damaged rows.
+    pane_cell_buffers: HashMap<PaneId, Vec<Vec<Option<Buffer>>>>,
 
-    // Track last cursor position to rebuild affected cell buffers when cursor moves.
-    last_cursor_pos: Option<(usize, usize)>,
+    // Per-pane last cursor position to rebuild affected cell buffers when cursor moves.
+    pane_last_cursor_pos: HashMap<PaneId, (usize, usize)>,
+
+    // The pane whose caches are currently active. Set via `set_current_pane()`.
+    current_pane: Option<PaneId>,
 
     // Frame counter for throttled atlas trimming.
     pub(crate) frame_count: u64,
@@ -478,9 +481,10 @@ impl GridRenderer {
             base_padding_y: padding_y,
             padding_x,
             padding_y,
-            row_cache: Vec::new(),
-            cell_buffers: Vec::new(),
-            last_cursor_pos: None,
+            pane_row_cache: HashMap::new(),
+            pane_cell_buffers: HashMap::new(),
+            pane_last_cursor_pos: HashMap::new(),
+            current_pane: None,
             frame_count: 0,
             rect_verts_cpu: Vec::new(),
             frame_times_us: vec![0u64; 100],
@@ -586,9 +590,9 @@ impl GridRenderer {
         self.atlas.trim();
         self.overlay_atlas.trim();
 
-        self.row_cache.clear();
-        self.cell_buffers.clear();
-        self.last_cursor_pos = None;
+        self.pane_row_cache.clear();
+        self.pane_cell_buffers.clear();
+        self.pane_last_cursor_pos.clear();
     }
 
     /// Replace the font configuration and recalculate metrics.
@@ -646,9 +650,9 @@ impl GridRenderer {
 
         self.atlas.trim();
         self.overlay_atlas.trim();
-        self.row_cache.clear();
-        self.cell_buffers.clear();
-        self.last_cursor_pos = None;
+        self.pane_row_cache.clear();
+        self.pane_cell_buffers.clear();
+        self.pane_last_cursor_pos.clear();
     }
 
     /// Adjust the font size by `delta` points (e.g. +1.0 or -1.0).
@@ -672,17 +676,11 @@ impl GridRenderer {
         self.font_config.font_size
     }
 
-    /// Reset per-pane caches so stale state from a previous pane doesn't bleed
-    /// into the next one.  Call this before rendering each pane when a single
-    /// `GridRenderer` is shared across multiple panes.
-    ///
-    /// Note: `hotspot_map` and `hyperlink_map` are NOT cleared here -- they
-    /// accumulate entries from all panes during a frame and are cleared once
-    /// at the start of the full render pass via `clear_frame_maps()`.
-    pub fn reset_pane_caches(&mut self) {
-        self.row_cache.clear();
-        self.cell_buffers.clear();
-        self.last_cursor_pos = None;
+    /// Remove the cached state for a specific pane (e.g. when a pane is closed).
+    pub fn remove_pane_cache(&mut self, pane_id: PaneId) {
+        self.pane_row_cache.remove(&pane_id);
+        self.pane_cell_buffers.remove(&pane_id);
+        self.pane_last_cursor_pos.remove(&pane_id);
     }
 
     /// Clear the hotspot and hyperlink maps at the start of a new frame,
@@ -694,9 +692,14 @@ impl GridRenderer {
     }
 
     /// Set the pane ID for the pane about to be rendered. Map entries
-    /// inserted during `render()` will be keyed to this pane.
+    /// inserted during `render()` will be keyed to this pane. Also switches
+    /// the per-pane row/cell caches to this pane (creating them if needed).
     pub fn set_current_pane(&mut self, pane_id: PaneId) {
         self.current_pane_id = Some(pane_id);
+        self.current_pane = Some(pane_id);
+        // Ensure cache entries exist for this pane.
+        self.pane_row_cache.entry(pane_id).or_default();
+        self.pane_cell_buffers.entry(pane_id).or_default();
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -740,9 +743,11 @@ impl GridRenderer {
         surface_width: u32,
         surface_height: u32,
     ) {
-        // ── Update row cache ────────────────────────────────────────────
-        if self.row_cache.len() != screen_lines {
-            self.row_cache.resize_with(screen_lines, || None);
+        // ── Update row cache for current pane ────────────────────────────
+        let pane_id = self.current_pane.unwrap_or(0);
+        let row_cache = self.pane_row_cache.entry(pane_id).or_default();
+        if row_cache.len() != screen_lines {
+            row_cache.resize_with(screen_lines, || None);
         }
 
         let mut new_row_cells: Vec<Vec<RenderCell>> = vec![Vec::new(); screen_lines];
@@ -770,9 +775,9 @@ impl GridRenderer {
             };
             if is_damaged {
                 if row_cells.is_empty() {
-                    self.row_cache[row_idx] = None;
+                    row_cache[row_idx] = None;
                 } else {
-                    self.row_cache[row_idx] = Some(CachedRow { cells: row_cells });
+                    row_cache[row_idx] = Some(CachedRow { cells: row_cells });
                 }
             }
         }
@@ -842,10 +847,18 @@ impl GridRenderer {
         let sw = surface_width as f32;
         let sh = surface_height as f32;
 
+        // ── Temporarily take per-pane caches out of the HashMaps ────────
+        // This avoids borrow-checker conflicts when accessing font_system
+        // and other &mut self fields alongside the per-pane cache vecs.
+        let pane_id = self.current_pane.unwrap_or(0);
+        let row_cache = self.pane_row_cache.remove(&pane_id).unwrap_or_default();
+        let mut cell_buffers = self.pane_cell_buffers.remove(&pane_id).unwrap_or_default();
+        let prev_cursor = self.pane_last_cursor_pos.get(&pane_id).copied();
+
         // ── Collect background rects from all cached rows ───────────────
         let mut bg_rects: Vec<([f32; 4], [f32; 4])> = Vec::new();
 
-        for row in self.row_cache.iter().flatten() {
+        for row in row_cache.iter().flatten() {
             for cell in &row.cells {
                 let bg_color = cell_bg_color(cell);
                 if let Some(bg) = bg_color {
@@ -907,7 +920,7 @@ impl GridRenderer {
         if let Some(sel) = selection {
             let sel_highlight = self.resolved_selection_color();
 
-            for row in self.row_cache.iter().flatten() {
+            for row in row_cache.iter().flatten() {
                 for cell in &row.cells {
                     let grid_line = Line(cell.row as i32 - display_offset as i32);
                     let point = Point::new(grid_line, Column(cell.col));
@@ -934,7 +947,7 @@ impl GridRenderer {
             let underline_h = 1.0_f32;
             let dash_on = 3.0_f32;
             let dash_off = 2.0_f32;
-            for row in self.row_cache.iter().flatten() {
+            for row in row_cache.iter().flatten() {
                 for cell in &row.cells {
                     if let Some(ref url) = cell.hyperlink {
                         self.hyperlink_map
@@ -974,7 +987,7 @@ impl GridRenderer {
             let underline_h = 1.0_f32;
             let dot_on = 2.0_f32;
             let dot_off = 2.0_f32;
-            for row in self.row_cache.iter().flatten() {
+            for row in row_cache.iter().flatten() {
                 for cell in &row.cells {
                     if let Some((ref kind, ref full_text)) = cell.hotspot {
                         // Skip cells that already have a hyperlink (hyperlinks take priority).
@@ -1045,15 +1058,14 @@ impl GridRenderer {
         };
         let cursor_col = cursor.point.column.0;
 
-        while self.cell_buffers.len() < screen_lines {
-            self.cell_buffers.push(Vec::new());
+        while cell_buffers.len() < screen_lines {
+            cell_buffers.push(Vec::new());
         }
-        self.cell_buffers.truncate(screen_lines);
+        cell_buffers.truncate(screen_lines);
 
-        let prev_cursor = self.last_cursor_pos;
         let full_rebuild = damaged_rows.is_none();
 
-        for (row_idx, cached) in self.row_cache.iter().enumerate() {
+        for (row_idx, cached) in row_cache.iter().enumerate() {
             if row_idx >= screen_lines {
                 break;
             }
@@ -1076,23 +1088,23 @@ impl GridRenderer {
             let row = match cached {
                 Some(r) => r,
                 None => {
-                    self.cell_buffers[row_idx].clear();
+                    cell_buffers[row_idx].clear();
                     continue;
                 }
             };
 
             let row_cells = &row.cells;
             if row_cells.is_empty() {
-                self.cell_buffers[row_idx].clear();
+                cell_buffers[row_idx].clear();
                 continue;
             }
 
             let max_col = row_cells.iter().map(|c| c.col).max().unwrap_or(0) + 1;
-            while self.cell_buffers[row_idx].len() < max_col {
-                self.cell_buffers[row_idx].push(None);
+            while cell_buffers[row_idx].len() < max_col {
+                cell_buffers[row_idx].push(None);
             }
 
-            for slot in self.cell_buffers[row_idx].iter_mut() {
+            for slot in cell_buffers[row_idx].iter_mut() {
                 *slot = None;
             }
 
@@ -1124,7 +1136,7 @@ impl GridRenderer {
                     self.cell_width
                 };
 
-                let buf = self.cell_buffers[row_idx][cell.col]
+                let buf = cell_buffers[row_idx][cell.col]
                     .get_or_insert_with(|| Buffer::new(&mut self.font_system, metrics));
                 buf.set_metrics(&mut self.font_system, metrics);
                 buf.set_size(
@@ -1146,7 +1158,8 @@ impl GridRenderer {
             }
         }
 
-        self.last_cursor_pos = Some((cursor_row, cursor_col));
+        self.pane_last_cursor_pos
+            .insert(pane_id, (cursor_row, cursor_col));
 
         // ── Update viewport ──────────────────────────────────────────────
         self.viewport.update(
@@ -1162,8 +1175,7 @@ impl GridRenderer {
         let pad_y = self.padding_y;
         let cw = self.cell_width;
         let ch = self.cell_height;
-        let text_areas: Vec<TextArea<'_>> = self
-            .cell_buffers
+        let text_areas: Vec<TextArea<'_>> = cell_buffers
             .iter()
             .enumerate()
             .flat_map(|(row_idx, row)| {
@@ -1293,6 +1305,10 @@ impl GridRenderer {
                 "grid render 100-frame avg"
             );
         }
+
+        // ── Restore per-pane caches back into the HashMaps ──────────────
+        self.pane_row_cache.insert(pane_id, row_cache);
+        self.pane_cell_buffers.insert(pane_id, cell_buffers);
     }
 }
 
