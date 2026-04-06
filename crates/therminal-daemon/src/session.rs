@@ -19,6 +19,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi;
 use portable_pty::MasterPty;
+use therminal_terminal::agent_registry::{AgentEntry, AgentRegistry, AgentStatus};
 use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
 use therminal_terminal::region_index::RegionIndex;
@@ -610,6 +611,8 @@ pub struct SessionManager {
     default_rows: u16,
     /// Optional persistence handle for debounced state saving.
     persistence: Option<crate::persistence::PersistenceHandle>,
+    /// Central registry of all detected agents across panes.
+    agent_registry: AgentRegistry,
 }
 
 impl SessionManager {
@@ -621,6 +624,7 @@ impl SessionManager {
             default_cols: 80,
             default_rows: 24,
             persistence: None,
+            agent_registry: AgentRegistry::new(),
         }
     }
 
@@ -719,7 +723,13 @@ impl SessionManager {
 
     /// Destroy a session and all its panes.
     pub fn destroy_session(&mut self, session_id: SessionId) -> bool {
-        if let Some(_session) = self.sessions.remove(&session_id) {
+        if let Some(session) = self.sessions.remove(&session_id) {
+            // Unregister all agents from panes in this session.
+            for window in &session.windows {
+                for pane in &window.panes {
+                    self.agent_registry.unregister(pane.id);
+                }
+            }
             info!(session_id = session_id, "session destroyed");
             let _ = self
                 .event_tx
@@ -826,6 +836,9 @@ impl SessionManager {
     /// If the window becomes empty, removes the window. If the session
     /// becomes empty, destroys the session.
     pub fn kill_pane(&mut self, pane_id: PaneId) -> Result<(), String> {
+        // Unregister any agent tracked for this pane.
+        self.agent_registry.unregister(pane_id);
+
         let session_id = self
             .sessions
             .values()
@@ -920,6 +933,44 @@ impl SessionManager {
     /// Return the ID of the first (default) session, if any.
     pub fn default_session_id(&self) -> Option<SessionId> {
         self.sessions.keys().next().copied()
+    }
+
+    // ── Agent registry ─────────────────────────────────────────────────
+
+    /// Access the agent registry (read-only).
+    pub fn agent_registry(&self) -> &AgentRegistry {
+        &self.agent_registry
+    }
+
+    /// Register an agent for a pane in the central registry.
+    pub fn register_agent(
+        &mut self,
+        pane_id: PaneId,
+        name: String,
+        agent_type: therminal_terminal::state_inference::AgentType,
+        pid: Option<u32>,
+    ) {
+        self.agent_registry.register(pane_id, name, agent_type, pid);
+    }
+
+    /// Unregister the agent for a pane.
+    pub fn unregister_agent(&mut self, pane_id: PaneId) {
+        self.agent_registry.unregister(pane_id);
+    }
+
+    /// Update the status of a tracked agent.
+    pub fn update_agent_status(&mut self, pane_id: PaneId, status: AgentStatus) {
+        self.agent_registry.update_status(pane_id, status);
+    }
+
+    /// Return a snapshot of all tracked agents.
+    pub fn list_agents(&self) -> Vec<AgentEntry> {
+        self.agent_registry.agents()
+    }
+
+    /// Return agents filtered by status string.
+    pub fn list_agents_by_status(&self, status: &str) -> Vec<AgentEntry> {
+        self.agent_registry.agents_by_status(status)
     }
 
     /// Collect handoff metadata and raw FDs for all panes (Unix only).

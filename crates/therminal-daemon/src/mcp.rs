@@ -124,6 +124,12 @@ struct ListWorkspacesParam {
     session_id: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListAgentsParam {
+    /// Optional status filter. One of: active, idle, processing, streaming, thinking, tool_use, awaiting_input.
+    status: Option<String>,
+}
+
 fn default_timeout_ms() -> u64 {
     30_000
 }
@@ -285,6 +291,31 @@ struct WorkspaceInfoResult {
 #[derive(Debug, Serialize, JsonSchema)]
 struct ListWorkspacesResult {
     workspaces: Vec<WorkspaceInfoResult>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct AgentInfoResult {
+    /// The pane ID where the agent is running.
+    pane_id: u64,
+    /// Human-readable agent name (e.g. "node").
+    name: String,
+    /// Agent type: claude, codex, copilot, or aider.
+    agent_type: String,
+    /// Current status: active, idle, processing, streaming, thinking, tool_use, awaiting_input.
+    status: String,
+    /// Current tool name if status is tool_use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_tool: Option<String>,
+    /// Unix timestamp (seconds) when the agent was first detected.
+    detected_at: u64,
+    /// OS process ID (if known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ListAgentsResult {
+    agents: Vec<AgentInfoResult>,
 }
 
 // Reserved for terminal.semantic.query_history (Phase 4).
@@ -703,6 +734,33 @@ impl TherminalMcpServer {
         }
 
         let result = ListWorkspacesResult { workspaces };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    async fn handle_list_agents(
+        &self,
+        params: ListAgentsParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+        let entries = match &params.status {
+            Some(status) => mgr.list_agents_by_status(status),
+            None => mgr.list_agents(),
+        };
+
+        let agents: Vec<AgentInfoResult> = entries
+            .into_iter()
+            .map(|e| AgentInfoResult {
+                pane_id: e.pane_id,
+                name: e.name,
+                agent_type: e.agent_type.as_str().to_string(),
+                status: e.status.as_str().to_string(),
+                current_tool: e.status.tool_name().map(String::from),
+                detected_at: e.detected_at,
+                pid: e.pid,
+            })
+            .collect();
+
+        let result = ListAgentsResult { agents };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -1236,6 +1294,11 @@ fn tool_definitions() -> Vec<Tool> {
             "List workspace tabs with their names, pane counts, and active status. Optionally filter by session ID.",
             schema_for_type::<ListWorkspacesParam>(),
         ),
+        Tool::new(
+            "terminal.agents.list",
+            "List all detected AI agents across terminal panes with their type, status, and pane location. Optionally filter by status.",
+            schema_for_type::<ListAgentsParam>(),
+        ),
     ]
 }
 
@@ -1537,6 +1600,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.workspaces.list" => {
                 let params: ListWorkspacesParam = parse_args(args)?;
                 self.handle_list_workspaces(params).await
+            }
+            "terminal.agents.list" => {
+                let params: ListAgentsParam = parse_args(args)?;
+                self.handle_list_agents(params).await
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),

@@ -2,6 +2,7 @@
 
 pub use therminal_protocol as protocol;
 
+pub mod agent_registry;
 pub mod event_log;
 pub mod hotspot_detection;
 pub mod input;
