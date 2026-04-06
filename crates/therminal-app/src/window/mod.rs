@@ -709,13 +709,6 @@ impl App {
                 is_zoomed: self.zoomed_layout.is_some(),
             };
 
-            // Push status bar background to overlay layer.
-            chrome::push_status_bar_bg_overlay(
-                gpu.config.width,
-                gpu.config.height,
-                &mut chrome_overlay,
-            );
-
             let mut encoder = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {

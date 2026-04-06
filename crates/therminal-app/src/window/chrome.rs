@@ -2082,27 +2082,6 @@ pub(crate) fn push_header_bg_overlay(
     header_h
 }
 
-/// Push the status bar background quad into the overlay layer.
-pub(crate) fn push_status_bar_bg_overlay(
-    surface_width: u32,
-    surface_height: u32,
-    overlay: &mut OverlayLayer,
-) {
-    let bar_h = crate::pane::STATUS_BAR_HEIGHT;
-    let sw = surface_width as f32;
-    let sh = surface_height as f32;
-    let bar_y = sh - bar_h;
-
-    overlay.push_rect(
-        0.0,
-        bar_y,
-        sw,
-        bar_h,
-        STATUS_BAR_BG_COLOR,
-        OverlayTier::Chrome,
-    );
-}
-
 /// Push the visual bell overlay quad into the overlay layer.
 pub(crate) fn push_visual_bell_overlay(
     intensity: f32,
