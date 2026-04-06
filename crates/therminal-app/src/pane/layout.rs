@@ -1767,4 +1767,131 @@ mod tests {
         // From 5, nothing below.
         assert_eq!(root.spatial_adjacent_pane(5, SpatialDirection::Down), None);
     }
+
+    // ── extract_pane / insert_pane_at_empty tests ────────────────────────
+
+    #[test]
+    fn extract_single_leaf_leaves_empty() {
+        let mut root = make_leaf(1);
+        let extracted = root.extract_pane(1);
+        assert!(extracted.is_some());
+        assert_eq!(extracted.unwrap().id, 1);
+        assert!(matches!(root, LayoutNode::Empty));
+        assert_eq!(root.pane_count(), 0);
+    }
+
+    #[test]
+    fn extract_from_nested_split_preserves_others() {
+        // Build: Split(Split(1, 2), Split(3, 4))
+        let root_inner_a = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(make_leaf(1)),
+            second: Box::new(make_leaf(2)),
+        };
+        let root_inner_b = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(make_leaf(3)),
+            second: Box::new(make_leaf(4)),
+        };
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(root_inner_a),
+            second: Box::new(root_inner_b),
+        };
+
+        let extracted = root.extract_pane(3);
+        assert!(extracted.is_some());
+        assert_eq!(extracted.unwrap().id, 3);
+
+        // Other panes still reachable
+        let ids = root.pane_ids();
+        assert_eq!(ids, vec![1, 2, 4]);
+        // Tree still has the structural Split nodes (Empty leaf preserved
+        // until cleanup); root is still a Split.
+        assert!(matches!(root, LayoutNode::Split { .. }));
+    }
+
+    #[test]
+    fn extract_nonexistent_pane_returns_none() {
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(make_leaf(1)),
+            second: Box::new(make_leaf(2)),
+        };
+        let original_ids = root.pane_ids();
+        let extracted = root.extract_pane(999);
+        assert!(extracted.is_none());
+        assert_eq!(root.pane_ids(), original_ids);
+    }
+
+    #[test]
+    fn insert_into_empty_slot_fills_it() {
+        // Build a split, then extract one to leave an Empty.
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(make_leaf(1)),
+            second: Box::new(make_leaf(2)),
+        };
+        let extracted = root.extract_pane(2).unwrap();
+        // Now the second child is Empty.
+        let leftover = root.insert_pane_at_empty(extracted);
+        assert!(leftover.is_none(), "insert should succeed");
+        assert_eq!(root.pane_ids(), vec![1, 2]);
+    }
+
+    #[test]
+    fn insert_with_no_empty_slot_returns_pane() {
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(make_leaf(1)),
+            second: Box::new(make_leaf(2)),
+        };
+        let pane = test_pane_state(99, Rect::new(0.0, 0.0, 100.0, 100.0));
+        let returned = root.insert_pane_at_empty(pane);
+        assert!(returned.is_some(), "no empty slot, pane should come back");
+        assert_eq!(returned.unwrap().id, 99);
+        assert_eq!(root.pane_ids(), vec![1, 2]);
+    }
+
+    #[test]
+    fn extract_then_insert_round_trip() {
+        // 4-pane mixed split tree:
+        // Vertical split of (Horizontal(1, 2)) and (Horizontal(3, 4))
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(make_leaf(1)),
+                second: Box::new(make_leaf(2)),
+            }),
+            second: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(make_leaf(3)),
+                second: Box::new(make_leaf(4)),
+            }),
+        };
+        let original_ids = root.pane_ids();
+        assert_eq!(original_ids, vec![1, 2, 3, 4]);
+
+        // Extract pane B (id=2).
+        let extracted = root.extract_pane(2).expect("pane 2 exists");
+        assert_eq!(extracted.id, 2);
+        assert_eq!(root.pane_ids(), vec![1, 3, 4]);
+
+        // Insert it back; should land in the Empty slot we just created.
+        let leftover = root.insert_pane_at_empty(extracted);
+        assert!(leftover.is_none());
+
+        // Round-trip: same ids in same traversal order.
+        assert_eq!(root.pane_ids(), original_ids);
+    }
 }

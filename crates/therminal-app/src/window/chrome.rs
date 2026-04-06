@@ -1882,6 +1882,74 @@ mod tests {
         let result = abbreviate_path("/mnt/c/Users/alice/Documents");
         assert!(!result.is_empty());
     }
+
+    // ── status_bar_hit_test ─────────────────────────────────────────────
+
+    fn hit_areas_with_indicator(rect: ChromeRect) -> StatusBarHitAreas {
+        StatusBarHitAreas {
+            agent_indicator: Some(rect),
+        }
+    }
+
+    #[test]
+    fn status_bar_hit_inside_agent_indicator() {
+        let areas = hit_areas_with_indicator((10.0, 100.0, 80.0, 24.0));
+        let hit = status_bar_hit_test(50.0, 110.0, &areas);
+        assert!(matches!(hit, Some(StatusBarHit::AgentIndicator)));
+    }
+
+    #[test]
+    fn status_bar_hit_inside_agent_indicator_with_zoom_offset() {
+        // Simulates a `[ZOOM]` prefix shifting the indicator rect to the right.
+        // The hit-test simply uses the rect provided by `draw_status_bar`, so
+        // any prefix offset is already baked in. Verify a click at the shifted
+        // x range still hits.
+        let zoom_prefix_width = 60.0;
+        let areas =
+            hit_areas_with_indicator((10.0 + zoom_prefix_width, 100.0, 80.0, 24.0));
+        // A click at the un-shifted x must miss.
+        assert!(status_bar_hit_test(50.0, 110.0, &areas).is_none());
+        // A click within the shifted rect must hit.
+        let hit = status_bar_hit_test(80.0, 110.0, &areas);
+        assert!(matches!(hit, Some(StatusBarHit::AgentIndicator)));
+    }
+
+    #[test]
+    fn status_bar_hit_outside_left_edge() {
+        let areas = hit_areas_with_indicator((10.0, 100.0, 80.0, 24.0));
+        // px just to the left of x.
+        assert!(status_bar_hit_test(9.999, 110.0, &areas).is_none());
+    }
+
+    #[test]
+    fn status_bar_hit_outside_right_edge() {
+        let areas = hit_areas_with_indicator((10.0, 100.0, 80.0, 24.0));
+        // px exactly at x + w is outside (half-open interval).
+        assert!(status_bar_hit_test(90.0, 110.0, &areas).is_none());
+    }
+
+    #[test]
+    fn status_bar_hit_outside_vertical_bounds() {
+        let areas = hit_areas_with_indicator((10.0, 100.0, 80.0, 24.0));
+        // Click within x range but above the rect.
+        assert!(status_bar_hit_test(50.0, 99.0, &areas).is_none());
+        // Click within x range but at y == y + h (half-open).
+        assert!(status_bar_hit_test(50.0, 124.0, &areas).is_none());
+    }
+
+    #[test]
+    fn status_bar_hit_in_bar_but_not_on_indicator() {
+        let areas = hit_areas_with_indicator((10.0, 100.0, 80.0, 24.0));
+        // Somewhere else in the status bar (e.g., center cwd region).
+        assert!(status_bar_hit_test(400.0, 110.0, &areas).is_none());
+    }
+
+    #[test]
+    fn status_bar_hit_no_indicator_registered() {
+        let areas = StatusBarHitAreas::default();
+        assert!(areas.agent_indicator.is_none());
+        assert!(status_bar_hit_test(50.0, 110.0, &areas).is_none());
+    }
 }
 
 // ── Overlay-compatible chrome functions ──────────────────────────────

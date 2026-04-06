@@ -317,6 +317,147 @@ mod tests {
         assert!((verts[4].position[1] - (-1.0)).abs() < 1e-5);
     }
 
+    /// Helper: replicate render's vertex generation without GPU calls.
+    fn build_vertices(layer: &mut OverlayLayer, sw: f32, sh: f32) -> Vec<ColorVertex> {
+        layer.quads.sort_by_key(|q| q.tier);
+        let mut vertices: Vec<ColorVertex> = Vec::with_capacity(layer.quads.len() * 6);
+        for quad in &layer.quads {
+            let verts = pixel_rect_to_ndc_overlay(
+                quad.x,
+                quad.y,
+                quad.width,
+                quad.height,
+                sw,
+                sh,
+                quad.color,
+            );
+            vertices.extend_from_slice(&verts);
+        }
+        vertices
+    }
+
+    #[test]
+    fn z_order_chrome_widget_modal_in_vertex_output() {
+        // Push out of order; verify the batched vertex output places Chrome
+        // first, then Widget, then Modal (encoded by distinct colors).
+        let mut layer = OverlayLayer::new();
+        let modal_color = [0.0, 0.0, 1.0, 1.0];
+        let chrome_color = [1.0, 0.0, 0.0, 1.0];
+        let widget_color = [0.0, 1.0, 0.0, 1.0];
+        layer.push_rect(0.0, 0.0, 10.0, 10.0, modal_color, OverlayTier::Modal);
+        layer.push_rect(0.0, 0.0, 10.0, 10.0, chrome_color, OverlayTier::Chrome);
+        layer.push_rect(0.0, 0.0, 10.0, 10.0, widget_color, OverlayTier::Widget);
+
+        let verts = build_vertices(&mut layer, 800.0, 600.0);
+        assert_eq!(verts.len(), 18, "3 quads * 6 verts each");
+        // First 6 verts must be Chrome (red), next 6 Widget (green), last 6 Modal (blue).
+        assert_eq!(verts[0].color, chrome_color);
+        assert_eq!(verts[5].color, chrome_color);
+        assert_eq!(verts[6].color, widget_color);
+        assert_eq!(verts[11].color, widget_color);
+        assert_eq!(verts[12].color, modal_color);
+        assert_eq!(verts[17].color, modal_color);
+    }
+
+    #[test]
+    fn mixed_tier_batching_preserves_within_tier_order() {
+        // Multiple quads per tier, interleaved on push. After sort, intra-tier
+        // submission order must be preserved (stable sort).
+        let mut layer = OverlayLayer::new();
+        let c1 = [0.1, 0.0, 0.0, 1.0];
+        let c2 = [0.2, 0.0, 0.0, 1.0];
+        let m1 = [0.0, 0.0, 0.1, 1.0];
+        let m2 = [0.0, 0.0, 0.2, 1.0];
+        let w1 = [0.0, 0.1, 0.0, 1.0];
+
+        layer.push_rect(0.0, 0.0, 1.0, 1.0, c1, OverlayTier::Chrome);
+        layer.push_rect(0.0, 0.0, 1.0, 1.0, m1, OverlayTier::Modal);
+        layer.push_rect(0.0, 0.0, 1.0, 1.0, w1, OverlayTier::Widget);
+        layer.push_rect(0.0, 0.0, 1.0, 1.0, c2, OverlayTier::Chrome);
+        layer.push_rect(0.0, 0.0, 1.0, 1.0, m2, OverlayTier::Modal);
+
+        let verts = build_vertices(&mut layer, 100.0, 100.0);
+        // Order: c1, c2, w1, m1, m2 → first vertex of each block at indices 0, 6, 12, 18, 24.
+        assert_eq!(verts[0].color, c1);
+        assert_eq!(verts[6].color, c2);
+        assert_eq!(verts[12].color, w1);
+        assert_eq!(verts[18].color, m1);
+        assert_eq!(verts[24].color, m2);
+    }
+
+    #[test]
+    fn push_rect_and_push_quad_produce_equivalent_output() {
+        let color = [0.3, 0.6, 0.9, 0.5];
+        let mut a = OverlayLayer::new();
+        a.push_rect(12.0, 34.0, 56.0, 78.0, color, OverlayTier::Widget);
+
+        let mut b = OverlayLayer::new();
+        b.push_quad(OverlayQuad {
+            x: 12.0,
+            y: 34.0,
+            width: 56.0,
+            height: 78.0,
+            color,
+            tier: OverlayTier::Widget,
+        });
+
+        let va = build_vertices(&mut a, 800.0, 600.0);
+        let vb = build_vertices(&mut b, 800.0, 600.0);
+        assert_eq!(va.len(), vb.len());
+        for (x, y) in va.iter().zip(vb.iter()) {
+            assert_eq!(x.position, y.position);
+            assert_eq!(x.color, y.color);
+        }
+    }
+
+    #[test]
+    fn empty_layer_produces_no_vertices() {
+        let mut layer = OverlayLayer::new();
+        let verts = build_vertices(&mut layer, 800.0, 600.0);
+        assert!(verts.is_empty());
+        assert!(layer.is_empty());
+    }
+
+    #[test]
+    fn many_quads_single_tier_batch_into_one_vertex_buffer() {
+        // The render path issues exactly one draw call regardless of quad count
+        // within a frame. Verify all quads in one tier accumulate into a single
+        // contiguous vertex array (6 verts per quad, no separators).
+        let mut layer = OverlayLayer::new();
+        const N: usize = 256;
+        for i in 0..N {
+            layer.push_rect(
+                i as f32,
+                0.0,
+                1.0,
+                1.0,
+                [1.0, 1.0, 1.0, 1.0],
+                OverlayTier::Widget,
+            );
+        }
+        let verts = build_vertices(&mut layer, 1024.0, 1024.0);
+        assert_eq!(verts.len(), N * 6);
+        assert_eq!(layer.quad_count(), N);
+    }
+
+    #[test]
+    fn clear_between_frames_resets_state() {
+        let mut layer = OverlayLayer::new();
+        layer.push_rect(0.0, 0.0, 10.0, 10.0, [1.0; 4], OverlayTier::Chrome);
+        layer.push_rect(0.0, 0.0, 10.0, 10.0, [1.0; 4], OverlayTier::Modal);
+        assert_eq!(layer.quad_count(), 2);
+
+        // Frame ends.
+        layer.clear();
+        assert!(layer.is_empty());
+        assert_eq!(layer.quad_count(), 0);
+
+        // Next frame: fresh pushes work and produce correct vertex count.
+        layer.push_rect(0.0, 0.0, 5.0, 5.0, [0.5; 4], OverlayTier::Widget);
+        let verts = build_vertices(&mut layer, 100.0, 100.0);
+        assert_eq!(verts.len(), 6);
+    }
+
     #[test]
     fn sort_by_tier() {
         let mut layer = OverlayLayer::new();

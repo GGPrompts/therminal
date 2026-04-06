@@ -628,6 +628,113 @@ mod tests {
         assert!(!consumed);
     }
 
+    #[test]
+    fn osc_9_bel_terminator() {
+        // ESC ] 9 ; text BEL  -- bell_terminated = true
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"bel msg"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => assert_eq!(t, "bel msg"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_st_terminator() {
+        // ESC ] 9 ; text ESC \  -- bell_terminated = false
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"st msg"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            false,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => assert_eq!(t, "st msg"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_empty_payload_does_not_crash() {
+        // ESC ] 9 ; BEL  -- payload present but empty
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b""];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        // Should not panic. Whether consumed/emitted is implementation detail;
+        // if an event is emitted it must be an empty-string notification.
+        if consumed
+            && let Ok(InterceptedEvent::DesktopNotification(t)) = rx.try_recv()
+        {
+            assert_eq!(t, "");
+        }
+    }
+
+    #[test]
+    fn osc_9_unicode_payload() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let msg = "Build done ✅ — 日本語 🚀";
+        let params: &[&[u8]] = &[b"9", msg.as_bytes()];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => assert_eq!(t, msg),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_disabled_config_not_consumed() {
+        let config = InterceptorConfig {
+            osc_9: false,
+            ..InterceptorConfig::default()
+        };
+        let (mut interceptor, rx) = TherminalInterceptor::new(config);
+        let params: &[&[u8]] = &[b"9", b"should be ignored"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(!consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_very_long_payload() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let msg = "A".repeat(8192);
+        let params: &[&[u8]] = &[b"9", msg.as_bytes()];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => {
+                assert_eq!(t.len(), 8192);
+                assert!(t.chars().all(|c| c == 'A'));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
     // -- OSC 7777 tests ---------------------------------------------------------
 
     /// Helper to dispatch an OSC 7777 sequence through the interceptor.
