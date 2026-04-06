@@ -3,11 +3,57 @@
 //! All non-terminal-content rendering lives here -- the decorative UI elements
 //! that surround the actual grid content.
 
+use std::collections::HashMap;
+
+use glyphon::{
+    Attrs, Buffer, Color as GlyphColor, Family, FontSystem, Metrics, Resolution, Shaping, TextArea,
+    TextBounds,
+};
 use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::{ColorVertex, GridRenderer};
 use crate::pane::{LayoutNode, PaneId, PaneState, SplitDirection};
 use therminal_core::palette::Color as PaletteColor;
+
+// ── Overlay text cache ────────────────────────────────────────────────
+
+/// Ensure a cached shaped Buffer exists for the given slot.
+/// If the cache key matches, this is a no-op. Otherwise creates a new Buffer,
+/// shapes it, and stores it in the cache.
+///
+/// After calling this for all needed slots, retrieve buffers via
+/// `cache.get(slot).unwrap().1` for use in TextArea references.
+#[allow(clippy::too_many_arguments)]
+fn ensure_shaped(
+    slot: &str,
+    cache_key: &str,
+    metrics: Metrics,
+    width: f32,
+    height: f32,
+    text: &str,
+    attrs: Attrs<'_>,
+    font_system: &mut FontSystem,
+    cache: &mut HashMap<String, (String, Buffer)>,
+) {
+    let needs_reshape = cache
+        .get(slot)
+        .map(|(k, _)| k.as_str() != cache_key)
+        .unwrap_or(true);
+
+    if needs_reshape {
+        let mut buf = Buffer::new(font_system, metrics);
+        buf.set_size(font_system, Some(width), Some(height));
+        buf.set_text(font_system, text, attrs, Shaping::Basic);
+        buf.shape_until_scroll(font_system, false);
+        cache.insert(slot.to_string(), (cache_key.to_string(), buf));
+    }
+}
+
+/// Get a reference to a cached Buffer. Panics if the slot was not previously
+/// populated via `ensure_shaped`.
+fn cached_buf<'a>(cache: &'a HashMap<String, (String, Buffer)>, slot: &str) -> &'a Buffer {
+    &cache.get(slot).unwrap().1
+}
 
 // ── Color constants ────────────────────────────────────────────────────
 
@@ -277,10 +323,6 @@ pub(crate) fn draw_pane_header(
     surface_height: u32,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
-    use glyphon::{
-        Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea,
-        TextBounds,
-    };
 
     let vp = pane.viewport;
     let header_h = crate::pane::PANE_HEADER_HEIGHT;
@@ -335,18 +377,6 @@ pub(crate) fn draw_pane_header(
         if is_focused { 255 } else { 200 },
     );
 
-    let mut index_buf = Buffer::new(&mut renderer.font_system, metrics);
-    index_buf.set_size(&mut renderer.font_system, Some(vp.width()), Some(header_h));
-    index_buf.set_text(
-        &mut renderer.font_system,
-        &index_text,
-        Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
-            .color(index_color),
-        Shaping::Basic,
-    );
-    index_buf.shape_until_scroll(&mut renderer.font_system, false);
-
     // Process name (center-aligned via offset).
     let process_text = format!("pane {}", pane_index + 1);
     let process_color = if is_focused {
@@ -364,26 +394,6 @@ pub(crate) fn draw_pane_header(
             220,
         )
     };
-
-    let mut process_buf = Buffer::new(&mut renderer.font_system, metrics);
-    process_buf.set_size(&mut renderer.font_system, Some(vp.width()), Some(header_h));
-    process_buf.set_text(
-        &mut renderer.font_system,
-        &process_text,
-        Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
-            .color(process_color),
-        Shaping::Basic,
-    );
-    process_buf.shape_until_scroll(&mut renderer.font_system, false);
-
-    // Estimate text width for centering.
-    let process_text_width = process_buf
-        .layout_runs()
-        .next()
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
-    let center_offset = ((vp.width() - process_text_width) / 2.0).max(0.0);
 
     // ── Right-aligned header buttons: [H] [V] [X] ─────────────────────
     let close_color = GlyphColor::rgba(
@@ -404,53 +414,98 @@ pub(crate) fn draw_pane_header(
     let btn_x_vsplit = btn_x_close - HEADER_BUTTON_WIDTH;
     let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
 
-    let mut close_buf = Buffer::new(&mut renderer.font_system, metrics);
-    close_buf.set_size(
+    // Cache keys encode text + width + focus state (which affects colors).
+    let focus_tag = if is_focused { "f" } else { "u" };
+    let idx_slot = format!("hdr_idx_{pane_index}");
+    let idx_key = format!("{index_text}|{:.0}|{focus_tag}", vp.width());
+    let proc_slot = format!("hdr_proc_{pane_index}");
+    let proc_key = format!("{process_text}|{:.0}|{focus_tag}", vp.width());
+    let close_slot = format!("hdr_close_{pane_index}");
+    let close_key = format!("X|{focus_tag}");
+    let vsplit_slot = format!("hdr_vsplit_{pane_index}");
+    let vsplit_key = format!("V|{focus_tag}");
+    let hsplit_slot = format!("hdr_hsplit_{pane_index}");
+    let hsplit_key = format!("H|{focus_tag}");
+
+    // Phase 1: ensure all buffers are shaped in the cache.
+    let family = renderer.font_config.family.clone();
+    ensure_shaped(
+        &idx_slot,
+        &idx_key,
+        metrics,
+        vp.width(),
+        header_h,
+        &index_text,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(index_color),
         &mut renderer.font_system,
-        Some(HEADER_BUTTON_WIDTH),
-        Some(header_h),
+        &mut renderer.overlay_cache,
     );
-    close_buf.set_text(
+    ensure_shaped(
+        &proc_slot,
+        &proc_key,
+        metrics,
+        vp.width(),
+        header_h,
+        &process_text,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(process_color),
         &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    ensure_shaped(
+        &close_slot,
+        &close_key,
+        metrics,
+        HEADER_BUTTON_WIDTH,
+        header_h,
         " X",
         Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(&family))
             .color(close_color),
-        Shaping::Basic,
-    );
-    close_buf.shape_until_scroll(&mut renderer.font_system, false);
-
-    let mut vsplit_buf = Buffer::new(&mut renderer.font_system, metrics);
-    vsplit_buf.set_size(
         &mut renderer.font_system,
-        Some(HEADER_BUTTON_WIDTH),
-        Some(header_h),
+        &mut renderer.overlay_cache,
     );
-    vsplit_buf.set_text(
-        &mut renderer.font_system,
+    ensure_shaped(
+        &vsplit_slot,
+        &vsplit_key,
+        metrics,
+        HEADER_BUTTON_WIDTH,
+        header_h,
         " V",
         Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(&family))
             .color(button_color),
-        Shaping::Basic,
-    );
-    vsplit_buf.shape_until_scroll(&mut renderer.font_system, false);
-
-    let mut hsplit_buf = Buffer::new(&mut renderer.font_system, metrics);
-    hsplit_buf.set_size(
         &mut renderer.font_system,
-        Some(HEADER_BUTTON_WIDTH),
-        Some(header_h),
+        &mut renderer.overlay_cache,
     );
-    hsplit_buf.set_text(
-        &mut renderer.font_system,
+    ensure_shaped(
+        &hsplit_slot,
+        &hsplit_key,
+        metrics,
+        HEADER_BUTTON_WIDTH,
+        header_h,
         " H",
         Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(&family))
             .color(button_color),
-        Shaping::Basic,
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
     );
-    hsplit_buf.shape_until_scroll(&mut renderer.font_system, false);
+
+    // Phase 2: borrow cache immutably for TextArea references.
+    let index_buf = cached_buf(&renderer.overlay_cache, &idx_slot);
+    let process_buf = cached_buf(&renderer.overlay_cache, &proc_slot);
+
+    // Estimate text width for centering.
+    let process_text_width = process_buf
+        .layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0);
+    let center_offset = ((vp.width() - process_text_width) / 2.0).max(0.0);
 
     renderer.viewport.update(
         queue,
@@ -469,7 +524,7 @@ pub(crate) fn draw_pane_header(
 
     let text_areas = vec![
         TextArea {
-            buffer: &index_buf,
+            buffer: index_buf,
             left: vp.x(),
             top: vp.y(),
             scale: 1.0,
@@ -478,7 +533,7 @@ pub(crate) fn draw_pane_header(
             custom_glyphs: &[],
         },
         TextArea {
-            buffer: &process_buf,
+            buffer: process_buf,
             left: vp.x() + center_offset,
             top: vp.y(),
             scale: 1.0,
@@ -487,7 +542,7 @@ pub(crate) fn draw_pane_header(
             custom_glyphs: &[],
         },
         TextArea {
-            buffer: &hsplit_buf,
+            buffer: cached_buf(&renderer.overlay_cache, &hsplit_slot),
             left: btn_x_hsplit,
             top: vp.y(),
             scale: 1.0,
@@ -496,7 +551,7 @@ pub(crate) fn draw_pane_header(
             custom_glyphs: &[],
         },
         TextArea {
-            buffer: &vsplit_buf,
+            buffer: cached_buf(&renderer.overlay_cache, &vsplit_slot),
             left: btn_x_vsplit,
             top: vp.y(),
             scale: 1.0,
@@ -505,7 +560,7 @@ pub(crate) fn draw_pane_header(
             custom_glyphs: &[],
         },
         TextArea {
-            buffer: &close_buf,
+            buffer: cached_buf(&renderer.overlay_cache, &close_slot),
             left: btn_x_close,
             top: vp.y(),
             scale: 1.0,
@@ -586,10 +641,6 @@ pub(crate) fn draw_status_bar(
     surface_height: u32,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
-    use glyphon::{
-        Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea,
-        TextBounds,
-    };
 
     let bar_h = crate::pane::STATUS_BAR_HEIGHT;
     let sw = surface_width as f32;
@@ -638,11 +689,8 @@ pub(crate) fn draw_status_bar(
     };
 
     let mut text_areas: Vec<TextArea<'_>> = Vec::new();
-    // We need to keep the buffers alive for the text_areas references.
-    // Allocate all buffers first, then build text_areas.
 
     // ── Workspace indicators (left-most) ────────────────────────────────
-    // Show workspace numbers; highlight the active one. Only show when >1 workspace.
     let workspace_text = if info.workspace_ids.len() > 1 {
         let mut s = String::from(" ");
         for &ws_id in &info.workspace_ids {
@@ -663,24 +711,6 @@ pub(crate) fn draw_status_bar(
         PaletteColor::FOCUS.b,
         255,
     );
-
-    let mut workspace_buf = Buffer::new(&mut renderer.font_system, metrics);
-    workspace_buf.set_size(&mut renderer.font_system, Some(sw * 0.25), Some(bar_h));
-    workspace_buf.set_text(
-        &mut renderer.font_system,
-        &workspace_text,
-        Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
-            .color(workspace_active_color),
-        Shaping::Basic,
-    );
-    workspace_buf.shape_until_scroll(&mut renderer.font_system, false);
-
-    let workspace_text_width = workspace_buf
-        .layout_runs()
-        .next()
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
 
     // ── Left section: agent indicator (when detected and config allows) ──
     let left_text = if info.show_agent_indicator {
@@ -705,18 +735,6 @@ pub(crate) fn draw_status_bar(
         230,
     );
 
-    let mut left_buf = Buffer::new(&mut renderer.font_system, metrics);
-    left_buf.set_size(&mut renderer.font_system, Some(sw * 0.35), Some(bar_h));
-    left_buf.set_text(
-        &mut renderer.font_system,
-        left_text_ref,
-        Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
-            .color(agent_color),
-        Shaping::Basic,
-    );
-    left_buf.shape_until_scroll(&mut renderer.font_system, false);
-
     // ── Center section: CWD ─────────────────────────────────────────────
     let center_text = info.cwd.as_deref().map(abbreviate_path).unwrap_or_default();
     let center_color = GlyphColor::rgba(
@@ -725,25 +743,6 @@ pub(crate) fn draw_status_bar(
         PaletteColor::INK.b,
         200,
     );
-
-    let mut center_buf = Buffer::new(&mut renderer.font_system, metrics);
-    center_buf.set_size(&mut renderer.font_system, Some(sw), Some(bar_h));
-    center_buf.set_text(
-        &mut renderer.font_system,
-        &center_text,
-        Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
-            .color(center_color),
-        Shaping::Basic,
-    );
-    center_buf.shape_until_scroll(&mut renderer.font_system, false);
-
-    let center_text_width = center_buf
-        .layout_runs()
-        .next()
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
-    let center_offset = ((sw - center_text_width) / 2.0).max(0.0);
 
     // ── Right section: dimensions + exit code ───────────────────────────
     let (cols, rows) = info.dimensions;
@@ -768,19 +767,82 @@ pub(crate) fn draw_status_bar(
         None => muted_color,
     };
 
-    let mut right_buf = Buffer::new(&mut renderer.font_system, metrics);
-    right_buf.set_size(&mut renderer.font_system, Some(sw * 0.35), Some(bar_h));
-    right_buf.set_text(
-        &mut renderer.font_system,
-        &right_text,
-        Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
-            .color(exit_color),
-        Shaping::Basic,
-    );
-    right_buf.shape_until_scroll(&mut renderer.font_system, false);
+    // Cache keys encode text + width (width affects line-wrapping).
+    let ws_key = format!("{workspace_text}|{:.0}", sw * 0.25);
+    let left_key = format!("{left_text_ref}|{:.0}", sw * 0.35);
+    let center_key = format!("{center_text}|{sw:.0}");
+    let right_key = format!("{right_text}|{:.0}|{:?}", sw * 0.35, info.last_exit_code);
 
-    // Measure right text width for right-alignment.
+    // Phase 1: ensure all buffers are shaped in the cache.
+    let family = renderer.font_config.family.clone();
+    ensure_shaped(
+        "sb_workspace",
+        &ws_key,
+        metrics,
+        sw * 0.25,
+        bar_h,
+        &workspace_text,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(workspace_active_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    ensure_shaped(
+        "sb_left",
+        &left_key,
+        metrics,
+        sw * 0.35,
+        bar_h,
+        left_text_ref,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(agent_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    ensure_shaped(
+        "sb_center",
+        &center_key,
+        metrics,
+        sw,
+        bar_h,
+        &center_text,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(center_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    ensure_shaped(
+        "sb_right",
+        &right_key,
+        metrics,
+        sw * 0.35,
+        bar_h,
+        &right_text,
+        Attrs::new().family(Family::Name(&family)).color(exit_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+
+    // Phase 2: borrow cache immutably for TextArea references and measurements.
+    let workspace_buf = cached_buf(&renderer.overlay_cache, "sb_workspace");
+    let workspace_text_width = workspace_buf
+        .layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0);
+
+    let center_buf = cached_buf(&renderer.overlay_cache, "sb_center");
+    let center_text_width = center_buf
+        .layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0);
+    let center_offset = ((sw - center_text_width) / 2.0).max(0.0);
+
+    let right_buf = cached_buf(&renderer.overlay_cache, "sb_right");
     let right_text_width = right_buf
         .layout_runs()
         .next()
@@ -799,7 +861,7 @@ pub(crate) fn draw_status_bar(
     // Workspace indicators (left-most).
     if !workspace_text.is_empty() {
         text_areas.push(TextArea {
-            buffer: &workspace_buf,
+            buffer: workspace_buf,
             left: 0.0,
             top: bar_y,
             scale: 1.0,
@@ -812,7 +874,7 @@ pub(crate) fn draw_status_bar(
     // Only add left area if there is agent text.
     if !left_text_ref.is_empty() {
         text_areas.push(TextArea {
-            buffer: &left_buf,
+            buffer: cached_buf(&renderer.overlay_cache, "sb_left"),
             left: workspace_text_width,
             top: bar_y,
             scale: 1.0,
@@ -824,7 +886,7 @@ pub(crate) fn draw_status_bar(
 
     if !center_text.is_empty() {
         text_areas.push(TextArea {
-            buffer: &center_buf,
+            buffer: center_buf,
             left: center_offset,
             top: bar_y,
             scale: 1.0,
@@ -835,7 +897,7 @@ pub(crate) fn draw_status_bar(
     }
 
     text_areas.push(TextArea {
-        buffer: &right_buf,
+        buffer: right_buf,
         left: right_x,
         top: bar_y,
         scale: 1.0,
@@ -917,10 +979,6 @@ pub(crate) fn draw_tab_bar(
     surface_height: u32,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
-    use glyphon::{
-        Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea,
-        TextBounds,
-    };
 
     let bar_h = crate::pane::TAB_BAR_HEIGHT;
     let sw = surface_width as f32;
@@ -1034,8 +1092,9 @@ pub(crate) fn draw_tab_bar(
         200,
     );
 
-    // Build text buffers for each tab.
-    let mut tab_bufs: Vec<(Buffer, f32, GlyphColor)> = Vec::new();
+    // Phase 1: ensure all tab buffers are shaped in the cache.
+    let family = renderer.font_config.family.clone();
+    let mut tab_slots: Vec<(String, f32, GlyphColor)> = Vec::new();
     for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
         let tab_x = i as f32 * TAB_WIDTH;
         let is_active = ws_id == info.active_workspace;
@@ -1045,28 +1104,37 @@ pub(crate) fn draw_tab_bar(
             inactive_color
         };
         let label = format!(" {ws_id}");
+        let active_tag = if is_active { "a" } else { "i" };
+        let slot = format!("tab_{ws_id}");
+        let key = format!("{label}|{active_tag}");
 
-        let mut buf = Buffer::new(&mut renderer.font_system, metrics);
-        buf.set_size(&mut renderer.font_system, Some(TAB_WIDTH), Some(bar_h));
-        buf.set_text(
-            &mut renderer.font_system,
+        ensure_shaped(
+            &slot,
+            &key,
+            metrics,
+            TAB_WIDTH,
+            bar_h,
             &label,
-            Attrs::new()
-                .family(Family::Name(&renderer.font_config.family))
-                .color(color),
-            Shaping::Basic,
+            Attrs::new().family(Family::Name(&family)).color(color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
         );
-        buf.shape_until_scroll(&mut renderer.font_system, false);
 
-        // Center the label within the tab.
+        // Measure for centering (need to read from cache after ensure).
+        tab_slots.push((slot, tab_x, color));
+    }
+
+    // Phase 2: borrow cache immutably to build TextAreas.
+    let mut tab_positions: Vec<(&Buffer, f32, GlyphColor)> = Vec::new();
+    for (slot, tab_x, color) in &tab_slots {
+        let buf = cached_buf(&renderer.overlay_cache, slot);
         let text_width = buf
             .layout_runs()
             .next()
             .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
             .unwrap_or(0.0);
         let centered_x = tab_x + ((TAB_WIDTH - text_width) / 2.0).max(0.0);
-
-        tab_bufs.push((buf, centered_x, color));
+        tab_positions.push((buf, centered_x, *color));
     }
 
     renderer.viewport.update(
@@ -1077,7 +1145,7 @@ pub(crate) fn draw_tab_bar(
         },
     );
 
-    let text_areas: Vec<TextArea<'_>> = tab_bufs
+    let text_areas: Vec<TextArea<'_>> = tab_positions
         .iter()
         .map(|(buf, x, color)| TextArea {
             buffer: buf,
