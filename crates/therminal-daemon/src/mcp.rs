@@ -12,14 +12,18 @@
 //! The server listens on a dedicated Unix socket (separate from the IPC socket)
 //! and uses the `rmcp` crate for protocol handling.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-    ServerInfo, Tool,
+    Annotated, CallToolRequestParams, CallToolResult, Content, ErrorCode,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
+    ResourceContents, ResourceUpdatedNotificationParam, ServerInfo, SubscribeRequestParams, Tool,
+    UnsubscribeRequestParams,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt};
@@ -31,7 +35,9 @@ use tracing::{debug, error, info, warn};
 use therminal_core::config::TrustConfig;
 
 use crate::session::SessionManager;
-use crate::trust::{AgentIdentity, RateLimiter, TrustCheckResult, check_tool_access};
+use crate::trust::{
+    AgentIdentity, RateLimiter, TrustCheckResult, check_resource_access, check_tool_access,
+};
 
 // ── Tool parameter types ────────────────────────────────────────────────
 
@@ -338,12 +344,20 @@ fn extract_agent_identity(context: &RequestContext<RoleServer>) -> AgentIdentity
 /// Therminal MCP server handler.
 ///
 /// Wraps a shared `SessionManager` and exposes session/pane operations as
-/// MCP tools. Each tool call is gated by trust tier enforcement and
-/// audit-logged.
+/// MCP tools and terminal resources. Each tool/resource call is gated by
+/// trust tier enforcement and audit-logged.
+///
+/// Resources follow the `terminal://pane/{pane_id}/content` and
+/// `terminal://pane/{pane_id}/output` URI scheme. Subscriptions to output
+/// resources spawn a background task that forwards `DaemonEvent::PaneOutput`
+/// events as MCP resource-updated notifications.
 pub struct TherminalMcpServer {
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
+    /// Active resource subscriptions: maps URI -> JoinHandle for the background
+    /// forwarding task. Protected by a std Mutex since we only hold it briefly.
+    subscriptions: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl TherminalMcpServer {
@@ -357,6 +371,7 @@ impl TherminalMcpServer {
             session_mgr,
             trust_config,
             rate_limiter,
+            subscriptions: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -370,6 +385,68 @@ impl TherminalMcpServer {
             TrustCheckResult::Denied(reason) => {
                 Err(CallToolResult::error(vec![Content::text(reason)]))
             }
+        }
+    }
+
+    /// Enforce trust tier for a resource read.
+    ///
+    /// All resource reads are Observer-tier (Sandboxed minimum).
+    fn enforce_resource_trust(&self, uri: &str, agent: &AgentIdentity) -> Result<(), ErrorData> {
+        match check_resource_access(uri, agent, &self.trust_config) {
+            TrustCheckResult::Allowed => Ok(()),
+            TrustCheckResult::Denied(reason) => Err(ErrorData::new(
+                // JSON-RPC has no standard FORBIDDEN code; use a custom application error.
+                ErrorCode(-32001),
+                reason,
+                None,
+            )),
+        }
+    }
+
+    /// Build the list of concrete resources from current pane state.
+    async fn build_resource_list(&self) -> Vec<rmcp::model::Resource> {
+        let mgr = self.session_mgr.lock().await;
+        let mut resources = Vec::new();
+        for (session_id, session) in mgr.iter_sessions() {
+            for window in &session.windows {
+                for pane in &window.panes {
+                    let content_uri = format!("terminal://pane/{}/content", pane.id);
+                    resources.push(Annotated::new(
+                        RawResource::new(&content_uri, format!("Pane {} content", pane.id))
+                            .with_description(format!(
+                                "Current visible grid content of pane {} (session {})",
+                                pane.id, session_id
+                            ))
+                            .with_mime_type("text/plain"),
+                        None,
+                    ));
+
+                    let output_uri = format!("terminal://pane/{}/output", pane.id);
+                    resources.push(Annotated::new(
+                        RawResource::new(&output_uri, format!("Pane {} output stream", pane.id))
+                            .with_description(format!(
+                                "Live PTY output stream for pane {} (session {}). Subscribe for real-time updates.",
+                                pane.id, session_id
+                            ))
+                            .with_mime_type("text/plain"),
+                        None,
+                    ));
+                }
+            }
+        }
+        resources
+    }
+
+    /// Parse a pane resource URI into (pane_id, resource_kind).
+    ///
+    /// Accepts `terminal://pane/{id}/content` and `terminal://pane/{id}/output`.
+    fn parse_pane_uri(uri: &str) -> Option<(u64, &str)> {
+        let rest = uri.strip_prefix("terminal://pane/")?;
+        let (id_str, kind) = rest.split_once('/')?;
+        let pane_id: u64 = id_str.parse().ok()?;
+        match kind {
+            "content" | "output" => Some((pane_id, kind)),
+            _ => None,
         }
     }
 
@@ -1167,11 +1244,218 @@ impl ServerHandler for TherminalMcpServer {
         ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_resources()
+                .enable_resources_list_changed()
+                .enable_resources_subscribe()
                 .build(),
         )
         .with_instructions(
-            "Therminal MCP server. Provides tools to manage terminal sessions and panes.",
+            "Therminal MCP server. Provides tools and resources to manage terminal sessions and panes. \
+             Resources: terminal://pane/{id}/content (grid snapshot), terminal://pane/{id}/output (live stream).",
         )
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let agent = extract_agent_identity(&context);
+        // Resources are Observer-tier; check against a representative URI.
+        self.enforce_resource_trust("terminal://pane/0/content", &agent)?;
+        let resources = self.build_resource_list().await;
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let templates = vec![
+            Annotated::new(
+                RawResourceTemplate::new(
+                    "terminal://pane/{pane_id}/content",
+                    "Pane content",
+                )
+                .with_description(
+                    "Current visible grid content of a terminal pane. Returns plain text lines with cursor position.",
+                )
+                .with_mime_type("text/plain"),
+                None,
+            ),
+            Annotated::new(
+                RawResourceTemplate::new(
+                    "terminal://pane/{pane_id}/output",
+                    "Pane output stream",
+                )
+                .with_description(
+                    "Live PTY output stream for a terminal pane. Subscribe for real-time update notifications.",
+                )
+                .with_mime_type("text/plain"),
+                None,
+            ),
+        ];
+        Ok(ListResourceTemplatesResult::with_all_items(templates))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let uri = &request.uri;
+        let agent = extract_agent_identity(&context);
+        self.enforce_resource_trust(uri, &agent)?;
+
+        let (pane_id, kind) = Self::parse_pane_uri(uri).ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("invalid resource URI: {uri}"),
+                None,
+            )
+        })?;
+
+        match kind {
+            "content" => {
+                let mgr = self.session_mgr.lock().await;
+                let snap = mgr.capture_pane(pane_id).map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("capture_pane failed: {e}"),
+                        None,
+                    )
+                })?;
+                let lines: Vec<String> = snap
+                    .grid
+                    .iter()
+                    .map(|row| row.iter().map(|(ch, _)| ch).collect())
+                    .collect();
+                let text = lines.join("\n");
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain"),
+                ]))
+            }
+            "output" => {
+                // For output, return the current grid content as a snapshot.
+                // Live streaming happens via subscribe/notifications.
+                let mgr = self.session_mgr.lock().await;
+                let snap = mgr.capture_pane(pane_id).map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("capture_pane failed: {e}"),
+                        None,
+                    )
+                })?;
+                let lines: Vec<String> = snap
+                    .grid
+                    .iter()
+                    .map(|row| row.iter().map(|(ch, _)| ch).collect())
+                    .collect();
+                let text = lines.join("\n");
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain"),
+                ]))
+            }
+            _ => Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("unknown resource kind in URI: {uri}"),
+                None,
+            )),
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        let uri = &request.uri;
+        let agent = extract_agent_identity(&context);
+        self.enforce_resource_trust(uri, &agent)?;
+
+        let (pane_id, kind) = Self::parse_pane_uri(uri).ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("invalid resource URI for subscription: {uri}"),
+                None,
+            )
+        })?;
+
+        // Only output resources support subscriptions.
+        if kind != "output" {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "resource {uri} does not support subscriptions; use terminal://pane/{pane_id}/output"
+                ),
+                None,
+            ));
+        }
+
+        // Get a broadcast receiver for daemon events.
+        let mut event_rx = {
+            let mgr = self.session_mgr.lock().await;
+            mgr.subscribe_events()
+        };
+
+        let peer = context.peer.clone();
+        let uri_owned = uri.to_string();
+
+        // Spawn a background task that forwards PaneOutput events as resource-updated notifications.
+        let handle = tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(therminal_protocol::daemon::DaemonEvent::PaneOutput {
+                        pane_id: event_pane_id,
+                        ..
+                    }) if event_pane_id == pane_id => {
+                        let params = ResourceUpdatedNotificationParam::new(&uri_owned);
+                        if let Err(e) = peer.notify_resource_updated(params).await {
+                            debug!(
+                                error = %e,
+                                uri = %uri_owned,
+                                "failed to send resource-updated notification, stopping subscription"
+                            );
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        debug!(uri = %uri_owned, "event channel closed, ending subscription");
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!(uri = %uri_owned, lagged = n, "subscription lagged, continuing");
+                    }
+                    _ => {
+                        // Other event types -- ignore.
+                    }
+                }
+            }
+        });
+
+        // Store the subscription handle (cancel previous if re-subscribing).
+        let mut subs = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old_handle) = subs.insert(uri.to_string(), handle) {
+            old_handle.abort();
+        }
+
+        info!(uri = %uri, "resource subscription active");
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        let uri = &request.uri;
+        let mut subs = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(handle) = subs.remove(uri) {
+            handle.abort();
+            info!(uri = %uri, "resource subscription cancelled");
+        }
+        Ok(())
     }
 
     async fn list_tools(

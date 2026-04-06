@@ -80,6 +80,23 @@ Tools exposed:
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 
+### MCP Resources
+
+The server also exposes MCP Resources for pane content access:
+
+| Resource URI | Category | Description |
+|-------------|----------|-------------|
+| `terminal://pane/{id}/content` | Observer | Current visible grid snapshot (plain text) |
+| `terminal://pane/{id}/output` | Observer | Live PTY output stream (subscribe for updates) |
+
+**Resource listing**: `list_resources` returns concrete resources for each active pane. `list_resource_templates` returns URI templates for both content and output patterns.
+
+**Resource reading**: `read_resource` snapshots the pane's current visible grid content as plain text lines (same data as the `terminal.panes.get_content` tool but via the MCP resource protocol).
+
+**Resource subscriptions**: Subscribing to `terminal://pane/{id}/output` spawns a background task that listens to the `DaemonEvent::PaneOutput` broadcast channel and sends `notifications/resources/updated` to the MCP client whenever new PTY output arrives. The client can then call `read_resource` to fetch the updated content. Content resources do not support subscriptions. Unsubscribing cancels the background task.
+
+**Trust enforcement**: All resource operations require Observer tier (Sandboxed minimum), matching the read-only nature of resource access. Trust is enforced via `check_resource_access()` in `trust.rs`.
+
 ## MCP Tool Naming
 
 All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-separated namespaces.

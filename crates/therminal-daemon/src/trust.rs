@@ -57,6 +57,51 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
     }
 }
 
+/// Classify an MCP resource URI into its permission category.
+///
+/// All resource reads are Observer-tier (read-only). Returns `None` for
+/// URIs that don't match any known resource pattern.
+pub fn resource_category(uri: &str) -> Option<ToolCategory> {
+    if uri.starts_with("terminal://pane/") {
+        Some(ToolCategory::Observer)
+    } else {
+        None
+    }
+}
+
+/// Run the trust gate for an MCP resource access.
+///
+/// Resources are Observer-tier (read-only). The check resolves the agent's
+/// tier and verifies it meets the Observer minimum.
+pub fn check_resource_access(
+    uri: &str,
+    agent: &AgentIdentity,
+    config: &TrustConfig,
+) -> TrustCheckResult {
+    let category = match resource_category(uri) {
+        Some(c) => c,
+        None => {
+            audit_log(agent, uri, "unknown_resource");
+            return TrustCheckResult::Allowed;
+        }
+    };
+
+    let agent_tier = agent.resolve_tier(config);
+    let required = category.required_tier();
+
+    if !agent_tier.has_access(required) {
+        let reason = format!(
+            "permission denied: agent {:?} has tier {:?}, resource {:?} requires {:?}",
+            agent.name, agent_tier, uri, required,
+        );
+        audit_log_denied(agent, uri, &reason);
+        return TrustCheckResult::Denied(reason);
+    }
+
+    audit_log(agent, uri, "allowed");
+    TrustCheckResult::Allowed
+}
+
 // ── Agent identity resolution ───────────────────────────────────────────
 
 /// Resolved identity of an MCP client.
@@ -417,6 +462,48 @@ mod tests {
         assert!(matches!(
             check_tool_access("terminal.sessions.destroy", &agent, &config, &limiter),
             TrustCheckResult::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn resource_categories() {
+        assert_eq!(
+            resource_category("terminal://pane/1/content"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            resource_category("terminal://pane/42/output"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(resource_category("file:///tmp/foo"), None);
+        assert_eq!(resource_category("unknown://something"), None);
+    }
+
+    #[test]
+    fn check_resource_access_sandboxed_allowed() {
+        let config = TrustConfig {
+            default_tier: TrustTier::Sandboxed,
+            ..TrustConfig::default()
+        };
+        let agent = AgentIdentity {
+            name: "test".to_string(),
+        };
+        assert!(matches!(
+            check_resource_access("terminal://pane/1/content", &agent, &config),
+            TrustCheckResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn check_resource_access_unknown_uri_allowed() {
+        let config = TrustConfig::default();
+        let agent = AgentIdentity {
+            name: "test".to_string(),
+        };
+        // Unknown URIs pass through (handled as not-found by the handler).
+        assert!(matches!(
+            check_resource_access("file:///tmp/foo", &agent, &config),
+            TrustCheckResult::Allowed
         ));
     }
 }
