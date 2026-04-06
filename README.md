@@ -47,7 +47,8 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 - Control mode (tmux -CC style machine-readable protocol, --help-control flag)
 
 **MCP server & trust**
-- MCP server in the daemon (rmcp, Unix socket) with stdio bridge (`therminal mcp`) for Claude Code integration
+- MCP server in the daemon with stdio bridge (`therminal mcp`) for Claude Code integration
+- Cross-platform IPC: Unix sockets (Linux/macOS), named pipes (Windows)
 - Tools: list_sessions, get_session, read_pane_content, create_session, write_to_pane, destroy_session
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at the MCP handler layer
 - Sliding-window rate limiter for destructive tools; all decisions audit-logged
@@ -109,22 +110,36 @@ cargo run --bin therminal
 
 ### Windows-native build
 
-For native Windows fullscreen, snap/tiling, and window-manager integration, build and run Therminal on Windows rather than through WSLg.
+For native Windows GPU rendering, fullscreen, snap/tiling, and window-manager integration, build and run Therminal on Windows rather than through WSLg.
 
-From PowerShell on Windows:
+**Prerequisites (Windows side):**
+- Rust toolchain: `winget install --id Rustlang.Rustup -e`
+- MSVC Build Tools: `winget install --id Microsoft.VisualStudio.2022.BuildTools -e` (select "Desktop development with C++")
+- If Windows Defender / Smart App Control blocks build scripts, add an exclusion: `Add-MpExclusion -Path "C:\Users\<you>\therminal-build\target"` (admin PowerShell)
 
-```powershell
-# Build release and copy therminal.exe to the Desktop
-.\scripts\build-windows.ps1
+**From WSL (recommended):**
 
-# Build debug without copying
-.\scripts\build-windows.ps1 -Debug -NoCopy
+```bash
+# Syncs repo to Windows, builds natively, copies exe + resources to Desktop
+./scripts/build-windows.sh
 
-# Copy to a custom path
-.\scripts\build-windows.ps1 -Destination "$env:USERPROFILE\Desktop\therminal-dev.exe"
+# Debug build
+./scripts/build-windows.sh --debug
 ```
 
-This script is intentionally separate from [`scripts/ci.sh`](scripts/ci.sh): CI remains host-local, while `build-windows.ps1` is the recommended Windows-native workflow.
+**From PowerShell on Windows:**
+
+```powershell
+.\scripts\build-windows.ps1
+.\scripts\build-windows.ps1 -Debug -NoCopy
+```
+
+**Shell detection on Windows:** Therminal auto-detects the best available shell: WSL (if installed) > PowerShell 7 > PowerShell 5.1 > cmd.exe. WSL shells start in the Linux home directory with `TERM_PROGRAM=therminal` forwarded for shell integration. Override in `therminal.toml`:
+
+```toml
+[general]
+shell = "powershell.exe"  # or "wsl.exe", "pwsh.exe", "cmd.exe"
+```
 
 ## Architecture
 
@@ -161,13 +176,13 @@ resources/
 
 ### WSL2
 
-Therminal runs on WSL2 via WSLg (Wayland). Known limitations:
+**Recommended:** Build therminal natively on Windows (`./scripts/build-windows.sh`) — it auto-detects WSL and launches your Linux shell with native Windows GPU rendering. This avoids WSLg compositor issues entirely.
 
-- **Maximize may crash** due to a WSLg compositor bug (SIGSEGV in the Vulkan driver). This does not affect native Linux, macOS, or Windows builds.
-- **Software rendering** via llvmpipe if no GPU passthrough is configured. Performance is acceptable but not optimal.
-- Vulkan backend is preferred automatically on Linux to avoid WSLg EGL/GLES instability.
+**Running inside WSL2 via WSLg** (Wayland) also works but has limitations:
 
-For production use on Windows, the target is a native Windows build (not WSLg).
+- **Fullscreen rendering issues** due to WSLg compositor / Vulkan paravirtualization quirks. Does not affect native Windows, Linux, or macOS builds.
+- **Software rendering** via llvmpipe if no GPU passthrough is configured.
+- Vulkan backend is preferred automatically to avoid WSLg EGL/GLES instability.
 
 ### macOS
 

@@ -142,7 +142,7 @@ Clicking and dragging a pane separator adjusts the `split_ratio` of the enclosin
 
 ### MCP Server
 
-`crates/therminal-daemon/src/mcp.rs` implements an MCP server (`rmcp` crate) listening on a Unix socket (configurable via `[mcp] socket_path` in `therminal.toml`, defaults to `<runtime_dir>/mcp.sock`). `crates/therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's MCP socket, enabling MCP clients like Claude Code to connect as a subprocess.
+`crates/therminal-daemon/src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `crates/therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
 Tools exposed:
 
@@ -232,6 +232,39 @@ Therminal runs fine on WSL2. The quirks below are documented for future contribu
 - **`USERPROFILE` forwarding**: The `~win` abbreviation in the status bar only works if `USERPROFILE` (or `HOMEDRIVE`+`HOMEPATH`) is forwarded from Windows. Windows Terminal forwards these by default; other launchers may not. If not forwarded, `/mnt/c/` paths appear unabbreviated — acceptable fallback.
 - **Windows process visibility**: `sysinfo` reads `/proc` and sees Windows interop processes as regular Linux PIDs. The interop guard in `process_detector.rs` prevents false agent detections, but `scan()` still traverses these PIDs during the BFS walk. This adds a small overhead on systems with many Windows interop processes. Not a correctness issue.
 - **GPU / wgpu on WSL2**: wgpu requires a Vulkan ICD. Under WSL2 this works via `d3d12` (WSL2 GPU paravirtualisation) when running with a GUI. Headless WSL2 sessions (no `DISPLAY` / `WAYLAND_DISPLAY`) will fail at window creation — this is expected; therminal is a GUI app.
+
+## Windows Native Build
+
+The recommended way to run therminal on Windows is a native build (not WSLg). This gives proper GPU rendering, fullscreen, and window management.
+
+### Build Scripts
+
+- `scripts/build-windows.sh` — Bash wrapper for WSL. Syncs repo to `C:\Users\<user>\therminal-build` via `/mnt/c` (avoids UNC path issues), invokes PowerShell build, copies exe + resources.
+- `scripts/build-windows.ps1` — PowerShell script. Auto-finds cargo in `%USERPROFILE%\.cargo\bin`, bootstraps MSVC via VsDevCmd.bat, builds, copies exe to Desktop, copies `resources/` to `%APPDATA%\therminal\resources`.
+
+### Shell Detection on Windows
+
+`get_default_shell()` in `crates/therminal-terminal/src/pty.rs` probes in order: `wsl.exe` > `pwsh.exe` > `powershell.exe` > `ComSpec`/`cmd.exe`. WSL is preferred because most dev workflows live in WSL.
+
+### WSL Shell Integration
+
+When shell is `wsl.exe` (detected as `ShellType::Wsl`):
+- `--cd ~` is passed so the shell starts in the Linux home directory
+- `TERM_PROGRAM=therminal` is forwarded for shell integration auto-sourcing
+- `THERMINAL_RESOURCES_DIR` is converted from Windows paths (`C:\...`) to WSL paths (`/mnt/c/...`)
+
+### IPC on Windows
+
+`socket_path()` in `therminal-runtime/src/paths.rs` returns platform-appropriate IPC paths:
+- Unix: `<runtime_dir>/<name>.sock` (Unix domain socket)
+- Windows: `\\.\pipe\therminal-<name>` (named pipe)
+
+The MCP stdio bridge (`mcp_stdio.rs`) uses `tokio::net::UnixStream` on Unix and `tokio::net::windows::named_pipe::ClientOptions` on Windows.
+
+### Known Windows Issues
+
+- **WDAC/SmartScreen**: Windows Defender Application Control may block cargo build-script executables. Fix: `Add-MpExclusion -Path "C:\Users\<user>\therminal-build\target"` in admin PowerShell, or disable Smart App Control.
+- **Font availability**: JetBrainsMono Nerd Font and Noto Color Emoji must be installed on the Windows side separately from WSL.
 
 ## Code Style
 
