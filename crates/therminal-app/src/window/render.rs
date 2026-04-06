@@ -3,6 +3,8 @@
 //! Contains the recursive pane traversal that renders each pane's terminal
 //! content, headers, and separators.
 
+use std::sync::Arc;
+
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermDamage;
 
@@ -230,7 +232,7 @@ fn render_single_pane(
                 return None;
             }
 
-            let hyperlink = cell.hyperlink().map(|h| h.uri().to_owned());
+            let hyperlink = cell.hyperlink().map(|h| Arc::from(h.uri()));
             let hyperlink_source = if hyperlink.is_some() {
                 Some(HyperlinkSource::Osc8)
             } else {
@@ -289,7 +291,7 @@ fn render_single_pane(
                     && cell.col >= hotspot.start_col
                     && cell.col < hotspot.end_col
                 {
-                    cell.hotspot = Some((hotspot.kind.clone(), hotspot.text.clone()));
+                    cell.hotspot = Some((hotspot.kind.clone(), Arc::clone(&hotspot.text)));
                 }
             }
         }
@@ -303,7 +305,7 @@ fn render_single_pane(
                     && cell.col >= hotspot.start_col
                     && cell.col < hotspot.end_col
                 {
-                    cell.hotspot = Some((hotspot.kind.clone(), hotspot.text.clone()));
+                    cell.hotspot = Some((hotspot.kind.clone(), Arc::clone(&hotspot.text)));
                 }
             }
         }

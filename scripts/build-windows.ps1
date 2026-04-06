@@ -18,6 +18,27 @@ if (-not (Test-Path (Join-Path $repoRoot "Cargo.toml"))) {
     throw "Repo root does not contain Cargo.toml: $repoRoot"
 }
 
+# --- UNC path handling ---
+# Building from a UNC path (e.g. \\wsl.localhost\...) breaks cargo, cmd.exe,
+# and MSVC tools. Mirror the source to a native Windows temp directory.
+$localBuildDir = Join-Path $env:TEMP "therminal-build"
+if ($repoRoot -match '^\\\\') {
+    Write-Host "=== UNC source detected, syncing to $localBuildDir ==="
+    & robocopy $repoRoot $localBuildDir /MIR /XD target .git /XF "*.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
+    # robocopy exit codes 0-7 are success/informational
+    if ($LASTEXITCODE -gt 7) {
+        throw "robocopy failed with exit code $LASTEXITCODE"
+    }
+    # Copy Cargo.lock separately (robocopy /XF excluded all .lock files above,
+    # but we need Cargo.lock for reproducible builds)
+    $cargoLock = Join-Path $repoRoot "Cargo.lock"
+    if (Test-Path $cargoLock) {
+        Copy-Item -Force $cargoLock (Join-Path $localBuildDir "Cargo.lock")
+    }
+    $repoRoot = $localBuildDir
+    Write-Host "=== building from $repoRoot ==="
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw @"
 Windows cargo was not found on PATH.
@@ -69,7 +90,7 @@ Required workload:
     }
 
     Write-Host "=== bootstrapping MSVC environment with $vsDevCmd ==="
-    $cmdLine = "call `"$vsDevCmd`" -no_logo && cargo $($buildArgs -join ' ')"
+    $cmdLine = "cd /d `"$repoRoot`" && call `"$vsDevCmd`" -no_logo && cargo $($buildArgs -join ' ')"
     & cmd.exe /s /c $cmdLine
 }
 
