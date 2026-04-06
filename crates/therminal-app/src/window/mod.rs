@@ -649,9 +649,29 @@ impl App {
                 (vec![1], 1)
             };
 
+            let tab_labels: Vec<String> = workspace_ids
+                .iter()
+                .map(|&ws_id| {
+                    self.workspaces
+                        .as_ref()
+                        .and_then(|wm| wm.focused_pane_status(ws_id))
+                        .and_then(|status| {
+                            status.cwd.as_ref().map(|cwd| {
+                                let basename = std::path::Path::new(cwd)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(cwd);
+                                format!("{ws_id}: {basename}")
+                            })
+                        })
+                        .unwrap_or_else(|| format!("{ws_id}"))
+                })
+                .collect();
+
             let tab_info = chrome::TabBarInfo {
                 workspace_ids,
                 active_workspace,
+                tab_labels,
             };
 
             let bar_h = crate::pane::effective_tab_bar_height_csd(
@@ -1473,7 +1493,26 @@ impl ApplicationHandler<UserEvent> for App {
                                 .as_ref()
                                 .map(|wm| wm.workspace_ids())
                                 .unwrap_or_default();
-                            if let Some(ws_id) = chrome::tab_bar_hit_test(px as f32, &workspace_ids)
+                            let tab_labels: Vec<String> = workspace_ids
+                                .iter()
+                                .map(|&ws_id| {
+                                    self.workspaces
+                                        .as_ref()
+                                        .and_then(|wm| wm.focused_pane_status(ws_id))
+                                        .and_then(|status| {
+                                            status.cwd.as_ref().map(|cwd| {
+                                                let basename = std::path::Path::new(cwd)
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or(cwd);
+                                                format!("{ws_id}: {basename}")
+                                            })
+                                        })
+                                        .unwrap_or_else(|| format!("{ws_id}"))
+                                })
+                                .collect();
+                            if let Some(ws_id) =
+                                chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels)
                             {
                                 self.switch_workspace(ws_id as u8);
                                 if let Some(w) = self.window.as_ref() {

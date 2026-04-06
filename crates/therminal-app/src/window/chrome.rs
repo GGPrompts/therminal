@@ -964,10 +964,19 @@ pub(crate) struct TabBarInfo {
     pub workspace_ids: Vec<usize>,
     /// Currently active workspace number.
     pub active_workspace: usize,
+    /// Per-workspace display labels (parallel to `workspace_ids`).
+    /// Each entry is the tab label string, e.g. "1: therminal" or just "1".
+    pub tab_labels: Vec<String>,
 }
 
-/// Width of a single tab in the tab bar.
-const TAB_WIDTH: f32 = 48.0;
+/// Minimum width of a single tab in the tab bar.
+const TAB_MIN_WIDTH: f32 = 48.0;
+
+/// Per-character width estimate for tab labels (used before shaping).
+const TAB_CHAR_WIDTH: f32 = 8.0;
+
+/// Horizontal padding inside each tab (left + right combined).
+const TAB_PADDING: f32 = 16.0;
 
 /// Tab bar background color (same as status bar).
 const TAB_BAR_BG_COLOR: [f32; 4] = STATUS_BAR_BG_COLOR;
@@ -1036,16 +1045,34 @@ pub(crate) fn draw_tab_bar(
         return;
     }
 
+    // ── Compute per-tab widths from labels ────────────────────────────────
+    let tab_widths: Vec<f32> = info
+        .tab_labels
+        .iter()
+        .map(|label| (label.len() as f32 * TAB_CHAR_WIDTH + TAB_PADDING).max(TAB_MIN_WIDTH))
+        .collect();
+
+    // Cumulative x-offsets for each tab.
+    let tab_offsets: Vec<f32> = tab_widths
+        .iter()
+        .scan(0.0f32, |acc, &w| {
+            let x = *acc;
+            *acc += w;
+            Some(x)
+        })
+        .collect();
+
     // ── Per-tab rects (active tab gets highlighted bg + underline) ──────
     let mut tab_verts: Vec<ColorVertex> = Vec::new();
     for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
-        let tab_x = i as f32 * TAB_WIDTH;
+        let tab_x = tab_offsets[i];
+        let tab_w = tab_widths[i];
         if ws_id == info.active_workspace {
             // Active tab background.
             tab_verts.extend_from_slice(&pixel_rect_to_ndc(
                 tab_x,
                 0.0,
-                TAB_WIDTH,
+                tab_w,
                 bar_h,
                 sw,
                 sh,
@@ -1055,7 +1082,7 @@ pub(crate) fn draw_tab_bar(
             tab_verts.extend_from_slice(&pixel_rect_to_ndc(
                 tab_x,
                 bar_h - 2.0,
-                TAB_WIDTH,
+                tab_w,
                 2.0,
                 sw,
                 sh,
@@ -1119,16 +1146,17 @@ pub(crate) fn draw_tab_bar(
 
     // Phase 1: ensure all tab buffers are shaped in the cache.
     let family = renderer.font_config.family.clone();
-    let mut tab_slots: Vec<(String, f32, GlyphColor)> = Vec::new();
+    let mut tab_slots: Vec<(String, f32, f32, GlyphColor)> = Vec::new();
     for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
-        let tab_x = i as f32 * TAB_WIDTH;
+        let tab_x = tab_offsets[i];
+        let tab_w = tab_widths[i];
         let is_active = ws_id == info.active_workspace;
         let color = if is_active {
             active_color
         } else {
             inactive_color
         };
-        let label = format!(" {ws_id}");
+        let label = &info.tab_labels[i];
         let active_tag = if is_active { "a" } else { "i" };
         let slot = format!("tab_{ws_id}");
         let key = format!("{label}|{active_tag}");
@@ -1137,28 +1165,28 @@ pub(crate) fn draw_tab_bar(
             &slot,
             &key,
             metrics,
-            TAB_WIDTH,
+            tab_w,
             bar_h,
-            &label,
+            label,
             Attrs::new().family(Family::Name(&family)).color(color),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
 
         // Measure for centering (need to read from cache after ensure).
-        tab_slots.push((slot, tab_x, color));
+        tab_slots.push((slot, tab_x, tab_w, color));
     }
 
     // Phase 2: borrow cache immutably to build TextAreas.
     let mut tab_positions: Vec<(&Buffer, f32, GlyphColor)> = Vec::new();
-    for (slot, tab_x, color) in &tab_slots {
+    for (slot, tab_x, tab_w, color) in &tab_slots {
         let buf = cached_buf(&renderer.overlay_cache, slot);
         let text_width = buf
             .layout_runs()
             .next()
             .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
             .unwrap_or(0.0);
-        let centered_x = tab_x + ((TAB_WIDTH - text_width) / 2.0).max(0.0);
+        let centered_x = tab_x + ((tab_w - text_width) / 2.0).max(0.0);
         tab_positions.push((buf, centered_x, *color));
     }
 
@@ -1224,13 +1252,24 @@ pub(crate) fn draw_tab_bar(
 }
 
 /// Return the workspace ID for a click at the given x-position in the tab bar,
-/// given the list of workspace IDs displayed.
-pub(crate) fn tab_bar_hit_test(px: f32, workspace_ids: &[usize]) -> Option<usize> {
+/// given the list of workspace IDs and their display labels.
+pub(crate) fn tab_bar_hit_test(
+    px: f32,
+    workspace_ids: &[usize],
+    tab_labels: &[String],
+) -> Option<usize> {
     if workspace_ids.is_empty() {
         return None;
     }
-    let tab_index = (px / TAB_WIDTH).floor() as usize;
-    workspace_ids.get(tab_index).copied()
+    let mut cumulative_x = 0.0f32;
+    for (i, label) in tab_labels.iter().enumerate() {
+        let tab_w = (label.len() as f32 * TAB_CHAR_WIDTH + TAB_PADDING).max(TAB_MIN_WIDTH);
+        if px < cumulative_x + tab_w {
+            return workspace_ids.get(i).copied();
+        }
+        cumulative_x += tab_w;
+    }
+    None
 }
 
 // ── CSD (client-side decorations) ────────────────────────────────────

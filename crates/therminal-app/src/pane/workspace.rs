@@ -288,6 +288,15 @@ impl WorkspaceManager {
         true
     }
 
+    /// Return the focused pane's `PaneStatus` for a given workspace ID, if available.
+    pub fn focused_pane_status(&self, workspace_id: usize) -> Option<super::state::PaneStatus> {
+        let ws = self.workspaces.iter().find(|ws| ws.id == workspace_id)?;
+        let focused_id = ws.focused_pane?;
+        let pane = ws.layout.find_pane(focused_id)?;
+        let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
+        Some(status.clone())
+    }
+
     /// Return all workspace IDs that currently exist, sorted.
     pub fn workspace_ids(&self) -> Vec<usize> {
         let mut ids: Vec<usize> = self.workspaces.iter().map(|ws| ws.id).collect();
