@@ -3,6 +3,7 @@
 //! Contains the recursive pane traversal that renders each pane's terminal
 //! content, headers, and separators.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use alacritty_terminal::term::TermDamage;
@@ -12,11 +13,38 @@ use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_displ
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
-use therminal_terminal::hotspot_detection::detect_hotspots_from_text;
+use therminal_terminal::hotspot_detection::{TextHotspot, detect_hotspots_from_text};
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/// Apply detected hotspots to cells using a row-indexed lookup.
+///
+/// Complexity: O(H + C) where H = number of hotspots, C = number of cells.
+/// Builds a `HashMap<row, Vec<&Hotspot>>` so each cell only checks hotspots
+/// on its own row, avoiding the previous O(H * C) nested loop.
+fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
+    if hotspots.is_empty() {
+        return;
+    }
+    // Group hotspots by row for O(1) row lookup.
+    let mut row_hotspots: HashMap<usize, Vec<&TextHotspot>> = HashMap::new();
+    for h in hotspots {
+        row_hotspots.entry(h.row).or_default().push(h);
+    }
+    // Single pass over cells: check only hotspots on the same row.
+    for cell in cells.iter_mut() {
+        if let Some(row_hs) = row_hotspots.get(&cell.row) {
+            for h in row_hs {
+                if cell.col >= h.start_col && cell.col < h.end_col {
+                    cell.hotspot = Some((h.kind.clone(), Arc::from(h.text.as_str())));
+                    break; // first matching hotspot wins
+                }
+            }
+        }
+    }
+}
 
 /// Extract row text strings from a cell grid for text-based hotspot detection.
 fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec<String> {
@@ -283,7 +311,10 @@ fn render_single_pane(
     // When partial damage is available, only run detection on damaged rows
     // to avoid re-scanning the entire visible area every frame.
     if let Some(ref damage_vec) = damaged_rows {
-        // Filter to only damaged-row cells for detection.
+        // Collect indices of damaged-row cells to avoid cloning entire cells.
+        // We build a separate vec of references for detection, then write
+        // results back via a HashMap for O(1) lookup.  Complexity: O(D)
+        // where D = number of damaged-row cells, instead of O(N*M).
         let mut damaged_cells: Vec<RenderCell> = cells
             .iter()
             .filter(|c| damage_vec.get(c.row).copied().unwrap_or(false))
@@ -294,44 +325,37 @@ fn render_single_pane(
         let row_texts = extract_row_text_from_cells(&damaged_cells, screen_lines);
         let hotspots = detect_hotspots_from_text(&row_texts);
 
-        // Apply detected URLs back to the main cells vec.
-        for dc in &damaged_cells {
-            if dc.hyperlink.is_some()
-                && let Some(cell) = cells
-                    .iter_mut()
-                    .find(|c| c.row == dc.row && c.col == dc.col)
-            {
-                cell.hyperlink.clone_from(&dc.hyperlink);
-                cell.hyperlink_source = dc.hyperlink_source;
-            }
-        }
+        // O(1) copy-back: build a HashMap from detected URLs keyed by (row, col),
+        // then single-pass over `cells` to apply. Avoids O(N*M) linear search.
+        let url_map: HashMap<(usize, usize), (Arc<str>, HyperlinkSource)> = damaged_cells
+            .into_iter()
+            .filter_map(|dc| {
+                dc.hyperlink
+                    .map(|link| ((dc.row, dc.col), (link, dc.hyperlink_source.unwrap_or(HyperlinkSource::Regex))))
+            })
+            .collect();
 
-        // Apply detected hotspots to the main cells vec.
-        for hotspot in &hotspots {
+        if !url_map.is_empty() {
             for cell in cells.iter_mut() {
-                if cell.row == hotspot.row
-                    && cell.col >= hotspot.start_col
-                    && cell.col < hotspot.end_col
-                {
-                    cell.hotspot = Some((hotspot.kind.clone(), Arc::from(hotspot.text.as_str())));
+                if let Some((link, source)) = url_map.get(&(cell.row, cell.col)) {
+                    cell.hyperlink = Some(Arc::clone(link));
+                    cell.hyperlink_source = Some(*source);
                 }
             }
         }
+
+        // Row-indexed hotspot application: O(C + H) instead of O(H*C).
+        // Build a map of row -> hotspots, then single-pass over cells checking
+        // only hotspots on the matching row.
+        apply_hotspots_to_cells(&mut cells, &hotspots);
     } else {
         // Full damage — detect on all cells.
         detect_urls_in_cells(&mut cells, screen_lines);
         let row_texts = extract_row_text_from_cells(&cells, screen_lines);
         let hotspots = detect_hotspots_from_text(&row_texts);
-        for hotspot in &hotspots {
-            for cell in cells.iter_mut() {
-                if cell.row == hotspot.row
-                    && cell.col >= hotspot.start_col
-                    && cell.col < hotspot.end_col
-                {
-                    cell.hotspot = Some((hotspot.kind.clone(), Arc::from(hotspot.text.as_str())));
-                }
-            }
-        }
+
+        // Row-indexed hotspot application: O(C + H) instead of O(H*C).
+        apply_hotspots_to_cells(&mut cells, &hotspots);
     }
 
     // ── Draw pane header strip (only when multiple panes) ────────────────

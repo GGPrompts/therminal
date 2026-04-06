@@ -133,6 +133,9 @@ impl RegionIndex {
                     metadata,
                 });
             }
+            InterceptedEvent::DesktopNotification(_) => {
+                // Desktop notifications don't map to semantic regions.
+            }
         }
     }
 

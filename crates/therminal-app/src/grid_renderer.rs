@@ -727,14 +727,20 @@ impl GridRenderer {
         self.pane_row_cache.remove(&pane_id);
         self.pane_cell_buffers.remove(&pane_id);
         self.pane_cell_shape_keys.remove(&pane_id);
+        // Clean up hotspot_map entries for the removed pane (since the map
+        // is no longer cleared every frame).
+        self.hotspot_map.retain(|&(pid, _, _), _| pid != pane_id);
         self.pane_last_cursor_pos.remove(&pane_id);
     }
 
-    /// Clear the hotspot and hyperlink maps at the start of a new frame,
-    /// before any panes are rendered. This allows all panes to contribute
-    /// entries that persist until the next frame.
+    /// Clear per-frame maps at the start of a new frame, before any panes
+    /// are rendered.
+    ///
+    /// The hotspot_map is NOT cleared here — it uses damage-aware incremental
+    /// updates in `render_from_cache()` to avoid rebuilding entries for
+    /// undamaged rows. Stale pane entries are cleaned up in `remove_pane_cache()`.
     pub fn clear_frame_maps(&mut self) {
-        self.hotspot_map.clear();
+        // hotspot_map: damage-aware incremental update (see render_from_cache)
         self.hyperlink_map.clear();
     }
 
@@ -1031,25 +1037,55 @@ impl GridRenderer {
             }
         }
 
-        // ── Hotspot dotted underline rects + map rebuild ──────────────────
+        // ── Hotspot dotted underline rects + damage-aware map update ──────
         // Hotspots (file paths, errors, git refs, issue refs) get a dotted
         // underline (2px dot / 2px gap) to distinguish from hyperlink styles.
+        //
+        // Only rebuild hotspot_map entries for damaged rows, then draw
+        // underlines for ALL cached rows. Complexity: O(D) for map update
+        // where D = cells in damaged rows, plus O(C) for underline drawing
+        // where C = total cached cells. Previously was O(C) for both every
+        // frame even when only a few rows changed.
         {
+            // Remove stale hotspot_map entries for damaged rows, then re-insert.
+            // Undamaged rows keep their existing map entries.
+            for (row_idx, cached_row) in row_cache.iter().enumerate() {
+                let is_damaged = match damaged_rows {
+                    None => true,
+                    Some(d) => d.get(row_idx).copied().unwrap_or(false),
+                };
+                if is_damaged {
+                    // Remove all hotspot entries for this damaged row.
+                    // We collect cols first to avoid borrowing issues.
+                    if let Some(row) = cached_row {
+                        for cell in &row.cells {
+                            self.hotspot_map.remove(&(pane_id, cell.row, cell.col));
+                        }
+                    }
+                    // Re-insert from fresh cell data.
+                    if let Some(row) = cached_row {
+                        for cell in &row.cells {
+                            if let Some((ref kind, ref full_text)) = cell.hotspot {
+                                if cell.hyperlink.is_none() {
+                                    self.hotspot_map.insert(
+                                        (pane_id, cell.row, cell.col),
+                                        (kind.clone(), Arc::clone(full_text)),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Draw dotted underlines for all rows (damaged and undamaged).
             let hotspot_color = PaletteColor::ACCENT_WARM.to_f32_array();
             let underline_h = 1.0_f32;
             let dot_on = 2.0_f32;
             let dot_off = 2.0_f32;
             for row in row_cache.iter().flatten() {
                 for cell in &row.cells {
-                    if let Some((ref kind, ref full_text)) = cell.hotspot {
-                        // Skip cells that already have a hyperlink (hyperlinks take priority).
-                        if cell.hyperlink.is_some() {
-                            continue;
-                        }
-                        self.hotspot_map.insert(
-                            (pane_id, cell.row, cell.col),
-                            (kind.clone(), Arc::clone(full_text)),
-                        );
+                    if cell.hotspot.is_some() && cell.hyperlink.is_none() {
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
                         let y =
                             self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
