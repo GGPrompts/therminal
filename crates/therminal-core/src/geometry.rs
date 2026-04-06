@@ -77,9 +77,9 @@ impl Rect {
     /// Returns (left, right). `gap` is the pixel-width separator between them.
     pub fn split_horizontal_ratio(self, ratio: f32, gap: f32) -> (Rect, Rect) {
         let ratio = ratio.clamp(0.05, 0.95);
-        let usable = self.size.width - gap;
-        let left_w = usable * ratio;
-        let right_w = usable * (1.0 - ratio);
+        let usable = (self.size.width - gap).max(0.0);
+        let left_w = (usable * ratio).max(1.0);
+        let right_w = (usable * (1.0 - ratio)).max(1.0);
         let left = Rect::new(self.origin.x, self.origin.y, left_w, self.size.height);
         let right = Rect::new(
             self.origin.x + left_w + gap,
@@ -94,9 +94,9 @@ impl Rect {
     /// Returns (top, bottom). `gap` is the pixel-height separator between them.
     pub fn split_vertical_ratio(self, ratio: f32, gap: f32) -> (Rect, Rect) {
         let ratio = ratio.clamp(0.05, 0.95);
-        let usable = self.size.height - gap;
-        let top_h = usable * ratio;
-        let bottom_h = usable * (1.0 - ratio);
+        let usable = (self.size.height - gap).max(0.0);
+        let top_h = (usable * ratio).max(1.0);
+        let bottom_h = (usable * (1.0 - ratio)).max(1.0);
         let top = Rect::new(self.origin.x, self.origin.y, self.size.width, top_h);
         let bottom = Rect::new(
             self.origin.x,
