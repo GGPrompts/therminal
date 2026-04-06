@@ -30,6 +30,7 @@ pub mod framing;
 pub mod handoff;
 pub mod lifecycle;
 pub mod mcp;
+pub mod persistence;
 pub mod server;
 pub mod session;
 pub mod trust;

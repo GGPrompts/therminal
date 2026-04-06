@@ -253,6 +253,37 @@ pub struct HandoffPayload {
     pub panes: Vec<HandoffPaneMeta>,
 }
 
+// ── Persisted state (session/layout persistence across daemon restarts) ──
+
+/// Persisted metadata for a single pane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedPane {
+    /// Last known working directory (empty if unknown).
+    pub cwd: String,
+    /// Shell command that was used (empty = default shell).
+    pub shell: String,
+    /// Terminal columns at time of save.
+    pub cols: u16,
+    /// Terminal rows at time of save.
+    pub rows: u16,
+}
+
+/// Persisted metadata for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSession {
+    /// Human-readable session name, if any.
+    pub name: Option<String>,
+    /// Panes in this session (flat list; layout topology preserved by order).
+    pub panes: Vec<PersistedPane>,
+}
+
+/// Top-level persisted daemon state, serialised to `sessions.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PersistedState {
+    /// All sessions that were active when state was last saved.
+    pub sessions: Vec<PersistedSession>,
+}
+
 // ── Framing helpers ───────────────────────────────────────────────────────
 
 /// Error type for frame encoding operations.

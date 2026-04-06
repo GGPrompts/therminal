@@ -601,6 +601,8 @@ pub struct SessionManager {
     /// Default pane dimensions for new sessions.
     default_cols: u16,
     default_rows: u16,
+    /// Optional persistence handle for debounced state saving.
+    persistence: Option<crate::persistence::PersistenceHandle>,
 }
 
 impl SessionManager {
@@ -611,6 +613,19 @@ impl SessionManager {
             event_tx,
             default_cols: 80,
             default_rows: 24,
+            persistence: None,
+        }
+    }
+
+    /// Attach a persistence handle for debounced state saving.
+    pub fn set_persistence(&mut self, handle: crate::persistence::PersistenceHandle) {
+        self.persistence = Some(handle);
+    }
+
+    /// Notify the persistence layer that session state has changed.
+    fn mark_dirty(&self) {
+        if let Some(ref handle) = self.persistence {
+            handle.mark_dirty();
         }
     }
 
@@ -649,6 +664,7 @@ impl SessionManager {
             .send(DaemonEvent::SessionCreated { session_id });
 
         self.sessions.insert(session_id, session);
+        self.mark_dirty();
         Ok(session_id)
     }
 
@@ -701,6 +717,7 @@ impl SessionManager {
             let _ = self
                 .event_tx
                 .send(DaemonEvent::SessionDestroyed { session_id });
+            self.mark_dirty();
             true
         } else {
             false
@@ -794,6 +811,7 @@ impl SessionManager {
 
         let new_id = new_pane.id;
         window.add_pane(new_pane);
+        self.mark_dirty();
         Ok(new_id)
     }
 
@@ -821,9 +839,11 @@ impl SessionManager {
         }
         // Remove empty windows
         session.windows.retain(|w| !w.panes.is_empty());
-        // If no windows left, destroy session
+        // If no windows left, destroy session (which also marks dirty)
         if session.windows.is_empty() {
             self.destroy_session(session_id);
+        } else {
+            self.mark_dirty();
         }
         Ok(())
     }
@@ -993,6 +1013,92 @@ impl SessionManager {
         let current_pane = NEXT_PANE_ID.load(Ordering::Relaxed);
         if max_pane >= current_pane {
             NEXT_PANE_ID.store(max_pane + 1, Ordering::Relaxed);
+        }
+
+        restored
+    }
+
+    /// Restore sessions from persisted state.
+    ///
+    /// For each persisted session, spawns a new session with fresh PTYs using
+    /// the saved cwd. Does not restore terminal grid content -- only layout
+    /// and metadata.
+    pub fn restore_from_persisted(
+        &mut self,
+        state: &therminal_protocol::daemon::PersistedState,
+    ) -> usize {
+        let mut restored = 0usize;
+        for persisted_session in &state.sessions {
+            if persisted_session.panes.is_empty() {
+                continue;
+            }
+
+            // Use the first pane to create the session (which creates a default pane).
+            let first_pane = &persisted_session.panes[0];
+            let spawn_opts = therminal_terminal::pty::SpawnOptions {
+                cwd: first_pane.cwd.clone(),
+                shell: first_pane.shell.clone(),
+                ..Default::default()
+            };
+
+            let mut session = Session::new(persisted_session.name.clone(), self.event_tx.clone());
+            match session.create_default_pane(first_pane.cols, first_pane.rows, &spawn_opts) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        name = ?persisted_session.name,
+                        error = %e,
+                        "failed to restore session from persisted state"
+                    );
+                    continue;
+                }
+            }
+
+            let session_id = session.id;
+
+            // Spawn additional panes for multi-pane sessions.
+            for pane_meta in &persisted_session.panes[1..] {
+                let opts = therminal_terminal::pty::SpawnOptions {
+                    cwd: pane_meta.cwd.clone(),
+                    shell: pane_meta.shell.clone(),
+                    ..Default::default()
+                };
+                match Pane::spawn(
+                    pane_meta.cols,
+                    pane_meta.rows,
+                    self.event_tx.clone(),
+                    session_id,
+                    &opts,
+                ) {
+                    Ok(pane) => {
+                        // Add to the first (default) window.
+                        if let Some(window) = session.windows.first_mut() {
+                            window.add_pane(pane);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            session_id = session_id,
+                            error = %e,
+                            "failed to restore pane in persisted session"
+                        );
+                    }
+                }
+            }
+
+            let pane_count = session.pane_count();
+            info!(
+                session_id = session_id,
+                name = ?persisted_session.name,
+                pane_count,
+                "restored session from persisted state"
+            );
+
+            let _ = self
+                .event_tx
+                .send(DaemonEvent::SessionCreated { session_id });
+            self.sessions.insert(session_id, session);
+            restored += pane_count;
         }
 
         restored

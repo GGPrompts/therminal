@@ -180,6 +180,36 @@ async fn start_daemon(
         );
     }
 
+    // If no sessions were restored from handoff, try loading persisted state.
+    {
+        let session_mgr = server.session_manager();
+        let mgr = session_mgr.lock().await;
+        let has_sessions = mgr.session_count() > 0;
+        drop(mgr);
+
+        if !has_sessions && let Some(persisted) = crate::persistence::load() {
+            let mut mgr = session_mgr.lock().await;
+            let restored = mgr.restore_from_persisted(&persisted);
+            lifecycle.set_session_count(mgr.session_count());
+            if restored > 0 {
+                info!(
+                    restored_panes = restored,
+                    "sessions restored from persisted state"
+                );
+            }
+        }
+    }
+
+    // Spawn the debounced persistence task.
+    let persist_shutdown = lifecycle.shutdown_notify();
+    let (persist_handle, _persist_task) =
+        crate::persistence::spawn_persistence_task(server.session_manager(), persist_shutdown);
+    {
+        let session_mgr = server.session_manager();
+        let mut mgr = session_mgr.lock().await;
+        mgr.set_persistence(persist_handle);
+    }
+
     // Binding -> Ready
     lifecycle.transition(DaemonState::Ready)?;
 
