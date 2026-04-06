@@ -567,12 +567,26 @@ impl App {
             .and_then(|r| r.hyperlink_map.get(&(pane_id, row, col)).cloned())
     }
 
+    /// Check whether a hyperlink exists at a given grid cell (presence only, no clone).
+    fn has_hyperlink(&self, pane_id: PaneId, row: usize, col: usize) -> bool {
+        self.grid_renderer
+            .as_ref()
+            .is_some_and(|r| r.hyperlink_map.contains_key(&(pane_id, row, col)))
+    }
+
+    /// Check whether a hotspot exists at a given grid cell (presence only, no clone).
+    fn has_hotspot(&self, pane_id: PaneId, row: usize, col: usize) -> bool {
+        self.grid_renderer
+            .as_ref()
+            .is_some_and(|r| r.hotspot_map.contains_key(&(pane_id, row, col)))
+    }
+
     /// Update cursor icon based on whether the hovered cell has a hyperlink or hotspot.
     fn update_hyperlink_hover(&mut self, pane_id: PaneId, row: usize, col: usize) {
         use winit::window::CursorIcon;
 
-        let on_link = self.hyperlink_at(pane_id, row, col).is_some();
-        let on_hotspot = self.hotspot_at(pane_id, row, col).is_some();
+        let on_link = self.has_hyperlink(pane_id, row, col);
+        let on_hotspot = self.has_hotspot(pane_id, row, col);
         let want_pointer = on_link || on_hotspot;
         if want_pointer && !self.hyperlink_cursor_active {
             self.hyperlink_cursor_active = true;
