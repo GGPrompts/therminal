@@ -652,6 +652,68 @@ impl LayoutNode {
         }
     }
 
+    /// Traverse all leaves and return the ID of the one with the largest
+    /// viewport area (width * height). Used by auto-tiling to split the
+    /// largest available pane instead of always splitting the parent -- this
+    /// avoids tiny unusable panes from nested binary splits (Hyprland-style).
+    pub fn find_largest_pane(&self) -> Option<super::PaneId> {
+        let mut best: Option<(super::PaneId, f32)> = None;
+        self.find_largest_pane_impl(&mut best);
+        best.map(|(id, _)| id)
+    }
+
+    fn find_largest_pane_impl(&self, best: &mut Option<(super::PaneId, f32)>) {
+        match self {
+            LayoutNode::Leaf(pane) => {
+                let area = pane.viewport.width() * pane.viewport.height();
+                match best {
+                    None => *best = Some((pane.id, area)),
+                    Some((_, best_area)) if area > *best_area => *best = Some((pane.id, area)),
+                    _ => {}
+                }
+            }
+            LayoutNode::Split { first, second, .. } => {
+                first.find_largest_pane_impl(best);
+                second.find_largest_pane_impl(best);
+            }
+            LayoutNode::Empty => {}
+        }
+    }
+
+    /// Remove `Empty` leaves from the tree and rebalance split ratios
+    /// proportionally. Called after reclaiming an auto-tiled pane to clean
+    /// up any transient placeholders and ensure even space distribution.
+    pub fn compact_layout(&mut self) {
+        // First, collapse any splits that have an Empty child.
+        self.collapse_empty_children();
+        // Then rebalance ratios so remaining panes share space evenly.
+        self.rebalance();
+    }
+
+    /// Recursively collapse split nodes that contain Empty children by
+    /// promoting the non-empty sibling.
+    fn collapse_empty_children(&mut self) {
+        if let LayoutNode::Split { first, second, .. } = self {
+            // Recurse into children first.
+            first.collapse_empty_children();
+            second.collapse_empty_children();
+
+            // If either child is Empty, promote the other.
+            let first_empty = matches!(first.as_ref(), LayoutNode::Empty);
+            let second_empty = matches!(second.as_ref(), LayoutNode::Empty);
+
+            if first_empty && second_empty {
+                *self = LayoutNode::Empty;
+            } else if first_empty {
+                let sibling = std::mem::replace(second.as_mut(), LayoutNode::Empty);
+                *self = sibling;
+            } else if second_empty {
+                let sibling = std::mem::replace(first.as_mut(), LayoutNode::Empty);
+                *self = sibling;
+            }
+        }
+    }
+
     /// Check whether splitting `rect` in `direction` would produce children
     /// below the minimum pane size.
     pub fn can_split(rect: Rect, direction: SplitDirection) -> bool {
@@ -1472,6 +1534,133 @@ mod tests {
             root.spatial_adjacent_pane(99, SpatialDirection::Right),
             None
         );
+    }
+
+    // ── find_largest_pane tests ──────────────────────────────────────────
+
+    #[test]
+    fn find_largest_pane_single_leaf() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = test_leaf(1, rect);
+        root.layout(rect);
+        assert_eq!(root.find_largest_pane(), Some(1));
+    }
+
+    #[test]
+    fn find_largest_pane_equal_split() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+        // Both have equal area -- first encountered wins.
+        let largest = root.find_largest_pane();
+        assert!(largest == Some(1) || largest == Some(2));
+    }
+
+    #[test]
+    fn find_largest_pane_unequal_split() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        // Pane 1 gets 80% of width, pane 2 gets 20%.
+        let mut root = make_split(SplitDirection::Horizontal, 0.8, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+        assert_eq!(root.find_largest_pane(), Some(1));
+    }
+
+    #[test]
+    fn find_largest_pane_deep_tree() {
+        // Build a tree where pane 5 is the full bottom half (largest).
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let top = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        let mut root = make_split(SplitDirection::Vertical, 0.5, top, make_leaf(5));
+        root.layout(rect);
+        // Pane 5 spans full width * half height = 800*300 = 240000
+        // Panes 1,2 each span half width * half height = 400*300 = 120000 (approx)
+        assert_eq!(root.find_largest_pane(), Some(5));
+    }
+
+    #[test]
+    fn find_largest_pane_empty_tree() {
+        let root = LayoutNode::Empty;
+        assert_eq!(root.find_largest_pane(), None);
+    }
+
+    // ── compact_layout tests ──────────────────────────────────────────────
+
+    #[test]
+    fn compact_layout_removes_empty_leaves() {
+        // Manually create a split with an Empty child.
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(make_leaf(1)),
+            second: Box::new(LayoutNode::Empty),
+        };
+        root.compact_layout();
+        // Should collapse to just the leaf.
+        assert_eq!(root.pane_count(), 1);
+        assert_eq!(root.pane_ids(), vec![1]);
+        assert!(matches!(root, LayoutNode::Leaf(_)));
+    }
+
+    #[test]
+    fn compact_layout_both_empty_becomes_empty() {
+        let mut root = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Empty),
+            second: Box::new(LayoutNode::Empty),
+        };
+        root.compact_layout();
+        assert!(matches!(root, LayoutNode::Empty));
+    }
+
+    #[test]
+    fn compact_layout_nested_empty() {
+        // Split { Split { leaf(1), Empty }, leaf(2) }
+        let inner = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(make_leaf(1)),
+            second: Box::new(LayoutNode::Empty),
+        };
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, inner, make_leaf(2));
+        root.compact_layout();
+        // Inner split should collapse, leaving Split { leaf(1), leaf(2) }.
+        assert_eq!(root.pane_count(), 2);
+        assert_eq!(root.pane_ids(), vec![1, 2]);
+        // Root should be rebalanced to 0.5.
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!((*ratio - 0.5).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn compact_layout_no_empty_is_noop() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
+        root.layout(rect);
+        root.compact_layout();
+        assert_eq!(root.pane_count(), 2);
+        assert_eq!(root.pane_ids(), vec![1, 2]);
+    }
+
+    // ── Minimum size enforcement in auto-tile context ─────────────────────
+
+    #[test]
+    fn find_largest_pane_split_refused_when_too_small() {
+        // Create a layout where the largest pane is still too small to split.
+        let tiny_rect = Rect::new(0.0, 0.0, 150.0, 100.0);
+        let mut root = test_leaf(1, tiny_rect);
+        root.layout(tiny_rect);
+
+        let largest = root.find_largest_pane();
+        assert_eq!(largest, Some(1));
+
+        // Both split directions should be refused.
+        assert!(!LayoutNode::can_split(
+            tiny_rect,
+            SplitDirection::Horizontal
+        ));
+        assert!(!LayoutNode::can_split(tiny_rect, SplitDirection::Vertical));
     }
 
     #[test]

@@ -879,14 +879,22 @@ impl App {
                     agent_name,
                     ..
                 } => {
+                    // WM-style: split the largest pane instead of always
+                    // splitting the parent -- avoids tiny unusable panes
+                    // from nested binary splits.
+                    let target_pane_id = self
+                        .get_layout()
+                        .and_then(|l| l.find_largest_pane())
+                        .unwrap_or(parent_pane_id);
+
                     info!(
                         parent_pane_id,
-                        agent_name, "Auto-tiling: splitting pane for agent"
+                        target_pane_id, agent_name, "Auto-tiling: splitting largest pane for agent"
                     );
-                    // Determine split direction from parent pane's viewport.
+                    // Determine split direction from target pane's viewport.
                     let direction = self
                         .get_layout()
-                        .and_then(|l| l.find_pane(parent_pane_id))
+                        .and_then(|l| l.find_pane(target_pane_id))
                         .map(|p| {
                             LayoutNode::auto_split_direction(p.viewport, SplitDirection::Horizontal)
                         })
@@ -918,7 +926,7 @@ impl App {
                         None => continue,
                     };
 
-                    let new_id = layout.split_pane(parent_pane_id, direction, |viewport| {
+                    let new_id = layout.split_pane(target_pane_id, direction, |viewport| {
                         match crate::pane::spawn_pane(
                             viewport,
                             renderer,
@@ -953,6 +961,10 @@ impl App {
                 crate::pane::AutoTileAction::Reclaim { pane_id } => {
                     info!(pane_id, "Auto-tiling: reclaiming pane after agent exit");
                     self.close_pane_by_id(pane_id);
+                    // Clean up any Empty leaves and rebalance after reclaim.
+                    if let Some(layout) = self.get_layout_mut() {
+                        layout.compact_layout();
+                    }
                 }
             }
         }
