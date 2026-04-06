@@ -55,6 +55,10 @@ pub struct TherminalConfig {
     pub terminal: TerminalConfig,
     /// MCP server settings.
     pub mcp: McpConfig,
+    /// Bell behavior settings.
+    pub bell: BellConfig,
+    /// Notification settings.
+    pub notifications: NotificationConfig,
 }
 
 impl TherminalConfig {
@@ -417,6 +421,8 @@ pub struct TerminalConfig {
     pub osc_133: bool,
     /// Intercept OSC 7 sequences (current working directory).
     pub osc_7: bool,
+    /// Intercept OSC 9 sequences (desktop notifications).
+    pub osc_9: bool,
     /// Intercept OSC 1337 sequences (iTerm2).
     pub osc_1337: bool,
     /// Intercept OSC 7777 sequences (cooperative agent self-reporting).
@@ -429,6 +435,7 @@ impl Default for TerminalConfig {
             osc_633: true,
             osc_133: true,
             osc_7: true,
+            osc_9: true,
             osc_1337: true,
             osc_7777: true,
         }
@@ -567,6 +574,64 @@ impl Default for McpConfig {
         Self {
             enabled: true,
             socket_path: String::new(),
+        }
+    }
+}
+
+// ── Section: Bell ───────────────────────────────────────────────────────
+
+/// Bell style determines how BEL (`\x07`) is presented to the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BellStyle {
+    /// Flash the taskbar/dock icon.
+    Taskbar,
+    /// Brief screen invert/flash.
+    Visual,
+    /// System audible bell (not yet implemented; falls back to taskbar).
+    Audible,
+    /// Ignore the bell entirely.
+    None,
+}
+
+/// Bell behavior configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BellConfig {
+    /// How to present BEL characters to the user.
+    pub style: BellStyle,
+    /// Duration of the visual bell flash in milliseconds (only used when
+    /// `style = "visual"`).
+    pub visual_bell_duration_ms: u64,
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self {
+            style: BellStyle::Taskbar,
+            visual_bell_duration_ms: 150,
+        }
+    }
+}
+
+// ── Section: Notifications ──────────────────────────────────────────────
+
+/// Desktop notification settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationConfig {
+    /// Send a desktop notification when an agent transitions to
+    /// `AwaitingInput` (i.e. the agent is waiting for the user).
+    pub agent_waiting: bool,
+    /// Send desktop notifications for OSC 9 sequences.
+    pub osc9_enabled: bool,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            agent_waiting: true,
+            osc9_enabled: true,
         }
     }
 }

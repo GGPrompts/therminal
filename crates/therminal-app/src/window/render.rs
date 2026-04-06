@@ -330,8 +330,12 @@ fn render_single_pane(
         let url_map: HashMap<(usize, usize), (Arc<str>, HyperlinkSource)> = damaged_cells
             .into_iter()
             .filter_map(|dc| {
-                dc.hyperlink
-                    .map(|link| ((dc.row, dc.col), (link, dc.hyperlink_source.unwrap_or(HyperlinkSource::Regex))))
+                dc.hyperlink.map(|link| {
+                    (
+                        (dc.row, dc.col),
+                        (link, dc.hyperlink_source.unwrap_or(HyperlinkSource::Regex)),
+                    )
+                })
             })
             .collect();
 

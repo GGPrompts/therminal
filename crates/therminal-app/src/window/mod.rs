@@ -61,10 +61,7 @@ enum UserEvent {
     /// A BEL character was received from a pane.
     Bell(crate::pane::PaneId),
     /// A desktop notification was requested (OSC 9 or agent event).
-    DesktopNotification {
-        title: String,
-        body: String,
-    },
+    DesktopNotification { title: String, body: String },
 }
 
 // ── GPU state ────────────────────────────────────────────────────────────
@@ -246,9 +243,7 @@ impl App {
                             {
                                 let _ = proxy.send_event(UserEvent::DesktopNotification {
                                     title: "Agent waiting".to_string(),
-                                    body: format!(
-                                        "Agent in pane {pane_id} is awaiting input"
-                                    ),
+                                    body: format!("Agent in pane {pane_id} is awaiting input"),
                                 });
                             }
                         }
@@ -827,7 +822,43 @@ impl App {
             );
         }
 
+        // ── Visual bell overlay ──────────────────────────────────────────
+        let bell_intensity = {
+            let duration_ms = self.config.bell.visual_bell_duration_ms;
+            match self.visual_bell_start {
+                Some(start) => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    if elapsed_ms >= duration_ms {
+                        0.0
+                    } else {
+                        1.0 - (elapsed_ms as f32 / duration_ms as f32)
+                    }
+                }
+                None => 0.0,
+            }
+        };
+        if bell_intensity > 0.0 {
+            chrome::draw_visual_bell_overlay(
+                bell_intensity,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
+        }
+
         output.present();
+
+        // If visual bell is still active, schedule another redraw for animation.
+        if bell_intensity > 0.0 {
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        } else {
+            self.visual_bell_start = None;
+        }
     }
 
     /// Check if this key event matches a configured keybinding.

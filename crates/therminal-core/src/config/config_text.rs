@@ -111,6 +111,10 @@ pub(super) fn default_config_text() -> String {
         d.terminal.osc_7
     ));
     out.push_str(&format!(
+        "# osc_9 = {}   # desktop notifications\n",
+        d.terminal.osc_9
+    ));
+    out.push_str(&format!(
         "# osc_1337 = {}  # iTerm2 extensions\n",
         d.terminal.osc_1337
     ));
@@ -202,6 +206,34 @@ pub(super) fn default_config_text() -> String {
     out.push_str("[mcp]\n");
     out.push_str(&format!("# enabled = {}\n", d.mcp.enabled));
     out.push_str("# socket_path = \"\"  # empty = default runtime dir socket\n");
+    out.push('\n');
+
+    // ── [bell] ──────────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [bell] — BEL character handling.\n");
+    out.push_str("# style: \"taskbar\" | \"visual\" | \"audible\" | \"none\"\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[bell]\n");
+    out.push_str("# style = \"taskbar\"  # flash the taskbar/dock icon on BEL\n");
+    out.push_str(&format!(
+        "# visual_bell_duration_ms = {}  # flash duration when style = \"visual\"\n",
+        d.bell.visual_bell_duration_ms
+    ));
+    out.push('\n');
+
+    // ── [notifications] ─────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [notifications] — Desktop notification settings.\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[notifications]\n");
+    out.push_str(&format!(
+        "# agent_waiting = {}  # notify when an agent transitions to awaiting input\n",
+        d.notifications.agent_waiting
+    ));
+    out.push_str(&format!(
+        "# osc9_enabled = {}  # send desktop notifications for OSC 9 sequences\n",
+        d.notifications.osc9_enabled
+    ));
     out.push('\n');
 
     out

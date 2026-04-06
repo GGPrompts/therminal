@@ -463,7 +463,7 @@ mod tests {
                 columns: 80,
                 screen_lines: 24,
             },
-            PaneListener,
+            PaneListener::new(),
         );
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {

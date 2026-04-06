@@ -12,6 +12,7 @@
 //! | OSC 133   | FinalTerm           | Shell integration (prompt/cmd) |
 //! | OSC 633   | VS Code             | Shell integration (extended)   |
 //! | OSC 7     | Standard            | Current working directory      |
+//! | OSC 9     | ConEmu/mintty       | Desktop notifications          |
 //! | OSC 1337  | iTerm2              | Various (used by some agents)  |
 //! | OSC 7777  | Therminal           | Cooperative agent self-report   |
 //!
@@ -35,6 +36,8 @@ pub enum InterceptedEvent {
     CurrentDirectory(String),
     /// An iTerm2-style (OSC 1337) key=value pair was detected.
     Iterm2 { key: String, value: String },
+    /// A desktop notification was requested via OSC 9.
+    DesktopNotification(String),
     /// A cooperative agent self-reported its state via OSC 7777.
     ///
     /// See [`TherminalInterceptor::handle_osc_7777`] for the full protocol spec.
@@ -64,6 +67,8 @@ pub struct InterceptorConfig {
     pub osc_7: bool,
     /// Intercept OSC 1337 (iTerm2).
     pub osc_1337: bool,
+    /// Intercept OSC 9 (desktop notifications).
+    pub osc_9: bool,
     /// Intercept OSC 7777 (cooperative agent self-reporting).
     pub osc_7777: bool,
 }
@@ -74,6 +79,7 @@ impl Default for InterceptorConfig {
             osc_633: true,
             osc_133: true,
             osc_7: true,
+            osc_9: true,
             osc_1337: true,
             osc_7777: true,
         }
@@ -164,6 +170,25 @@ impl TherminalInterceptor {
         self.emit(InterceptedEvent::Osc133(mark));
 
         // Consume: alacritty_terminal also ignores these.
+        true
+    }
+
+    /// Handle OSC 9 (desktop notification). Returns `true` to consume.
+    fn handle_osc_9(&mut self, params: &[&[u8]]) -> bool {
+        // Format: OSC 9 ; <notification text> ST
+        if params.len() < 2 {
+            return false;
+        }
+
+        let text = match std::str::from_utf8(params[1]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        debug!("OSC 9 (notification): {}", text);
+        self.emit(InterceptedEvent::DesktopNotification(text.to_string()));
+
+        // Consume: alacritty_terminal doesn't handle OSC 9.
         true
     }
 
@@ -357,6 +382,7 @@ impl alacritty_terminal::vte::SequenceInterceptor for TherminalInterceptor {
             b"633" if self.config.osc_633 => self.handle_osc_633(params),
             b"133" if self.config.osc_133 => self.handle_osc_133(params),
             b"7" if self.config.osc_7 => self.handle_osc_7(params),
+            b"9" if self.config.osc_9 => self.handle_osc_9(params),
             b"1337" if self.config.osc_1337 => self.handle_osc_1337(params),
             b"7777" if self.config.osc_7777 => self.handle_osc_7777(params),
             _ => false,
@@ -527,6 +553,7 @@ mod tests {
             osc_633: false,
             osc_133: false,
             osc_7: false,
+            osc_9: false,
             osc_1337: false,
             osc_7777: false,
         };
@@ -565,6 +592,40 @@ mod tests {
         let block = &interceptor.command_tracker.blocks[0];
         assert_eq!(block.command, Some("ls -la".to_string()));
         assert_eq!(block.exit_code, Some(0));
+    }
+
+    // -- OSC 9 tests -----------------------------------------------------------
+
+    #[test]
+    fn intercept_osc_9_notification() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"Build complete!"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            InterceptedEvent::DesktopNotification(text) => {
+                assert_eq!(text, "Build complete!");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_no_text_not_consumed() {
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(!consumed);
     }
 
     // -- OSC 7777 tests ---------------------------------------------------------

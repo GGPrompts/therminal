@@ -13,6 +13,9 @@ pub mod spawn;
 pub mod state;
 pub mod workspace;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 
 // ── Re-export canonical PaneId from protocol ────────────────────────────
@@ -29,15 +32,35 @@ pub enum SplitDirection {
 
 // ── EventListener for per-pane Term ─────────────────────────────────────
 
-/// Minimal listener forwarded from each pane's Term.
+/// Listener forwarded from each pane's Term.
+///
+/// Carries an optional bell flag that the reader thread checks after each
+/// `advance_with_interceptor` call to detect BEL events without needing
+/// a full channel.
 #[derive(Clone)]
-pub(crate) struct PaneListener;
+pub(crate) struct PaneListener {
+    /// Set to `true` when `Event::Bell` fires. The reader thread clears
+    /// it after forwarding the bell to the event loop.
+    pub(crate) bell_pending: Arc<AtomicBool>,
+}
+
+impl PaneListener {
+    /// Create a new listener with a shared bell flag.
+    pub(crate) fn new() -> Self {
+        Self {
+            bell_pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 impl EventListener for PaneListener {
     fn send_event(&self, event: TermEvent) {
         match event {
             TermEvent::Title(title) => tracing::debug!("Pane title: {title}"),
             TermEvent::Wakeup => {}
+            TermEvent::Bell => {
+                self.bell_pending.store(true, Ordering::Release);
+            }
             _ => tracing::debug!("Pane event: {event:?}"),
         }
     }

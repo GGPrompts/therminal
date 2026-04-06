@@ -739,9 +739,7 @@ impl LayoutNode {
         match self {
             LayoutNode::Leaf(pane) if pane.id == id => {
                 // Replace this leaf with Empty, return the pane state.
-                if let LayoutNode::Leaf(pane) =
-                    std::mem::replace(self, LayoutNode::Empty)
-                {
+                if let LayoutNode::Leaf(pane) = std::mem::replace(self, LayoutNode::Empty) {
                     Some(pane)
                 } else {
                     unreachable!()

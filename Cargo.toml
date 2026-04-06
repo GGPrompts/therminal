@@ -79,6 +79,9 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 rmcp = { version = "1", features = ["server", "transport-io", "transport-async-rw"] }
 schemars = "1"
 
+# Notifications
+notify-rust = "4"
+
 # Misc
 open = "5"
 bytemuck = { version = "1", features = ["derive"] }

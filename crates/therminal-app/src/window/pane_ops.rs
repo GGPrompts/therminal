@@ -1068,7 +1068,7 @@ impl App {
                         osc_633: self.config.terminal.osc_633,
                         osc_133: self.config.terminal.osc_133,
                         osc_7: self.config.terminal.osc_7,
-            osc_9: self.config.terminal.osc_9,
+                        osc_9: self.config.terminal.osc_9,
                         osc_1337: self.config.terminal.osc_1337,
                         osc_7777: self.config.terminal.osc_7777,
                     };
