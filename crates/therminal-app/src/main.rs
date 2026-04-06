@@ -1,7 +1,6 @@
 mod clipboard;
 mod color_mapping;
 mod grid_renderer;
-mod hotspot_detection;
 mod mcp_stdio;
 mod menu;
 mod pane;
@@ -9,7 +8,7 @@ mod url_detection;
 mod window;
 
 pub use grid_renderer::{FontConfig, GridRenderer, RenderCell};
-pub use hotspot_detection::{Hotspot, HotspotKind};
+pub use therminal_terminal::hotspot_detection::{HotspotKind, TextHotspot};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

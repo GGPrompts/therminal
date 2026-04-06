@@ -1014,9 +1014,9 @@ impl TherminalMcpServer {
             hotspots.push(HotspotInfo {
                 hotspot_type: type_str.to_string(),
                 text: h.text,
-                line: h.line,
-                col_start: h.col_start,
-                col_end: h.col_end,
+                line: h.row,
+                col_start: h.start_col,
+                col_end: h.end_col,
                 metadata,
             });
 

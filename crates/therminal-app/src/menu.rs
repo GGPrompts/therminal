@@ -320,11 +320,11 @@ pub(crate) fn build_tab_menu(
 /// location, git ref, issue ref). Actions use `HotspotCopy` / `HotspotOpenInEditor`
 /// / `HotspotOpenExternal` KeyAction variants.
 pub(crate) fn build_hotspot_palette(
-    kind: crate::hotspot_detection::HotspotKind,
+    kind: therminal_terminal::hotspot_detection::HotspotKind,
     text: String,
     position: (f32, f32),
 ) -> ContextMenu {
-    use crate::hotspot_detection::HotspotKind;
+    use therminal_terminal::hotspot_detection::HotspotKind;
 
     let sections = match kind {
         HotspotKind::FilePath | HotspotKind::ErrorLocation => {

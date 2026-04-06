@@ -9,12 +9,31 @@ use alacritty_terminal::term::TermDamage;
 use alacritty_terminal::term::cell::Flags;
 
 use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_display_text};
-use crate::hotspot_detection::detect_hotspots;
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
+use therminal_terminal::hotspot_detection::detect_hotspots_from_text;
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+/// Extract row text strings from a cell grid for text-based hotspot detection.
+fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec<String> {
+    let mut rows: Vec<Vec<char>> = vec![Vec::new(); screen_lines];
+    for cell in cells {
+        if cell.row < screen_lines {
+            let row_chars = &mut rows[cell.row];
+            if cell.col >= row_chars.len() {
+                row_chars.resize(cell.col + 1, ' ');
+            }
+            row_chars[cell.col] = cell.c;
+        }
+    }
+    rows.into_iter()
+        .map(|chars| chars.into_iter().collect())
+        .collect()
+}
 
 // ── Recursive pane rendering ───────────────────────────────────────────
 
@@ -272,7 +291,8 @@ fn render_single_pane(
             .collect();
 
         detect_urls_in_cells(&mut damaged_cells, screen_lines);
-        let hotspots = detect_hotspots(&damaged_cells, screen_lines);
+        let row_texts = extract_row_text_from_cells(&damaged_cells, screen_lines);
+        let hotspots = detect_hotspots_from_text(&row_texts);
 
         // Apply detected URLs back to the main cells vec.
         for dc in &damaged_cells {
@@ -293,21 +313,22 @@ fn render_single_pane(
                     && cell.col >= hotspot.start_col
                     && cell.col < hotspot.end_col
                 {
-                    cell.hotspot = Some((hotspot.kind.clone(), Arc::clone(&hotspot.text)));
+                    cell.hotspot = Some((hotspot.kind.clone(), Arc::from(hotspot.text.as_str())));
                 }
             }
         }
     } else {
         // Full damage — detect on all cells.
         detect_urls_in_cells(&mut cells, screen_lines);
-        let hotspots = detect_hotspots(&cells, screen_lines);
+        let row_texts = extract_row_text_from_cells(&cells, screen_lines);
+        let hotspots = detect_hotspots_from_text(&row_texts);
         for hotspot in &hotspots {
             for cell in cells.iter_mut() {
                 if cell.row == hotspot.row
                     && cell.col >= hotspot.start_col
                     && cell.col < hotspot.end_col
                 {
-                    cell.hotspot = Some((hotspot.kind.clone(), Arc::clone(&hotspot.text)));
+                    cell.hotspot = Some((hotspot.kind.clone(), Arc::from(hotspot.text.as_str())));
                 }
             }
         }

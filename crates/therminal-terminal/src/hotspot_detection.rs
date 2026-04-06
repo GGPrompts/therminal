@@ -47,11 +47,11 @@ pub struct TextHotspot {
     /// The matched text.
     pub text: String,
     /// Row index (0-based).
-    pub line: usize,
+    pub row: usize,
     /// First column of the match (0-based, inclusive).
-    pub col_start: usize,
+    pub start_col: usize,
     /// One-past-last column of the match (exclusive).
-    pub col_end: usize,
+    pub end_col: usize,
 }
 
 // ── Compiled regexes ─────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ pub static URL_RE: LazyLock<Regex> =
 pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
     let mut hotspots = Vec::new();
 
-    for (line, text) in rows.iter().enumerate() {
+    for (row, text) in rows.iter().enumerate() {
         if text.trim().is_empty() {
             continue;
         }
@@ -136,9 +136,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
             hotspots.push(TextHotspot {
                 kind: HotspotKind::Url,
                 text: m.as_str().to_string(),
-                line,
-                col_start: sc,
-                col_end: ec,
+                row,
+                start_col: sc,
+                end_col: ec,
             });
         }
 
@@ -149,9 +149,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
                 hotspots.push(TextHotspot {
                     kind: HotspotKind::ErrorLocation,
                     text: m.as_str().to_string(),
-                    line,
-                    col_start: sc,
-                    col_end: ec,
+                    row,
+                    start_col: sc,
+                    end_col: ec,
                 });
             }
         }
@@ -163,9 +163,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
                 hotspots.push(TextHotspot {
                     kind: HotspotKind::ErrorLocation,
                     text: m.as_str().to_string(),
-                    line,
-                    col_start: sc,
-                    col_end: ec,
+                    row,
+                    start_col: sc,
+                    end_col: ec,
                 });
             }
         }
@@ -174,10 +174,10 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         for m in FILE_PATH_RE.find_iter(text) {
             let (sc, ec) = byte_to_cols(m.start(), m.end());
             let dominated = hotspots.iter().any(|h| {
-                h.line == line
+                h.row == row
                     && (h.kind == HotspotKind::ErrorLocation || h.kind == HotspotKind::Url)
-                    && h.col_start <= sc
-                    && h.col_end >= ec
+                    && h.start_col <= sc
+                    && h.end_col >= ec
             });
             if dominated {
                 continue;
@@ -189,9 +189,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
             hotspots.push(TextHotspot {
                 kind: HotspotKind::FilePath,
                 text: txt.to_string(),
-                line,
-                col_start: sc,
-                col_end: ec,
+                row,
+                start_col: sc,
+                end_col: ec,
             });
         }
 
@@ -203,9 +203,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
                 hotspots.push(TextHotspot {
                     kind: HotspotKind::GitRef,
                     text: m.as_str().to_string(),
-                    line,
-                    col_start: sc,
-                    col_end: ec,
+                    row,
+                    start_col: sc,
+                    end_col: ec,
                 });
             }
         }
@@ -215,16 +215,16 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
             let (sc, ec) = byte_to_cols(m.start(), m.end());
             let dominated = hotspots
                 .iter()
-                .any(|h| h.line == line && h.col_start <= sc && h.col_end >= ec);
+                .any(|h| h.row == row && h.start_col <= sc && h.end_col >= ec);
             if dominated {
                 continue;
             }
             hotspots.push(TextHotspot {
                 kind: HotspotKind::GitRef,
                 text: m.as_str().to_string(),
-                line,
-                col_start: sc,
-                col_end: ec,
+                row,
+                start_col: sc,
+                end_col: ec,
             });
         }
 
@@ -234,9 +234,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
             hotspots.push(TextHotspot {
                 kind: HotspotKind::IssueRef,
                 text: m.as_str().to_string(),
-                line,
-                col_start: sc,
-                col_end: ec,
+                row,
+                start_col: sc,
+                end_col: ec,
             });
         }
     }
@@ -337,6 +337,60 @@ mod tests {
     }
 
     #[test]
+    fn detects_ts_error_location() {
+        let hotspots = detect(&["Error in src/app.ts(42,15): something failed"]);
+        let el: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::ErrorLocation)
+            .collect();
+        assert_eq!(el.len(), 1);
+        assert_eq!(el[0].text, "src/app.ts(42,15)");
+    }
+
+    #[test]
+    fn detects_git_branch_current() {
+        let hotspots = detect(&["* main"]);
+        let gr: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::GitRef)
+            .collect();
+        assert_eq!(gr.len(), 1);
+        assert_eq!(gr[0].text, "main");
+    }
+
+    #[test]
+    fn detects_git_branch_with_separator() {
+        let hotspots = detect(&["  feature/my-branch"]);
+        let gr: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::GitRef)
+            .collect();
+        assert_eq!(gr.len(), 1);
+        assert_eq!(gr[0].text, "feature/my-branch");
+    }
+
+    #[test]
+    fn no_false_positive_on_indented_prose() {
+        let hotspots = detect(&["  This is a normal paragraph line"]);
+        let gr: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::GitRef)
+            .collect();
+        assert_eq!(gr.len(), 0, "indented prose should not match as git branch");
+    }
+
+    #[test]
+    fn detects_issue_ref_prefix() {
+        let hotspots = detect(&["see JIRA-456 for context"]);
+        let ir: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::IssueRef)
+            .collect();
+        assert_eq!(ir.len(), 1);
+        assert_eq!(ir[0].text, "JIRA-456");
+    }
+
+    #[test]
     fn multi_row_detection() {
         let hotspots = detect(&[
             "see /home/user/src/main.rs:1",
@@ -345,17 +399,17 @@ mod tests {
         assert!(
             hotspots
                 .iter()
-                .any(|h| h.kind == HotspotKind::FilePath && h.line == 0)
+                .any(|h| h.kind == HotspotKind::FilePath && h.row == 0)
         );
         assert!(
             hotspots
                 .iter()
-                .any(|h| h.kind == HotspotKind::IssueRef && h.line == 1)
+                .any(|h| h.kind == HotspotKind::IssueRef && h.row == 1)
         );
         assert!(
             hotspots
                 .iter()
-                .any(|h| h.kind == HotspotKind::GitRef && h.line == 1)
+                .any(|h| h.kind == HotspotKind::GitRef && h.row == 1)
         );
     }
 
