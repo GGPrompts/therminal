@@ -8,6 +8,7 @@ pub mod interceptor;
 pub mod osc633;
 pub mod process_detector;
 pub mod pty;
+pub mod pty_runtime;
 pub mod region_index;
 pub mod state_inference;
 pub mod terminal;

@@ -2,24 +2,24 @@
 //!
 //! Hierarchy: `SessionManager` -> `Session` -> `Window` -> `Pane`.
 //! Each pane owns a PTY + headless `alacritty_terminal::Term` running
-//! in a dedicated reader thread.
+//! in a dedicated reader thread via the shared `PtyPaneCore`.
 //!
 //! Attach/detach sends a state snapshot (grid + cursor + scrollback),
 //! not a byte replay.
 
 use std::collections::HashMap;
-use std::io::{Read as IoRead, Write as IoWrite};
+use std::io::Write as IoWrite;
 use std::sync::Arc;
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi;
 use portable_pty::MasterPty;
+use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -94,35 +94,52 @@ impl EventListener for HeadlessListener {
     }
 }
 
-// ── Dimensions adapter ──────────────────────────────────────────────────
+// ── Daemon-side PtyReaderHandler ───────────────────────────────────────
 
-struct TermSize {
-    columns: usize,
-    screen_lines: usize,
+/// Handler that feeds bytes to the headless Term and broadcasts `PaneOutput` events.
+struct DaemonPtyHandler {
+    event_tx: broadcast::Sender<DaemonEvent>,
+    session_id: SessionId,
+    pane_id: PaneId,
 }
 
-impl Dimensions for TermSize {
-    fn total_lines(&self) -> usize {
-        self.screen_lines
+impl PtyReaderHandler for DaemonPtyHandler {
+    type Listener = HeadlessListener;
+
+    fn process_bytes(
+        &mut self,
+        processor: &mut ansi::Processor<ansi::StdSyncHandler>,
+        term: &Arc<FairMutex<Term<HeadlessListener>>>,
+        data: &[u8],
+    ) {
+        // Feed bytes to the headless terminal.
+        {
+            let mut term_guard = term.lock();
+            processor.advance(&mut *term_guard, data);
+        }
+
+        // Broadcast pane output event to subscribed clients.
+        let _ = self.event_tx.send(DaemonEvent::PaneOutput {
+            session_id: self.session_id,
+            pane_id: self.pane_id,
+            data: data.to_vec(),
+        });
     }
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-    fn columns(&self) -> usize {
-        self.columns
+
+    fn on_eof(&mut self) {
+        info!(pane_id = %self.pane_id, "PTY closed (EOF)");
     }
 }
 
 // ── Pane ────────────────────────────────────────────────────────────────
 
-/// A single pane: owns a headless Term + PTY.
+/// A single pane: owns a headless Term + PTY via `PtyPaneCore`.
 #[allow(dead_code)]
 pub struct Pane {
     pub id: PaneId,
     term: Arc<FairMutex<Term<HeadlessListener>>>,
     pty_writer: Box<dyn IoWrite + Send>,
     _pty_master: Box<dyn MasterPty + Send>,
-    reader_handle: Option<thread::JoinHandle<()>>,
     cols: u16,
     rows: u16,
 }
@@ -137,53 +154,30 @@ impl Pane {
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let id = next_pane_id();
 
-        // Create headless alacritty_terminal::Term
-        let term_config = TermConfig {
-            scrolling_history: 10_000,
-            ..Default::default()
+        let handler = DaemonPtyHandler {
+            event_tx,
+            session_id,
+            pane_id: id,
         };
-        let term_size = TermSize {
-            columns: cols as usize,
-            screen_lines: rows as usize,
-        };
-        let term = Term::new(term_config, &term_size, HeadlessListener);
-        let term = Arc::new(FairMutex::new(term));
 
-        // Spawn PTY
-        let (pty_master, _child) = therminal_terminal::pty::spawn_shell(cols, rows)?;
+        let mut core = PtyPaneCore::spawn(
+            cols as usize,
+            rows as usize,
+            10_000,
+            HeadlessListener,
+            &therminal_terminal::pty::SpawnOptions::default(),
+            handler,
+        )?;
 
-        let pty_reader = pty_master.try_clone_reader().map_err(|e| {
-            therminal_terminal::pty::PtyError::Open(anyhow::anyhow!(
-                "failed to clone PTY reader: {e}"
-            ))
-        })?;
-        let pty_writer = pty_master.take_writer().map_err(|e| {
-            therminal_terminal::pty::PtyError::Open(anyhow::anyhow!(
-                "failed to get PTY writer: {e}"
-            ))
-        })?;
-
-        // Spawn reader thread
-        let term_for_reader = Arc::clone(&term);
-        let pane_id = id;
-        let sess_id = session_id;
-        let reader_handle = thread::Builder::new()
-            .name(format!("pty-reader-{id}"))
-            .spawn(move || {
-                pane_reader_loop(pty_reader, term_for_reader, event_tx, sess_id, pane_id);
-            })
-            .map_err(|e| {
-                therminal_terminal::pty::PtyError::Open(anyhow::anyhow!(
-                    "failed to spawn PTY reader thread: {e}"
-                ))
-            })?;
+        let term = Arc::clone(core.term());
+        let pty_writer = core.take_writer();
+        let pty_master = core.take_pty_master();
 
         Ok(Self {
             id,
             term,
             pty_writer,
             _pty_master: pty_master,
-            reader_handle: Some(reader_handle),
             cols,
             rows,
         })
@@ -207,9 +201,6 @@ impl Pane {
         // Collect scrollback rows (oldest first), capped at MAX_SNAPSHOT_SCROLLBACK.
         let scrollback_lines = history_size.min(MAX_SNAPSHOT_SCROLLBACK);
         let mut scrollback = Vec::with_capacity(scrollback_lines);
-        // Scrollback rows are indexed with negative Line values:
-        //   Line(-(history_size as i32)) is the oldest, Line(-1) is the newest.
-        // We start from the oldest line we want to include.
         let start = -(scrollback_lines as i32);
         for line_idx in start..0 {
             let line = alacritty_terminal::index::Line(line_idx);
@@ -237,7 +228,7 @@ impl Pane {
 
         PaneSnapshot {
             pane_id: self.id,
-            title: String::new(), // Could extract from Term if needed
+            title: String::new(),
             scrollback,
             grid: visible,
             cursor_col: cursor_point.column.0,
@@ -269,48 +260,6 @@ impl Drop for Pane {
         // The PTY master drop will close the PTY, causing the reader thread
         // to get EOF and exit. We don't join here to avoid blocking.
         debug!(pane_id = %self.id, "pane dropped");
-    }
-}
-
-// ── Pane reader loop (runs in a dedicated thread) ───────────────────────
-
-fn pane_reader_loop(
-    mut reader: Box<dyn IoRead + Send>,
-    term: Arc<FairMutex<Term<HeadlessListener>>>,
-    event_tx: broadcast::Sender<DaemonEvent>,
-    session_id: SessionId,
-    pane_id: PaneId,
-) {
-    let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
-    let mut buf = [0u8; 4096];
-
-    debug!(pane_id = %pane_id, "pane reader thread started");
-
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                info!(pane_id = %pane_id, "PTY closed (EOF)");
-                break;
-            }
-            Ok(n) => {
-                // Feed bytes to the headless terminal
-                {
-                    let mut term_guard = term.lock();
-                    processor.advance(&mut *term_guard, &buf[..n]);
-                }
-
-                // Broadcast pane output event to subscribed clients
-                let _ = event_tx.send(DaemonEvent::PaneOutput {
-                    session_id,
-                    pane_id,
-                    data: buf[..n].to_vec(),
-                });
-            }
-            Err(e) => {
-                warn!(pane_id = %pane_id, error = %e, "PTY read error");
-                break;
-            }
-        }
     }
 }
 
