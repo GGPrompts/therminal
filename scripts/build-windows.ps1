@@ -39,7 +39,40 @@ if (-not $Debug) {
 }
 
 Write-Host "=== cargo $($buildArgs -join ' ') ==="
-& cargo @buildArgs
+
+if (Get-Command link.exe -ErrorAction SilentlyContinue) {
+    & cargo @buildArgs
+} else {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsDevCmd = $null
+
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($installPath)) {
+            $candidate = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+            if (Test-Path $candidate) {
+                $vsDevCmd = $candidate
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($vsDevCmd)) {
+        throw @"
+Windows link.exe was not found on PATH, and VsDevCmd.bat could not be located.
+
+Install Visual Studio Build Tools with the C++ workload, then retry:
+  winget install --id Microsoft.VisualStudio.2022.BuildTools -e
+
+Required workload:
+  Desktop development with C++
+"@
+    }
+
+    Write-Host "=== bootstrapping MSVC environment with $vsDevCmd ==="
+    $cmdLine = "call `"$vsDevCmd`" -no_logo && cargo $($buildArgs -join ' ')"
+    & cmd.exe /s /c $cmdLine
+}
+
 if ($LASTEXITCODE -ne 0) {
     throw "cargo build failed with exit code $LASTEXITCODE"
 }
