@@ -223,6 +223,68 @@ pub(crate) fn draw_pane_focus_border(
     pass.draw(0..verts.len() as u32, 0..1);
 }
 
+// ── Visual bell flash ─────────────────────────────────────────────────
+
+/// Draw a full-screen semi-transparent white overlay for the visual bell.
+/// `intensity` should be in 0.0..=1.0 (1.0 = fully white, 0.0 = invisible).
+pub(crate) fn draw_visual_bell_overlay(
+    intensity: f32,
+    renderer: &GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+
+    if intensity <= 0.0 {
+        return;
+    }
+
+    let alpha = intensity * 0.3; // cap at 30% opacity for a subtle flash
+    let color = [1.0_f32, 1.0, 1.0, alpha];
+    let sw = surface_width as f32;
+    let sh = surface_height as f32;
+
+    let verts = pixel_rect_to_ndc(0.0, 0.0, sw, sh, sw, sh, color);
+
+    let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("visual_bell_vbuf"),
+        contents: bytemuck::cast_slice(&verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("visual_bell_encoder"),
+    });
+
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("visual_bell_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, vertex_buf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
 // ── Split separator ────────────────────────────────────────────────────
 
 /// Draw a 1px separator line in the gap between two split children.
@@ -634,6 +696,8 @@ pub(crate) struct StatusBarInfo {
     pub workspace_ids: Vec<usize>,
     /// Currently active workspace number.
     pub active_workspace: usize,
+    /// Whether a pane is currently zoomed to fullscreen.
+    pub is_zoomed: bool,
 }
 
 /// Draw the window status bar at the bottom of the screen.
@@ -722,13 +786,18 @@ pub(crate) fn draw_status_bar(
         255,
     );
 
-    // ── Left section: agent indicator (when detected and config allows) ──
-    let left_text = if info.show_agent_indicator {
-        info.agent_name
-            .as_ref()
-            .map(|name| format!(" [agent: {name}]"))
-    } else {
-        None
+    // ── Left section: zoom indicator + agent indicator ────────────────────
+    let left_text = {
+        let mut parts = String::new();
+        if info.is_zoomed {
+            parts.push_str(" [ZOOM]");
+        }
+        if info.show_agent_indicator
+            && let Some(name) = &info.agent_name
+        {
+            parts.push_str(&format!(" [agent: {name}]"));
+        }
+        if parts.is_empty() { None } else { Some(parts) }
     };
     let left_text_ref = left_text.as_deref().unwrap_or("");
 

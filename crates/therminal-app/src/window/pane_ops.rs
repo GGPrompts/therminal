@@ -21,6 +21,8 @@ use super::{App, EventLoopProxy, UserEvent};
 fn make_pane_callbacks(proxy: &EventLoopProxy<UserEvent>, pane_id: PaneId) -> PaneCallbacks {
     let p1 = proxy.clone();
     let p2 = proxy.clone();
+    let p3 = proxy.clone();
+    let p4 = proxy.clone();
     PaneCallbacks {
         wake: Box::new(move || {
             let _ = p1.send_event(UserEvent::PtyOutput);
@@ -28,12 +30,25 @@ fn make_pane_callbacks(proxy: &EventLoopProxy<UserEvent>, pane_id: PaneId) -> Pa
         on_exit: Box::new(move || {
             let _ = p2.send_event(UserEvent::PaneExited(pane_id));
         }),
+        on_bell: Box::new(move || {
+            let _ = p3.send_event(UserEvent::Bell(pane_id));
+        }),
+        on_notification: Box::new(move |text| {
+            let _ = p4.send_event(UserEvent::DesktopNotification {
+                title: "Therminal".to_string(),
+                body: text,
+            });
+        }),
     }
 }
 
 impl App {
     /// Split the currently focused pane with auto-detected direction.
     pub(crate) fn split_focused_pane_auto(&mut self) {
+        // Restore layout before splitting so the new pane joins the full tree.
+        if self.zoomed_layout.is_some() {
+            self.zoom_toggle_focused_pane();
+        }
         let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
@@ -69,6 +84,7 @@ impl App {
             osc_633: self.config.terminal.osc_633,
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
@@ -130,6 +146,11 @@ impl App {
         }
         self.last_close_action = Some(std::time::Instant::now());
 
+        // If zoomed, restore the full layout before closing so the tree is intact.
+        if self.zoomed_layout.is_some() {
+            self.zoom_toggle_focused_pane();
+        }
+
         let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
@@ -177,6 +198,89 @@ impl App {
         }
     }
 
+    /// Toggle zoom on the focused pane.
+    ///
+    /// When not zoomed: saves the current layout tree (with the focused pane
+    /// extracted), replaces the workspace layout with a single leaf containing
+    /// only the focused pane, and stores the saved layout for later restore.
+    ///
+    /// When zoomed: restores the saved layout tree, re-inserting the zoomed
+    /// pane back into its original position.
+    pub(crate) fn zoom_toggle_focused_pane(&mut self) {
+        if self.zoomed_layout.is_some() {
+            // ── Unzoom: restore saved layout ────────────────────────────
+            let wm = match self.workspaces.as_mut() {
+                Some(wm) => wm,
+                None => return,
+            };
+
+            // Take the current single-leaf layout (the zoomed pane).
+            let zoomed_leaf = wm.take_layout();
+            let pane = match zoomed_leaf {
+                LayoutNode::Leaf(p) => p,
+                _ => {
+                    warn!("zoom_toggle: expected Leaf in zoomed layout");
+                    // Put it back if something went wrong.
+                    wm.set_layout(zoomed_leaf);
+                    return;
+                }
+            };
+
+            let pane_id = pane.id;
+
+            // Put the pane back into the saved layout at the Empty slot.
+            let mut saved = self.zoomed_layout.take().unwrap();
+            if saved.insert_pane_at_empty(pane).is_some() {
+                warn!("zoom_toggle: no Empty slot found in saved layout, pane lost");
+            }
+
+            // Restore the full layout.
+            let wm = self.workspaces.as_mut().unwrap();
+            wm.set_layout(saved);
+            wm.set_focused_pane(Some(pane_id));
+            info!("Unzoomed pane {pane_id}");
+            self.relayout_and_redraw();
+        } else {
+            // ── Zoom: save layout, show only focused pane ───────────────
+            let focused = match self.focused_pane() {
+                Some(id) => id,
+                None => return,
+            };
+
+            let wm = match self.workspaces.as_mut() {
+                Some(wm) => wm,
+                None => return,
+            };
+
+            // Only zoom if there are multiple panes.
+            if wm.layout().pane_count() <= 1 {
+                debug!("zoom_toggle: only one pane, nothing to zoom");
+                return;
+            }
+
+            // Take the full layout, extract the focused pane leaf.
+            let mut full_layout = wm.take_layout();
+            let pane = match full_layout.extract_pane(focused) {
+                Some(p) => p,
+                None => {
+                    warn!("zoom_toggle: focused pane {focused} not found in layout");
+                    wm.set_layout(full_layout);
+                    return;
+                }
+            };
+
+            // Store the (now-holey) layout for later restore.
+            self.zoomed_layout = Some(full_layout);
+
+            // Set the workspace to just this pane.
+            let wm = self.workspaces.as_mut().unwrap();
+            wm.set_layout(LayoutNode::Leaf(pane));
+            wm.set_focused_pane(Some(focused));
+            info!("Zoomed pane {focused}");
+            self.relayout_and_redraw();
+        }
+    }
+
     /// Split a specific pane by ID.
     pub(crate) fn split_pane_by_id(&mut self, target_id: PaneId, direction: SplitDirection) {
         let renderer = match self.grid_renderer.as_ref() {
@@ -188,6 +292,7 @@ impl App {
             osc_633: self.config.terminal.osc_633,
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
@@ -251,6 +356,11 @@ impl App {
             return;
         }
         self.last_close_action = Some(std::time::Instant::now());
+
+        // If zoomed, restore the full layout so tree removal works correctly.
+        if self.zoomed_layout.is_some() {
+            self.zoom_toggle_focused_pane();
+        }
 
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
@@ -636,6 +746,7 @@ impl App {
             osc_633: self.config.terminal.osc_633,
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
@@ -762,6 +873,12 @@ impl App {
 
     /// Switch to workspace `n` (1-9).
     pub(crate) fn switch_workspace(&mut self, n: u8) {
+        // Restore layout before switching so the saved tree goes back to the
+        // current workspace, not the target.
+        if self.zoomed_layout.is_some() {
+            self.zoom_toggle_focused_pane();
+        }
+
         let full_rect = match self.compute_layout_rect() {
             Some(r) => r,
             None => return,
@@ -780,6 +897,7 @@ impl App {
             osc_633: self.config.terminal.osc_633,
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
@@ -862,6 +980,7 @@ impl App {
             osc_633: self.config.terminal.osc_633,
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
@@ -949,6 +1068,7 @@ impl App {
                         osc_633: self.config.terminal.osc_633,
                         osc_133: self.config.terminal.osc_133,
                         osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
                         osc_1337: self.config.terminal.osc_1337,
                         osc_7777: self.config.terminal.osc_7777,
                     };

@@ -731,6 +731,47 @@ impl LayoutNode {
         }
     }
 
+    /// Extract a pane by ID, replacing its leaf with `Empty`.
+    ///
+    /// Returns `Some(PaneState)` if the pane was found and extracted.
+    /// The caller is responsible for putting it back (e.g. via `insert_pane_at_empty`).
+    pub fn extract_pane(&mut self, id: super::PaneId) -> Option<PaneState> {
+        match self {
+            LayoutNode::Leaf(pane) if pane.id == id => {
+                // Replace this leaf with Empty, return the pane state.
+                if let LayoutNode::Leaf(pane) =
+                    std::mem::replace(self, LayoutNode::Empty)
+                {
+                    Some(pane)
+                } else {
+                    unreachable!()
+                }
+            }
+            LayoutNode::Leaf(_) | LayoutNode::Empty => None,
+            LayoutNode::Split { first, second, .. } => {
+                first.extract_pane(id).or_else(|| second.extract_pane(id))
+            }
+        }
+    }
+
+    /// Insert a pane at the first `Empty` node found in the tree.
+    ///
+    /// Returns `Some(pane)` if no empty slot was found (pane returned to caller),
+    /// or `None` if the pane was successfully inserted.
+    pub fn insert_pane_at_empty(&mut self, pane: PaneState) -> Option<PaneState> {
+        match self {
+            LayoutNode::Empty => {
+                *self = LayoutNode::Leaf(pane);
+                None // success
+            }
+            LayoutNode::Leaf(_) => Some(pane), // no slot here
+            LayoutNode::Split { first, second, .. } => {
+                let pane = first.insert_pane_at_empty(pane)?;
+                second.insert_pane_at_empty(pane)
+            }
+        }
+    }
+
     /// Check whether splitting `rect` in `direction` would produce children
     /// below the minimum pane size.
     pub fn can_split(rect: Rect, direction: SplitDirection) -> bool {
@@ -835,7 +876,7 @@ mod tests {
                 columns: 80,
                 screen_lines: 24,
             },
-            PaneListener,
+            PaneListener::new(),
         );
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {

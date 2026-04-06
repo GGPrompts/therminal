@@ -1,5 +1,6 @@
 //! Pane spawning: PTY creation via shared PtyPaneCore, reader thread, and lifecycle callbacks.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::sync::FairMutex;
@@ -28,6 +29,10 @@ pub struct PaneCallbacks {
     pub wake: Box<dyn Fn() + Send + 'static>,
     /// Called once when the PTY closes (shell exited).
     pub on_exit: Box<dyn FnOnce() + Send + 'static>,
+    /// Called when a BEL character is received.
+    pub on_bell: Box<dyn Fn() + Send + 'static>,
+    /// Called when a desktop notification is requested (OSC 9).
+    pub on_notification: Box<dyn Fn(String) + Send + 'static>,
 }
 
 // ── Reader-thread state (lazily initialised) ───────────────────────────
@@ -53,6 +58,12 @@ struct AppPtyHandler {
     agent_registry: Option<Arc<Mutex<therminal_terminal::agent_registry::AgentRegistry>>>,
     /// Whether we currently have an agent registered for this pane.
     has_registered_agent: bool,
+    /// Shared bell flag from PaneListener (set when BEL fires).
+    bell_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// Callback to fire when a bell is detected.
+    on_bell: Box<dyn Fn() + Send + 'static>,
+    /// Callback to fire for desktop notifications (OSC 9).
+    on_notification: Box<dyn Fn(String) + Send + 'static>,
     /// Lazily initialised on the reader thread.
     reader_state: Option<ReaderState>,
 }
@@ -101,6 +112,11 @@ impl PtyReaderHandler for AppPtyHandler {
             processor.advance_with_interceptor(&mut *term_guard, &mut state.interceptor, data);
         }
 
+        // Check if a BEL fired during processing.
+        if self.bell_flag.swap(false, Ordering::AcqRel) {
+            (self.on_bell)();
+        }
+
         // Drain intercepted events and update shared status.
         while let Ok(event) = state.event_rx.try_recv() {
             use therminal_terminal::interceptor::InterceptedEvent;
@@ -119,6 +135,9 @@ impl PtyReaderHandler for AppPtyHandler {
                     if let Ok(mut s) = self.status.lock() {
                         s.last_exit_code = exit_code;
                     }
+                }
+                InterceptedEvent::DesktopNotification(text) => {
+                    (self.on_notification)(text);
                 }
                 _ => {}
             }
@@ -220,6 +239,9 @@ where
 
     let callbacks = callback_fn(id);
 
+    let listener = PaneListener::new();
+    let bell_flag = Arc::clone(&listener.bell_pending);
+
     let handler = AppPtyHandler {
         pane_id: id,
         wake: callbacks.wake,
@@ -229,6 +251,9 @@ where
         status: Arc::clone(&status),
         agent_registry,
         has_registered_agent: false,
+        bell_flag,
+        on_bell: callbacks.on_bell,
+        on_notification: callbacks.on_notification,
         reader_state: None,
     };
 
@@ -236,7 +261,7 @@ where
         cols,
         rows,
         scrollback_lines,
-        PaneListener,
+        listener,
         spawn_options,
         handler,
     )

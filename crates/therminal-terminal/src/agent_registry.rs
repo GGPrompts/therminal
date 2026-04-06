@@ -100,20 +100,39 @@ pub struct AgentRegistry {
     agents: HashMap<PaneId, AgentEntry>,
     event_tx: mpsc::Sender<AgentEvent>,
     event_rx: Option<mpsc::Receiver<AgentEvent>>,
+    /// Secondary event channel for notification subscribers (e.g. bell/notifications).
+    #[allow(dead_code)]
+    notification_tx: mpsc::Sender<AgentEvent>,
+    notification_rx: Option<mpsc::Receiver<AgentEvent>>,
 }
 
 impl AgentRegistry {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel();
+        let (notification_tx, notification_rx) = mpsc::channel();
         Self {
             agents: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
+            notification_tx,
+            notification_rx: Some(notification_rx),
         }
     }
 
     pub fn take_event_rx(&mut self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.event_rx.take()
+    }
+
+    /// Take the notification event receiver. Used by the notification
+    /// subsystem to react to agent status changes.
+    pub fn take_notification_rx(&mut self) -> Option<mpsc::Receiver<AgentEvent>> {
+        self.notification_rx.take()
+    }
+
+    /// Broadcast an event to both the primary and notification channels.
+    fn emit(&self, event: AgentEvent) {
+        let _ = self.event_tx.send(event.clone());
+        let _ = self.notification_tx.send(event);
     }
 
     pub fn register(
@@ -124,7 +143,7 @@ impl AgentRegistry {
         pid: Option<u32>,
     ) {
         if let Some(old) = self.agents.remove(&pane_id) {
-            let _ = self.event_tx.send(AgentEvent::Unregistered {
+            self.emit(AgentEvent::Unregistered {
                 pane_id,
                 agent_type: old.agent_type,
             });
@@ -142,7 +161,7 @@ impl AgentRegistry {
             pid,
         };
         self.agents.insert(pane_id, entry);
-        let _ = self.event_tx.send(AgentEvent::Registered {
+        self.emit(AgentEvent::Registered {
             pane_id,
             agent_type,
             name,
@@ -151,7 +170,7 @@ impl AgentRegistry {
 
     pub fn unregister(&mut self, pane_id: PaneId) -> bool {
         if let Some(old) = self.agents.remove(&pane_id) {
-            let _ = self.event_tx.send(AgentEvent::Unregistered {
+            self.emit(AgentEvent::Unregistered {
                 pane_id,
                 agent_type: old.agent_type,
             });
@@ -166,7 +185,7 @@ impl AgentRegistry {
             if entry.status != new_status {
                 let old_status = entry.status.clone();
                 entry.status = new_status.clone();
-                let _ = self.event_tx.send(AgentEvent::StatusChanged {
+                self.emit(AgentEvent::StatusChanged {
                     pane_id,
                     old_status,
                     new_status,

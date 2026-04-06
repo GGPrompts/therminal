@@ -1065,13 +1065,13 @@ impl GridRenderer {
                     // Re-insert from fresh cell data.
                     if let Some(row) = cached_row {
                         for cell in &row.cells {
-                            if let Some((ref kind, ref full_text)) = cell.hotspot {
-                                if cell.hyperlink.is_none() {
-                                    self.hotspot_map.insert(
-                                        (pane_id, cell.row, cell.col),
-                                        (kind.clone(), Arc::clone(full_text)),
-                                    );
-                                }
+                            if let Some((ref kind, ref full_text)) = cell.hotspot
+                                && cell.hyperlink.is_none()
+                            {
+                                self.hotspot_map.insert(
+                                    (pane_id, cell.row, cell.col),
+                                    (kind.clone(), Arc::clone(full_text)),
+                                );
                             }
                         }
                     }

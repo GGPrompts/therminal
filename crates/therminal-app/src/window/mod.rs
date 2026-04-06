@@ -58,6 +58,13 @@ enum UserEvent {
     PaneExited(crate::pane::PaneId),
     /// Config file changed; apply new settings.
     ConfigChanged(Box<ConfigChanged>),
+    /// A BEL character was received from a pane.
+    Bell(crate::pane::PaneId),
+    /// A desktop notification was requested (OSC 9 or agent event).
+    DesktopNotification {
+        title: String,
+        body: String,
+    },
 }
 
 // ── GPU state ────────────────────────────────────────────────────────────
@@ -156,6 +163,13 @@ pub struct App {
 
     /// Auto-tile debouncer for agent spawn/exit events.
     auto_tile_debouncer: Option<AutoTileDebouncer>,
+
+    /// Timestamp when a visual bell flash started (for timed invert effect).
+    visual_bell_start: Option<Instant>,
+
+    /// Pre-zoom layout tree, stored when a pane is zoomed to fullscreen.
+    /// Contains the full layout with the zoomed pane replaced by `Empty`.
+    zoomed_layout: Option<LayoutNode>,
 }
 
 /// State for an in-progress separator drag.
@@ -214,6 +228,38 @@ impl App {
             let _ = agent_registry.take_event_rx();
             None
         };
+
+        // Start agent notification listener thread if agent_waiting is enabled.
+        if config.notifications.agent_waiting {
+            if let Some(notification_rx) = agent_registry.take_notification_rx() {
+                let proxy = event_proxy.clone();
+                thread::Builder::new()
+                    .name("agent-notify".into())
+                    .spawn(move || {
+                        use therminal_terminal::agent_registry::{AgentEvent, AgentStatus};
+                        while let Ok(event) = notification_rx.recv() {
+                            if let AgentEvent::StatusChanged {
+                                new_status: AgentStatus::AwaitingInput,
+                                pane_id,
+                                ..
+                            } = event
+                            {
+                                let _ = proxy.send_event(UserEvent::DesktopNotification {
+                                    title: "Agent waiting".to_string(),
+                                    body: format!(
+                                        "Agent in pane {pane_id} is awaiting input"
+                                    ),
+                                });
+                            }
+                        }
+                    })
+                    .expect("failed to spawn agent notification thread");
+            }
+        } else {
+            // Consume the receiver so it doesn't fill up.
+            let _ = agent_registry.take_notification_rx();
+        }
+
         let agent_registry = Arc::new(std::sync::Mutex::new(agent_registry));
 
         Self {
@@ -247,6 +293,8 @@ impl App {
             last_tab_bar_click: None,
             last_close_action: None,
             auto_tile_debouncer,
+            visual_bell_start: None,
+            zoomed_layout: None,
         }
     }
 
@@ -375,6 +423,7 @@ impl App {
             osc_633: self.config.terminal.osc_633,
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
@@ -393,12 +442,23 @@ impl App {
             |pane_id| {
                 let p1 = proxy.clone();
                 let p2 = proxy.clone();
+                let p3 = proxy.clone();
+                let p4 = proxy.clone();
                 crate::pane::PaneCallbacks {
                     wake: Box::new(move || {
                         let _ = p1.send_event(UserEvent::PtyOutput);
                     }),
                     on_exit: Box::new(move || {
                         let _ = p2.send_event(UserEvent::PaneExited(pane_id));
+                    }),
+                    on_bell: Box::new(move || {
+                        let _ = p3.send_event(UserEvent::Bell(pane_id));
+                    }),
+                    on_notification: Box::new(move |text| {
+                        let _ = p4.send_event(UserEvent::DesktopNotification {
+                            title: "Therminal".to_string(),
+                            body: text,
+                        });
                     }),
                 }
             },
@@ -624,6 +684,7 @@ impl App {
                 show_agent_indicator: self.config.trust.show_agent_indicator,
                 workspace_ids,
                 active_workspace,
+                is_zoomed: self.zoomed_layout.is_some(),
             };
 
             let mut encoder = gpu
@@ -810,8 +871,7 @@ impl App {
                 self.swap_focused_pane(crate::pane::FocusDirection::Prev);
             }
             KeyAction::ZoomPane => {
-                // TODO: implement pane zoom toggle (tn-oxa)
-                info!("zoom pane: not yet implemented");
+                self.zoom_toggle_focused_pane();
             }
             KeyAction::Copy => {
                 self.copy_selection();
@@ -1261,6 +1321,73 @@ impl App {
             w.request_redraw();
         }
     }
+
+    // ── Bell & notification handling ────────────────────────────────────
+
+    /// Handle a BEL event from a pane according to the `[bell]` config.
+    fn handle_bell(&mut self, pane_id: PaneId) {
+        use therminal_core::config::BellStyle;
+
+        debug!(pane_id, "bell received");
+        match self.config.bell.style {
+            BellStyle::Taskbar => {
+                if let Some(w) = self.window.as_ref() {
+                    w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+                }
+            }
+            BellStyle::Visual => {
+                self.visual_bell_start = Some(Instant::now());
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            BellStyle::Audible => {
+                // Audible bell: fall back to taskbar flash for now.
+                if let Some(w) = self.window.as_ref() {
+                    w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+                }
+            }
+            BellStyle::None => {}
+        }
+    }
+
+    /// Send a desktop notification via notify-rust.
+    fn send_desktop_notification(&self, title: &str, body: &str) {
+        debug!(title, body, "sending desktop notification");
+        let title = title.to_string();
+        let body = body.to_string();
+        // Fire-and-forget on a background thread to avoid blocking the event loop.
+        std::thread::Builder::new()
+            .name("desktop-notify".into())
+            .spawn(move || {
+                if let Err(e) = notify_rust::Notification::new()
+                    .summary(&title)
+                    .body(&body)
+                    .appname("Therminal")
+                    .show()
+                {
+                    warn!("failed to send desktop notification: {e}");
+                }
+            })
+            .ok();
+    }
+
+    /// Check if the visual bell flash is still active and return the
+    /// invert intensity (0.0 = off, 1.0 = full invert).
+    #[allow(dead_code)]
+    pub(crate) fn visual_bell_intensity(&self) -> f32 {
+        let start = match self.visual_bell_start {
+            Some(s) => s,
+            None => return 0.0,
+        };
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = self.config.bell.visual_bell_duration_ms;
+        if elapsed_ms >= duration_ms {
+            return 0.0;
+        }
+        // Linear fade-out.
+        1.0 - (elapsed_ms as f32 / duration_ms as f32)
+    }
 }
 
 // ── ApplicationHandler impl ─────────────────────────────────────────────
@@ -1309,6 +1436,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged(changed) => {
                 info!("applying config change (hot-reload)");
                 self.apply_config(changed.config.clone());
+            }
+            UserEvent::Bell(pane_id) => {
+                self.handle_bell(pane_id);
+            }
+            UserEvent::DesktopNotification { title, body } => {
+                self.send_desktop_notification(&title, &body);
             }
         }
     }
