@@ -121,7 +121,7 @@ impl<L: EventListener> PtyPaneCore<L> {
         let term = Arc::new(FairMutex::new(term));
 
         // Spawn the PTY.
-        let (pty_master, _child) =
+        let (pty_master, mut child) =
             pty::spawn_shell_with_options(cols as u16, rows as u16, spawn_options)?;
 
         let pty_reader = pty_master
@@ -131,12 +131,26 @@ impl<L: EventListener> PtyPaneCore<L> {
             .take_writer()
             .map_err(|e| PtyError::Open(anyhow::anyhow!("failed to get PTY writer: {e}")))?;
 
-        // Spawn reader thread.
+        // Spawn reader thread with child handle for exit detection.
+        // On Windows/ConPTY, the PTY reader may not get EOF when the shell
+        // exits (especially with wsl.exe). The reader loop uses a child
+        // watcher thread that sets a flag, which the reader checks after
+        // each read to detect exit even without EOF.
+        let child_exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_exited_flag = Arc::clone(&child_exited);
+        let _child_thread = thread::Builder::new()
+            .name("child-watcher".into())
+            .spawn(move || {
+                let _status = child.wait();
+                info!("child process exited");
+                child_exited_flag.store(true, std::sync::atomic::Ordering::Release);
+            });
+
         let term_for_reader = Arc::clone(&term);
         let reader_handle = thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
-                reader_loop(pty_reader, term_for_reader, handler);
+                reader_loop(pty_reader, term_for_reader, handler, Some(child_exited));
             })
             .map_err(|e| {
                 PtyError::Open(anyhow::anyhow!("failed to spawn PTY reader thread: {e}"))
@@ -207,13 +221,14 @@ pub fn reader_loop_external<H: PtyReaderHandler>(
     term: Arc<FairMutex<Term<H::Listener>>>,
     handler: H,
 ) {
-    reader_loop(reader, term, handler);
+    reader_loop(reader, term, handler, None);
 }
 
 fn reader_loop<H: PtyReaderHandler>(
     mut reader: Box<dyn IoRead + Send>,
     term: Arc<FairMutex<Term<H::Listener>>>,
     mut handler: H,
+    child_exited: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) {
     let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
     let mut buf = [0u8; 4096];
@@ -227,8 +242,26 @@ fn reader_loop<H: PtyReaderHandler>(
             }
             Ok(n) => {
                 handler.process_bytes(&mut processor, &term, &buf[..n]);
+                // After processing, check if the child has exited.
+                // On Windows/ConPTY with wsl.exe, the reader may never get
+                // EOF even after the shell exits. This check catches that.
+                if let Some(ref flag) = child_exited
+                    && flag.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    info!("child exited, treating as EOF");
+                    handler.on_eof();
+                    break;
+                }
             }
             Err(e) => {
+                // If child already exited, this is expected — treat as EOF.
+                if let Some(ref flag) = child_exited
+                    && flag.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    info!("PTY read error after child exit, treating as EOF");
+                    handler.on_eof();
+                    break;
+                }
                 warn!(error = %e, "PTY read error");
                 handler.on_error(&e);
                 break;
