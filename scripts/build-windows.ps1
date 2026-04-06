@@ -144,4 +144,19 @@ if (-not $NoCopy) {
 
     Copy-Item -Force $exePath $Destination
     Write-Host "Copied to: $Destination"
+
+    # --- Copy resources alongside the executable ---
+    # The app looks for <exe_dir>/../resources or <data_dir>/resources.
+    # Copy to <data_dir>/resources (%APPDATA%/therminal/resources) since
+    # putting a resources/ folder on the Desktop would be messy.
+    $resourcesSrc = Join-Path $repoRoot "resources"
+    $dataDir = Join-Path $env:APPDATA "therminal"
+    $resourcesDst = Join-Path $dataDir "resources"
+    if (Test-Path $resourcesSrc) {
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        Copy-Item -Recurse -Force $resourcesSrc $dataDir
+        Write-Host "Resources copied to: $resourcesDst"
+    } else {
+        Write-Host "WARNING: resources/ not found in repo, shell integration will not work"
+    }
 }
