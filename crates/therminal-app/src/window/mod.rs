@@ -233,7 +233,7 @@ impl App {
             wgpu::Backends::all()
         };
         info!("wgpu backends: {:?}", backends);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
             ..Default::default()
         });
@@ -255,13 +255,10 @@ impl App {
             adapter.get_info().backend
         );
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("therminal"),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("therminal"),
+            ..Default::default()
+        }))
         .expect("failed to create wgpu device");
 
         let surface_caps = surface.get_capabilities(&adapter);
@@ -516,10 +513,12 @@ impl App {
                         load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 

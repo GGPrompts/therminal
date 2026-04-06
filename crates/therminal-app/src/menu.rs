@@ -582,10 +582,12 @@ pub(crate) fn render_context_menu(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
@@ -656,7 +658,7 @@ pub(crate) fn render_context_menu(
             label_buf.set_text(
                 &mut renderer.font_system,
                 item.label,
-                Attrs::new()
+                &Attrs::new()
                     .family(Family::Name(&renderer.font_config.family))
                     .color(if item.enabled {
                         label_color
@@ -664,6 +666,7 @@ pub(crate) fn render_context_menu(
                         label_disabled_color
                     }),
                 Shaping::Basic,
+                None,
             );
             label_buf.shape_until_scroll(&mut renderer.font_system, false);
             label_buffers.push(label_buf);
@@ -679,10 +682,11 @@ pub(crate) fn render_context_menu(
                 hint_buf.set_text(
                     &mut renderer.font_system,
                     hint_text,
-                    Attrs::new()
+                    &Attrs::new()
                         .family(Family::Name(&renderer.font_config.family))
                         .color(hint_color),
                     Shaping::Basic,
+                    None,
                 );
                 hint_buf.shape_until_scroll(&mut renderer.font_system, false);
 
@@ -773,10 +777,12 @@ pub(crate) fn render_context_menu(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         if let Err(e) = renderer.overlay_text_renderer.render(

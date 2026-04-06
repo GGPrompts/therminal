@@ -117,10 +117,12 @@ pub(crate) fn draw_help_overlay(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
@@ -177,11 +179,12 @@ pub(crate) fn draw_help_overlay(
     title_buf.set_text(
         &mut renderer.font_system,
         "Keybindings",
-        Attrs::new()
+        &Attrs::new()
             .family(Family::Name(&renderer.font_config.family))
             .weight(Weight::BOLD)
             .color(text_color),
         Shaping::Basic,
+        None,
     );
     title_buf.shape_until_scroll(&mut renderer.font_system, false);
     buffers.push(title_buf);
@@ -218,11 +221,12 @@ pub(crate) fn draw_help_overlay(
         hdr_buf.set_text(
             &mut renderer.font_system,
             section_name,
-            Attrs::new()
+            &Attrs::new()
                 .family(Family::Name(&renderer.font_config.family))
                 .weight(Weight::BOLD)
                 .color(accent_color),
             Shaping::Basic,
+            None,
         );
         hdr_buf.shape_until_scroll(&mut renderer.font_system, false);
         buffers.push(hdr_buf);
@@ -241,10 +245,11 @@ pub(crate) fn draw_help_overlay(
             key_buf.set_text(
                 &mut renderer.font_system,
                 shortcut,
-                Attrs::new()
+                &Attrs::new()
                     .family(Family::Name(&renderer.font_config.family))
                     .color(text_color),
                 Shaping::Basic,
+                None,
             );
             key_buf.shape_until_scroll(&mut renderer.font_system, false);
             buffers.push(key_buf);
@@ -261,10 +266,11 @@ pub(crate) fn draw_help_overlay(
             desc_buf.set_text(
                 &mut renderer.font_system,
                 description,
-                Attrs::new()
+                &Attrs::new()
                     .family(Family::Name(&renderer.font_config.family))
                     .color(muted_color),
                 Shaping::Basic,
+                None,
             );
             desc_buf.shape_until_scroll(&mut renderer.font_system, false);
             buffers.push(desc_buf);
@@ -322,10 +328,12 @@ pub(crate) fn draw_help_overlay(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         if let Err(e) = renderer.overlay_text_renderer.render(

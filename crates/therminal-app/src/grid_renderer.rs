@@ -414,8 +414,9 @@ impl GridRenderer {
         measure_buf.set_text(
             &mut font_system,
             "M",
-            Attrs::new().family(Family::Name(&font_family)),
+            &Attrs::new().family(Family::Name(&font_family)),
             Shaping::Basic,
+            None,
         );
         measure_buf.shape_until_scroll(&mut font_system, false);
 
@@ -438,7 +439,7 @@ impl GridRenderer {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("grid_rect_pipeline_layout"),
             bind_group_layouts: &[],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("grid_rect_pipeline"),
@@ -467,7 +468,7 @@ impl GridRenderer {
                 })],
                 compilation_options: Default::default(),
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -656,8 +657,9 @@ impl GridRenderer {
         measure_buf.set_text(
             &mut self.font_system,
             "M",
-            Attrs::new().family(Family::Name(&self.font_config.family)),
+            &Attrs::new().family(Family::Name(&self.font_config.family)),
             Shaping::Basic,
+            None,
         );
         measure_buf.shape_until_scroll(&mut self.font_system, false);
 
@@ -1225,7 +1227,7 @@ impl GridRenderer {
                 } else {
                     Shaping::Advanced
                 };
-                buf.set_text(&mut self.font_system, &cell.text, attrs, shaping);
+                buf.set_text(&mut self.font_system, &cell.text, &attrs, shaping, None);
                 buf.shape_until_scroll(&mut self.font_system, false);
 
                 cell_shape_keys[row_idx][cell.col] = Some(new_key);
@@ -1318,10 +1320,12 @@ impl GridRenderer {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             if rect_vertex_count > 0 {
@@ -1342,10 +1346,12 @@ impl GridRenderer {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             if let Err(e) = self

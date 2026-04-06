@@ -1,13 +1,14 @@
-//! Thin wrapper around glyphon 0.7 + cosmic-text 0.12 for consistent text
+//! Thin wrapper around glyphon 0.10 + cosmic-text 0.15 for consistent text
 //! rendering across all therminal crates.
 //!
-//! # Glyphon 0.7 API notes
-//! In glyphon 0.7 a [`Cache`] holds shared pipeline/shader state and must be
-//! created first.  [`TextAtlas`] and [`Viewport`] each borrow that `Cache` at
-//! construction time.  The old pattern of constructing `TextAtlas` directly
-//! from a `Device` no longer exists.
+//! # Glyphon 0.10 API notes
+//! A [`Cache`] holds shared pipeline/shader state and must be created first.
+//! [`TextAtlas`] and [`Viewport`] each borrow that `Cache` at construction
+//! time.
 //!
-//! The workspace uses wgpu 23, which matches glyphon 0.7's dependency.
+//! The workspace uses wgpu 28, which matches glyphon 0.10's dependency.
+//! cosmic-text 0.15 adds an ASCII fast-path that skips complex shaping/bidi
+//! for ASCII text (~95% of terminal output).
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -28,7 +29,7 @@ pub struct TherminalTextRenderer {
     pub font_system: FontSystem,
     /// Swash rasterisation cache used by glyphon during `prepare`.
     pub swash_cache: SwashCache,
-    /// Shared glyphon pipeline / shader cache (wgpu 23).
+    /// Shared glyphon pipeline / shader cache (wgpu 28).
     pub cache: Cache,
     /// GPU glyph atlas.
     pub atlas: TextAtlas,
@@ -41,12 +42,12 @@ pub struct TherminalTextRenderer {
 impl TherminalTextRenderer {
     /// Initialise all glyphon state for a given surface.
     ///
-    /// All wgpu types here come from the **wgpu 23** family (the version
-    /// glyphon 0.7 depends on).
+    /// All wgpu types here come from the **wgpu 28** family (the version
+    /// glyphon 0.10 depends on).
     ///
     /// # Arguments
-    /// * `device`      — wgpu 23 `Device`
-    /// * `queue`       — wgpu 23 `Queue`
+    /// * `device`      — wgpu 28 `Device`
+    /// * `queue`       — wgpu 28 `Queue`
     /// * `format`      — `TextureFormat` of the render target
     /// * `width`       — surface width in physical pixels
     /// * `height`      — surface height in physical pixels
@@ -64,7 +65,7 @@ impl TherminalTextRenderer {
         let font_system = font::build_font_system(cfg);
         let swash_cache = SwashCache::new();
 
-        // glyphon 0.7: Cache must be created before TextAtlas / Viewport.
+        // glyphon 0.10: Cache must be created before TextAtlas / Viewport.
         let cache = Cache::new(device);
 
         let mut atlas = TextAtlas::with_color_mode(
@@ -126,7 +127,7 @@ impl TherminalTextRenderer {
         buffer.set_size(&mut self.font_system, None, None);
 
         let attrs = Attrs::new().color(color).family(Family::Monospace);
-        buffer.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+        buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         buffer

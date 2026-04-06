@@ -27,9 +27,9 @@ therminal-daemon = { path = "crates/therminal-daemon" }
 therminal-app = { path = "crates/therminal-app" }
 
 # GPU Rendering
-wgpu = "23"
-glyphon = "0.7"
-cosmic-text = "0.12"
+wgpu = "28"
+glyphon = "0.10"
+cosmic-text = "0.15"
 
 # Windowing
 winit = "0.30"

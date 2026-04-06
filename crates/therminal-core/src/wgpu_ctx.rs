@@ -19,7 +19,7 @@ impl WgpuContext {
             wgpu::Backends::default()
         };
         info!("wgpu backends: {:?}", backends);
-        let instance = Instance::new(wgpu::InstanceDescriptor {
+        let instance = Instance::new(&wgpu::InstanceDescriptor {
             backends,
             ..Default::default()
         });
@@ -30,7 +30,7 @@ impl WgpuContext {
         }))
         .expect("therminal-core: no wgpu adapter found");
         let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .expect("therminal-core: failed to create wgpu device");
         Self {
             instance,

@@ -43,7 +43,7 @@ fn ensure_shaped(
     if needs_reshape {
         let mut buf = Buffer::new(font_system, metrics);
         buf.set_size(font_system, Some(width), Some(height));
-        buf.set_text(font_system, text, attrs, Shaping::Basic);
+        buf.set_text(font_system, text, &attrs, Shaping::Basic, None);
         buf.shape_until_scroll(font_system, false);
         cache.insert(slot.to_string(), (cache_key.to_string(), buf));
     }
@@ -210,10 +210,12 @@ pub(crate) fn draw_pane_focus_border(
                 load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },
+            depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
 
     pass.set_pipeline(&renderer.rect_pipeline);
@@ -295,10 +297,12 @@ pub(crate) fn draw_split_separator(
                 load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },
+            depth_slice: None,
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
 
     pass.set_pipeline(&renderer.rect_pipeline);
@@ -353,10 +357,12 @@ pub(crate) fn draw_pane_header(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
@@ -592,10 +598,12 @@ pub(crate) fn draw_pane_header(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         if let Err(e) = renderer.overlay_text_renderer.render(
@@ -666,10 +674,12 @@ pub(crate) fn draw_status_bar(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
@@ -928,10 +938,12 @@ pub(crate) fn draw_status_bar(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         if let Err(e) = renderer.overlay_text_renderer.render(
@@ -1007,10 +1019,12 @@ pub(crate) fn draw_tab_bar(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
@@ -1066,10 +1080,12 @@ pub(crate) fn draw_tab_bar(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, tab_buf.slice(..));
@@ -1189,10 +1205,12 @@ pub(crate) fn draw_tab_bar(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         if let Err(e) = renderer.overlay_text_renderer.render(
@@ -1346,10 +1364,12 @@ pub(crate) fn draw_csd_buttons(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, buf.slice(..));
@@ -1506,10 +1526,12 @@ pub(crate) fn draw_csd_buttons(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         if let Err(e) = renderer.overlay_text_renderer.render(
             &renderer.overlay_atlas,
