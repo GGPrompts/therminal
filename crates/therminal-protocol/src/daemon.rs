@@ -10,8 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::{PaneId, SessionId};
 
 /// Build hash embedded at compile time (git short hash + timestamp).
-/// Used for version-mismatch detection during daemon handoff.
+/// Informational only — not used for handoff decisions.
 pub type BuildHash = String;
+
+/// Protocol version for daemon handoff decisions.
+///
+/// Bump this constant when the IPC wire format or daemon behaviour changes
+/// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
+/// app-side code) do **not** need a bump — the running daemon will be reused.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -115,6 +122,7 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     /// Health check response.
     Pong {
+        protocol_version: u32,
         build_hash: BuildHash,
         uptime_secs: u64,
         sessions: u32,
@@ -290,6 +298,7 @@ mod tests {
         let msg = IpcMessage::Response {
             request_id: 42,
             payload: IpcResponse::Pong {
+                protocol_version: 1,
                 build_hash: "abc123".into(),
                 uptime_secs: 100,
                 sessions: 2,

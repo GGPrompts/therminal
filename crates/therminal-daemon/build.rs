@@ -1,9 +1,9 @@
 //! Build script that embeds a BUILD_HASH at compile time.
 //!
 //! The hash is `<git-short-hash>-<unix-timestamp>`, providing a unique
-//! identifier for each build. This is used for version-mismatch detection
-//! during daemon handoff — if a new binary has a different BUILD_HASH than
-//! the running daemon, a graceful handoff is triggered.
+//! identifier for each build. This is informational only (shown in logs
+//! and Pong responses) — daemon handoff is driven by PROTOCOL_VERSION
+//! in `therminal-protocol`, not by BUILD_HASH.
 
 use std::process::Command;
 

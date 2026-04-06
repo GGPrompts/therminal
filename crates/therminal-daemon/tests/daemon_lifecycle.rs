@@ -88,7 +88,7 @@ async fn wait_for_socket_removal(socket_path: &std::path::Path, timeout: Duratio
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// A running daemon with a matching build hash should report `DaemonCheck::Reuse`.
+/// A running daemon with a matching protocol version should report `DaemonCheck::Reuse`.
 #[tokio::test]
 async fn check_daemon_reuse_when_hash_matches() {
     let dir = tempfile::tempdir().unwrap();
@@ -97,10 +97,12 @@ async fn check_daemon_reuse_when_hash_matches() {
 
     let (lifecycle, handle) = start_test_server(&socket_path, build_hash).await;
 
-    let result = handoff::check_daemon(&socket_path, build_hash).await;
+    // The server uses therminal_protocol::PROTOCOL_VERSION in its Pong,
+    // so passing the same value should yield Reuse.
+    let result = handoff::check_daemon(&socket_path, therminal_protocol::PROTOCOL_VERSION).await;
     assert!(
         matches!(result, DaemonCheck::Reuse),
-        "expected Reuse when build hashes match"
+        "expected Reuse when protocol versions match"
     );
 
     // Shut down cleanly.
@@ -108,22 +110,23 @@ async fn check_daemon_reuse_when_hash_matches() {
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
 
-/// A running daemon with a *different* build hash should report `NeedsHandoff`.
+/// A running daemon with a *different* protocol version should report `NeedsHandoff`.
 #[tokio::test]
 async fn check_daemon_needs_handoff_when_hash_differs() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("daemon.sock");
     let old_hash = "old-build-hash";
-    let new_hash = "new-build-hash";
 
     let (lifecycle, handle) = start_test_server(&socket_path, old_hash).await;
 
-    let result = handoff::check_daemon(&socket_path, new_hash).await;
+    // Ask for a protocol version that differs from the server's PROTOCOL_VERSION.
+    let different_version = therminal_protocol::PROTOCOL_VERSION + 1;
+    let result = handoff::check_daemon(&socket_path, different_version).await;
     match result {
         DaemonCheck::NeedsHandoff { old_build_hash } => {
             assert_eq!(
                 old_build_hash, old_hash,
-                "NeedsHandoff should carry the old hash"
+                "NeedsHandoff should carry the old build hash"
             );
         }
         other => panic!("expected NeedsHandoff, got {other:?}"),
@@ -140,7 +143,7 @@ async fn check_daemon_start_fresh_when_no_daemon() {
     let socket_path = dir.path().join("no-daemon.sock");
 
     // Socket doesn't exist — nothing to connect to.
-    let result = handoff::check_daemon(&socket_path, "any-hash").await;
+    let result = handoff::check_daemon(&socket_path, 999).await;
     assert!(
         matches!(result, DaemonCheck::StartFresh),
         "expected StartFresh when no daemon is running"
@@ -165,7 +168,7 @@ async fn check_daemon_start_fresh_with_stale_socket() {
     assert!(socket_path.exists(), "stale socket file should still exist");
 
     // check_daemon should fail to connect and return StartFresh.
-    let result = handoff::check_daemon(&socket_path, "any-hash").await;
+    let result = handoff::check_daemon(&socket_path, 999).await;
     assert!(
         matches!(result, DaemonCheck::StartFresh),
         "expected StartFresh for a stale (nobody listening) socket"
@@ -360,7 +363,7 @@ async fn check_daemon_incompatible_when_garbage_response() {
     // Give the mock server time to start.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let result = handoff::check_daemon(&socket_path, "any-hash").await;
+    let result = handoff::check_daemon(&socket_path, 999).await;
     assert!(
         matches!(result, DaemonCheck::IncompatibleDaemon),
         "expected IncompatibleDaemon for a server sending garbage, got {result:?}"
@@ -390,7 +393,7 @@ async fn check_daemon_incompatible_when_immediate_close() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let result = handoff::check_daemon(&socket_path, "any-hash").await;
+    let result = handoff::check_daemon(&socket_path, 999).await;
     assert!(
         matches!(result, DaemonCheck::IncompatibleDaemon),
         "expected IncompatibleDaemon for a server that immediately closes, got {result:?}"

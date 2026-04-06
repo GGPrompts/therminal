@@ -1,6 +1,6 @@
 //! Zero-downtime daemon handoff.
 //!
-//! When a new build detects a running daemon with a different BUILD_HASH,
+//! When a new build detects a running daemon with a different PROTOCOL_VERSION,
 //! it performs a graceful handoff:
 //!
 //! 1. Sends `GracefulShutdown` to the old daemon
@@ -36,10 +36,10 @@ pub enum DaemonCheck {
 /// Check the state of the existing daemon.
 ///
 /// - Tries to connect and ping the daemon at `socket_path`.
-/// - Returns `Reuse` if build hashes match.
-/// - Returns `NeedsHandoff` if hashes differ.
+/// - Returns `Reuse` if protocol versions match.
+/// - Returns `NeedsHandoff` if protocol versions differ.
 /// - Returns `StartFresh` if no daemon is reachable.
-pub async fn check_daemon(socket_path: &Path, our_build_hash: &str) -> DaemonCheck {
+pub async fn check_daemon(socket_path: &Path, our_protocol_version: u32) -> DaemonCheck {
     // First, check if anything is listening on the socket at all.
     // We do this by attempting a raw TCP-level connect before running
     // the full IPC ping, so we can distinguish "nothing listening"
@@ -47,15 +47,24 @@ pub async fn check_daemon(socket_path: &Path, our_build_hash: &str) -> DaemonChe
     let can_connect = tokio::net::UnixStream::connect(socket_path).await.is_ok();
 
     match client::ping(socket_path).await {
-        Ok(therminal_protocol::IpcResponse::Pong { build_hash, .. }) => {
-            if build_hash == our_build_hash {
-                info!(build_hash = %our_build_hash, "existing daemon matches our build");
+        Ok(therminal_protocol::IpcResponse::Pong {
+            protocol_version,
+            build_hash,
+            ..
+        }) => {
+            if protocol_version == our_protocol_version {
+                info!(
+                    protocol_version,
+                    build_hash = %build_hash,
+                    "existing daemon matches our protocol version"
+                );
                 DaemonCheck::Reuse
             } else {
                 info!(
-                    old = %build_hash,
-                    new = %our_build_hash,
-                    "build hash mismatch, handoff needed"
+                    old_protocol = protocol_version,
+                    new_protocol = our_protocol_version,
+                    old_build = %build_hash,
+                    "protocol version mismatch, handoff needed"
                 );
                 DaemonCheck::NeedsHandoff {
                     old_build_hash: build_hash,

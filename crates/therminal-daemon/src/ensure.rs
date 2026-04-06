@@ -1,11 +1,11 @@
 //! `ensure_daemon()` — the primary entry point for daemon lifecycle management.
 //!
 //! Called by the terminal app (or CLI) to guarantee a daemon is running with
-//! a compatible build. Handles three cases:
+//! a compatible protocol version. Handles three cases:
 //!
 //! 1. **No daemon running**: start a new one.
-//! 2. **Daemon running, matching build**: reuse it.
-//! 3. **Daemon running, different build**: graceful handoff.
+//! 2. **Daemon running, matching protocol version**: reuse it.
+//! 3. **Daemon running, different protocol version**: graceful handoff.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,12 +38,12 @@ pub enum EnsureResult {
     },
 }
 
-/// Ensure a daemon is running with a compatible build hash.
+/// Ensure a daemon is running with a compatible protocol version.
 ///
 /// This is the main entry point for daemon lifecycle management. It:
 /// 1. Checks if a daemon is already running via socket probe.
-/// 2. If running with matching build hash, returns `Reused`.
-/// 3. If running with different build hash, performs graceful handoff.
+/// 2. If running with matching protocol version, returns `Reused`.
+/// 3. If running with different protocol version, performs graceful handoff.
 /// 4. If no daemon, starts a new one.
 ///
 /// Returns an `EnsureResult` indicating what happened.
@@ -51,6 +51,7 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
     let socket_path = therminal_runtime::paths::socket_path("daemon");
 
     info!(
+        protocol_version = therminal_protocol::PROTOCOL_VERSION,
         build_hash = BUILD_HASH,
         version = VERSION,
         socket = %socket_path.display(),
@@ -60,17 +61,18 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
     // Ensure runtime directory exists
     therminal_runtime::paths::ensure_runtime_dir().context("failed to create runtime directory")?;
 
-    // Check existing daemon
-    match handoff::check_daemon(&socket_path, BUILD_HASH).await {
+    // Check existing daemon — handoff is based on protocol version, not build hash
+    match handoff::check_daemon(&socket_path, therminal_protocol::PROTOCOL_VERSION).await {
         DaemonCheck::Reuse => {
             info!("reusing existing daemon");
             return Ok(EnsureResult::Reused);
         }
         DaemonCheck::NeedsHandoff { old_build_hash } => {
             info!(
-                old_hash = %old_build_hash,
-                new_hash = BUILD_HASH,
-                "performing version handoff"
+                old_build_hash = %old_build_hash,
+                new_build_hash = BUILD_HASH,
+                protocol_version = therminal_protocol::PROTOCOL_VERSION,
+                "performing protocol version handoff"
             );
             handoff::perform_handoff(&socket_path).await?;
         }

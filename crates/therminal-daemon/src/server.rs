@@ -427,6 +427,7 @@ async fn dispatch_ipc(
         IpcRequest::Ping => {
             let mgr = session_mgr.lock().await;
             IpcResponse::Pong {
+                protocol_version: therminal_protocol::PROTOCOL_VERSION,
                 build_hash: build_hash.to_string(),
                 uptime_secs: lifecycle.uptime_secs(),
                 sessions: mgr.session_count(),

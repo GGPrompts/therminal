@@ -9,7 +9,9 @@ pub mod daemon;
 pub mod message;
 
 pub use bus_types::{AgentId, ClaudeStatus, ParseAgentIdError, TaskState};
-pub use daemon::{DaemonEvent, DaemonState, EventKind, IpcMessage, IpcRequest, IpcResponse};
+pub use daemon::{
+    DaemonEvent, DaemonState, EventKind, IpcMessage, IpcRequest, IpcResponse, PROTOCOL_VERSION,
+};
 pub use message::{Message, MessageType};
 
 // ── Canonical ID types ──────────────────────────────────────────────────
