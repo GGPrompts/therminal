@@ -3129,6 +3129,7 @@ dependencies = [
  "anyhow",
  "clap",
  "portable-pty",
+ "regex",
  "rmcp",
  "rmp-serde",
  "schemars",

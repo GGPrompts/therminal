@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::Write as IoWrite;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
@@ -19,7 +19,9 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi;
 use portable_pty::MasterPty;
+use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
+use therminal_terminal::region_index::RegionIndex;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -97,10 +99,16 @@ impl EventListener for HeadlessListener {
 // ── Daemon-side PtyReaderHandler ───────────────────────────────────────
 
 /// Handler that feeds bytes to the headless Term and broadcasts `PaneOutput` events.
+///
+/// Also runs a `TherminalInterceptor` to capture OSC shell-integration marks
+/// and feeds them into a shared `RegionIndex` for semantic history queries.
 struct DaemonPtyHandler {
     event_tx: broadcast::Sender<DaemonEvent>,
     session_id: SessionId,
     pane_id: PaneId,
+    interceptor: TherminalInterceptor,
+    interceptor_rx: std::sync::mpsc::Receiver<InterceptedEvent>,
+    region_index: Arc<Mutex<RegionIndex>>,
 }
 
 impl PtyReaderHandler for DaemonPtyHandler {
@@ -112,10 +120,18 @@ impl PtyReaderHandler for DaemonPtyHandler {
         term: &Arc<FairMutex<Term<HeadlessListener>>>,
         data: &[u8],
     ) {
-        // Feed bytes to the headless terminal.
+        // Feed bytes to the headless terminal via the interceptor so we
+        // capture OSC shell-integration marks for the RegionIndex.
         {
             let mut term_guard = term.lock();
-            processor.advance(&mut *term_guard, data);
+            processor.advance_with_interceptor(&mut *term_guard, &mut self.interceptor, data);
+        }
+
+        // Drain intercepted events into the region index.
+        while let Ok(event) = self.interceptor_rx.try_recv() {
+            if let Ok(mut idx) = self.region_index.lock() {
+                idx.push_event(&event);
+            }
         }
 
         // Broadcast pane output event to subscribed clients.
@@ -140,6 +156,7 @@ pub struct Pane {
     term: Arc<FairMutex<Term<HeadlessListener>>>,
     pty_writer: Box<dyn IoWrite + Send>,
     _pty_master: Box<dyn MasterPty + Send>,
+    region_index: Arc<Mutex<RegionIndex>>,
     cols: u16,
     rows: u16,
 }
@@ -154,10 +171,16 @@ impl Pane {
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let id = next_pane_id();
 
+        let region_index = Arc::new(Mutex::new(RegionIndex::new()));
+        let (interceptor, interceptor_rx) = TherminalInterceptor::with_defaults();
+
         let handler = DaemonPtyHandler {
             event_tx,
             session_id,
             pane_id: id,
+            interceptor,
+            interceptor_rx,
+            region_index: Arc::clone(&region_index),
         };
 
         let mut core = PtyPaneCore::spawn(
@@ -178,9 +201,15 @@ impl Pane {
             term,
             pty_writer,
             _pty_master: pty_master,
+            region_index,
             cols,
             rows,
         })
+    }
+
+    /// Access the pane's semantic region index.
+    pub fn region_index(&self) -> &Arc<Mutex<RegionIndex>> {
+        &self.region_index
     }
 
     /// Get the number of columns.
@@ -496,6 +525,18 @@ impl SessionManager {
             for window in &session.windows {
                 if let Some(pane) = window.pane(pane_id) {
                     return Ok(pane.snapshot());
+                }
+            }
+        }
+        Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Access a pane's region index by pane ID (searches all sessions).
+    pub fn pane_region_index(&self, pane_id: PaneId) -> Result<Arc<Mutex<RegionIndex>>, String> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Ok(Arc::clone(pane.region_index()));
                 }
             }
         }

@@ -43,7 +43,8 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         "terminal.sessions.list"
         | "terminal.sessions.get"
         | "terminal.panes.list"
-        | "terminal.panes.get_content" => Some(ToolCategory::Observer),
+        | "terminal.panes.get_content"
+        | "terminal.semantic.query_history" => Some(ToolCategory::Observer),
         "terminal.sessions.create" | "terminal.panes.write" => Some(ToolCategory::Writer),
         "terminal.sessions.destroy" => Some(ToolCategory::Admin),
         _ => None,
@@ -244,6 +245,10 @@ mod tests {
         );
         assert_eq!(
             tool_category("terminal.panes.get_content"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            tool_category("terminal.semantic.query_history"),
             Some(ToolCategory::Observer)
         );
         assert_eq!(
