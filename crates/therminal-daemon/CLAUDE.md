@@ -1,0 +1,98 @@
+# therminal-daemon
+
+Session manager, event bus, multiplexer, MCP server, trust enforcement.
+
+## Daemon Lifecycle
+
+The daemon uses a **socket-as-lock** pattern -- successful socket bind = ownership of the daemon role, no pidfiles needed.
+
+**BUILD_HASH**: `build.rs` embeds `<git-short-hash>-<unix-timestamp>` at compile time via `env!("BUILD_HASH")`. Used for version-mismatch detection during handoff.
+
+**State machine**: `Starting -> Binding -> Ready -> Running -> Draining -> Stopped`
+
+**`ensure_daemon()` startup protocol**:
+1. Try connect to daemon socket, send `Ping`, check `Pong { build_hash }`
+2. Version match: reuse existing daemon (`EnsureResult::Reused`)
+3. Version mismatch: send `GracefulShutdown`, wait for old daemon to drain, start new daemon
+4. Connection refused / no socket: clean stale socket, start new daemon
+
+**Zero-downtime handoff**: New daemon sends `GracefulShutdown` to old daemon, waits for socket to be released (5s timeout), then binds the canonical socket path. Rollback on crash removes temp socket.
+
+**Health check**: `Ping` / `Pong { uptime, sessions, version, build_hash }` with 2s timeout over length-prefixed MessagePack framing.
+
+**Idle exit**: Daemon exits when last session closes + configurable `keep_alive` duration (default 5 minutes).
+
+Key files: `ensure.rs` (entry point), `lifecycle.rs` (state machine), `server.rs` (IPC server), `client.rs` (IPC client), `handoff.rs` (version handoff).
+
+## IPC Protocol
+
+The daemon exposes a multiplexed IPC protocol over Unix domain sockets with length-prefixed MessagePack framing.
+
+**Wire format**: `[4-byte BE length][MessagePack payload]`. Max frame size: 1 MiB.
+
+**Envelope** (`IpcMessage`): Three variants -- `Request { request_id, payload }`, `Response { request_id, payload }`, `Event { payload }`. The `request_id: u64` enables multiplexing multiple in-flight requests over one connection.
+
+**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`.
+
+**Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
+
+**Events** (`DaemonEvent`): `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`. Clients subscribe via `Subscribe { filter: Vec<EventKind> }` -- empty filter = all events.
+
+**Client API** (`DaemonClient`): Persistent connection with `connect()`, `send_request()`, `ping()`, `shutdown()`, `subscribe_events()`, `recv_event()`. Uses internal reader/writer tasks for full-duplex communication.
+
+**Server** (`IpcServer`): Accepts connections, dispatches to handlers, manages per-connection event subscriptions via `tokio::sync::broadcast`. Auto-detects legacy vs IPC protocol on first frame.
+
+**Backward compatibility**: The server auto-detects legacy `DaemonRequest` frames (used by `ensure_daemon()` and handoff) vs new `IpcMessage` frames. Legacy single-shot `send_request()` function is preserved. `DaemonServer` is a type alias for `IpcServer`.
+
+Protocol types live in `therminal-protocol/src/daemon.rs`. Server/client in `src/{server,client}.rs`.
+
+## Session Manager
+
+Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy managed by `SessionManager` in `src/session.rs`.
+
+**Hierarchy**: `SessionManager` owns a `HashMap<SessionId, Session>`. Each `Session` contains `Vec<Window>`, each `Window` contains `Vec<Pane>`. A new session gets one default window with one pane.
+
+**Pane PTY workers**: Both app and daemon use `PtyPaneCore` from `therminal-terminal/src/pty_runtime.rs` for shared PTY lifecycle (Term creation, PTY spawn, reader thread). The daemon implements `PtyReaderHandler` to broadcast `DaemonEvent::PaneOutput`.
+
+**Attach/detach protocol**: On attach, the daemon takes a `PaneSnapshot` from each pane's `Term` state -- grid content (chars + bold flags), cursor position, and dimensions. This is a state snapshot, not a byte replay. The client renders this snapshot to immediately show the current terminal state.
+
+**Session CRUD via IPC**: `CreateSession` spawns a real PTY and returns the session ID. `ListSessions`, `GetSession`, `DestroySession` operate on the session map. Session count is synced to the `Lifecycle` for idle-exit tracking.
+
+**Keystroke forwarding**: Client sends input bytes via IPC, dispatched through `SessionManager::write_to_pane()` to the pane's PTY writer.
+
+**Graceful shutdown**: `IpcServer::run()` calls `SessionManager::shutdown()` on exit, which destroys all sessions (dropping PTY masters, causing reader threads to get EOF and exit).
+
+## MCP Server
+
+`src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
+
+Tools exposed:
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `list_sessions` | Observer | List all session IDs |
+| `get_session` | Observer | Get session metadata |
+| `read_pane_content` | Observer | Read visible pane content |
+| `create_session` | Writer | Spawn a new PTY session |
+| `write_to_pane` | Writer | Send input to a pane's PTY |
+| `destroy_session` | Admin | Kill a session |
+
+Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
+
+## Trust Tier Enforcement
+
+`src/trust.rs` maps MCP tools to three permission categories (Observer, Writer, Admin) and enforces access control on every call:
+
+| Tier | Name | MCP Access |
+|------|------|-----------|
+| `Sandboxed` | Read-only | Observer tools only |
+| `Supervised` | Default | Observer + Writer tools |
+| `Trusted` | Full | All tools including Admin |
+
+Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallback. Destructive (Admin) tools are additionally subject to a sliding-window rate limiter (configurable `max_destructive_per_minute`). All allow/deny decisions are audit-logged via `tracing`.
+
+Key files: `src/mcp.rs` (server), `src/trust.rs` (enforcement + rate limiter), `therminal-app/src/mcp_stdio.rs` (stdio bridge), `therminal-core/src/config/mod.rs` (`McpConfig`).
+
+## Control Mode
+
+`src/control.rs` implements a machine-readable text protocol (tmux `-CC` style). The `--help-control` CLI flag prints the full protocol reference. The `help` command within a control session returns the same reference inline.
