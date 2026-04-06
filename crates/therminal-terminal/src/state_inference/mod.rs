@@ -18,293 +18,38 @@
 //!       -> state file writes to /tmp/{agent}-state/
 //! ```
 
+mod ansi_strip;
+mod cadence;
+mod patterns;
+mod persistence;
+mod types;
+
+// Re-export all public types so they remain importable from
+// `therminal_terminal::state_inference::*`.
+pub use cadence::{ByteChunkStats, OutputCadence};
+pub use types::{AgentType, InferenceConfig, InferredStatus, StateChangeNotification};
+
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
-use regex::Regex;
-use serde::Serialize;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::event_log::{EventLog, SessionEvent};
 use crate::osc633::CommandState;
 
-// -- Output cadence analysis -------------------------------------------------
+use ansi_strip::AnsiStripper;
+use cadence::{classify_output_cadence, is_spinner_pattern, is_streaming_cadence, MAX_CHUNK_STATS};
+use patterns::Patterns;
+use persistence::{cleanup as do_cleanup, update_state_file_path, write_state_file};
+use types::StateFile;
 
-/// Statistics for a single chunk of PTY output, used for cadence analysis.
-#[derive(Debug, Clone)]
-pub struct ByteChunkStats {
-    /// When this chunk was received.
-    pub timestamp: Instant,
-    /// Number of bytes in the chunk.
-    pub byte_count: usize,
-    /// Whether the chunk contained backspace (0x08) or DEL (0x7F).
-    pub has_backspace: bool,
-    /// Whether the chunk contained CSI sequences for cursor movement.
-    pub has_cursor_control: bool,
-    /// Number of visible (non-control) characters after ANSI stripping.
-    pub visible_chars: usize,
-}
+/// Maximum number of recent lines to keep in the ring buffer.
+const MAX_RECENT_LINES: usize = 50;
 
-/// Classification of the output stream cadence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputCadence {
-    /// Human typing: small chunks, moderate intervals, backspaces present.
-    Human,
-    /// Agent output: large chunks, rapid intervals, no backspaces, sustained.
-    Agent,
-    /// Burst output (e.g., `cat` a file, compiler output): large but not sustained.
-    Burst,
-    /// Not enough data to classify.
-    Unknown,
-}
-
-/// Maximum number of chunk stats to keep in the sliding window.
-const MAX_CHUNK_STATS: usize = 20;
-
-/// Minimum number of chunks required before classification (below this -> Unknown).
-const MIN_CHUNKS_FOR_CLASSIFICATION: usize = 3;
-
-/// Minimum sustained duration (in seconds) to distinguish Agent from Burst.
-const AGENT_SUSTAINED_SECS: f64 = 2.0;
-
-// -- State change notifications ----------------------------------------------
-
-/// A notification emitted when the inference engine detects a state change.
-/// Used by the daemon to bridge into semantic events without polling.
-#[derive(Debug, Clone)]
-pub enum StateChangeNotification {
-    /// Agent activity status changed.
-    StatusChanged {
-        old: InferredStatus,
-        new: InferredStatus,
-    },
-    /// A tool invocation started.
-    ToolStarted { tool_name: String },
-    /// A tool invocation completed (inferred from status change away from ToolUse).
-    ToolCompleted { tool_name: String },
-    /// Agent type was detected from output.
-    AgentDetected { agent_type: AgentType },
-    /// Model name was detected from output.
-    ModelDetected { model: String },
-    /// Context percentage was updated.
-    ContextUpdated { percent: f32 },
-    /// OSC 633 command started executing.
-    CommandStarted { command: Option<String> },
-    /// OSC 633 command finished.
-    CommandFinished {
-        command: Option<String>,
-        exit_code: Option<i32>,
-        duration_ms: u64,
-    },
-    /// Structured JSON output mode detected (agent launched with --output-format json).
-    StructuredJsonDetected,
-}
-
-// -- Agent types -------------------------------------------------------------
-
-/// The type of agent running in this terminal session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentType {
-    Claude,
-    Codex,
-    Copilot,
-    Aider,
-}
-
-impl AgentType {
-    /// The state directory path for this agent type.
-    pub fn state_dir(&self) -> &'static str {
-        match self {
-            AgentType::Claude => "/tmp/claude-code-state",
-            AgentType::Codex => "/tmp/codex-state",
-            AgentType::Copilot => "/tmp/copilot-state",
-            AgentType::Aider => "/tmp/aider-state",
-        }
-    }
-
-    /// Try to infer agent type from a spawn command string.
-    pub fn from_command(cmd: &str) -> Option<Self> {
-        let tokens: Vec<String> = cmd
-            .split_whitespace()
-            .map(|token| {
-                token
-                    .trim_matches(|c: char| {
-                        !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '/'
-                    })
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(token)
-                    .to_lowercase()
-            })
-            .filter(|token| !token.is_empty())
-            .collect();
-
-        if tokens.iter().any(|token| token == "gh") && tokens.iter().any(|token| token == "copilot")
-        {
-            Some(AgentType::Copilot)
-        } else if tokens.iter().any(|token| token.contains("claude")) {
-            Some(AgentType::Claude)
-        } else if tokens
-            .iter()
-            .any(|token| token == "copilot" || token.starts_with("copilot-"))
-        {
-            Some(AgentType::Copilot)
-        } else if tokens
-            .iter()
-            .any(|token| token == "codex" || token.starts_with("codex-"))
-        {
-            Some(AgentType::Codex)
-        } else if tokens.iter().any(|token| token.contains("aider")) {
-            Some(AgentType::Aider)
-        } else {
-            None
-        }
-    }
-
-    /// String representation matching the existing state file format.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AgentType::Claude => "claude",
-            AgentType::Codex => "codex",
-            AgentType::Copilot => "copilot",
-            AgentType::Aider => "aider",
-        }
-    }
-}
-
-// -- Inferred status ---------------------------------------------------------
-
-/// Agent status, matching the format in `ClaudeStatus`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InferredStatus {
-    Idle,
-    Processing,
-    Streaming,
-    Thinking,
-    ToolUse { tool_name: String },
-    AwaitingInput,
-}
-
-impl InferredStatus {
-    fn status_str(&self) -> &str {
-        match self {
-            InferredStatus::Idle => "idle",
-            InferredStatus::Processing => "processing",
-            InferredStatus::Streaming => "streaming",
-            InferredStatus::Thinking => "thinking",
-            InferredStatus::ToolUse { .. } => "tool_use",
-            InferredStatus::AwaitingInput => "awaiting_input",
-        }
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        match self {
-            InferredStatus::ToolUse { tool_name } => Some(tool_name),
-            _ => None,
-        }
-    }
-}
-
-// -- State file format -------------------------------------------------------
-
-/// JSON structure written to state files for agent session state.
-///
-/// Field names and types are aligned with the `ClaudeStatus` enum in
-/// `therminal-protocol` so that the JSON written here deserializes correctly
-/// via `ClaudeStatePoller` (therminal-core). We keep a local struct rather
-/// than importing `therminal-core` to avoid pulling GPU/Wayland dependencies
-/// into this lightweight, Android-compatible crate.
-#[derive(Debug, Serialize)]
-struct StateFile {
-    session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_type: Option<String>,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    current_tool: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    working_dir: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_updated: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_exit_code: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_command_started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_command_duration_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    consecutive_failures: Option<i64>,
-}
-
-// -- Pattern matchers (compiled once) ----------------------------------------
-
-struct Patterns {
-    /// Braille spinner characters used by Claude/Codex during processing.
-    spinner: Regex,
-    /// Tool call patterns: "Read(", "Edit(", "Bash(", "Write(", etc.
-    tool_call: Regex,
-    /// Awaiting input indicators.
-    awaiting_input: Regex,
-    /// Context percentage patterns (e.g., "Context: 42%", "42% context").
-    context_percent: Regex,
-    /// Agent identification from output (e.g., "Claude Code", "Codex").
-    agent_ident_claude: Regex,
-    agent_ident_codex: Regex,
-    agent_ident_copilot: Regex,
-    /// Model name extraction from output.
-    ///
-    /// NOTE: The canonical model family list lives in `therminal-core`'s
-    /// `MODEL_REGISTRY` (`claude_state.rs`). Keep this regex's alternations
-    /// in sync when adding new model families there.
-    model_pattern: Regex,
-}
-
-impl Patterns {
-    fn new() -> Self {
-        Self {
-            spinner: Regex::new(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Thinking\.{2,}").unwrap(),
-            tool_call: Regex::new(
-                r"(?:^|\s)(Read|Edit|Write|Bash|Glob|Grep|TodoRead|TodoWrite|WebSearch|WebFetch|mcp_|ListFiles|SearchFiles|ExecuteCommand|ReplaceInFile|ReadFile|WriteToFile)\s*[\(\{(]"
-            ).unwrap(),
-            awaiting_input: Regex::new(
-                r"(?:^>\s|esc to interrupt|waiting for (?:input|response)|^\s*\$\s*$|Press Enter|Type (?:a|your) (?:message|response))"
-            ).unwrap(),
-            context_percent: Regex::new(r"(\d{1,3})(?:\.\d)?%\s*(?:context|ctx)").unwrap(),
-            agent_ident_claude: Regex::new(r"(?i)claude\s*(?:code|3|4)?").unwrap(),
-            agent_ident_codex: Regex::new(r"(?i)codex").unwrap(),
-            agent_ident_copilot: Regex::new(r"(?i)copilot").unwrap(),
-            model_pattern: Regex::new(
-                r"(?:model|using)[\s:]+([a-zA-Z0-9._-]+(?:opus|sonnet|haiku|gpt[0-9.-]+|o[134]-?[a-z]*|gemini[a-zA-Z0-9._-]*)[a-zA-Z0-9._-]*)"
-            ).unwrap(),
-        }
-    }
-}
-
-// -- Main inference engine ---------------------------------------------------
-
-/// Configuration for the inference engine.
-pub struct InferenceConfig {
-    /// Session ID used in state files.
-    pub session_id: String,
-    /// PID of the PTY child process.
-    pub child_pid: u32,
-    /// Agent type (if known from spawn command). Inferred from output if None.
-    pub agent_type: Option<AgentType>,
-    /// Working directory of the session.
-    pub working_dir: Option<String>,
-}
+/// Minimum interval between state file writes.
+const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Agent state inference engine.
 ///
@@ -364,12 +109,6 @@ pub struct AgentStateInference {
     /// Number of consecutive JSON object lines seen (for sniffing).
     json_line_streak: u8,
 }
-
-/// Maximum number of recent lines to keep in the ring buffer.
-const MAX_RECENT_LINES: usize = 50;
-
-/// Minimum interval between state file writes.
-const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(500);
 
 impl AgentStateInference {
     /// Create a new inference engine with the given configuration.
@@ -497,86 +236,7 @@ impl AgentStateInference {
     /// Distinguishes human typing, agent output, and burst dumps based on
     /// chunk sizes, inter-chunk intervals, and the presence of backspaces.
     pub fn classify_output_cadence(&self) -> OutputCadence {
-        let stats = &self.chunk_stats;
-        if stats.len() < MIN_CHUNKS_FOR_CLASSIFICATION {
-            return OutputCadence::Unknown;
-        }
-
-        // Compute averages over the window.
-        let total_visible: usize = stats.iter().map(|s| s.visible_chars).sum();
-        let avg_visible = total_visible as f64 / stats.len() as f64;
-
-        let backspace_count = stats.iter().filter(|s| s.has_backspace).count();
-        let backspace_ratio = backspace_count as f64 / stats.len() as f64;
-
-        // Compute average inter-chunk interval (in milliseconds).
-        let intervals: Vec<f64> = stats
-            .iter()
-            .zip(stats.iter().skip(1))
-            .map(|(a, b)| b.timestamp.duration_since(a.timestamp).as_secs_f64() * 1000.0)
-            .collect();
-        let avg_interval_ms = if intervals.is_empty() {
-            0.0
-        } else {
-            intervals.iter().sum::<f64>() / intervals.len() as f64
-        };
-
-        // Compute total window duration.
-        let window_duration_secs = if stats.len() >= 2 {
-            stats
-                .back()
-                .unwrap()
-                .timestamp
-                .duration_since(stats.front().unwrap().timestamp)
-                .as_secs_f64()
-        } else {
-            0.0
-        };
-
-        // Classification logic:
-        //
-        // Human: small chunks, moderate intervals, backspaces common.
-        if avg_visible < 5.0 && avg_interval_ms > 30.0 && backspace_ratio > 0.01 {
-            return OutputCadence::Human;
-        }
-
-        // Also classify as Human if chunks are tiny and intervals are human-speed,
-        // even without backspaces (careful typer).
-        if avg_visible < 5.0 && avg_interval_ms > 50.0 {
-            return OutputCadence::Human;
-        }
-
-        // Burst: very large chunks but not sustained (short window or few chunks).
-        let max_visible = stats.iter().map(|s| s.visible_chars).max().unwrap_or(0);
-        if max_visible > 1000 && (stats.len() <= 3 || window_duration_secs < AGENT_SUSTAINED_SECS) {
-            return OutputCadence::Burst;
-        }
-
-        // Agent: large chunks, rapid intervals, no backspaces, sustained.
-        if avg_visible > 50.0
-            && avg_interval_ms < 10.0
-            && backspace_ratio < 0.01
-            && window_duration_secs >= AGENT_SUSTAINED_SECS
-        {
-            return OutputCadence::Agent;
-        }
-
-        // Agent (relaxed): sustained large output even with moderate intervals.
-        // With a 20-chunk window, reaching 2s requires ~105ms+ intervals.
-        if avg_visible > 30.0
-            && avg_interval_ms < 200.0
-            && backspace_ratio < 0.01
-            && window_duration_secs >= AGENT_SUSTAINED_SECS
-        {
-            return OutputCadence::Agent;
-        }
-
-        // Burst: large output, short lived.
-        if avg_visible > 50.0 && window_duration_secs < AGENT_SUSTAINED_SECS {
-            return OutputCadence::Burst;
-        }
-
-        OutputCadence::Unknown
+        classify_output_cadence(&self.chunk_stats)
     }
 
     /// Check if recent output looks like a spinner pattern.
@@ -584,23 +244,7 @@ impl AgentStateInference {
     /// Spinners are characterized by cursor-control-heavy output with low
     /// visible text content -- the terminal is being rewritten in place.
     pub fn is_spinner_pattern(&self) -> bool {
-        let stats = &self.chunk_stats;
-        if stats.len() < MIN_CHUNKS_FOR_CLASSIFICATION {
-            return false;
-        }
-
-        // Look at the most recent chunks (up to 10).
-        let recent: Vec<&ByteChunkStats> = stats.iter().rev().take(10).collect();
-
-        let cursor_control_count = recent.iter().filter(|s| s.has_cursor_control).count();
-        let cursor_control_ratio = cursor_control_count as f64 / recent.len() as f64;
-
-        let avg_visible =
-            recent.iter().map(|s| s.visible_chars).sum::<usize>() as f64 / recent.len() as f64;
-
-        // Spinner: high ratio of cursor control with low visible text per chunk.
-        // Typical spinner: overwrites a line with CSI sequences, writes 1-5 chars.
-        cursor_control_ratio > 0.5 && avg_visible < 20.0
+        is_spinner_pattern(&self.chunk_stats)
     }
 
     /// Check if recent output is a sustained high-throughput stream.
@@ -609,32 +253,7 @@ impl AgentStateInference {
     /// at least 2 seconds with no backspaces -- e.g., an agent writing a
     /// long code block or explanation.
     pub fn is_streaming_cadence(&self) -> bool {
-        let stats = &self.chunk_stats;
-        if stats.len() < MIN_CHUNKS_FOR_CLASSIFICATION {
-            return false;
-        }
-
-        let window_duration_secs = if stats.len() >= 2 {
-            stats
-                .back()
-                .unwrap()
-                .timestamp
-                .duration_since(stats.front().unwrap().timestamp)
-                .as_secs_f64()
-        } else {
-            return false;
-        };
-
-        if window_duration_secs < AGENT_SUSTAINED_SECS {
-            return false;
-        }
-
-        let total_visible: usize = stats.iter().map(|s| s.visible_chars).sum();
-        let chars_per_sec = total_visible as f64 / window_duration_secs;
-
-        let has_backspace = stats.iter().any(|s| s.has_backspace);
-
-        chars_per_sec > 500.0 && !has_backspace
+        is_streaming_cadence(&self.chunk_stats)
     }
 
     /// Read-only access to the chunk stats window (for external analysis).
@@ -843,15 +462,7 @@ impl AgentStateInference {
 
     /// Clean up the state file on session exit.
     pub fn cleanup(&self) {
-        if let Some(ref path) = self.state_file_path {
-            if path.exists() {
-                if let Err(e) = std::fs::remove_file(path) {
-                    warn!(path = %path.display(), error = %e, "Failed to remove state file on cleanup");
-                } else {
-                    debug!(path = %path.display(), "Removed state file on session exit");
-                }
-            }
-        }
+        do_cleanup(self.state_file_path.as_ref());
     }
 
     fn push_line(&mut self, line: String) {
@@ -989,7 +600,8 @@ impl AgentStateInference {
             trace!(field = "agent_type", value = at.as_str(), "state dirty");
             self.detected_agent_type = Some(at);
             self.dirty = true;
-            self.update_state_file_path();
+            self.state_file_path =
+                update_state_file_path(self.effective_agent_type(), &self.config.session_id);
             self.emit(StateChangeNotification::AgentDetected { agent_type: at });
         }
         if let Some(ref model) = new_model {
@@ -1002,16 +614,6 @@ impl AgentStateInference {
         if let Some(model) = new_model {
             self.detected_model = Some(model);
             self.dirty = true;
-        }
-    }
-
-    /// Update the state file path after agent type is detected.
-    fn update_state_file_path(&mut self) {
-        if let Some(agent_type) = self.effective_agent_type() {
-            self.state_file_path = Some(
-                PathBuf::from(agent_type.state_dir())
-                    .join(format!("{}.json", self.config.session_id)),
-            );
         }
     }
 
@@ -1067,7 +669,7 @@ impl AgentStateInference {
         if self.dirty && self.last_write.elapsed() >= MIN_WRITE_INTERVAL {
             self.dirty = false;
             let start = Instant::now();
-            self.write_state_file();
+            self.do_write_state_file();
             let elapsed = start.elapsed();
             debug!(
                 elapsed_ms = elapsed.as_millis() as u64,
@@ -1080,6 +682,43 @@ impl AgentStateInference {
                 throttle_remaining_ms = (MIN_WRITE_INTERVAL.saturating_sub(self.last_write.elapsed())).as_millis() as u64,
                 "state write throttled"
             );
+        }
+    }
+
+    /// Build a `StateFile` from current state and delegate to persistence.
+    fn do_write_state_file(&mut self) {
+        let Some(agent_type) = self.effective_agent_type() else {
+            trace!("No agent type detected, skipping state file write");
+            return;
+        };
+
+        let state_dir = std::path::Path::new(agent_type.state_dir());
+
+        let state_file = StateFile {
+            session_id: self.config.session_id.clone(),
+            agent_type: Some(agent_type.as_str().to_string()),
+            status: self.last_status.status_str().to_string(),
+            current_tool: self.last_status.tool_name().map(|s| s.to_string()),
+            working_dir: self.config.working_dir.clone(),
+            last_updated: Some(now_rfc3339()),
+            pid: Some(self.config.child_pid as i64),
+            model: self.detected_model.clone(),
+            context_percent: self.context_percent.map(|v| v as f64),
+            source: Some("terminal_inference".to_string()),
+            last_command: self.last_command.clone(),
+            last_exit_code: self.last_exit_code.map(|c| c as i64),
+            last_command_started_at: self.command_started_at_iso.clone(),
+            last_command_duration_ms: self.last_command_duration_ms,
+            consecutive_failures: if self.consecutive_failures > 0 {
+                Some(self.consecutive_failures)
+            } else {
+                None
+            },
+        };
+
+        if let Some(path) = write_state_file(&state_file, &self.config.session_id, state_dir) {
+            self.last_write = Instant::now();
+            self.state_file_path = Some(path);
         }
     }
 
@@ -1205,277 +844,6 @@ impl AgentStateInference {
             }
         }
     }
-
-    /// Write the current state to a JSON file atomically.
-    fn write_state_file(&mut self) {
-        let Some(agent_type) = self.effective_agent_type() else {
-            trace!("No agent type detected, skipping state file write");
-            return;
-        };
-
-        let state_dir = Path::new(agent_type.state_dir());
-
-        // Ensure the state directory exists.
-        if !state_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(state_dir) {
-                warn!(dir = %state_dir.display(), error = %e, "Failed to create state directory");
-                return;
-            }
-        }
-
-        let state_file = StateFile {
-            session_id: self.config.session_id.clone(),
-            agent_type: Some(agent_type.as_str().to_string()),
-            status: self.last_status.status_str().to_string(),
-            current_tool: self.last_status.tool_name().map(|s| s.to_string()),
-            working_dir: self.config.working_dir.clone(),
-            last_updated: Some(now_rfc3339()),
-            pid: Some(self.config.child_pid as i64),
-            model: self.detected_model.clone(),
-            context_percent: self.context_percent.map(|v| v as f64),
-            source: Some("terminal_inference".to_string()),
-            last_command: self.last_command.clone(),
-            last_exit_code: self.last_exit_code.map(|c| c as i64),
-            last_command_started_at: self.command_started_at_iso.clone(),
-            last_command_duration_ms: self.last_command_duration_ms,
-            consecutive_failures: if self.consecutive_failures > 0 {
-                Some(self.consecutive_failures)
-            } else {
-                None
-            },
-        };
-
-        let file_path = state_dir.join(format!("{}.json", self.config.session_id));
-
-        // Atomic write: write to .tmp then rename.
-        let tmp_path = state_dir.join(format!("{}.json.tmp", self.config.session_id));
-        match serde_json::to_string_pretty(&state_file) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&tmp_path, json.as_bytes()) {
-                    warn!(path = %tmp_path.display(), error = %e, "Failed to write temp state file");
-                    return;
-                }
-                if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
-                    warn!(path = %file_path.display(), error = %e, "Failed to rename state file");
-                    // Clean up tmp file.
-                    let _ = std::fs::remove_file(&tmp_path);
-                    return;
-                }
-                self.last_write = Instant::now();
-                self.state_file_path = Some(file_path.clone());
-                trace!(
-                    status = self.last_status.status_str(),
-                    path = %file_path.display(),
-                    "Wrote agent state file"
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to serialize state file");
-            }
-        }
-    }
-}
-
-// -- ANSI stripping ----------------------------------------------------------
-
-/// Parser state for the ANSI escape sequence stripper.
-///
-/// Carried across `feed()` calls so that escape sequences split across PTY
-/// read boundaries are handled correctly instead of leaking fragments into
-/// the visible text buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StripState {
-    /// Normal text -- not inside any escape sequence.
-    Normal,
-    /// Saw ESC (0x1B), waiting for the next byte to determine sequence type.
-    Escape,
-    /// Inside a CSI sequence (ESC \[), consuming parameter/intermediate bytes
-    /// until a final byte in 0x40..=0x7E.
-    Csi,
-    /// Inside an OSC sequence (ESC \]), consuming until BEL (0x07) or ST (ESC \\).
-    Osc,
-    /// Inside an OSC sequence, just saw ESC -- waiting for `\` to complete ST,
-    /// or any other byte which continues the OSC body.
-    OscEsc,
-    /// Inside an APC sequence (ESC \_), consuming until ST (ESC \\).
-    Apc,
-    /// Inside an APC sequence, just saw ESC -- waiting for `\` to complete ST.
-    ApcEsc,
-    /// Saw ESC followed by a charset designator (one of `( ) * +`), waiting
-    /// for the charset byte (e.g. `B`, `0`).
-    Charset,
-}
-
-/// Stateful ANSI escape sequence stripper.
-///
-/// Strips CSI, OSC, APC, and other common escape sequences from a byte
-/// stream, returning only the visible text. State is preserved across
-/// calls to [`AnsiStripper::feed`] so that sequences split across PTY
-/// read boundaries are consumed correctly.
-struct AnsiStripper {
-    state: StripState,
-}
-
-impl AnsiStripper {
-    fn new() -> Self {
-        Self {
-            state: StripState::Normal,
-        }
-    }
-
-    /// Feed a chunk of raw bytes and return the visible text extracted from it.
-    ///
-    /// Escape-sequence parsing state is carried across calls, so a sequence
-    /// that starts at the end of one chunk and finishes at the start of the
-    /// next is handled without leaking control characters into the output.
-    fn feed(&mut self, bytes: &[u8]) -> String {
-        let mut out = String::with_capacity(bytes.len());
-        let mut i = 0;
-
-        while i < bytes.len() {
-            let b = bytes[i];
-
-            match self.state {
-                StripState::Normal => {
-                    if b == 0x1B {
-                        self.state = StripState::Escape;
-                        i += 1;
-                    } else if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
-                        // Skip non-printable control characters.
-                        i += 1;
-                    } else {
-                        // Visible character or whitespace -- handle UTF-8.
-                        let remaining = &bytes[i..];
-                        if let Some(ch) = decode_utf8_char(remaining) {
-                            let char_len = ch.len_utf8();
-                            out.push(ch);
-                            i += char_len;
-                        } else {
-                            // Invalid UTF-8, skip byte.
-                            i += 1;
-                        }
-                    }
-                }
-
-                StripState::Escape => {
-                    // We saw ESC last; this byte determines the sequence type.
-                    match b {
-                        b'[' => {
-                            self.state = StripState::Csi;
-                            i += 1;
-                        }
-                        b']' => {
-                            self.state = StripState::Osc;
-                            i += 1;
-                        }
-                        b'(' | b')' | b'*' | b'+' => {
-                            self.state = StripState::Charset;
-                            i += 1;
-                        }
-                        b'_' => {
-                            self.state = StripState::Apc;
-                            i += 1;
-                        }
-                        _ => {
-                            // Other 2-byte ESC sequences: skip this byte and done.
-                            self.state = StripState::Normal;
-                            i += 1;
-                        }
-                    }
-                }
-
-                StripState::Csi => {
-                    // CSI sequence: consume until final byte 0x40..=0x7E.
-                    if (0x40..=0x7E).contains(&b) {
-                        self.state = StripState::Normal;
-                    }
-                    i += 1;
-                }
-
-                StripState::Osc => {
-                    if b == 0x07 {
-                        // BEL terminates OSC.
-                        self.state = StripState::Normal;
-                        i += 1;
-                    } else if b == 0x1B {
-                        // Possible ST (ESC \).
-                        self.state = StripState::OscEsc;
-                        i += 1;
-                    } else {
-                        // OSC body -- skip.
-                        i += 1;
-                    }
-                }
-
-                StripState::OscEsc => {
-                    if b == b'\\' {
-                        // ST complete -- OSC is done.
-                        self.state = StripState::Normal;
-                    } else {
-                        // Not ST -- the ESC was part of the OSC body (rare).
-                        // Stay in OSC and reprocess this byte.
-                        self.state = StripState::Osc;
-                        continue; // reprocess without advancing i
-                    }
-                    i += 1;
-                }
-
-                StripState::Apc => {
-                    if b == 0x1B {
-                        self.state = StripState::ApcEsc;
-                    }
-                    i += 1;
-                }
-
-                StripState::ApcEsc => {
-                    if b == b'\\' {
-                        // ST complete -- APC is done.
-                        self.state = StripState::Normal;
-                    } else {
-                        // Not ST -- stay in APC.
-                        self.state = StripState::Apc;
-                        continue; // reprocess without advancing i
-                    }
-                    i += 1;
-                }
-
-                StripState::Charset => {
-                    // Charset designation: consume the one charset byte.
-                    self.state = StripState::Normal;
-                    i += 1;
-                }
-            }
-        }
-
-        out
-    }
-}
-
-/// Strip ANSI escape sequences from bytes, returning visible text.
-///
-/// Convenience wrapper that creates a one-shot [`AnsiStripper`]. For
-/// streaming use (where sequences may be split across chunks), prefer
-/// creating an `AnsiStripper` and calling [`AnsiStripper::feed`] repeatedly.
-#[cfg(test)]
-fn strip_ansi_visible(bytes: &[u8]) -> String {
-    AnsiStripper::new().feed(bytes)
-}
-
-/// Decode a single UTF-8 character from the start of a byte slice.
-fn decode_utf8_char(bytes: &[u8]) -> Option<char> {
-    std::str::from_utf8(bytes)
-        .ok()
-        .and_then(|s| s.chars().next())
-        .or_else(|| {
-            // Try progressively shorter slices (1-4 bytes) to handle partial
-            // multi-byte sequences at chunk boundaries.
-            for len in (1..=4.min(bytes.len())).rev() {
-                if let Ok(s) = std::str::from_utf8(&bytes[..len]) {
-                    return s.chars().next();
-                }
-            }
-            None
-        })
 }
 
 /// Get the current time as an RFC 3339 string.
@@ -1533,85 +901,12 @@ mod tests {
         })
     }
 
-    // -- ANSI stripping ------------------------------------------------------
-
-    #[test]
-    fn strip_plain_text() {
-        let text = b"Hello, world!";
-        assert_eq!(strip_ansi_visible(text), "Hello, world!");
-    }
-
-    #[test]
-    fn strip_csi_color_codes() {
-        // ESC[31m = red, ESC[0m = reset
-        let text = b"\x1b[31mRed text\x1b[0m normal";
-        assert_eq!(strip_ansi_visible(text), "Red text normal");
-    }
-
-    #[test]
-    fn strip_osc_title() {
-        // OSC 2 = set title, terminated by BEL
-        let text = b"\x1b]2;My Title\x07Visible text";
-        assert_eq!(strip_ansi_visible(text), "Visible text");
-    }
-
-    #[test]
-    fn strip_preserves_newlines() {
-        let text = b"line1\nline2\r\nline3";
-        assert_eq!(strip_ansi_visible(text), "line1\nline2\r\nline3");
-    }
-
-    #[test]
-    fn strip_mixed_escapes() {
-        let text = b"\x1b[1;32m> \x1b[0mType a message\x1b]2;title\x07";
-        assert_eq!(strip_ansi_visible(text), "> Type a message");
-    }
-
-    // -- Agent type detection ------------------------------------------------
-
-    #[test]
-    fn agent_type_from_command() {
-        assert_eq!(
-            AgentType::from_command("claude --model opus"),
-            Some(AgentType::Claude)
-        );
-        assert_eq!(
-            AgentType::from_command("codex --model o4-mini"),
-            Some(AgentType::Codex)
-        );
-        assert_eq!(
-            AgentType::from_command("gh copilot suggest"),
-            Some(AgentType::Copilot)
-        );
-        assert_eq!(
-            AgentType::from_command("gh copilot suggest --prompt 'compare this to codex'"),
-            Some(AgentType::Copilot)
-        );
-        assert_eq!(
-            AgentType::from_command("/usr/bin/gh copilot suggest"),
-            Some(AgentType::Copilot)
-        );
-        assert_eq!(
-            AgentType::from_command("/usr/local/bin/codex-wrapper"),
-            Some(AgentType::Codex)
-        );
-        assert_eq!(AgentType::from_command("vim file.rs"), None);
-    }
-
-    #[test]
-    fn agent_type_state_dir() {
-        assert_eq!(AgentType::Claude.state_dir(), "/tmp/claude-code-state");
-        assert_eq!(AgentType::Codex.state_dir(), "/tmp/codex-state");
-        assert_eq!(AgentType::Copilot.state_dir(), "/tmp/copilot-state");
-    }
-
     // -- Pattern matching ----------------------------------------------------
 
     #[test]
     fn detect_spinner_thinking() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // Simulate spinner output -- maps to Thinking, not Processing.
-        engine.push_line("⠋ Processing your request...".to_string());
+        engine.push_line("\u{280b} Processing your request...".to_string());
         let status = engine.infer_status();
         assert_eq!(status, InferredStatus::Thinking);
     }
@@ -1744,7 +1039,6 @@ mod tests {
     fn detect_context_percent_with_decimal() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.push_line("87.5% context remaining".to_string());
-        // Our regex captures the integer part before the dot.
         engine.detect_context_percent();
         assert_eq!(engine.context_percent, Some(87.0));
     }
@@ -1755,7 +1049,6 @@ mod tests {
     fn command_state_executing_default_processing() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.last_command_state = Some(CommandState::Executing);
-        // No output patterns -- default to processing.
         let status = engine.infer_status();
         assert_eq!(status, InferredStatus::Processing);
     }
@@ -1764,7 +1057,6 @@ mod tests {
     fn command_state_input_awaiting() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.last_command_state = Some(CommandState::Input);
-        // No specific output patterns -- default to awaiting.
         let status = engine.infer_status();
         assert_eq!(status, InferredStatus::AwaitingInput);
     }
@@ -1773,66 +1065,8 @@ mod tests {
     fn command_state_finished_idle() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.last_command_state = Some(CommandState::Finished);
-        // No specific output patterns -- default to idle.
         let status = engine.infer_status();
         assert_eq!(status, InferredStatus::Idle);
-    }
-
-    // -- State file format ---------------------------------------------------
-
-    #[test]
-    fn state_file_serialization() {
-        let state = StateFile {
-            session_id: "abc-123".to_string(),
-            agent_type: Some("claude".to_string()),
-            status: "tool_use".to_string(),
-            current_tool: Some("Read".to_string()),
-            working_dir: Some("/home/user/project".to_string()),
-            last_updated: Some("2026-03-30T12:00:00Z".to_string()),
-            pid: Some(12345),
-            model: Some("claude-sonnet-4-20250514".to_string()),
-            context_percent: Some(42.0),
-            source: Some("terminal_inference".to_string()),
-            last_command: None,
-            last_exit_code: None,
-            last_command_started_at: None,
-            last_command_duration_ms: None,
-            consecutive_failures: None,
-        };
-
-        let json = serde_json::to_string_pretty(&state).unwrap();
-        assert!(json.contains("\"session_id\": \"abc-123\""));
-        assert!(json.contains("\"status\": \"tool_use\""));
-        assert!(json.contains("\"current_tool\": \"Read\""));
-        assert!(json.contains("\"source\": \"terminal_inference\""));
-        assert!(json.contains("\"pid\": 12345"));
-    }
-
-    #[test]
-    fn state_file_omits_none_fields() {
-        let state = StateFile {
-            session_id: "abc-123".to_string(),
-            agent_type: Some("claude".to_string()),
-            status: "idle".to_string(),
-            current_tool: None,
-            working_dir: None,
-            last_updated: Some("2026-03-30T12:00:00Z".to_string()),
-            pid: Some(12345),
-            model: None,
-            context_percent: None,
-            source: Some("terminal_inference".to_string()),
-            last_command: None,
-            last_exit_code: None,
-            last_command_started_at: None,
-            last_command_duration_ms: None,
-            consecutive_failures: None,
-        };
-
-        let json = serde_json::to_string_pretty(&state).unwrap();
-        assert!(!json.contains("current_tool"));
-        assert!(!json.contains("working_dir"));
-        assert!(!json.contains("model"));
-        assert!(!json.contains("context_percent"));
     }
 
     // -- RFC 3339 timestamp --------------------------------------------------
@@ -1840,7 +1074,6 @@ mod tests {
     #[test]
     fn now_rfc3339_format() {
         let ts = now_rfc3339();
-        // Should match YYYY-MM-DDTHH:MM:SSZ format.
         assert!(ts.len() == 20, "Unexpected timestamp length: {ts}");
         assert!(ts.ends_with('Z'));
         assert_eq!(&ts[4..5], "-");
@@ -1848,6 +1081,18 @@ mod tests {
         assert_eq!(&ts[10..11], "T");
         assert_eq!(&ts[13..14], ":");
         assert_eq!(&ts[16..17], ":");
+    }
+
+    // -- Days to YMD ---------------------------------------------------------
+
+    #[test]
+    fn epoch_day_zero() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn known_date() {
+        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
     }
 
     // -- Feed bytes integration ----------------------------------------------
@@ -1887,89 +1132,14 @@ mod tests {
             engine.push_line(format!("line {i}"));
         }
         assert_eq!(engine.recent_lines.len(), MAX_RECENT_LINES);
-        // Oldest lines should be evicted.
         assert_eq!(engine.recent_lines[0], "line 10");
         assert_eq!(engine.recent_lines[MAX_RECENT_LINES - 1], "line 59");
     }
 
-    // -- Stateful ANSI stripper (split sequences) ----------------------------
-
-    #[test]
-    fn split_csi_across_chunks() {
-        // ESC at end of chunk 1, "[0m" at start of chunk 2 -> no leaked text.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"hello\x1b");
-        let out2 = stripper.feed(b"[0mworld");
-        assert_eq!(format!("{out1}{out2}"), "helloworld");
-    }
-
-    #[test]
-    fn split_csi_esc_bracket_then_params() {
-        // ESC [ at end of chunk 1, "31m" at start of chunk 2.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"before\x1b[");
-        let out2 = stripper.feed(b"31mafter");
-        assert_eq!(format!("{out1}{out2}"), "beforeafter");
-    }
-
-    #[test]
-    fn split_osc_across_chunks() {
-        // ESC ] at end of chunk 1, OSC body + BEL at start of chunk 2.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"before\x1b]");
-        let out2 = stripper.feed(b"2;My Title\x07after");
-        assert_eq!(format!("{out1}{out2}"), "beforeafter");
-    }
-
-    #[test]
-    fn split_osc_st_across_chunks() {
-        // OSC body continues across chunks, terminated by ST (ESC \).
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"\x1b]633;some data");
-        let out2 = stripper.feed(b" more data\x1b\\visible");
-        assert_eq!(format!("{out1}{out2}"), "visible");
-    }
-
-    #[test]
-    fn split_osc_st_esc_at_boundary() {
-        // OSC body, then ESC at end of chunk, then \ at start of next.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"\x1b]2;title\x1b");
-        let out2 = stripper.feed(b"\\after");
-        assert_eq!(format!("{out1}{out2}"), "after");
-    }
-
-    #[test]
-    fn split_normal_text_across_chunks() {
-        // Normal text split across chunks -- all text preserved.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"hello ");
-        let out2 = stripper.feed(b"world");
-        assert_eq!(format!("{out1}{out2}"), "hello world");
-    }
-
-    #[test]
-    fn split_apc_across_chunks() {
-        // APC sequence (ESC _) split across chunks.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"before\x1b_apc body");
-        let out2 = stripper.feed(b" continued\x1b\\after");
-        assert_eq!(format!("{out1}{out2}"), "beforeafter");
-    }
-
-    #[test]
-    fn split_charset_across_chunks() {
-        // Charset designation ESC ( at end of chunk, charset byte at start of next.
-        let mut stripper = AnsiStripper::new();
-        let out1 = stripper.feed(b"before\x1b(");
-        let out2 = stripper.feed(b"Bafter");
-        assert_eq!(format!("{out1}{out2}"), "beforeafter");
-    }
+    // -- Stateful ANSI stripper integration ----------------------------------
 
     #[test]
     fn feed_bytes_split_csi_no_leak() {
-        // Integration test: ESC at end of chunk 1, "[0m" at start of chunk 2
-        // should not leak "[0m" or partial escape chars into lines.
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.feed_bytes(b"clean text\x1b");
         engine.feed_bytes(b"[0m more text\n");
@@ -1979,7 +1149,6 @@ mod tests {
 
     #[test]
     fn feed_bytes_split_osc_no_leak() {
-        // Integration test: OSC split across feed_bytes calls.
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.feed_bytes(b"before\x1b]2;title");
         engine.feed_bytes(b"\x07after\n");
@@ -1987,38 +1156,19 @@ mod tests {
         assert_eq!(engine.recent_lines[0], "beforeafter");
     }
 
-    // -- Days to YMD ---------------------------------------------------------
-
-    #[test]
-    fn epoch_day_zero() {
-        assert_eq!(days_to_ymd(0), (1970, 1, 1));
-    }
-
-    #[test]
-    fn known_date() {
-        // 2026-03-30 = day 20542 from epoch
-        // Let's verify a simpler one: 2000-01-01 = day 10957
-        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
-    }
-
     // -- Dirty-flag write semantics ------------------------------------------
 
     #[test]
     fn model_detection_triggers_write_without_status_change() {
-        // Model detection should set dirty, causing a state file write even
-        // when the inferred status hasn't changed.
         let mut engine = make_engine(Some(AgentType::Claude));
         assert!(!engine.dirty);
 
-        // Feed output containing a model identifier.
         engine.feed_bytes(b"using: claude-sonnet-4-20250514\n");
         assert_eq!(
             engine.detected_model.as_deref(),
             Some("claude-sonnet-4-20250514")
         );
 
-        // Status is still Idle (unchanged), but dirty should have been set
-        // and then cleared by the write inside feed_bytes.
         assert!(!engine.dirty, "dirty should be cleared after write");
         assert_eq!(engine.last_status, InferredStatus::Idle);
     }
@@ -2030,17 +1180,14 @@ mod tests {
 
         engine.push_line("42% context used".to_string());
         engine.infer_and_write();
-        // First context_percent detection -> dirty set and flushed.
         assert_eq!(engine.context_percent, Some(42.0));
         assert!(!engine.dirty);
 
-        // Same value again -> no dirty.
         engine.last_write = Instant::now() - MIN_WRITE_INTERVAL;
         engine.push_line("42% context used".to_string());
         engine.infer_and_write();
         assert!(!engine.dirty);
 
-        // Different value -> dirty set and flushed.
         engine.last_write = Instant::now() - MIN_WRITE_INTERVAL;
         engine.push_line("58% context remaining".to_string());
         engine.infer_and_write();
@@ -2052,15 +1199,11 @@ mod tests {
     fn throttled_status_change_flushed_on_next_call() {
         let mut engine = make_engine(Some(AgentType::Claude));
 
-        // Set last_write to now to simulate a recent write (don't rely on
-        // write_state_file() succeeding -- it touches the filesystem).
         engine.last_write = Instant::now();
         let initial_write_time = engine.last_write;
 
-        // Now simulate a status change while throttled (last_write is very recent).
-        engine.push_line("⠋ Processing...".to_string());
+        engine.push_line("\u{280b} Processing...".to_string());
         engine.infer_and_write();
-        // Status changed to Thinking (spinner detected), dirty was set, but throttle blocked the write.
         assert_eq!(engine.last_status, InferredStatus::Thinking);
         assert!(engine.dirty, "dirty flag should persist when throttled");
         assert_eq!(
@@ -2068,10 +1211,8 @@ mod tests {
             "last_write unchanged -- write was throttled"
         );
 
-        // Fast-forward past the throttle window.
         engine.last_write = Instant::now() - MIN_WRITE_INTERVAL - Duration::from_millis(1);
 
-        // Next infer_and_write call should flush the pending dirty state.
         engine.infer_and_write();
         assert!(
             !engine.dirty,
@@ -2087,16 +1228,12 @@ mod tests {
     fn no_changes_no_write() {
         let mut engine = make_engine(Some(AgentType::Claude));
 
-        // Record last_write after construction.
         let initial_write_time = engine.last_write;
 
-        // Feed innocuous output that doesn't change any exported fields.
         engine.feed_bytes(b"some random text\n");
 
-        // Status stays Idle (the default), no model/agent/context detected.
         assert_eq!(engine.last_status, InferredStatus::Idle);
         assert!(!engine.dirty);
-        // last_write should not have advanced (no write happened).
         assert_eq!(engine.last_write, initial_write_time);
     }
 
@@ -2114,7 +1251,6 @@ mod tests {
         let t0 = Instant::now();
         engine.feed_bytes_at(b"ab", t0);
         engine.feed_bytes_at(b"cd", t0 + Duration::from_millis(100));
-        // Only 2 chunks -- below minimum.
         assert_eq!(engine.classify_output_cadence(), OutputCadence::Unknown);
     }
 
@@ -2123,16 +1259,14 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Simulate human typing: 1-3 chars per chunk, 50-200ms apart,
-        // with occasional backspaces.
         engine.feed_bytes_at(b"h", t0);
         engine.feed_bytes_at(b"el", t0 + Duration::from_millis(80));
         engine.feed_bytes_at(b"l", t0 + Duration::from_millis(150));
-        engine.feed_bytes_at(b"\x08", t0 + Duration::from_millis(300)); // backspace
+        engine.feed_bytes_at(b"\x08", t0 + Duration::from_millis(300));
         engine.feed_bytes_at(b"lo", t0 + Duration::from_millis(420));
         engine.feed_bytes_at(b" w", t0 + Duration::from_millis(550));
         engine.feed_bytes_at(b"or", t0 + Duration::from_millis(700));
-        engine.feed_bytes_at(b"\x08", t0 + Duration::from_millis(800)); // backspace
+        engine.feed_bytes_at(b"\x08", t0 + Duration::from_millis(800));
         engine.feed_bytes_at(b"rl", t0 + Duration::from_millis(950));
         engine.feed_bytes_at(b"d", t0 + Duration::from_millis(1100));
 
@@ -2144,7 +1278,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Careful typer: small chunks, human speed, no backspaces.
         for i in 0..10 {
             engine.feed_bytes_at(b"ab", t0 + Duration::from_millis(i * 120));
         }
@@ -2161,8 +1294,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Realistic agent scenario: 20 chunks of ~95 visible chars each,
-        // arriving every ~150ms over ~2.85 seconds. No backspaces.
         let chunk = b"This is a line of agent output that is about one hundred characters long roughly speaking yes.\n";
         for i in 0..20 {
             engine.feed_bytes_at(chunk, t0 + Duration::from_millis(i * 150));
@@ -2180,7 +1311,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Simulate burst: 3 very large chunks in quick succession.
         let big_chunk: Vec<u8> = b"x".repeat(2000);
         engine.feed_bytes_at(&big_chunk, t0);
         engine.feed_bytes_at(&big_chunk, t0 + Duration::from_millis(5));
@@ -2198,7 +1328,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Large visible output over a short window (< 2s).
         let chunk: Vec<u8> = b"x".repeat(200);
         for i in 0..5 {
             engine.feed_bytes_at(&chunk, t0 + Duration::from_millis(i * 50));
@@ -2216,7 +1345,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Phase 1: Human typing.
         for i in 0..10 {
             let b: &[u8] = if i % 4 == 3 { b"\x08" } else { b"ab" };
             engine.feed_bytes_at(b, t0 + Duration::from_millis(i * 100));
@@ -2227,8 +1355,6 @@ mod tests {
             "Phase 1 should be Human"
         );
 
-        // Phase 2: Transition to agent -- flood with large chunks.
-        // Clear the window to simulate time passing and agent taking over.
         engine.chunk_stats.clear();
         let t1 = t0 + Duration::from_secs(5);
         let agent_chunk = b"Agent is writing a long response with many characters per chunk and this continues on.\n";
@@ -2241,7 +1367,6 @@ mod tests {
             "Phase 2 should be Agent"
         );
 
-        // Phase 3: Back to human typing.
         engine.chunk_stats.clear();
         let t2 = t1 + Duration::from_secs(10);
         for i in 0..10 {
@@ -2257,7 +1382,6 @@ mod tests {
 
     #[test]
     fn cadence_burst_vs_agent() {
-        // Burst: large output but only a few chunks (< sustained duration).
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
         let big = b"x".repeat(5000);
@@ -2271,7 +1395,6 @@ mod tests {
             "Large output over 6ms should be Burst"
         );
 
-        // Agent: same size chunks but sustained over > 2 seconds.
         engine.chunk_stats.clear();
         let chunk = b"x".repeat(200);
         for i in 0..20 {
@@ -2291,9 +1414,7 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Simpler: chunks with CSI cursor movement and small visible text.
         for i in 0..10 {
-            // ESC[H = cursor home (H is cursor control), then a single visible char.
             let mut raw = b"\x1b[H".to_vec();
             raw.push(b"-/|\\"[i as usize % 4]);
             engine.feed_bytes_at(&raw, t0 + Duration::from_millis(i * 80));
@@ -2310,7 +1431,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         let t0 = Instant::now();
 
-        // Normal output: no cursor control, lots of visible text.
         for i in 0..10 {
             let line = format!("This is line {} of normal output\n", i);
             engine.feed_bytes_at(line.as_bytes(), t0 + Duration::from_millis(i * 50));
@@ -2361,7 +1481,6 @@ mod tests {
     #[test]
     fn chunk_stats_cursor_control_detected() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // CSI A = cursor up.
         engine.feed_bytes(b"\x1b[Ahello\n");
         assert!(engine.chunk_stats[0].has_cursor_control);
     }
@@ -2369,7 +1488,6 @@ mod tests {
     #[test]
     fn chunk_stats_no_cursor_control_for_sgr() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // CSI 31m = set color (SGR), not cursor control.
         engine.feed_bytes(b"\x1b[31mred\x1b[0m\n");
         assert!(!engine.chunk_stats[0].has_cursor_control);
     }
@@ -2386,7 +1504,6 @@ mod tests {
     #[test]
     fn chunk_stats_visible_chars_count() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // "hello" = 5 visible chars, \n is control, ANSI codes stripped.
         engine.feed_bytes(b"\x1b[31mhello\x1b[0m\n");
         assert_eq!(engine.chunk_stats[0].visible_chars, 5);
     }
@@ -2397,8 +1514,6 @@ mod tests {
     fn streaming_cadence_high_throughput() {
         let mut engine = make_engine(Some(AgentType::Claude));
         let base = Instant::now();
-        // Simulate sustained high-throughput output: 600 visible chars over
-        // chunks spanning 3 seconds with no backspaces.
         for i in 0..10 {
             let chunk = "a".repeat(200);
             let ts = base + Duration::from_millis(300 * i);
@@ -2416,7 +1531,7 @@ mod tests {
         let base = Instant::now();
         for i in 0..10 {
             let mut chunk = "a".repeat(200);
-            chunk.push('\x08'); // backspace
+            chunk.push('\x08');
             let ts = base + Duration::from_millis(300 * i);
             engine.feed_bytes_at(chunk.as_bytes(), ts);
         }
@@ -2430,7 +1545,6 @@ mod tests {
     fn streaming_not_detected_low_throughput() {
         let mut engine = make_engine(Some(AgentType::Claude));
         let base = Instant::now();
-        // Small chunks spread over a long time: well under 500 chars/sec.
         for i in 0..5 {
             let ts = base + Duration::from_millis(1000 * i);
             engine.feed_bytes_at(b"hi\n", ts);
@@ -2445,7 +1559,6 @@ mod tests {
     fn streaming_not_detected_short_window() {
         let mut engine = make_engine(Some(AgentType::Claude));
         let base = Instant::now();
-        // High throughput but too short to be sustained.
         for i in 0..3 {
             let chunk = "a".repeat(500);
             let ts = base + Duration::from_millis(100 * i);
@@ -2462,7 +1575,6 @@ mod tests {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.last_command_state = Some(CommandState::Executing);
         let base = Instant::now();
-        // Sustained high-throughput output without spinner patterns.
         for i in 0..10 {
             let chunk = "x".repeat(200);
             let ts = base + Duration::from_millis(300 * i);
@@ -2479,7 +1591,6 @@ mod tests {
     #[test]
     fn infer_streaming_from_output_fallback() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // No command state -- falls through to infer_from_output_or.
         let base = Instant::now();
         for i in 0..10 {
             let chunk = "y".repeat(200);
@@ -2500,7 +1611,7 @@ mod tests {
     fn infer_thinking_during_execution_spinner() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.last_command_state = Some(CommandState::Executing);
-        engine.push_line("⠙ Working on it...".to_string());
+        engine.push_line("\u{2819} Working on it...".to_string());
         let status = engine.infer_status();
         assert_eq!(
             status,
@@ -2512,7 +1623,6 @@ mod tests {
     #[test]
     fn infer_thinking_from_output_fallback() {
         let mut engine = make_engine(Some(AgentType::Claude));
-        // No command state.
         engine.push_line("Thinking...".to_string());
         let status = engine.infer_status();
         assert_eq!(
@@ -2526,9 +1636,8 @@ mod tests {
     fn thinking_does_not_override_tool_use() {
         let mut engine = make_engine(Some(AgentType::Claude));
         engine.last_command_state = Some(CommandState::Executing);
-        // Tool call pattern takes priority over spinner.
         engine.push_line("Read(/home/user/file.rs)".to_string());
-        engine.push_line("⠋ reading...".to_string());
+        engine.push_line("\u{280b} reading...".to_string());
         let status = engine.infer_status();
         assert_eq!(
             status,
@@ -2537,17 +1646,5 @@ mod tests {
             },
             "Tool use should take priority over thinking"
         );
-    }
-
-    // -- Status string coverage ------------------------------------------------
-
-    #[test]
-    fn status_str_streaming() {
-        assert_eq!(InferredStatus::Streaming.status_str(), "streaming");
-    }
-
-    #[test]
-    fn status_str_thinking() {
-        assert_eq!(InferredStatus::Thinking.status_str(), "thinking");
     }
 }
