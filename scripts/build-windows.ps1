@@ -18,6 +18,18 @@ if (-not (Test-Path (Join-Path $repoRoot "Cargo.toml"))) {
     throw "Repo root does not contain Cargo.toml: $repoRoot"
 }
 
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw @"
+Windows cargo was not found on PATH.
+
+This script performs a native Windows build, so it needs a Windows Rust toolchain.
+Your WSL cargo installation is not visible to Windows PowerShell.
+
+Install Rust on Windows, reopen PowerShell, and try again:
+  winget install --id Rustlang.Rustup -e
+"@
+}
+
 Set-Location $repoRoot
 
 $profile = if ($Debug) { "debug" } else { "release" }
