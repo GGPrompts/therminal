@@ -1,216 +1,14 @@
-//! Pane layout tree and per-pane terminal state.
+//! Binary layout tree for pane splits.
 //!
-//! Implements a binary tree of splits where each leaf is a terminal pane
-//! with its own PTY, Term, and VTE parser. Supports horizontal/vertical
-//! splits, focus navigation, ratio-based resize, and pane close with
-//! tree rebalancing.
+//! `LayoutNode` is a recursive enum: each node is either a `Leaf` (terminal pane),
+//! a `Split` (two children with a direction and ratio), or `Empty` (transient placeholder).
 
-use std::io::{Read as IoRead, Write as IoWrite};
-use std::sync::{Arc, Mutex};
-use std::thread;
-
-use alacritty_terminal::event::{Event as TermEvent, EventListener};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config as TermConfig, Term};
-use alacritty_terminal::vte::ansi;
-use portable_pty::MasterPty;
 use therminal_core::geometry::Rect;
-use tracing::{info, warn};
 
+use super::geometry::{effective_header_height, MIN_PANE_HEIGHT, MIN_PANE_WIDTH, SEPARATOR_GAP};
+use super::state::PaneState;
+use super::SplitDirection;
 use crate::grid_renderer::GridRenderer;
-
-// ── Re-export canonical PaneId from protocol ────────────────────────────
-
-pub use therminal_protocol::PaneId;
-
-/// Direction of a split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitDirection {
-    /// Side-by-side (left | right).
-    Horizontal,
-    /// Stacked (top / bottom).
-    Vertical,
-}
-
-/// Separator gap between panes in physical pixels.
-pub const SEPARATOR_GAP: f32 = 2.0;
-
-/// Height of the pane header strip in physical pixels (when multiple panes exist).
-pub const PANE_HEADER_HEIGHT: f32 = 20.0;
-
-/// Return the effective header height: 0 when single pane, PANE_HEADER_HEIGHT otherwise.
-pub fn effective_header_height(pane_count: usize) -> f32 {
-    if pane_count <= 1 {
-        0.0
-    } else {
-        PANE_HEADER_HEIGHT
-    }
-}
-
-/// Height of the window status bar in physical pixels.
-pub const STATUS_BAR_HEIGHT: f32 = 24.0;
-
-/// Height of the workspace tab bar in physical pixels.
-pub const TAB_BAR_HEIGHT: f32 = 24.0;
-
-/// Return the effective status bar height: 0 when disabled, STATUS_BAR_HEIGHT otherwise.
-pub fn effective_status_bar_height(show: bool) -> f32 {
-    if show {
-        STATUS_BAR_HEIGHT
-    } else {
-        0.0
-    }
-}
-
-/// Return the effective tab bar height: 0 when disabled, TAB_BAR_HEIGHT otherwise.
-pub fn effective_tab_bar_height(show: bool) -> f32 {
-    if show {
-        TAB_BAR_HEIGHT
-    } else {
-        0.0
-    }
-}
-
-/// Compute the content area rect (window area minus status bar and tab bar).
-pub fn content_area_rect(
-    width: f32,
-    height: f32,
-    show_status_bar: bool,
-    show_tab_bar: bool,
-) -> therminal_core::geometry::Rect {
-    let status_bar_h = effective_status_bar_height(show_status_bar);
-    let tab_bar_h = effective_tab_bar_height(show_tab_bar);
-    therminal_core::geometry::Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
-}
-
-/// Minimum pane width in physical pixels.
-pub const MIN_PANE_WIDTH: f32 = 80.0;
-
-/// Minimum pane height in physical pixels.
-pub const MIN_PANE_HEIGHT: f32 = 60.0;
-
-// ── EventListener for per-pane Term ─────────────────────────────────────
-
-/// Minimal listener forwarded from each pane's Term.
-#[derive(Clone)]
-pub(crate) struct PaneListener;
-
-impl EventListener for PaneListener {
-    fn send_event(&self, event: TermEvent) {
-        match event {
-            TermEvent::Title(title) => tracing::debug!("Pane title: {title}"),
-            TermEvent::Wakeup => {}
-            _ => tracing::debug!("Pane event: {event:?}"),
-        }
-    }
-}
-
-// ── Dimensions adapter ──────────────────────────────────────────────────
-
-struct PaneTermSize {
-    columns: usize,
-    screen_lines: usize,
-}
-
-impl Dimensions for PaneTermSize {
-    fn total_lines(&self) -> usize {
-        self.screen_lines
-    }
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-    fn columns(&self) -> usize {
-        self.columns
-    }
-}
-
-// ── Shared pane status (updated by PTY reader, read by render loop) ────
-
-/// Shared status data for a pane, updated by the PTY reader thread and
-/// read (cheaply) by the render loop to populate the status bar.
-#[derive(Debug, Default, Clone)]
-pub struct PaneStatus {
-    /// Current working directory (from OSC 7).
-    pub cwd: Option<String>,
-    /// Exit code of the last finished command (from OSC 633 D mark).
-    pub last_exit_code: Option<i32>,
-    /// Name of a detected AI agent (from ProcessDetector).
-    pub agent_name: Option<String>,
-}
-
-// ── Per-pane state ──────────────────────────────────────────────────────
-
-/// State for a single terminal pane.
-pub struct PaneState {
-    pub id: PaneId,
-    pub term: Arc<FairMutex<Term<PaneListener>>>,
-    pub pty_writer: Box<dyn IoWrite + Send>,
-    pub pty_master: Box<dyn MasterPty + Send>,
-    /// Current viewport rect in physical pixels (set by layout computation).
-    pub viewport: Rect,
-    /// Scrollback configuration.
-    #[allow(dead_code)]
-    pub scrollback_lines: usize,
-    /// Shared status updated by the PTY reader thread.
-    pub status: Arc<Mutex<PaneStatus>>,
-}
-
-impl PaneState {
-    /// Resize this pane's terminal and PTY to match a new viewport rect.
-    #[allow(dead_code)]
-    pub fn resize_to_viewport(&mut self, rect: Rect, renderer: &GridRenderer) {
-        self.resize_to_viewport_with_header(rect, renderer, PANE_HEADER_HEIGHT);
-    }
-
-    /// Resize with an explicit header height (0 for single pane).
-    pub fn resize_to_viewport_with_header(
-        &mut self,
-        rect: Rect,
-        renderer: &GridRenderer,
-        header_h: f32,
-    ) {
-        self.viewport = rect;
-        let (cols, rows) = grid_size_for_rect_with_header(rect, renderer, header_h);
-        if cols == 0 || rows == 0 {
-            return;
-        }
-        {
-            let mut term_guard = self.term.lock();
-            let size = PaneTermSize {
-                columns: cols,
-                screen_lines: rows,
-            };
-            term_guard.resize(size);
-        }
-        if let Err(e) =
-            therminal_terminal::pty::resize(self.pty_master.as_ref(), cols as u16, rows as u16)
-        {
-            warn!("Failed to resize pane {} PTY: {e}", self.id);
-        }
-    }
-}
-
-/// Compute (cols, rows) for a viewport rect using the renderer's cell metrics.
-/// `header_h` is the effective header height (0 for single pane, PANE_HEADER_HEIGHT for multi).
-pub fn grid_size_for_rect(rect: Rect, renderer: &GridRenderer) -> (usize, usize) {
-    grid_size_for_rect_with_header(rect, renderer, PANE_HEADER_HEIGHT)
-}
-
-/// Like `grid_size_for_rect` but with an explicit header height.
-pub fn grid_size_for_rect_with_header(
-    rect: Rect,
-    renderer: &GridRenderer,
-    header_h: f32,
-) -> (usize, usize) {
-    let usable_w = rect.width() - renderer.padding_x() * 2.0;
-    let usable_h = rect.height() - renderer.padding_y() * 2.0 - header_h;
-    let cols = (usable_w / renderer.cell_width).floor().max(2.0) as usize;
-    let rows = (usable_h / renderer.cell_height).floor().max(1.0) as usize;
-    (cols, rows)
-}
-
-// ── Layout tree ─────────────────────────────────────────────────────────
 
 /// A node in the binary layout tree.
 pub enum LayoutNode {
@@ -277,13 +75,13 @@ impl LayoutNode {
     }
 
     /// Collect all pane IDs in order (left-to-right / top-to-bottom).
-    pub fn pane_ids(&self) -> Vec<PaneId> {
+    pub fn pane_ids(&self) -> Vec<super::PaneId> {
         let mut ids = Vec::new();
         self.collect_ids(&mut ids);
         ids
     }
 
-    fn collect_ids(&self, ids: &mut Vec<PaneId>) {
+    fn collect_ids(&self, ids: &mut Vec<super::PaneId>) {
         match self {
             LayoutNode::Leaf(pane) => ids.push(pane.id),
             LayoutNode::Split { first, second, .. } => {
@@ -295,7 +93,7 @@ impl LayoutNode {
     }
 
     /// Find a pane by ID.
-    pub fn find_pane(&self, id: PaneId) -> Option<&PaneState> {
+    pub fn find_pane(&self, id: super::PaneId) -> Option<&PaneState> {
         match self {
             LayoutNode::Leaf(pane) if pane.id == id => Some(pane),
             LayoutNode::Leaf(_) => None,
@@ -307,7 +105,7 @@ impl LayoutNode {
     }
 
     /// Find a mutable pane by ID.
-    pub fn find_pane_mut(&mut self, id: PaneId) -> Option<&mut PaneState> {
+    pub fn find_pane_mut(&mut self, id: super::PaneId) -> Option<&mut PaneState> {
         match self {
             LayoutNode::Leaf(pane) if pane.id == id => Some(pane),
             LayoutNode::Leaf(_) => None,
@@ -323,10 +121,10 @@ impl LayoutNode {
     /// The `spawn_fn` is called to create the new pane's state.
     pub fn split_pane<F>(
         &mut self,
-        target_id: PaneId,
+        target_id: super::PaneId,
         direction: SplitDirection,
         spawn_fn: F,
-    ) -> Option<PaneId>
+    ) -> Option<super::PaneId>
     where
         F: FnOnce(Rect) -> Option<PaneState>,
     {
@@ -336,10 +134,10 @@ impl LayoutNode {
 
     fn split_pane_impl<F>(
         &mut self,
-        target_id: PaneId,
+        target_id: super::PaneId,
         direction: SplitDirection,
         spawn_fn: &mut Option<F>,
-    ) -> Option<PaneId>
+    ) -> Option<super::PaneId>
     where
         F: FnOnce(Rect) -> Option<PaneState>,
     {
@@ -349,7 +147,7 @@ impl LayoutNode {
 
                 // Refuse to split if result would be below minimum pane size.
                 if !LayoutNode::can_split(rect, direction) {
-                    warn!(
+                    tracing::warn!(
                         "Cannot split pane {}: result would be below minimum size",
                         target_id
                     );
@@ -414,7 +212,7 @@ impl LayoutNode {
     /// After removal the sibling takes the parent's position and the tree
     /// is rebalanced so remaining panes share space proportionally.
     /// Returns None if the pane is the only one (root leaf).
-    pub fn remove_pane(&mut self, target_id: PaneId) -> Option<bool> {
+    pub fn remove_pane(&mut self, target_id: super::PaneId) -> Option<bool> {
         match self {
             LayoutNode::Leaf(pane) if pane.id == target_id => {
                 // This is the root leaf -- caller should handle window close.
@@ -470,7 +268,11 @@ impl LayoutNode {
     }
 
     /// Find the next pane ID in the given direction relative to the focused pane.
-    pub fn adjacent_pane(&self, focused_id: PaneId, direction: FocusDirection) -> Option<PaneId> {
+    pub fn adjacent_pane(
+        &self,
+        focused_id: super::PaneId,
+        direction: FocusDirection,
+    ) -> Option<super::PaneId> {
         let ids = self.pane_ids();
         let idx = ids.iter().position(|&id| id == focused_id)?;
         match direction {
@@ -487,9 +289,9 @@ impl LayoutNode {
 
     /// Swap the positions of two panes in the tree by exchanging their `PaneState` contents.
     /// Returns `true` if both panes were found and swapped.
-    pub fn swap_pane(&mut self, a: PaneId, b: PaneId) -> bool {
+    pub fn swap_pane(&mut self, a: super::PaneId, b: super::PaneId) -> bool {
         // Collect mutable pointers to the two leaf PaneStates.
-        fn find_leaf(node: &mut LayoutNode, id: PaneId) -> Option<*mut PaneState> {
+        fn find_leaf(node: &mut LayoutNode, id: super::PaneId) -> Option<*mut PaneState> {
             match node {
                 LayoutNode::Leaf(ps) if ps.id == id => Some(ps as *mut PaneState),
                 LayoutNode::Split { first, second, .. } => {
@@ -521,7 +323,7 @@ impl LayoutNode {
     }
 
     /// Adjust the split ratio for the split containing the focused pane.
-    pub fn adjust_ratio(&mut self, focused_id: PaneId, delta: f32) -> bool {
+    pub fn adjust_ratio(&mut self, focused_id: super::PaneId, delta: f32) -> bool {
         match self {
             LayoutNode::Leaf(_) => false,
             LayoutNode::Split {
@@ -842,496 +644,22 @@ impl LayoutNode {
     }
 }
 
-// ── Workspace manager ──────────────────────────────────────────────────
-
-/// A workspace holds an independent pane layout with its own focused pane.
-pub struct Workspace {
-    /// Workspace number (1-9).
-    pub id: usize,
-    /// Root of this workspace's layout tree.
-    pub layout: LayoutNode,
-    /// Currently focused pane within this workspace.
-    pub focused_pane: Option<PaneId>,
-}
-
-/// Manages multiple workspaces, each with an independent pane layout.
-/// Supports up to 9 workspaces (1-9), Hyprland-style.
-pub struct WorkspaceManager {
-    /// All workspaces, indexed by workspace number (1-based).
-    workspaces: Vec<Workspace>,
-    /// Index into `workspaces` for the currently active workspace.
-    active_idx: usize,
-}
-
-impl WorkspaceManager {
-    /// Create a new manager with workspace 1 containing the given layout.
-    pub fn new(layout: LayoutNode, focused_pane: Option<PaneId>) -> Self {
-        let ws = Workspace {
-            id: 1,
-            layout,
-            focused_pane,
-        };
-        Self {
-            workspaces: vec![ws],
-            active_idx: 0,
-        }
-    }
-
-    /// The active workspace number (1-9).
-    pub fn active_id(&self) -> usize {
-        self.workspaces[self.active_idx].id
-    }
-
-    /// Get a reference to the active workspace's layout.
-    pub fn layout(&self) -> &LayoutNode {
-        &self.workspaces[self.active_idx].layout
-    }
-
-    /// Get a mutable reference to the active workspace's layout.
-    pub fn layout_mut(&mut self) -> &mut LayoutNode {
-        &mut self.workspaces[self.active_idx].layout
-    }
-
-    /// Get the focused pane of the active workspace.
-    pub fn focused_pane(&self) -> Option<PaneId> {
-        self.workspaces[self.active_idx].focused_pane
-    }
-
-    /// Set the focused pane of the active workspace.
-    pub fn set_focused_pane(&mut self, pane_id: Option<PaneId>) {
-        self.workspaces[self.active_idx].focused_pane = pane_id;
-    }
-
-    /// Take the active workspace's layout (replaces it with Empty).
-    pub fn take_layout(&mut self) -> LayoutNode {
-        std::mem::replace(
-            &mut self.workspaces[self.active_idx].layout,
-            LayoutNode::Empty,
-        )
-    }
-
-    /// Set the active workspace's layout.
-    pub fn set_layout(&mut self, layout: LayoutNode) {
-        self.workspaces[self.active_idx].layout = layout;
-    }
-
-    /// Check if workspace `n` exists.
-    fn workspace_index(&self, n: usize) -> Option<usize> {
-        self.workspaces.iter().position(|ws| ws.id == n)
-    }
-
-    /// Switch to workspace `n` (1-9). Returns true if the workspace changed.
-    /// `create_pane` is called if the workspace doesn't exist yet and needs a
-    /// default pane.
-    pub fn switch_to<F>(&mut self, n: usize, create_pane: F) -> bool
-    where
-        F: FnOnce() -> Option<(LayoutNode, PaneId)>,
-    {
-        if !(1..=9).contains(&n) {
-            return false;
-        }
-        if self.workspaces[self.active_idx].id == n {
-            return false; // already on this workspace
-        }
-
-        let target_idx = match self.workspace_index(n) {
-            Some(idx) => idx,
-            None => {
-                // Create new workspace with a default pane.
-                if let Some((layout, pane_id)) = create_pane() {
-                    let ws = Workspace {
-                        id: n,
-                        layout,
-                        focused_pane: Some(pane_id),
-                    };
-                    self.workspaces.push(ws);
-                    self.workspaces.len() - 1
-                } else {
-                    return false;
-                }
-            }
-        };
-
-        self.active_idx = target_idx;
-        true
-    }
-
-    /// Remove a pane from the active workspace's layout tree and return it.
-    /// Returns the extracted `PaneState` if found, or None.
-    fn extract_pane(&mut self, pane_id: PaneId) -> Option<PaneState> {
-        let layout = &mut self.workspaces[self.active_idx].layout;
-
-        // If this is the root leaf and it's the target, extract it.
-        if matches!(layout, LayoutNode::Leaf(p) if p.id == pane_id) {
-            let old = std::mem::replace(layout, LayoutNode::Empty);
-            if let LayoutNode::Leaf(pane) = old {
-                return Some(pane);
-            }
-        }
-
-        // Otherwise use remove_pane logic but we need the actual PaneState.
-        // We'll do a custom extraction.
-        Self::extract_from_tree(layout, pane_id)
-    }
-
-    /// Recursively extract a pane from a layout tree, promoting the sibling.
-    fn extract_from_tree(node: &mut LayoutNode, target_id: PaneId) -> Option<PaneState> {
-        match node {
-            LayoutNode::Leaf(_) => None,
-            LayoutNode::Split { first, second, .. } => {
-                // Check if target is a direct child.
-                let first_is_target =
-                    matches!(first.as_ref(), LayoutNode::Leaf(p) if p.id == target_id);
-                let second_is_target =
-                    matches!(second.as_ref(), LayoutNode::Leaf(p) if p.id == target_id);
-
-                if first_is_target {
-                    let extracted = std::mem::replace(first.as_mut(), LayoutNode::Empty);
-                    let sibling = std::mem::replace(second.as_mut(), LayoutNode::Empty);
-                    *node = sibling;
-                    node.rebalance();
-                    if let LayoutNode::Leaf(pane) = extracted {
-                        return Some(pane);
-                    }
-                    return None;
-                }
-
-                if second_is_target {
-                    let extracted = std::mem::replace(second.as_mut(), LayoutNode::Empty);
-                    let sibling = std::mem::replace(first.as_mut(), LayoutNode::Empty);
-                    *node = sibling;
-                    node.rebalance();
-                    if let LayoutNode::Leaf(pane) = extracted {
-                        return Some(pane);
-                    }
-                    return None;
-                }
-
-                // Recurse into children.
-                if let Some(pane) = Self::extract_from_tree(first, target_id) {
-                    // Rebalance after extraction.
-                    let first_leaves = first.leaf_count() as f32;
-                    let total_leaves = first_leaves + second.leaf_count() as f32;
-                    if let LayoutNode::Split { ratio, .. } = node {
-                        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
-                    }
-                    return Some(pane);
-                }
-                if let Some(pane) = Self::extract_from_tree(second, target_id) {
-                    let first_leaves = first.leaf_count() as f32;
-                    let total_leaves = first_leaves + second.leaf_count() as f32;
-                    if let LayoutNode::Split { ratio, .. } = node {
-                        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
-                    }
-                    return Some(pane);
-                }
-
-                None
-            }
-            LayoutNode::Empty => None,
-        }
-    }
-
-    /// Send a pane from the active workspace to workspace `n`.
-    /// `create_default_pane` is called if the source workspace becomes empty
-    /// and needs a replacement pane.
-    /// Returns true if the pane was moved.
-    pub fn send_pane_to<F>(
-        &mut self,
-        pane_id: PaneId,
-        target_n: usize,
-        create_default_pane: F,
-    ) -> bool
-    where
-        F: FnOnce() -> Option<(LayoutNode, PaneId)>,
-    {
-        if !(1..=9).contains(&target_n) {
-            return false;
-        }
-        let current_id = self.workspaces[self.active_idx].id;
-        if current_id == target_n {
-            return false; // already on target workspace
-        }
-
-        // Extract the pane from the active workspace.
-        let pane = match self.extract_pane(pane_id) {
-            Some(p) => p,
-            None => return false,
-        };
-
-        // If the active workspace layout became Empty, create a default pane.
-        let active_layout_empty =
-            matches!(self.workspaces[self.active_idx].layout, LayoutNode::Empty);
-        if active_layout_empty {
-            if let Some((layout, new_id)) = create_default_pane() {
-                self.workspaces[self.active_idx].layout = layout;
-                self.workspaces[self.active_idx].focused_pane = Some(new_id);
-            }
-        } else {
-            // If we removed the focused pane, pick a new one.
-            if self.workspaces[self.active_idx].focused_pane == Some(pane_id) {
-                let ids = self.workspaces[self.active_idx].layout.pane_ids();
-                self.workspaces[self.active_idx].focused_pane = ids.first().copied();
-            }
-        }
-
-        // Insert into target workspace.
-        let target_idx = match self.workspace_index(target_n) {
-            Some(idx) => idx,
-            None => {
-                // Create new workspace with the moved pane as the only pane.
-                let ws = Workspace {
-                    id: target_n,
-                    layout: LayoutNode::Leaf(pane),
-                    focused_pane: Some(pane_id),
-                };
-                self.workspaces.push(ws);
-                return true;
-            }
-        };
-
-        // Add pane to existing target workspace by creating a split.
-        let target_layout = &mut self.workspaces[target_idx].layout;
-        let old_layout = std::mem::replace(target_layout, LayoutNode::Empty);
-        *target_layout = LayoutNode::Split {
-            direction: SplitDirection::Horizontal,
-            ratio: 0.5,
-            first: Box::new(old_layout),
-            second: Box::new(LayoutNode::Leaf(pane)),
-        };
-        target_layout.rebalance();
-
-        true
-    }
-
-    /// Return all workspace IDs that currently exist, sorted.
-    pub fn workspace_ids(&self) -> Vec<usize> {
-        let mut ids: Vec<usize> = self.workspaces.iter().map(|ws| ws.id).collect();
-        ids.sort();
-        ids
-    }
-
-    /// Returns true if the manager has no workspaces (shouldn't normally happen).
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.workspaces.is_empty()
-    }
-
-    /// Remove the active workspace if its layout is Empty and there are other
-    /// workspaces. Switches to the first available workspace. Returns true if removed.
-    #[allow(dead_code)]
-    pub fn remove_empty_active(&mut self) -> bool {
-        if self.workspaces.len() <= 1 {
-            return false;
-        }
-        if !matches!(self.workspaces[self.active_idx].layout, LayoutNode::Empty) {
-            return false;
-        }
-        self.workspaces.remove(self.active_idx);
-        if self.active_idx >= self.workspaces.len() {
-            self.active_idx = 0;
-        }
-        true
-    }
-}
-
-// ── Pane spawning ───────────────────────────────────────────────────────
-
-/// Counter for generating unique pane IDs.
-static NEXT_PANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-pub fn next_pane_id() -> PaneId {
-    NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Callbacks for pane lifecycle events.
-pub struct PaneCallbacks {
-    /// Called repeatedly when new PTY data arrives (wake the event loop).
-    pub wake: Box<dyn Fn() + Send + 'static>,
-    /// Called once when the PTY closes (shell exited).
-    pub on_exit: Box<dyn FnOnce() + Send + 'static>,
-}
-
-/// Spawn a new pane with its own PTY, Term, and reader thread.
-///
-/// `callback_fn` is called with the pane_id to create wake and exit callbacks.
-///
-/// `interceptor_config` controls which OSC sequence families are intercepted.
-/// `scan_interval_secs` sets the process-detector scan interval (0 = disabled).
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_pane<F>(
-    viewport: Rect,
-    renderer: &GridRenderer,
-    scrollback_lines: usize,
-    interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
-    scan_interval_secs: u64,
-    spawn_options: &therminal_terminal::pty::SpawnOptions,
-    callback_fn: F,
-) -> Result<PaneState, anyhow::Error>
-where
-    F: FnOnce(PaneId) -> PaneCallbacks,
-{
-    let id = next_pane_id();
-    let (cols, rows) = grid_size_for_rect(viewport, renderer);
-    let cols = cols.max(2);
-    let rows = rows.max(1);
-
-    let term_config = TermConfig {
-        scrolling_history: scrollback_lines,
-        ..Default::default()
-    };
-    let term_size = PaneTermSize {
-        columns: cols,
-        screen_lines: rows,
-    };
-    let term = Term::new(term_config, &term_size, PaneListener);
-    let term = Arc::new(FairMutex::new(term));
-
-    let (pty_master, _child) =
-        therminal_terminal::pty::spawn_shell_with_options(cols as u16, rows as u16, spawn_options)
-            .map_err(|e| anyhow::anyhow!("failed to spawn shell for pane: {e}"))?;
-
-    let pty_reader = pty_master
-        .try_clone_reader()
-        .map_err(|e| anyhow::anyhow!("failed to clone PTY reader for pane: {e}"))?;
-    let pty_writer = pty_master
-        .take_writer()
-        .map_err(|e| anyhow::anyhow!("failed to get PTY writer for pane: {e}"))?;
-
-    // Shared status for status bar rendering.
-    let status = Arc::new(Mutex::new(PaneStatus::default()));
-    let status_for_reader = Arc::clone(&status);
-
-    // Spawn PTY reader thread for this pane.
-    let term_for_reader = Arc::clone(&term);
-    let callbacks = callback_fn(id);
-    let wake = callbacks.wake;
-    let on_exit = callbacks.on_exit;
-    thread::Builder::new()
-        .name(format!("pty-reader-{id}"))
-        .spawn(move || {
-            pane_pty_reader_loop(
-                pty_reader,
-                term_for_reader,
-                wake,
-                interceptor_config,
-                scan_interval_secs,
-                status_for_reader,
-            );
-            on_exit();
-        })
-        .map_err(|e| anyhow::anyhow!("failed to spawn pane PTY reader thread: {e}"))?;
-
-    info!(pane_id = id, cols, rows, "Pane spawned");
-
-    Ok(PaneState {
-        id,
-        term,
-        pty_writer,
-        pty_master,
-        viewport,
-        scrollback_lines,
-        status,
-    })
-}
-
-/// PTY reader loop for a single pane.
-fn pane_pty_reader_loop(
-    mut reader: Box<dyn IoRead + Send>,
-    term: Arc<FairMutex<Term<PaneListener>>>,
-    wake: Box<dyn Fn() + Send + 'static>,
-    interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
-    scan_interval_secs: u64,
-    status: Arc<Mutex<PaneStatus>>,
-) {
-    use std::time::Duration;
-
-    use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
-    use therminal_terminal::process_detector::ProcessDetector;
-
-    let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
-    let (mut interceptor, event_rx) = TherminalInterceptor::new(interceptor_config);
-
-    // Build process detector; 0 = disabled (interval set to 0 yields instant rescans,
-    // so we gate on the configured value before constructing).
-    let scan_interval = if scan_interval_secs == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(scan_interval_secs))
-    };
-    let mut process_detector =
-        scan_interval.map(|interval| ProcessDetector::new(None).with_interval(interval));
-
-    let mut buf = [0u8; 4096];
-
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                info!("Pane PTY closed (EOF)");
-                break;
-            }
-            Ok(n) => {
-                {
-                    let mut term_guard = term.lock();
-                    processor.advance_with_interceptor(
-                        &mut *term_guard,
-                        &mut interceptor,
-                        &buf[..n],
-                    );
-                }
-
-                // Drain intercepted events and update shared status.
-                while let Ok(event) = event_rx.try_recv() {
-                    match event {
-                        InterceptedEvent::CurrentDirectory(path) => {
-                            if let Ok(mut s) = status.lock() {
-                                s.cwd = Some(path);
-                            }
-                        }
-                        InterceptedEvent::Osc633(
-                            therminal_terminal::osc633::Osc633Mark::CommandFinished { exit_code },
-                        )
-                        | InterceptedEvent::Osc133(
-                            therminal_terminal::osc633::Osc633Mark::CommandFinished { exit_code },
-                        ) => {
-                            if let Ok(mut s) = status.lock() {
-                                s.last_exit_code = exit_code;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Run process-tree scan if enabled and interval has elapsed.
-                if let Some(ref mut detector) = process_detector {
-                    if let Some(agents) = detector.scan_if_due() {
-                        if let Ok(mut s) = status.lock() {
-                            s.agent_name = agents.first().map(|a| a.name.clone());
-                        }
-                        if !agents.is_empty() {
-                            tracing::debug!("detected agents: {:?}", agents);
-                        }
-                    }
-                }
-                wake();
-            }
-            Err(e) => {
-                warn!("Pane PTY read error: {e}");
-                break;
-            }
-        }
-    }
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use alacritty_terminal::sync::FairMutex;
+    use alacritty_terminal::term::{Config as TermConfig, Term};
     use therminal_core::geometry::Rect;
 
+    use super::*;
+    use crate::pane::state::PaneTermSize;
+    use crate::pane::PaneListener;
+
     /// Helper to create a minimal test leaf node (no real PTY).
-    fn test_leaf(id: PaneId, rect: Rect) -> LayoutNode {
+    fn test_leaf(id: super::super::PaneId, rect: Rect) -> LayoutNode {
         let term = Term::new(
             TermConfig::default(),
             &PaneTermSize {
@@ -1356,7 +684,7 @@ mod tests {
             pty_master: pair.master,
             viewport: rect,
             scrollback_lines: 1000,
-            status: Arc::new(Mutex::new(PaneStatus::default())),
+            status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
         })
     }
 
@@ -1398,7 +726,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(PaneStatus::default())),
+                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
             })
         });
 
@@ -1473,7 +801,7 @@ mod tests {
 
     /// Helper to build a leaf without a real PTY pair using sequential IDs.
     /// Returns (node, id).
-    fn make_leaf(id: PaneId) -> LayoutNode {
+    fn make_leaf(id: super::super::PaneId) -> LayoutNode {
         test_leaf(id, Rect::new(0.0, 0.0, 800.0, 600.0))
     }
 
@@ -1509,11 +837,6 @@ mod tests {
 
     #[test]
     fn deep_nesting_split_and_close_rebalances() {
-        // Build a right-leaning chain of 6 panes: each split adds a new leaf on
-        // the right, so pane IDs 1..=6 exist in order left-to-right.
-        //
-        // Tree after 6 panes:
-        //   Split(1, Split(2, Split(3, Split(4, Split(5, 6)))))
         let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
         let mut root = test_leaf(1, rect);
 
@@ -1541,9 +864,8 @@ mod tests {
                 pty_master: pair.master,
                 viewport: rect,
                 scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(PaneStatus::default())),
+                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
             };
-            // Find the rightmost leaf to split there.
             let rightmost_id = *root.pane_ids().last().unwrap();
             root.split_pane(rightmost_id, SplitDirection::Horizontal, |r| {
                 let _ = r;
@@ -1554,14 +876,12 @@ mod tests {
         assert_eq!(root.pane_count(), 6);
         assert_eq!(root.pane_ids(), vec![1, 2, 3, 4, 5, 6]);
 
-        // Close inner panes 3, 4, 5 one by one.
         for id in [3u64, 4, 5] {
             let result = root.remove_pane(id);
             assert_eq!(result, Some(true), "should remove pane {id}");
         }
 
         assert_eq!(root.pane_count(), 3);
-        // Remaining panes are 1, 2, 6 in tree order.
         let ids = root.pane_ids();
         assert!(ids.contains(&1));
         assert!(ids.contains(&2));
@@ -1575,11 +895,10 @@ mod tests {
 
     #[test]
     fn layout_rects_tile_viewport_exactly() {
+        use super::super::geometry::SEPARATOR_GAP;
+
         let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
 
-        // Build a 3-pane tree:  Split(H, Split(V, 1, 2), 3)
-        // Pane 1 and 2 share the left half stacked vertically.
-        // Pane 3 occupies the right half.
         let left = make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2));
         let mut root = make_split(SplitDirection::Horizontal, 0.5, left, make_leaf(3));
 
@@ -1588,20 +907,15 @@ mod tests {
         let rects = collect_leaf_rects(&root);
         assert_eq!(rects.len(), 3);
 
-        // Total area of leaf rects + separators must equal viewport area.
-        // Each split introduces one SEPARATOR_GAP strip; two splits = 2 gaps.
         let leaf_area: f32 = rects.iter().map(|r| r.width() * r.height()).sum();
         let viewport_area = viewport.width() * viewport.height();
 
-        // The separator gaps reduce usable area: we allow a tolerance of two
-        // full-width / full-height strips (SEPARATOR_GAP px wide/tall each).
         let gap_budget = SEPARATOR_GAP * (viewport.width() + viewport.height());
         assert!(
             (viewport_area - leaf_area).abs() < gap_budget + 1.0,
             "leaf area {leaf_area} should be close to viewport area {viewport_area}"
         );
 
-        // All leaf rects must be within viewport bounds.
         for r in &rects {
             assert!(r.x() >= viewport.x() - f32::EPSILON);
             assert!(r.y() >= viewport.y() - f32::EPSILON);
@@ -1614,27 +928,19 @@ mod tests {
 
     #[test]
     fn asymmetric_tree_close_shallow_side() {
-        // Asymmetric tree:
-        //   Split(H,
-        //     1,                          ← shallow (single leaf)
-        //     Split(V, 2, Split(H, 3, 4)) ← deep right subtree
-        //   )
         let deep = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
         let right_subtree = make_split(SplitDirection::Vertical, 0.5, make_leaf(2), deep);
         let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), right_subtree);
 
         assert_eq!(root.pane_count(), 4);
 
-        // Close pane 1 (the shallow side leaf that is a direct child of root).
         let result = root.remove_pane(1);
         assert_eq!(result, Some(true));
 
-        // Root should now be promoted to the right subtree.
         assert_eq!(root.pane_count(), 3);
         let ids = root.pane_ids();
         assert_eq!(ids, vec![2, 3, 4]);
 
-        // The new root must be a Split (right subtree), not a Leaf or Empty.
         assert!(
             matches!(&root, LayoutNode::Split { .. }),
             "root should be a split node after promotion"
@@ -1646,23 +952,16 @@ mod tests {
     #[test]
     fn ratio_extreme_low_layout_stays_within_bounds() {
         let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
-        let mut root = make_split(
-            SplitDirection::Horizontal,
-            0.1, // near minimum
-            make_leaf(1),
-            make_leaf(2),
-        );
+        let mut root = make_split(SplitDirection::Horizontal, 0.1, make_leaf(1), make_leaf(2));
         root.layout(viewport);
 
         let rects = collect_leaf_rects(&root);
         assert_eq!(rects.len(), 2);
 
-        // Both panes must have positive dimensions.
         for r in &rects {
             assert!(r.width() > 0.0, "pane width must be positive at ratio 0.1");
             assert!(r.height() > 0.0);
         }
-        // All within viewport.
         for r in &rects {
             assert!(r.right() <= viewport.right() + f32::EPSILON);
             assert!(r.bottom() <= viewport.bottom() + f32::EPSILON);
@@ -1672,12 +971,7 @@ mod tests {
     #[test]
     fn ratio_extreme_high_layout_stays_within_bounds() {
         let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
-        let mut root = make_split(
-            SplitDirection::Vertical,
-            0.9, // near maximum
-            make_leaf(1),
-            make_leaf(2),
-        );
+        let mut root = make_split(SplitDirection::Vertical, 0.9, make_leaf(1), make_leaf(2));
         root.layout(viewport);
 
         let rects = collect_leaf_rects(&root);
@@ -1702,18 +996,16 @@ mod tests {
     fn close_all_panes_last_returns_none() {
         let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
 
-        // Build a 4-pane tree.
         let mut root = make_split(
             SplitDirection::Horizontal,
             0.5,
             make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2)),
             make_split(SplitDirection::Vertical, 0.5, make_leaf(3), make_leaf(4)),
         );
-        let _ = rect; // used by make_leaf via test_leaf
+        let _ = rect;
 
         assert_eq!(root.pane_count(), 4);
 
-        // Close panes 1, 2, 3 — each should succeed.
         for id in [1u64, 2, 3] {
             let result = root.remove_pane(id);
             assert_eq!(
@@ -1723,7 +1015,6 @@ mod tests {
             );
         }
 
-        // One pane left (id=4). Closing it must return None (not panic).
         assert_eq!(root.pane_count(), 1);
         let last_id = root.pane_ids()[0];
         let result = root.remove_pane(last_id);
@@ -1734,7 +1025,6 @@ mod tests {
 
     #[test]
     fn adjacent_pane_navigation_complex_tree() {
-        // 4-pane tree: pane IDs in layout order are [1, 2, 3, 4].
         let root = make_split(
             SplitDirection::Horizontal,
             0.5,
@@ -1742,14 +1032,12 @@ mod tests {
             make_split(SplitDirection::Vertical, 0.5, make_leaf(3), make_leaf(4)),
         );
 
-        // Forward navigation wraps.
         assert_eq!(root.adjacent_pane(1, FocusDirection::Next), Some(2));
         assert_eq!(root.adjacent_pane(2, FocusDirection::Next), Some(3));
         assert_eq!(root.adjacent_pane(3, FocusDirection::Next), Some(4));
-        assert_eq!(root.adjacent_pane(4, FocusDirection::Next), Some(1)); // wraps
+        assert_eq!(root.adjacent_pane(4, FocusDirection::Next), Some(1));
 
-        // Backward navigation wraps.
-        assert_eq!(root.adjacent_pane(1, FocusDirection::Prev), Some(4)); // wraps
+        assert_eq!(root.adjacent_pane(1, FocusDirection::Prev), Some(4));
         assert_eq!(root.adjacent_pane(2, FocusDirection::Prev), Some(1));
         assert_eq!(root.adjacent_pane(3, FocusDirection::Prev), Some(2));
         assert_eq!(root.adjacent_pane(4, FocusDirection::Prev), Some(3));
@@ -1758,7 +1046,6 @@ mod tests {
     #[test]
     fn adjacent_pane_unknown_id_returns_none() {
         let root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
-        // An ID not present in the tree should return None.
         assert_eq!(root.adjacent_pane(99, FocusDirection::Next), None);
         assert_eq!(root.adjacent_pane(99, FocusDirection::Prev), None);
     }
@@ -1767,21 +1054,16 @@ mod tests {
 
     #[test]
     fn rebalance_3_way_even() {
-        // Build a 3-pane tree: Split(H, 1, Split(H, 2, 3))
-        // Before rebalance: root ratio=0.5 (giving pane 1 half, the right subtree half).
-        // After rebalance: root ratio should be ~0.333 (1/3), inner split ~0.5 (1/2).
         let inner = make_split(SplitDirection::Horizontal, 0.5, make_leaf(2), make_leaf(3));
         let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), inner);
 
         root.rebalance();
 
         if let LayoutNode::Split { ratio, second, .. } = &root {
-            // Root: 1 leaf on left, 2 on right -> ratio = 1/3
             assert!(
                 (*ratio - 1.0 / 3.0).abs() < 0.01,
                 "root ratio should be ~0.333, got {ratio}"
             );
-            // Inner split: 1 leaf each -> ratio = 0.5
             if let LayoutNode::Split { ratio: inner_r, .. } = second.as_ref() {
                 assert!(
                     (*inner_r - 0.5).abs() < 0.01,
@@ -1795,9 +1077,6 @@ mod tests {
 
     #[test]
     fn rebalance_4_way_even() {
-        // 4 panes: Split(H, Split(H, 1, 2), Split(H, 3, 4))
-        // Root: 2 leaves each side -> ratio = 0.5
-        // Each inner: 1 each -> ratio = 0.5
         let left = make_split(SplitDirection::Horizontal, 0.3, make_leaf(1), make_leaf(2));
         let right = make_split(SplitDirection::Horizontal, 0.7, make_leaf(3), make_leaf(4));
         let mut root = make_split(SplitDirection::Horizontal, 0.8, left, right);
@@ -1826,10 +1105,6 @@ mod tests {
 
     #[test]
     fn rebalance_asymmetric() {
-        // Asymmetric: Split(H, 1, Split(H, 2, Split(H, 3, 4)))
-        // Root: 1 vs 3 -> ratio = 0.25
-        // Mid: 1 vs 2 -> ratio = 0.333
-        // Inner: 1 vs 1 -> ratio = 0.5
         let inner = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
         let mid = make_split(SplitDirection::Horizontal, 0.5, make_leaf(2), inner);
         let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), mid);
@@ -1862,23 +1137,20 @@ mod tests {
 
     #[test]
     fn auto_direction_wide_rect() {
-        // width > height * 1.5 -> Horizontal
-        let rect = Rect::new(0.0, 0.0, 800.0, 200.0); // 800 > 200*1.5=300
+        let rect = Rect::new(0.0, 0.0, 800.0, 200.0);
         let dir = LayoutNode::auto_split_direction(rect, SplitDirection::Vertical);
         assert_eq!(dir, SplitDirection::Horizontal);
     }
 
     #[test]
     fn auto_direction_tall_rect() {
-        // height > width * 1.5 -> Vertical
-        let rect = Rect::new(0.0, 0.0, 200.0, 800.0); // 800 > 200*1.5=300
+        let rect = Rect::new(0.0, 0.0, 200.0, 800.0);
         let dir = LayoutNode::auto_split_direction(rect, SplitDirection::Horizontal);
         assert_eq!(dir, SplitDirection::Vertical);
     }
 
     #[test]
     fn auto_direction_square_uses_fallback() {
-        // Neither condition met -> fallback
         let rect = Rect::new(0.0, 0.0, 400.0, 400.0);
         assert_eq!(
             LayoutNode::auto_split_direction(rect, SplitDirection::Horizontal),
@@ -1894,36 +1166,31 @@ mod tests {
 
     #[test]
     fn can_split_respects_minimum_width() {
-        // rect width = 150, gap = 2 -> usable = 148, each half = 74 < MIN_PANE_WIDTH(80)
         let rect = Rect::new(0.0, 0.0, 150.0, 600.0);
         assert!(!LayoutNode::can_split(rect, SplitDirection::Horizontal));
     }
 
     #[test]
     fn can_split_allows_sufficient_width() {
-        // rect width = 200, gap = 2 -> usable = 198, each half = 99 >= 80
         let rect = Rect::new(0.0, 0.0, 200.0, 600.0);
         assert!(LayoutNode::can_split(rect, SplitDirection::Horizontal));
     }
 
     #[test]
     fn can_split_respects_minimum_height() {
-        // rect height = 100, gap = 2 -> usable = 98, each half = 49 < MIN_PANE_HEIGHT(60)
         let rect = Rect::new(0.0, 0.0, 800.0, 100.0);
         assert!(!LayoutNode::can_split(rect, SplitDirection::Vertical));
     }
 
     #[test]
     fn can_split_allows_sufficient_height() {
-        // rect height = 200, gap = 2 -> usable = 198, each half = 99 >= 60
         let rect = Rect::new(0.0, 0.0, 800.0, 200.0);
         assert!(LayoutNode::can_split(rect, SplitDirection::Vertical));
     }
 
     #[test]
     fn split_refused_when_below_minimum_size() {
-        // A rect too small to split horizontally should refuse the split.
-        let tiny_rect = Rect::new(0.0, 0.0, 150.0, 600.0); // 150 - 2 gap = 148, /2 = 74 < 80
+        let tiny_rect = Rect::new(0.0, 0.0, 150.0, 600.0);
         let mut node = make_leaf(1);
         node.layout(tiny_rect);
 
@@ -1951,7 +1218,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(PaneStatus::default())),
+                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
             })
         });
         assert_eq!(result, None, "split should be refused when too small");
@@ -1962,13 +1229,10 @@ mod tests {
 
     #[test]
     fn split_rebalances_parent_ratio() {
-        // Start with 2 panes, split pane 2 -> 3 panes total.
-        // Root should rebalance: 1 leaf on left, 2 on right -> ratio ~0.333.
         let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
         let mut root = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
         root.layout(rect);
 
-        // Split pane 2.
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
                 rows: 24,
@@ -1993,7 +1257,7 @@ mod tests {
                 pty_master: pair.master,
                 viewport: r,
                 scrollback_lines: 1000,
-                status: Arc::new(Mutex::new(PaneStatus::default())),
+                status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
             })
         });
 
@@ -2008,9 +1272,6 @@ mod tests {
 
     #[test]
     fn close_rebalances_remaining_tree() {
-        // 4 panes: Split(H, Split(H, 1, 2), Split(H, 3, 4))
-        // Close pane 1 -> 3 panes: Split(H, 2, Split(H, 3, 4))
-        // Root should rebalance: 1 vs 2 -> ratio ~0.333.
         let left = make_split(SplitDirection::Horizontal, 0.5, make_leaf(1), make_leaf(2));
         let right = make_split(SplitDirection::Horizontal, 0.5, make_leaf(3), make_leaf(4));
         let mut root = make_split(SplitDirection::Horizontal, 0.5, left, right);
@@ -2036,22 +1297,18 @@ mod tests {
         let rects_before = collect_leaf_rects(&root);
         assert!(root.swap_pane(1, 2));
 
-        // IDs should now be in reversed order.
         assert_eq!(root.pane_ids(), vec![2, 1]);
-        // Viewports should stay in their original positions.
         let rects_after = collect_leaf_rects(&root);
         assert_eq!(rects_before, rects_after);
     }
 
     #[test]
     fn swap_pane_preserves_tree_structure() {
-        // 4-pane tree: [1, 2, 3, 4]
         let left = make_split(SplitDirection::Vertical, 0.5, make_leaf(1), make_leaf(2));
         let right = make_split(SplitDirection::Vertical, 0.5, make_leaf(3), make_leaf(4));
         let mut root = make_split(SplitDirection::Horizontal, 0.5, left, right);
         root.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
 
-        // Swap panes across branches.
         assert!(root.swap_pane(1, 4));
         assert_eq!(root.pane_ids(), vec![4, 2, 3, 1]);
         assert_eq!(root.pane_count(), 4);
