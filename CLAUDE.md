@@ -130,7 +130,7 @@ Clicking and dragging a pane separator adjusts the `split_ratio` of the enclosin
 
 ### Font Size Keybindings
 
-`GridRenderer` exposes `adjust_font_size(delta)` (clamped to 8–32 pt) and `reset_font_size()`. Default keybindings: `Ctrl+Shift+=` increase, `Ctrl+Shift+-` decrease, `Ctrl+Shift+0` reset (actions `FontSizeUp`, `FontSizeDown`, `FontSizeReset`).
+`GridRenderer` exposes `adjust_font_size(delta)` (clamped to 8–32 pt) and `reset_font_size()`. Default keybindings: `Ctrl+=` increase (also `Ctrl+Shift+=`), `Ctrl+-` decrease, `Ctrl+0` reset (actions `FontSizeUp`, `FontSizeDown`, `FontSizeReset`).
 
 ### Keybinding Help Overlay
 

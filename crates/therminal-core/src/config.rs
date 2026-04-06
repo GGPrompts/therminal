@@ -678,7 +678,7 @@ impl Default for KeybindingsConfig {
                 },
                 // Font sizing
                 Keybinding {
-                    key: "ctrl+plus".to_string(),
+                    key: "ctrl+=".to_string(),
                     action: KeyAction::FontSizeUp,
                 },
                 Keybinding {

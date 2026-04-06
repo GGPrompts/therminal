@@ -8,6 +8,16 @@ use std::collections::HashMap;
 use tracing::warn;
 use winit::event::{KeyEvent, Modifiers};
 use winit::keyboard::{Key, NamedKey};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "macos",
+    target_os = "windows",
+))]
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use therminal_core::config::{
     parse_binding, KeyAction, ParsedKey, ParsedNamedKey, TherminalConfig,
@@ -118,5 +128,53 @@ pub(crate) fn lookup_binding(
     };
 
     let lookup = (ctrl, shift, alt, super_key, bk);
-    map.get(&lookup).cloned()
+    if let Some(action) = map.get(&lookup) {
+        return Some(action.clone());
+    }
+
+    // When Shift is held, winit reports the shifted character as logical_key
+    // (e.g., Shift+/ → '?', Shift+= → '+'). Bindings use the unshifted
+    // character. Use winit's key_without_modifiers() to get the layout-aware
+    // unshifted key rather than a hardcoded US-layout table.
+    if shift {
+        if let Some(unshifted_bk) = key_without_modifiers_binding(key_event) {
+            let fallback = (ctrl, shift, alt, super_key, unshifted_bk);
+            if let Some(action) = map.get(&fallback) {
+                return Some(action.clone());
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract the unshifted key from a KeyEvent using winit's platform API.
+/// Returns None if the platform trait isn't available or the key is named.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "macos",
+    target_os = "windows",
+))]
+fn key_without_modifiers_binding(key_event: &KeyEvent) -> Option<BindingKey> {
+    match key_event.key_without_modifiers() {
+        Key::Character(s) => Some(BindingKey::Character(s.to_lowercase().to_string())),
+        _ => None,
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "macos",
+    target_os = "windows",
+)))]
+fn key_without_modifiers_binding(_key_event: &KeyEvent) -> Option<BindingKey> {
+    None
 }
