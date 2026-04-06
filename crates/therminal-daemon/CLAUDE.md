@@ -66,17 +66,25 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed:
+Tools exposed (15 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
-| `terminal.sessions.list` | Observer | List all session IDs |
-| `terminal.sessions.get` | Observer | Get session metadata |
+| `terminal.sessions.list` | Observer | List all active session IDs |
+| `terminal.sessions.get` | Observer | Get session metadata (name, creation time) |
 | `terminal.sessions.create` | Writer | Spawn a new PTY session |
-| `terminal.sessions.destroy` | Admin | Kill a session |
-| `terminal.panes.get_content` | Observer | Read visible pane content |
-| `terminal.panes.write` | Writer | Send input to a pane's PTY |
+| `terminal.sessions.destroy` | Admin | Destroy a session and all its panes |
+| `terminal.panes.list` | Observer | List all panes with dimensions, session membership, title |
+| `terminal.panes.create` | Writer | Create a pane (split from existing or add to session) |
+| `terminal.panes.destroy` | Admin | Destroy a pane and its PTY |
+| `terminal.panes.get_content` | Observer | Read visible grid snapshot with cursor position |
+| `terminal.panes.get_geometry` | Observer | Get pane dimensions and split feasibility |
+| `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
+| `terminal.panes.wait_for_output` | Observer | Wait for output matching a pattern (string/regex) |
+| `terminal.semantic.query_history` | Observer | Query semantic region index (Prompt, Command, Output, Error) |
 | `terminal.semantic.get_hotspots` | Observer | Scan pane for file paths, URLs, git refs, issue refs |
+| `terminal.workspaces.list` | Observer | List workspace tabs with names, pane counts, active status |
+| `terminal.agents.list` | Observer | List detected AI agents with type, status, pane location |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 
@@ -106,8 +114,10 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 | Domain | Scope |
 |--------|-------|
 | `terminal.sessions` | Session lifecycle (list, get, create, destroy) |
-| `terminal.panes` | Pane I/O and state (get_content, write) |
-| `terminal.semantic` | Reserved for semantic region queries (Phase 4) |
+| `terminal.panes` | Pane I/O, state, and geometry (list, create, destroy, get_content, get_geometry, write, wait_for_output) |
+| `terminal.semantic` | Semantic region queries (query_history, get_hotspots) |
+| `terminal.workspaces` | Workspace tab introspection (list) |
+| `terminal.agents` | Agent detection and status (list) |
 
 ### Standard Verbs
 
@@ -141,7 +151,15 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 
 Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallback. Destructive (Admin) tools are additionally subject to a sliding-window rate limiter (configurable `max_destructive_per_minute`). All allow/deny decisions are audit-logged via `tracing`.
 
-Key files: `src/mcp.rs` (server), `src/trust.rs` (enforcement + rate limiter), `therminal-app/src/mcp_stdio.rs` (stdio bridge), `therminal-core/src/config/mod.rs` (`McpConfig`).
+Key files: `src/mcp.rs` (server), `src/trust.rs` (enforcement + rate limiter), `src/persistence.rs` (session state persistence), `src/fd_passing.rs` (FD handoff), `therminal-app/src/mcp_stdio.rs` (stdio bridge), `therminal-core/src/config/mod.rs` (`McpConfig`).
+
+## Persistence
+
+`src/persistence.rs` implements debounced session state persistence to `<data_dir>/sessions.json`. A background task listens for dirty signals from the session manager and coalesces rapid changes with a 2-second debounce timer. On daemon shutdown, a final synchronous save ensures no state is lost. The `PersistenceHandle` is cloned into session mutation paths to trigger saves on topology changes (create, destroy, split).
+
+## FD Passing
+
+`src/fd_passing.rs` implements Unix SCM_RIGHTS file descriptor passing for zero-downtime daemon handoff. Uses `sendmsg`/`recvmsg` with ancillary data to transfer PTY master FDs from the old daemon to the new daemon over a temporary Unix socket. The in-band data carries a MessagePack-encoded `HandoffPayload` with session/pane metadata; the out-of-band ancillary data carries the actual FDs. Gated behind `#[cfg(unix)]` — on non-Unix platforms the handoff falls back to graceful restart.
 
 ## Control Mode
 

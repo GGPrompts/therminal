@@ -21,8 +21,11 @@ src/
 │   ├── layout.rs        # LayoutNode binary tree, split/merge/focus
 │   ├── workspace.rs     # WorkspaceManager, saved layout snapshots
 │   ├── state.rs         # PaneState, PaneStatus, PaneTermSize
-│   └── spawn.rs         # spawn_pane(), PTY reader loop
+│   ├── spawn.rs         # spawn_pane(), PTY reader loop
+│   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView)
+│   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
 ├── grid_renderer.rs     # wgpu text rendering, glyph cache, rect drawing
+├── color_mapping.rs     # ANSI color to thermal palette / glyphon RGBA conversion
 ├── hotspot_detection.rs # File paths, errors, git refs, issue refs
 ├── url_detection.rs     # HTTP(S) URL regex detection
 ├── clipboard.rs         # OSC 52 clipboard integration
@@ -66,3 +69,22 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 - **Font Size**: `Ctrl+=` increase, `Ctrl+-` decrease, `Ctrl+0` reset (clamped 8–32 pt).
 - **Help Overlay**: `Ctrl+Shift+?` toggles full-window overlay showing all keybindings by category.
 - **Context Menu**: Right-click renders a GPU-drawn floating menu with pane actions (split, close, zoom, copy, paste).
+
+## PaneBackend Abstraction
+
+`PaneBackend` trait (`pane/backend.rs`) provides a uniform interface over different pane content types. Methods: `write_input()` (deliver keystrokes/paste), `resize()` (update grid dimensions), `get_content()` (extract visible text for MCP/search), and `backend_type()` (identifier string).
+
+`PaneBackendKind` is the concrete enum stored in each `PaneState`:
+- **Terminal** — PTY-backed pane using alacritty_terminal `Term`. Holds `Arc<FairMutex<Term>>`, PTY writer, and PTY master.
+- **WebView** — stub variant for future wry integration. Stores a URL and a content buffer.
+
+The enum also provides `resize_to_viewport()` which computes grid dimensions from a pixel `Rect` and renderer metrics before delegating to `resize()`.
+
+## Auto-Tiling
+
+`AutoTileDebouncer` (`pane/auto_tile.rs`) subscribes to `AgentRegistry` events via an `mpsc::Receiver<AgentEvent>` and debounces rapid spawn/exit cycles to avoid layout thrashing. On each `poll()` call it drains the event receiver, queues pending actions with timestamps, and yields `AutoTileAction`s once the debounce window expires:
+
+- **Split** — when an agent is registered on a pane, queue a split to create a companion pane (unless one already exists).
+- **Reclaim** — when an agent exits, queue removal of the auto-created pane.
+
+If an agent spawns and exits within the debounce window, the two events cancel each other out and no layout change occurs. Debounced actions are forwarded as `UserEvent` variants to the winit event loop so pane operations happen on the main thread.

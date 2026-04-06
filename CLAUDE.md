@@ -4,7 +4,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Status
 
-**Phases 0, 1, and 2 complete; Phase 3 UX in progress.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection, output cadence analysis, persistent multiplexed sessions via daemon with socket-as-lock, zero-downtime handoff, IPC protocol (MessagePack framing), split panes with mouse-drag separator resize, workspace tabs, pane swap, font size keybindings, keybinding help overlay, right-click context menus, TOML config with hot-reload, control mode, and an MCP server with trust tier enforcement.
+**Phases 0, 1, and 2 complete; Phase 3 UX in progress.** The terminal renders with wgpu, runs a shell, handles keyboard + mouse input, has a SequenceInterceptor for AI-aware OSC parsing, semantic region indexing, shell integration scripts, process tree agent detection with a live agent registry tracking status across panes, output cadence analysis, persistent multiplexed sessions via daemon with socket-as-lock, zero-downtime handoff with SCM_RIGHTS FD passing, debounced session state persistence, IPC protocol (MessagePack framing), split panes with mouse-drag separator resize, auto-tiling for agent swarms, PaneBackend abstraction (Terminal | WebView), workspace tabs, pane swap, font size keybindings, keybinding help overlay, right-click context menus, TOML config with hot-reload, JSONL event logging, control mode, MCP Resources with subscription-based pane content streaming, and an MCP server exposing 15 tools across 5 domains with trust tier enforcement.
 
 ## Architecture
 
