@@ -9,6 +9,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermDamage;
 
 use crate::grid_renderer::{cell_display_text, GridRenderer, RenderCell};
+use crate::hotspot_detection::detect_hotspots;
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use alacritty_terminal::grid::Dimensions;
 
@@ -153,7 +154,7 @@ fn render_single_pane(
     let cursor = content.cursor;
     let selection_range = content.selection;
 
-    let cells: Vec<RenderCell> = content
+    let mut cells: Vec<RenderCell> = content
         .display_iter
         .filter_map(|indexed| {
             let point = indexed.point;
@@ -180,12 +181,26 @@ fn render_single_pane(
                 bg: cell.bg,
                 flags: cell.flags,
                 hyperlink,
+                hotspot: None,
             })
         })
         .collect();
 
     term_guard.reset_damage();
     drop(term_guard);
+
+    // Annotate cells with detected hotspots (file paths, errors, git refs, etc.).
+    let hotspots = detect_hotspots(&cells, screen_lines);
+    for hotspot in &hotspots {
+        for cell in cells.iter_mut() {
+            if cell.row == hotspot.row
+                && cell.col >= hotspot.start_col
+                && cell.col < hotspot.end_col
+            {
+                cell.hotspot = Some(hotspot.kind.clone());
+            }
+        }
+    }
 
     // In multi-pane mode, clear per-pane caches so stale state from a previous pane
     // doesn't bleed through. This forces a full rebuild (damaged_rows = None) since

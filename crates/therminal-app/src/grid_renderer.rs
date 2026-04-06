@@ -130,6 +130,8 @@ pub struct RenderCell {
     pub flags: Flags,
     /// Hyperlink URI from OSC 8 or regex URL detection.
     pub hyperlink: Option<String>,
+    /// Hotspot kind for this cell, if it's part of an actionable pattern.
+    pub hotspot: Option<crate::hotspot_detection::HotspotKind>,
 }
 
 /// Build the full rendered text for a terminal cell.
@@ -715,6 +717,7 @@ impl GridRenderer {
                     bg: cell.bg,
                     flags: cell.flags,
                     hyperlink: cell.hyperlink.clone(),
+                    hotspot: cell.hotspot.clone(),
                 });
             }
         }
