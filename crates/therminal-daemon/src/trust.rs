@@ -45,6 +45,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.list"
         | "terminal.panes.get_geometry"
         | "terminal.panes.get_content"
+        | "terminal.panes.wait_for_output"
         | "terminal.semantic.query_history" => Some(ToolCategory::Observer),
         "terminal.sessions.create" | "terminal.panes.write" | "terminal.panes.create" => {
             Some(ToolCategory::Writer)

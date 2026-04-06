@@ -88,6 +88,23 @@ struct GetPaneGeometryParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct WaitForOutputParam {
+    /// The numeric pane ID to watch.
+    pane_id: u64,
+    /// String or regex pattern to match against output lines.
+    pattern: String,
+    /// Timeout in milliseconds (default 30000, max 120000).
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+    /// Only match output on or after this line number. If omitted, matches any new output.
+    since_line: Option<usize>,
+}
+
+fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SpawnPaneParam {
     /// Session ID to create the pane in. If omitted, uses the default (first) session.
     session_id: Option<u64>,
@@ -162,6 +179,18 @@ struct SpawnPaneResult {
     session_id: u64,
     cols: u16,
     rows: u16,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WaitForOutputResult {
+    /// Whether the pattern was matched before timeout.
+    matched: bool,
+    /// The line number where the match was found (0 if not matched).
+    line_number: usize,
+    /// The content of the matched line (empty if not matched).
+    line_content: String,
+    /// Elapsed time in milliseconds.
+    elapsed_ms: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -656,6 +685,132 @@ impl TherminalMcpServer {
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
+
+    async fn handle_wait_for_output(
+        &self,
+        params: WaitForOutputParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        use therminal_protocol::daemon::DaemonEvent;
+
+        // Clamp timeout to max 120 seconds.
+        let timeout_ms = params.timeout_ms.min(120_000);
+        let timeout_dur = std::time::Duration::from_millis(timeout_ms);
+
+        // Compile the pattern as a regex.
+        let regex = match regex::Regex::new(&params.pattern) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "invalid pattern: {e}"
+                ))]));
+            }
+        };
+
+        // Verify the pane exists and subscribe to events while holding the lock briefly.
+        let mut event_rx = {
+            let mgr = self.session_mgr.lock().await;
+            // Check pane exists.
+            let pane_found = mgr
+                .iter_sessions()
+                .flat_map(|(_, s)| s.windows.iter())
+                .any(|w| w.pane(params.pane_id).is_some());
+            if !pane_found {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "pane not found: {}",
+                    params.pane_id
+                ))]));
+            }
+            mgr.subscribe_events()
+        };
+        // Lock is released here -- the handler is now async/long-running.
+
+        // Also check existing content for an immediate match (if since_line is set,
+        // scan current buffer first so we don't miss lines already present).
+        if let Some(since_line) = params.since_line {
+            let mgr = self.session_mgr.lock().await;
+            if let Ok(snap) = mgr.capture_pane(params.pane_id) {
+                for (i, row) in snap.grid.iter().enumerate() {
+                    let line_num = i;
+                    if line_num < since_line {
+                        continue;
+                    }
+                    let line_content: String = row.iter().map(|(ch, _)| ch).collect();
+                    let trimmed = line_content.trim_end();
+                    if regex.is_match(trimmed) {
+                        let result = WaitForOutputResult {
+                            matched: true,
+                            line_number: line_num,
+                            line_content: trimmed.to_string(),
+                            elapsed_ms: 0,
+                        };
+                        return Ok(CallToolResult::success(vec![json_content(&result)?]));
+                    }
+                }
+            }
+        }
+
+        let start = std::time::Instant::now();
+
+        // Track cumulative line count from streamed output for since_line filtering.
+        // We use a simple line counter: each PaneOutput chunk may contain partial
+        // or multiple lines; we scan the decoded text line by line.
+        let mut accumulated_lines: usize = params.since_line.unwrap_or(0);
+
+        let result = tokio::time::timeout(timeout_dur, async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(DaemonEvent::PaneOutput { pane_id, data, .. })
+                        if pane_id == params.pane_id =>
+                    {
+                        // Decode output chunk and scan for pattern matches.
+                        let text = String::from_utf8_lossy(&data);
+                        for line in text.lines() {
+                            let trimmed = line.trim_end();
+                            if regex.is_match(trimmed) {
+                                return WaitForOutputResult {
+                                    matched: true,
+                                    line_number: accumulated_lines,
+                                    line_content: trimmed.to_string(),
+                                    elapsed_ms: start.elapsed().as_millis() as u64,
+                                };
+                            }
+                            accumulated_lines += 1;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Missed some events due to slow consumption; continue.
+                        debug!("wait_for_output: lagged by {n} events, continuing");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Channel closed -- pane likely destroyed.
+                        break;
+                    }
+                    _ => {
+                        // Other event types -- ignore.
+                    }
+                }
+            }
+            WaitForOutputResult {
+                matched: false,
+                line_number: 0,
+                line_content: String::new(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            }
+        })
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(_timeout) => WaitForOutputResult {
+                matched: false,
+                line_number: 0,
+                line_content: String::new(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            },
+        };
+
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
 }
 
 /// Build a content preview string from a region's metadata (first 200 chars).
@@ -763,6 +918,11 @@ fn tool_definitions() -> Vec<Tool> {
             "Query the semantic region index for a pane. Returns typed regions (Prompt, Command, Output, Error, etc.) with metadata. Supports filtering by region type, regex pattern, and scroll position.",
             schema_for_type::<QuerySemanticHistoryParam>(),
         ),
+        Tool::new(
+            "terminal.panes.wait_for_output",
+            "Wait for output matching a pattern (string or regex) to appear in a pane. Subscribes to live PTY output and returns on first match or timeout. Useful for waiting for command completion, prompts, or specific output.",
+            schema_for_type::<WaitForOutputParam>(),
+        ),
     ]
 }
 
@@ -841,6 +1001,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.semantic.query_history" => {
                 let params: QuerySemanticHistoryParam = parse_args(args)?;
                 self.handle_query_semantic_history(params).await
+            }
+            "terminal.panes.wait_for_output" => {
+                let params: WaitForOutputParam = parse_args(args)?;
+                self.handle_wait_for_output(params).await
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),

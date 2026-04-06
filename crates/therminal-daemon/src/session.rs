@@ -614,6 +614,15 @@ impl SessionManager {
         }
     }
 
+    /// Subscribe to daemon events via the broadcast channel.
+    ///
+    /// Returns a new `broadcast::Receiver` that will receive all future
+    /// `DaemonEvent`s (including `PaneOutput`). Used by long-running MCP
+    /// tools like `wait_for_output` that need to watch the event stream.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
+        self.event_tx.subscribe()
+    }
+
     /// Create a new session with a default window/pane.
     pub fn create_session(
         &mut self,
