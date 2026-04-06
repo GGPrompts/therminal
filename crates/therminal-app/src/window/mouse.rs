@@ -625,7 +625,10 @@ impl App {
         pane_id: PaneId,
         row: usize,
         col: usize,
-    ) -> Option<(crate::hotspot_detection::HotspotKind, std::sync::Arc<str>)> {
+    ) -> Option<(
+        therminal_terminal::hotspot_detection::HotspotKind,
+        std::sync::Arc<str>,
+    )> {
         self.grid_renderer
             .as_ref()
             .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())

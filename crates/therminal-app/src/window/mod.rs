@@ -39,6 +39,7 @@ use crate::menu::ContextMenu;
 use crate::pane::{AutoTileDebouncer, LayoutNode, PaneId, SplitDirection, WorkspaceManager};
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::{ConfigChanged, ConfigWatcher};
+use therminal_core::font::PLATFORM_MONOSPACE;
 use therminal_core::geometry::Rect;
 use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
 use therminal_terminal::interceptor::InterceptorConfig;
@@ -330,8 +331,12 @@ impl App {
 
         // ── Grid renderer ────────────────────────────────────────────────
         let scale = window.scale_factor() as f32;
-        let mut font_config =
-            FontConfig::new(self.config.font.family.clone(), self.config.font.size);
+        let effective_family = if self.config.font.family.is_empty() {
+            PLATFORM_MONOSPACE.to_string()
+        } else {
+            self.config.font.family.clone()
+        };
+        let mut font_config = FontConfig::new(effective_family, self.config.font.size);
         font_config.fallback_families = self.config.font.extra_fallbacks.clone();
         font_config.font_size *= scale;
         font_config.line_height = font_config.font_size * self.config.font.line_height_scale;
@@ -1054,6 +1059,8 @@ impl App {
         }
 
         let font_changed = self.config.font.family != old_config.font.family
+            || self.config.font.nerd_font != old_config.font.nerd_font
+            || self.config.font.extra_fallbacks != old_config.font.extra_fallbacks
             || (self.config.font.size - old_config.font.size).abs() > f32::EPSILON
             || (self.config.font.line_height_scale - old_config.font.line_height_scale).abs()
                 > f32::EPSILON;
@@ -1097,10 +1104,13 @@ impl App {
 
             if font_changed {
                 let scale = window.scale_factor() as f32;
-                let mut new_font_config = FontConfig::new(
-                    self.config.font.family.clone(),
-                    self.config.font.size * scale,
-                );
+                let effective_family = if self.config.font.family.is_empty() {
+                    PLATFORM_MONOSPACE.to_string()
+                } else {
+                    self.config.font.family.clone()
+                };
+                let mut new_font_config =
+                    FontConfig::new(effective_family, self.config.font.size * scale);
                 new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
                 new_font_config.line_height =
                     self.config.font.size * self.config.font.line_height_scale * scale;

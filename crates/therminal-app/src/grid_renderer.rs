@@ -6,6 +6,8 @@
 //! visual element (inverted block).
 #![allow(clippy::too_many_arguments)]
 
+use therminal_core::font::PLATFORM_MONOSPACE;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -81,6 +83,16 @@ impl FontConfig {
         self.font_size = self.default_font_size;
         self.line_height = self.font_size * LINE_HEIGHT_RATIO;
     }
+
+    /// The effective primary family, resolving empty string to the platform
+    /// monospace default.
+    pub fn effective_family(&self) -> &str {
+        if self.family.is_empty() {
+            PLATFORM_MONOSPACE
+        } else {
+            &self.family
+        }
+    }
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -144,7 +156,7 @@ pub struct RenderCell {
     /// Source of the hyperlink (OSC 8 vs regex), controls underline style.
     pub hyperlink_source: Option<HyperlinkSource>,
     /// Hotspot annotation for this cell: (kind, full matched text).
-    pub hotspot: Option<(crate::hotspot_detection::HotspotKind, Arc<str>)>,
+    pub hotspot: Option<(therminal_terminal::hotspot_detection::HotspotKind, Arc<str>)>,
 }
 
 /// Build the full rendered text for a terminal cell.
@@ -313,8 +325,10 @@ pub struct GridRenderer {
 
     /// Hotspot map: (pane_id, row, col) -> (HotspotKind, matched text).
     /// Rebuilt each frame from detected hotspots (file paths, errors, git refs, etc.).
-    pub hotspot_map:
-        HashMap<(PaneId, usize, usize), (crate::hotspot_detection::HotspotKind, Arc<str>)>,
+    pub hotspot_map: HashMap<
+        (PaneId, usize, usize),
+        (therminal_terminal::hotspot_detection::HotspotKind, Arc<str>),
+    >,
 
     /// The pane currently being rendered. Set before each pane's render pass
     /// so that hotspot/hyperlink map entries are keyed to the correct pane.
@@ -359,7 +373,7 @@ impl GridRenderer {
     ) -> Self {
         let font_size = font_config.font_size;
         let line_height = font_config.line_height;
-        let font_family = font_config.family.clone();
+        let font_family = font_config.effective_family().to_string();
 
         // ── Glyphon setup ────────────────────────────────────────────────
         let mut font_system = FontSystem::new();
@@ -641,7 +655,7 @@ impl GridRenderer {
         self.font_config = new_config;
         self.font_system
             .db_mut()
-            .set_monospace_family(&self.font_config.family);
+            .set_monospace_family(self.font_config.effective_family());
         self.update_font_metrics();
         self.resize(device, queue, width, height);
     }
@@ -657,7 +671,7 @@ impl GridRenderer {
         measure_buf.set_text(
             &mut self.font_system,
             "M",
-            &Attrs::new().family(Family::Name(&self.font_config.family)),
+            &Attrs::new().family(Family::Name(self.font_config.effective_family())),
             Shaping::Basic,
             None,
         );
@@ -1220,7 +1234,7 @@ impl GridRenderer {
                 );
 
                 let attrs = Attrs::new()
-                    .family(Family::Name(&self.font_config.family))
+                    .family(Family::Name(self.font_config.effective_family()))
                     .color(f32_to_glyph_color(fg));
                 let shaping = if cell.text.is_ascii() {
                     Shaping::Basic
@@ -1407,7 +1421,21 @@ impl GridRenderer {
 
 #[cfg(test)]
 mod tests {
+    use super::FontConfig;
     use super::cell_display_text;
+    use therminal_core::font::PLATFORM_MONOSPACE;
+
+    #[test]
+    fn empty_family_resolves_to_platform_default() {
+        let cfg = FontConfig::new("", 14.0);
+        assert_eq!(cfg.effective_family(), PLATFORM_MONOSPACE);
+    }
+
+    #[test]
+    fn nonempty_family_is_preserved() {
+        let cfg = FontConfig::new("Fira Code", 14.0);
+        assert_eq!(cfg.effective_family(), "Fira Code");
+    }
 
     #[test]
     fn cell_display_text_preserves_zero_width_codepoints() {
