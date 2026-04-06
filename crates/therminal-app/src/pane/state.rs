@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions;
 use therminal_core::geometry::Rect;
+use therminal_terminal::region_index::RegionIndex;
 
 use super::PaneId;
 use super::backend::{PaneBackend, PaneBackendKind};
@@ -53,6 +54,8 @@ pub struct PaneState {
     pub viewport: Rect,
     /// Shared status updated by the PTY reader thread.
     pub status: Arc<Mutex<PaneStatus>>,
+    /// Semantic region index, updated by the PTY reader thread.
+    pub region_index: Arc<Mutex<RegionIndex>>,
     /// The backend powering this pane (terminal, webview, etc.).
     pub backend: PaneBackendKind,
 }

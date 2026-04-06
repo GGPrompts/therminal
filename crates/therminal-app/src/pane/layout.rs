@@ -889,6 +889,9 @@ mod tests {
             id,
             viewport: rect,
             status: Arc::new(Mutex::new(super::super::PaneStatus::default())),
+            region_index: Arc::new(Mutex::new(
+                therminal_terminal::region_index::RegionIndex::new(),
+            )),
             backend: PaneBackendKind::Terminal {
                 term: Arc::new(FairMutex::new(term)),
                 pty_writer: writer,

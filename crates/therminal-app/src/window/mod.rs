@@ -172,6 +172,20 @@ pub struct App {
     /// Used by the mouse handler to detect clicks on chrome elements like
     /// the agent indicator.
     status_bar_hit_areas: chrome::StatusBarHitAreas,
+
+    /// Transient label shown after a semantic region jump (region kind +
+    /// optional command text), with the timestamp of when it was set.
+    /// Currently logged via tracing; future work will surface it as an
+    /// on-screen overlay toast.
+    #[allow(dead_code)]
+    region_jump_toast: Option<(String, Instant)>,
+}
+
+/// Direction for [`App::jump_to_region`].
+#[derive(Debug, Clone, Copy)]
+enum JumpDirection {
+    Prev,
+    Next,
 }
 
 /// State for an in-progress separator drag.
@@ -296,6 +310,7 @@ impl App {
             visual_bell_start: None,
             zoomed_layout: None,
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
+            region_jump_toast: None,
         }
     }
 
@@ -894,6 +909,117 @@ impl App {
         }
     }
 
+    /// Jump the focused pane's scrollback to the previous/next semantic
+    /// region. If `errors_only` is true, only `Error` regions are considered.
+    fn jump_to_region(&mut self, dir: JumpDirection, errors_only: bool) {
+        use alacritty_terminal::grid::{Dimensions, Scroll};
+        use therminal_terminal::region_index::RegionKind;
+
+        let focused = match self.focused_pane() {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Snapshot needed pane data without holding the layout borrow over
+        // the rest of the method.
+        let (term, region_index) = {
+            let layout = match self.get_layout() {
+                Some(l) => l,
+                None => return,
+            };
+            let pane = match layout.find_pane(focused) {
+                Some(p) => p,
+                None => return,
+            };
+            let term = match pane.backend.term() {
+                Some(t) => Arc::clone(t),
+                None => return,
+            };
+            (term, Arc::clone(&pane.region_index))
+        };
+
+        // Compute the current absolute "viewport top" line so we can find
+        // the nearest region in the requested direction.
+        let (current_top_line, screen_lines, history_size, current_offset) = {
+            let term_guard = term.lock();
+            let grid = term_guard.grid();
+            let history = grid.history_size();
+            let offset = grid.display_offset();
+            let screen = grid.screen_lines();
+            // The visible viewport's top absolute line is `history - offset`.
+            let top = history.saturating_sub(offset);
+            (top, screen, history, offset)
+        };
+
+        let kinds: &[RegionKind] = if errors_only {
+            &[RegionKind::Error]
+        } else {
+            &[
+                RegionKind::Prompt,
+                RegionKind::Command,
+                RegionKind::Output,
+                RegionKind::Error,
+                RegionKind::ToolCall,
+                RegionKind::Thinking,
+            ]
+        };
+
+        let target = {
+            let idx = match region_index.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let region = match dir {
+                JumpDirection::Prev => idx.region_before(current_top_line, kinds),
+                JumpDirection::Next => idx.region_after(current_top_line, kinds),
+            };
+            region.map(|r| {
+                let label = format!(
+                    "{:?}{}",
+                    r.kind,
+                    r.metadata
+                        .get("command")
+                        .map(|c| format!(": {}", c))
+                        .unwrap_or_default()
+                );
+                (r.start_line, label)
+            })
+        };
+
+        let (start_line, label) = match target {
+            Some(t) => t,
+            None => {
+                self.region_jump_toast = Some((
+                    format!("no {} region", if errors_only { "error" } else { "more" }),
+                    Instant::now(),
+                ));
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
+            }
+        };
+
+        // Center the target region in the viewport. The desired display
+        // offset puts `start_line` roughly mid-viewport.
+        let half = screen_lines / 2;
+        let desired_top = start_line.saturating_sub(half);
+        let new_offset = history_size.saturating_sub(desired_top).min(history_size);
+        let delta = new_offset as i32 - current_offset as i32;
+
+        if delta != 0 {
+            // Scroll::Delta is interpreted with positive values scrolling up.
+            let mut term_guard = term.lock();
+            term_guard.scroll_display(Scroll::Delta(delta));
+        }
+
+        info!(target: "therminal::region_jump", "{}", label);
+        self.region_jump_toast = Some((label, Instant::now()));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Check if this key event matches a configured keybinding.
     /// Returns true if the event was consumed.
     fn handle_keybinding(&mut self, key_event: &KeyEvent) -> bool {
@@ -976,6 +1102,18 @@ impl App {
             KeyAction::RenameWorkspace => {
                 // Rename is a placeholder until inline rename UI is implemented.
                 info!("rename workspace: not yet implemented");
+            }
+            KeyAction::JumpRegionPrev => {
+                self.jump_to_region(JumpDirection::Prev, false);
+            }
+            KeyAction::JumpRegionNext => {
+                self.jump_to_region(JumpDirection::Next, false);
+            }
+            KeyAction::JumpErrorPrev => {
+                self.jump_to_region(JumpDirection::Prev, true);
+            }
+            KeyAction::JumpErrorNext => {
+                self.jump_to_region(JumpDirection::Next, true);
             }
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)

@@ -65,6 +65,14 @@ pub enum KeyAction {
     NewWorkspace,
     /// Rename the current (or targeted) workspace tab.
     RenameWorkspace,
+    /// Jump scrollback to the previous semantic region.
+    JumpRegionPrev,
+    /// Jump scrollback to the next semantic region.
+    JumpRegionNext,
+    /// Jump scrollback to the previous error region.
+    JumpErrorPrev,
+    /// Jump scrollback to the next error region.
+    JumpErrorNext,
     // ── Hotspot actions (used by action palette, not keybindable) ────────
     /// Copy a hotspot text to the clipboard.
     HotspotCopy(String),
@@ -106,6 +114,10 @@ impl KeyAction {
             KeyAction::SendToWorkspace(_) => "Send pane to workspace",
             KeyAction::NewWorkspace => "New workspace tab",
             KeyAction::RenameWorkspace => "Rename workspace tab",
+            KeyAction::JumpRegionPrev => "Jump to previous region",
+            KeyAction::JumpRegionNext => "Jump to next region",
+            KeyAction::JumpErrorPrev => "Jump to previous error",
+            KeyAction::JumpErrorNext => "Jump to next error",
             KeyAction::HotspotCopy(_) => "Copy to clipboard",
             KeyAction::HotspotOpenInEditor(_) => "Open in editor",
             KeyAction::HotspotOpenExternal(_) => "Open externally",
@@ -137,6 +149,10 @@ impl KeyAction {
             | KeyAction::SendToWorkspace(_)
             | KeyAction::NewWorkspace
             | KeyAction::RenameWorkspace => "Pane Management",
+            KeyAction::JumpRegionPrev
+            | KeyAction::JumpRegionNext
+            | KeyAction::JumpErrorPrev
+            | KeyAction::JumpErrorNext => "Navigation",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
             KeyAction::HotspotCopy(_)
@@ -360,6 +376,23 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "alt+shift+9".to_string(),
                     action: KeyAction::SendToWorkspace(9),
+                },
+                // Semantic scrollback navigation
+                Keybinding {
+                    key: "ctrl+alt+up".to_string(),
+                    action: KeyAction::JumpRegionPrev,
+                },
+                Keybinding {
+                    key: "ctrl+alt+down".to_string(),
+                    action: KeyAction::JumpRegionNext,
+                },
+                Keybinding {
+                    key: "ctrl+alt+pageup".to_string(),
+                    action: KeyAction::JumpErrorPrev,
+                },
+                Keybinding {
+                    key: "ctrl+alt+pagedown".to_string(),
+                    action: KeyAction::JumpErrorNext,
                 },
             ],
         }

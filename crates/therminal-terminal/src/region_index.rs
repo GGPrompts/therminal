@@ -265,6 +265,29 @@ impl RegionIndex {
     pub fn regions(&self) -> &[Region] {
         &self.regions
     }
+
+    /// Find the nearest region whose `start_line` is strictly before `line`.
+    ///
+    /// If `kinds` is non-empty, only regions matching one of the listed kinds
+    /// are considered. Returns the closest such region, or `None`.
+    pub fn region_before(&self, line: usize, kinds: &[RegionKind]) -> Option<&Region> {
+        self.regions
+            .iter()
+            .rev()
+            .filter(|r| kinds.is_empty() || kinds.contains(&r.kind))
+            .find(|r| r.start_line < line)
+    }
+
+    /// Find the nearest region whose `start_line` is strictly after `line`.
+    ///
+    /// If `kinds` is non-empty, only regions matching one of the listed kinds
+    /// are considered. Returns the closest such region, or `None`.
+    pub fn region_after(&self, line: usize, kinds: &[RegionKind]) -> Option<&Region> {
+        self.regions
+            .iter()
+            .filter(|r| kinds.is_empty() || kinds.contains(&r.kind))
+            .find(|r| r.start_line > line)
+    }
 }
 
 // -- Tests -------------------------------------------------------------------

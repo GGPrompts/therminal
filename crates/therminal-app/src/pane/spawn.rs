@@ -8,6 +8,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi;
 use therminal_core::geometry::Rect;
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler};
+use therminal_terminal::region_index::RegionIndex;
 use tracing::info;
 
 use super::PaneId;
@@ -54,6 +55,8 @@ struct AppPtyHandler {
     interceptor_config: therminal_terminal::interceptor::InterceptorConfig,
     scan_interval_secs: u64,
     status: Arc<Mutex<PaneStatus>>,
+    /// Shared semantic region index, updated from intercepted events.
+    region_index: Arc<Mutex<RegionIndex>>,
     /// Shared agent registry for auto-tiling.
     agent_registry: Option<Arc<Mutex<therminal_terminal::agent_registry::AgentRegistry>>>,
     /// Whether we currently have an agent registered for this pane.
@@ -107,9 +110,17 @@ impl PtyReaderHandler for AppPtyHandler {
         self.ensure_init();
         let state = self.reader_state.as_mut().unwrap();
 
-        {
+        let current_line = {
             let mut term_guard = term.lock();
             processor.advance_with_interceptor(&mut *term_guard, &mut state.interceptor, data);
+            // Compute absolute line for region indexing: scrollback history +
+            // cursor row within the visible viewport.
+            use alacritty_terminal::grid::Dimensions;
+            let grid = term_guard.grid();
+            grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+        };
+        if let Ok(mut idx) = self.region_index.lock() {
+            idx.set_current_line(current_line);
         }
 
         // Check if a BEL fired during processing.
@@ -117,9 +128,12 @@ impl PtyReaderHandler for AppPtyHandler {
             (self.on_bell)();
         }
 
-        // Drain intercepted events and update shared status.
+        // Drain intercepted events and update shared status + region index.
         while let Ok(event) = state.event_rx.try_recv() {
             use therminal_terminal::interceptor::InterceptedEvent;
+            if let Ok(mut idx) = self.region_index.lock() {
+                idx.push_event(&event);
+            }
             match event {
                 InterceptedEvent::CurrentDirectory(path) => {
                     if let Ok(mut s) = self.status.lock() {
@@ -236,6 +250,8 @@ where
 
     // Shared status for status bar rendering.
     let status = Arc::new(Mutex::new(PaneStatus::default()));
+    // Shared semantic region index, populated from intercepted events.
+    let region_index = Arc::new(Mutex::new(RegionIndex::new()));
 
     let callbacks = callback_fn(id);
 
@@ -249,6 +265,7 @@ where
         interceptor_config,
         scan_interval_secs,
         status: Arc::clone(&status),
+        region_index: Arc::clone(&region_index),
         agent_registry,
         has_registered_agent: false,
         bell_flag,
@@ -277,6 +294,7 @@ where
         id,
         viewport,
         status,
+        region_index,
         backend: PaneBackendKind::Terminal {
             term,
             pty_writer,
