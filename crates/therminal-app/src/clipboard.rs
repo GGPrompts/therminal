@@ -36,7 +36,9 @@ fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
             let val = std::env::var_os("WAYLAND_DISPLAY");
             if val.is_some() {
                 debug!("WSL2 detected: forcing X11 clipboard backend");
-                std::env::remove_var("WAYLAND_DISPLAY");
+                // SAFETY: This runs during static init (OnceLock), before any
+                // other threads access WAYLAND_DISPLAY.
+                unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
             }
             val
         } else {
@@ -47,7 +49,9 @@ fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
 
         // Restore WAYLAND_DISPLAY so other code (wgpu, winit) still sees it.
         if let Some(val) = wayland_display {
-            std::env::set_var("WAYLAND_DISPLAY", val);
+            // SAFETY: Restoring the value we just removed; still in the same
+            // single-threaded init path.
+            unsafe { std::env::set_var("WAYLAND_DISPLAY", val) };
         }
 
         match result {
@@ -193,11 +197,12 @@ mod tests {
     fn wsl2_detection_reads_env() {
         // Without WSL_DISTRO_NAME set, should not detect WSL2.
         let had_var = std::env::var_os("WSL_DISTRO_NAME");
-        std::env::remove_var("WSL_DISTRO_NAME");
+        // SAFETY: test-only env var mutation.
+        unsafe { std::env::remove_var("WSL_DISTRO_NAME") };
         assert!(!is_wsl2());
         // Restore if it was set.
         if let Some(val) = had_var {
-            std::env::set_var("WSL_DISTRO_NAME", val);
+            unsafe { std::env::set_var("WSL_DISTRO_NAME", val) };
         }
     }
 }

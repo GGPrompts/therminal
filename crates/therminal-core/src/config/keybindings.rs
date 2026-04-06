@@ -513,10 +513,11 @@ mod tests {
     #[test]
     fn keybindings_default_has_pane_actions() {
         let kb = KeybindingsConfig::default();
-        assert!(kb
-            .bindings
-            .iter()
-            .any(|b| b.action == KeyAction::SplitHorizontal));
+        assert!(
+            kb.bindings
+                .iter()
+                .any(|b| b.action == KeyAction::SplitHorizontal)
+        );
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::ClosePane));
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::ZoomPane));
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::FocusNext));

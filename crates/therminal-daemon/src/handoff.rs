@@ -74,7 +74,9 @@ pub async fn check_daemon(socket_path: &Path, our_protocol_version: u32) -> Daem
         Ok(other) => {
             warn!(?other, "unexpected response to ping");
             if can_connect {
-                warn!("socket accepted connection but returned unexpected response — treating as incompatible daemon");
+                warn!(
+                    "socket accepted connection but returned unexpected response — treating as incompatible daemon"
+                );
                 DaemonCheck::IncompatibleDaemon
             } else {
                 DaemonCheck::StartFresh

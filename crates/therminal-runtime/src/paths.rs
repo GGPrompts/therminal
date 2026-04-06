@@ -130,36 +130,36 @@ pub fn resources_dir() -> PathBuf {
     }
 
     // 2. Try relative to executable: <exe_dir>/../resources
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let candidate = exe_dir.join("../resources").canonicalize().ok();
-            if let Some(dir) = candidate {
-                if dir.is_dir() {
-                    return dir;
-                }
-            }
-            // Also check <exe_dir>/resources (flat layout)
-            let candidate = exe_dir.join("resources");
-            if candidate.is_dir() {
-                return candidate;
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join("../resources").canonicalize().ok();
+        if let Some(dir) = candidate
+            && dir.is_dir()
+        {
+            return dir;
+        }
+        // Also check <exe_dir>/resources (flat layout)
+        let candidate = exe_dir.join("resources");
+        if candidate.is_dir() {
+            return candidate;
         }
     }
 
     // 3. Compile-time fallback for dev builds (`cargo run` / `cargo test`).
     //    CARGO_MANIFEST_DIR points to the crate directory; the workspace root
     //    is two levels up (crates/therminal-runtime -> workspace root).
-    if cfg!(debug_assertions) {
-        if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
-            let workspace_root = PathBuf::from(manifest_dir)
-                .join("../..")
-                .canonicalize()
-                .ok();
-            if let Some(root) = workspace_root {
-                let candidate = root.join("resources");
-                if candidate.is_dir() {
-                    return candidate;
-                }
+    if cfg!(debug_assertions)
+        && let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR")
+    {
+        let workspace_root = PathBuf::from(manifest_dir)
+            .join("../..")
+            .canonicalize()
+            .ok();
+        if let Some(root) = workspace_root {
+            let candidate = root.join("resources");
+            if candidate.is_dir() {
+                return candidate;
             }
         }
     }
@@ -388,9 +388,11 @@ mod tests {
         std::fs::create_dir_all(&fake_resources).unwrap();
 
         // Set the env var and verify it takes precedence.
-        std::env::set_var("THERMINAL_RESOURCES_DIR", &fake_resources);
+        // SAFETY: test-only; env var mutation is not thread-safe but acceptable
+        // in single-threaded test context.
+        unsafe { std::env::set_var("THERMINAL_RESOURCES_DIR", &fake_resources) };
         let dir = resources_dir();
-        std::env::remove_var("THERMINAL_RESOURCES_DIR");
+        unsafe { std::env::remove_var("THERMINAL_RESOURCES_DIR") };
 
         assert_eq!(
             dir, fake_resources,

@@ -64,20 +64,20 @@ fn get_default_shell() -> String {
     #[cfg(unix)]
     {
         // Prefer $SHELL, same logic as portable-pty's CommandBuilder::get_shell.
-        if let Ok(shell) = std::env::var("SHELL") {
-            if !shell.is_empty() {
-                return shell;
-            }
+        if let Ok(shell) = std::env::var("SHELL")
+            && !shell.is_empty()
+        {
+            return shell;
         }
         // Fallback: passwd database.
         unsafe {
             let ent = libc::getpwuid(libc::getuid());
             if !ent.is_null() {
                 let shell = std::ffi::CStr::from_ptr((*ent).pw_shell);
-                if let Ok(s) = shell.to_str() {
-                    if !s.is_empty() {
-                        return s.to_owned();
-                    }
+                if let Ok(s) = shell.to_str()
+                    && !s.is_empty()
+                {
+                    return s.to_owned();
                 }
             }
         }

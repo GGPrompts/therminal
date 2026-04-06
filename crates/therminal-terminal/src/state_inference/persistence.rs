@@ -15,11 +15,11 @@ pub(crate) fn write_state_file(
     state_dir: &Path,
 ) -> Option<PathBuf> {
     // Ensure the state directory exists.
-    if !state_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(state_dir) {
-            warn!(dir = %state_dir.display(), error = %e, "Failed to create state directory");
-            return None;
-        }
+    if !state_dir.exists()
+        && let Err(e) = std::fs::create_dir_all(state_dir)
+    {
+        warn!(dir = %state_dir.display(), error = %e, "Failed to create state directory");
+        return None;
     }
 
     let file_path = state_dir.join(format!("{session_id}.json"));
@@ -54,13 +54,13 @@ pub(crate) fn write_state_file(
 
 /// Clean up the state file on session exit.
 pub(crate) fn cleanup(state_file_path: Option<&PathBuf>) {
-    if let Some(path) = state_file_path {
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(path) {
-                warn!(path = %path.display(), error = %e, "Failed to remove state file on cleanup");
-            } else {
-                debug!(path = %path.display(), "Removed state file on session exit");
-            }
+    if let Some(path) = state_file_path
+        && path.exists()
+    {
+        if let Err(e) = std::fs::remove_file(path) {
+            warn!(path = %path.display(), error = %e, "Failed to remove state file on cleanup");
+        } else {
+            debug!(path = %path.display(), "Removed state file on session exit");
         }
     }
 }

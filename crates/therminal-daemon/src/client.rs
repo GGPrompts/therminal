@@ -7,19 +7,19 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, warn};
 
 use therminal_protocol::daemon::{
-    decode_ipc, encode_ipc, DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse,
-    MAX_FRAME_SIZE,
+    DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE, decode_ipc,
+    encode_ipc,
 };
 
 use crate::framing::read_frame;

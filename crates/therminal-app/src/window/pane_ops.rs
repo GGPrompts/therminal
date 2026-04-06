@@ -271,11 +271,11 @@ impl App {
             None => return,
         };
 
-        if let Some(target_id) = layout.adjacent_pane(focused, direction) {
-            if layout.swap_pane(focused, target_id) {
-                // Focus stays on the original pane ID (it moved to the new position).
-                self.request_redraw();
-            }
+        if let Some(target_id) = layout.adjacent_pane(focused, direction)
+            && layout.swap_pane(focused, target_id)
+        {
+            // Focus stays on the original pane ID (it moved to the new position).
+            self.request_redraw();
         }
     }
 
@@ -326,10 +326,10 @@ impl App {
             None => return,
         };
         let term_guard = pane.term.lock();
-        if let Some(text) = term_guard.selection_to_string() {
-            if !text.is_empty() {
-                crate::clipboard::copy_to_clipboard(&text);
-            }
+        if let Some(text) = term_guard.selection_to_string()
+            && !text.is_empty()
+        {
+            crate::clipboard::copy_to_clipboard(&text);
         }
     }
 
@@ -399,12 +399,11 @@ impl App {
 
     /// Clear the active selection on all panes.
     pub(crate) fn clear_selection(&mut self) {
-        if let Some(pane_id) = self.selection_pane.take() {
-            if let Some(layout) = self.get_layout_mut() {
-                if let Some(pane) = layout.find_pane_mut(pane_id) {
-                    pane.term.lock().selection = None;
-                }
-            }
+        if let Some(pane_id) = self.selection_pane.take()
+            && let Some(layout) = self.get_layout_mut()
+            && let Some(pane) = layout.find_pane_mut(pane_id)
+        {
+            pane.term.lock().selection = None;
         }
         self.selection_in_progress = false;
     }

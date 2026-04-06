@@ -9,9 +9,9 @@ use therminal_core::geometry::Rect;
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler};
 use tracing::info;
 
-use super::state::{grid_size_for_rect, PaneState, PaneStatus};
 use super::PaneId;
 use super::PaneListener;
+use super::state::{PaneState, PaneStatus, grid_size_for_rect};
 use crate::grid_renderer::GridRenderer;
 
 /// Counter for generating unique pane IDs.
@@ -119,14 +119,14 @@ impl PtyReaderHandler for AppPtyHandler {
         }
 
         // Run process-tree scan if enabled and interval has elapsed.
-        if let Some(ref mut detector) = state.process_detector {
-            if let Some(agents) = detector.scan_if_due() {
-                if let Ok(mut s) = self.status.lock() {
-                    s.agent_name = agents.first().map(|a| a.name.clone());
-                }
-                if !agents.is_empty() {
-                    tracing::debug!("detected agents: {:?}", agents);
-                }
+        if let Some(ref mut detector) = state.process_detector
+            && let Some(agents) = detector.scan_if_due()
+        {
+            if let Ok(mut s) = self.status.lock() {
+                s.agent_name = agents.first().map(|a| a.name.clone());
+            }
+            if !agents.is_empty() {
+                tracing::debug!("detected agents: {:?}", agents);
             }
         }
 

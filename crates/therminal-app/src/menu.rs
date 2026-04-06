@@ -351,10 +351,10 @@ pub(crate) fn build_hotspot_palette(
 /// Split a file path like `src/main.rs:42:5` into (`src/main.rs`, `:42:5`).
 fn parse_file_path_parts(text: &str) -> (&str, &str) {
     // Find the first colon that is followed by a digit (line number).
-    if let Some(idx) = text.find(':') {
-        if text[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) {
-            return (&text[..idx], &text[idx..]);
-        }
+    if let Some(idx) = text.find(':')
+        && text[idx + 1..].starts_with(|c: char| c.is_ascii_digit())
+    {
+        return (&text[..idx], &text[idx..]);
     }
     (text, "")
 }

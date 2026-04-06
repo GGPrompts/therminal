@@ -5,9 +5,9 @@
 
 use therminal_core::geometry::Rect;
 
-use super::geometry::{effective_header_height, MIN_PANE_HEIGHT, MIN_PANE_WIDTH, SEPARATOR_GAP};
-use super::state::PaneState;
 use super::SplitDirection;
+use super::geometry::{MIN_PANE_HEIGHT, MIN_PANE_WIDTH, SEPARATOR_GAP, effective_header_height};
+use super::state::PaneState;
 use crate::grid_renderer::GridRenderer;
 
 /// A node in the binary layout tree.
@@ -655,8 +655,8 @@ mod tests {
     use therminal_core::geometry::Rect;
 
     use super::*;
-    use crate::pane::state::PaneTermSize;
     use crate::pane::PaneListener;
+    use crate::pane::state::PaneTermSize;
 
     /// Helper to create a minimal test leaf node (no real PTY).
     fn test_leaf(id: super::super::PaneId, rect: Rect) -> LayoutNode {

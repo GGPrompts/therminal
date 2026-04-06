@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermDamage;
+use alacritty_terminal::term::cell::Flags;
 
-use crate::grid_renderer::{cell_display_text, GridRenderer, HyperlinkSource, RenderCell};
+use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_display_text};
 use crate::hotspot_detection::detect_hotspots;
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
@@ -160,38 +160,20 @@ fn render_single_pane(
     // When partial damage reports an empty set, nothing changed — use
     // the existing cached state without collecting cells or running
     // URL/hotspot detection.
-    if let Some(ref damaged) = damaged_rows {
-        if !damaged.iter().any(|&d| d) {
-            term_guard.reset_damage();
-            drop(term_guard);
+    if let Some(ref damaged) = damaged_rows
+        && !damaged.iter().any(|&d| d)
+    {
+        term_guard.reset_damage();
+        drop(term_guard);
 
-            // Draw pane header (multi-pane) even when content is unchanged.
-            let header_h = crate::pane::effective_header_height(pane_count);
-            if pane_count > 1 {
-                draw_pane_header(
-                    pane,
-                    pane_index,
-                    draw_focus_border,
-                    renderer,
-                    device,
-                    queue,
-                    encoder,
-                    view,
-                    surface_width,
-                    surface_height,
-                );
-            }
-
-            let internal_pad_x = renderer.padding_x();
-            let internal_pad_y = renderer.padding_y();
-            renderer
-                .set_viewport_offset(vp.x() + internal_pad_x, vp.y() + internal_pad_y + header_h);
-
-            renderer.render_cached(
-                &cursor,
-                screen_lines,
-                selection_range.as_ref(),
-                display_offset,
+        // Draw pane header (multi-pane) even when content is unchanged.
+        let header_h = crate::pane::effective_header_height(pane_count);
+        if pane_count > 1 {
+            draw_pane_header(
+                pane,
+                pane_index,
+                draw_focus_border,
+                renderer,
                 device,
                 queue,
                 encoder,
@@ -199,21 +181,38 @@ fn render_single_pane(
                 surface_width,
                 surface_height,
             );
-            renderer.restore_padding();
-
-            if draw_focus_border {
-                draw_pane_focus_border(
-                    pane,
-                    renderer,
-                    device,
-                    encoder,
-                    view,
-                    surface_width,
-                    surface_height,
-                );
-            }
-            return;
         }
+
+        let internal_pad_x = renderer.padding_x();
+        let internal_pad_y = renderer.padding_y();
+        renderer.set_viewport_offset(vp.x() + internal_pad_x, vp.y() + internal_pad_y + header_h);
+
+        renderer.render_cached(
+            &cursor,
+            screen_lines,
+            selection_range.as_ref(),
+            display_offset,
+            device,
+            queue,
+            encoder,
+            view,
+            surface_width,
+            surface_height,
+        );
+        renderer.restore_padding();
+
+        if draw_focus_border {
+            draw_pane_focus_border(
+                pane,
+                renderer,
+                device,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+        }
+        return;
     }
 
     let mut cells: Vec<RenderCell> = content
@@ -273,14 +272,13 @@ fn render_single_pane(
 
         // Apply detected URLs back to the main cells vec.
         for dc in &damaged_cells {
-            if dc.hyperlink.is_some() {
-                if let Some(cell) = cells
+            if dc.hyperlink.is_some()
+                && let Some(cell) = cells
                     .iter_mut()
                     .find(|c| c.row == dc.row && c.col == dc.col)
-                {
-                    cell.hyperlink.clone_from(&dc.hyperlink);
-                    cell.hyperlink_source = dc.hyperlink_source;
-                }
+            {
+                cell.hyperlink.clone_from(&dc.hyperlink);
+                cell.hyperlink_source = dc.hyperlink_source;
             }
         }
 

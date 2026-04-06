@@ -62,12 +62,11 @@ pub fn encode_key(key: &KeyCode, mods: &Modifiers) -> Option<Vec<u8>> {
     // -- Ctrl+letter ---------------------------------------------------------
     // Must be checked *before* the printable-text path so that
     // Ctrl+C emits 0x03 rather than the literal 'c'.
-    if mods.ctrl {
-        if let KeyCode::Char(ch) = key {
-            if let Some(byte) = ctrl_char_byte(*ch) {
-                return Some(vec![byte]);
-            }
-        }
+    if mods.ctrl
+        && let KeyCode::Char(ch) = key
+        && let Some(byte) = ctrl_char_byte(*ch)
+    {
+        return Some(vec![byte]);
     }
 
     // -- Special / non-printable keys ----------------------------------------
@@ -82,24 +81,25 @@ pub fn encode_key(key: &KeyCode, mods: &Modifiers) -> Option<Vec<u8>> {
 
     // -- Alt/Meta + key -> ESC prefix ----------------------------------------
     // When Alt is held (without Ctrl), prepend \x1b to the key byte.
-    if mods.alt && !mods.ctrl {
-        if let KeyCode::Char(ch) = key {
-            let mut s = String::new();
-            s.push(*ch);
-            let mut bytes = Vec::with_capacity(1 + s.len());
-            bytes.push(0x1b);
-            bytes.extend_from_slice(s.as_bytes());
-            return Some(bytes);
-        }
+    if mods.alt
+        && !mods.ctrl
+        && let KeyCode::Char(ch) = key
+    {
+        let mut s = String::new();
+        s.push(*ch);
+        let mut bytes = Vec::with_capacity(1 + s.len());
+        bytes.push(0x1b);
+        bytes.extend_from_slice(s.as_bytes());
+        return Some(bytes);
     }
 
     // -- Printable text (no Ctrl held) ---------------------------------------
-    if !mods.ctrl {
-        if let KeyCode::Char(ch) = key {
-            let mut s = String::new();
-            s.push(*ch);
-            return Some(s.into_bytes());
-        }
+    if !mods.ctrl
+        && let KeyCode::Char(ch) = key
+    {
+        let mut s = String::new();
+        s.push(*ch);
+        return Some(s.into_bytes());
     }
 
     None

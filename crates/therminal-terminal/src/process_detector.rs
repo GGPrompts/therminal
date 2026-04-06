@@ -59,10 +59,10 @@ impl ProcessDetector {
     /// Returns `None` if it is not yet time, or `Some(agents)` with the
     /// (possibly empty) list of detected agents.
     pub fn scan_if_due(&mut self) -> Option<Vec<DetectedAgent>> {
-        if let Some(last) = self.last_scan {
-            if last.elapsed() < self.scan_interval {
-                return None;
-            }
+        if let Some(last) = self.last_scan
+            && last.elapsed() < self.scan_interval
+        {
+            return None;
         }
         Some(self.scan())
     }

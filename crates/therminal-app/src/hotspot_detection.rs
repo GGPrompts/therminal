@@ -406,14 +406,20 @@ mod tests {
         let mut cells = cells_from_str(0, "see /home/user/src/main.rs:1");
         cells.extend(cells_from_str(1, "fixes #99 in commit abcdef1234567"));
         let hotspots = detect_hotspots(&cells, 2);
-        assert!(hotspots
-            .iter()
-            .any(|h| h.kind == HotspotKind::FilePath && h.row == 0));
-        assert!(hotspots
-            .iter()
-            .any(|h| h.kind == HotspotKind::IssueRef && h.row == 1));
-        assert!(hotspots
-            .iter()
-            .any(|h| h.kind == HotspotKind::GitRef && h.row == 1));
+        assert!(
+            hotspots
+                .iter()
+                .any(|h| h.kind == HotspotKind::FilePath && h.row == 0)
+        );
+        assert!(
+            hotspots
+                .iter()
+                .any(|h| h.kind == HotspotKind::IssueRef && h.row == 1)
+        );
+        assert!(
+            hotspots
+                .iter()
+                .any(|h| h.kind == HotspotKind::GitRef && h.row == 1)
+        );
     }
 }

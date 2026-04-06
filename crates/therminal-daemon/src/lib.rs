@@ -32,7 +32,7 @@ pub mod server;
 pub mod session;
 pub mod trust;
 
-pub use ensure::{ensure_daemon, EnsureResult, BUILD_HASH, VERSION};
+pub use ensure::{BUILD_HASH, EnsureResult, VERSION, ensure_daemon};
 pub use lifecycle::{Lifecycle, LifecycleConfig};
 pub use server::IpcServer;
 pub use session::SessionManager;

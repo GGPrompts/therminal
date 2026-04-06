@@ -186,10 +186,10 @@ impl Osc633Parser {
                 match byte {
                     // BEL terminates an OSC sequence.
                     0x07 => {
-                        if self.confirmed_633 {
-                            if let Some(mark) = parse_633_body(&self.buf) {
-                                marks.push(mark);
-                            }
+                        if self.confirmed_633
+                            && let Some(mark) = parse_633_body(&self.buf)
+                        {
+                            marks.push(mark);
                         }
                         self.reset();
                     }
@@ -201,10 +201,10 @@ impl Osc633Parser {
                     // `\` after ESC completes ST terminator.
                     0x5C if self.after_esc => {
                         self.after_esc = false;
-                        if self.confirmed_633 {
-                            if let Some(mark) = parse_633_body(&self.buf) {
-                                marks.push(mark);
-                            }
+                        if self.confirmed_633
+                            && let Some(mark) = parse_633_body(&self.buf)
+                        {
+                            marks.push(mark);
                         }
                         self.reset();
                     }

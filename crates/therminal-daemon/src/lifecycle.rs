@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{watch, Notify};
+use tokio::sync::{Notify, watch};
 use tracing::{info, warn};
 
 use therminal_protocol::DaemonState;

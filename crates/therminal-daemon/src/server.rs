@@ -5,8 +5,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use tokio::io::AsyncReadExt;
@@ -17,7 +17,7 @@ use crate::framing::{read_frame, write_frame};
 use tracing::{debug, error, info, warn};
 
 use therminal_protocol::daemon::{
-    decode_ipc, DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE,
+    DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE, decode_ipc,
 };
 
 use crate::control;

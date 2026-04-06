@@ -48,14 +48,15 @@ impl EventListener for PaneListener {
 
 #[allow(unused_imports)]
 pub use self::geometry::{
-    content_area_rect, effective_header_height, effective_status_bar_height,
-    effective_tab_bar_height, MIN_PANE_HEIGHT, MIN_PANE_WIDTH, PANE_HEADER_HEIGHT, SEPARATOR_GAP,
-    STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT,
+    CSD_BUTTON_HEIGHT, CSD_BUTTON_WIDTH, CSD_TAB_BAR_HEIGHT, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
+    PANE_HEADER_HEIGHT, SEPARATOR_GAP, STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, content_area_rect,
+    content_area_rect_csd, effective_header_height, effective_status_bar_height,
+    effective_tab_bar_height, effective_tab_bar_height_csd,
 };
 pub use self::layout::{FocusDirection, LayoutNode, LayoutSnapshot};
 #[allow(unused_imports)]
-pub use self::spawn::{next_pane_id, spawn_pane, PaneCallbacks};
+pub use self::spawn::{PaneCallbacks, next_pane_id, spawn_pane};
 #[allow(unused_imports)]
-pub use self::state::{grid_size_for_rect, grid_size_for_rect_with_header, PaneState, PaneStatus};
+pub use self::state::{PaneState, PaneStatus, grid_size_for_rect, grid_size_for_rect_with_header};
 #[allow(unused_imports)]
 pub use self::workspace::{Workspace, WorkspaceManager};

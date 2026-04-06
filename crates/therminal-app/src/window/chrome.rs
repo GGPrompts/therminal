@@ -1222,18 +1222,18 @@ fn abbreviate_path(path: &str) -> String {
     };
 
     // Replace Linux home dir with ~.
-    if let Ok(home) = std::env::var("HOME") {
-        if let Some(rest) = path.strip_prefix(home.as_str()) {
-            return format!("~{rest}");
-        }
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = path.strip_prefix(home.as_str())
+    {
+        return format!("~{rest}");
     }
 
     // WSL2: abbreviate Windows user home (/mnt/c/Users/<user>) to ~win.
     // This applies when the user navigates into Windows-side directories.
-    if let Some(win_home) = wsl2_windows_home() {
-        if let Some(rest) = path.strip_prefix(win_home.as_str()) {
-            return format!("~win{rest}");
-        }
+    if let Some(win_home) = wsl2_windows_home()
+        && let Some(rest) = path.strip_prefix(win_home.as_str())
+    {
+        return format!("~win{rest}");
     }
 
     path.to_string()
@@ -1250,10 +1250,10 @@ fn wsl2_windows_home() -> Option<String> {
 
     // USERPROFILE is typically forwarded from Windows via WSLENV (e.g.,
     // "C:\Users\alice"). Convert backslashes and prepend /mnt/c -> /mnt/c/Users/alice.
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        if let Some(linux_path) = windows_path_to_linux(&userprofile) {
-            return Some(linux_path);
-        }
+    if let Ok(userprofile) = std::env::var("USERPROFILE")
+        && let Some(linux_path) = windows_path_to_linux(&userprofile)
+    {
+        return Some(linux_path);
     }
 
     // Fallback: HOMEDRIVE (e.g. "C:") + HOMEPATH (e.g. "\Users\alice").

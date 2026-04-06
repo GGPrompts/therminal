@@ -217,7 +217,7 @@ async fn perform_handoff_force_removes_socket_on_timeout() {
     // 4. Then HOLDS the socket open indefinitely (simulates a stuck daemon).
     let listener = UnixListener::bind(&socket_path).expect("bind slow-daemon socket");
     tokio::spawn(async move {
-        use therminal_protocol::daemon::{encode_ipc, IpcMessage, IpcResponse};
+        use therminal_protocol::daemon::{IpcMessage, IpcResponse, encode_ipc};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         if let Ok((mut stream, _)) = listener.accept().await {

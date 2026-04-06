@@ -17,8 +17,8 @@ use crate::pane::{LayoutNode, PaneId};
 use alacritty_terminal::grid::Dimensions;
 use therminal_terminal::input::{self, MouseButton as InputMouseButton};
 
-use super::chrome::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 use super::App;
+use super::chrome::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 
 // ── Header button actions ──────────────────────────────────────────────
 
@@ -225,10 +225,10 @@ impl App {
             None => return,
         };
         let term_guard = pane.term.lock();
-        if let Some(text) = term_guard.selection_to_string() {
-            if !text.is_empty() {
-                crate::clipboard::copy_to_clipboard(&text);
-            }
+        if let Some(text) = term_guard.selection_to_string()
+            && !text.is_empty()
+        {
+            crate::clipboard::copy_to_clipboard(&text);
         }
     }
 
@@ -483,12 +483,12 @@ impl App {
             self.pty_write_to_pane(&seq, target_pane);
         } else {
             // Normal scrollback -- scroll the hovered pane.
-            if let Some(layout) = self.get_layout() {
-                if let Some(pane) = layout.find_pane(target_pane) {
-                    let scroll_lines = (lines * 3.0).round() as i32;
-                    let mut term_guard = pane.term.lock();
-                    term_guard.scroll_display(Scroll::Delta(scroll_lines));
-                }
+            if let Some(layout) = self.get_layout()
+                && let Some(pane) = layout.find_pane(target_pane)
+            {
+                let scroll_lines = (lines * 3.0).round() as i32;
+                let mut term_guard = pane.term.lock();
+                term_guard.scroll_display(Scroll::Delta(scroll_lines));
             }
             self.request_redraw();
         }
@@ -543,10 +543,10 @@ impl App {
             Some(l) => l,
             None => return,
         };
-        if let Some(pane) = layout.find_pane_mut(pane_id) {
-            if let Err(e) = pane.pty_writer.write_all(bytes) {
-                warn!("Failed to write to pane {} PTY: {e}", pane.id);
-            }
+        if let Some(pane) = layout.find_pane_mut(pane_id)
+            && let Err(e) = pane.pty_writer.write_all(bytes)
+        {
+            warn!("Failed to write to pane {} PTY: {e}", pane.id);
         }
     }
 
@@ -645,7 +645,10 @@ impl App {
     /// Compute the layout area rect (window minus status bar and tab bar).
     fn layout_area_rect(&self) -> Option<therminal_core::geometry::Rect> {
         let gpu = self.gpu.as_ref()?;
-        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
+        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+            self.config.general.show_tab_bar,
+            self.config.general.use_csd,
+        );
         Some(therminal_core::geometry::Rect::new(
             0.0,
             tab_bar_h,

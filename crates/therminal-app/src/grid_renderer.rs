@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::RenderableCursor;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape};
 
 use glyphon::{
@@ -1197,10 +1197,9 @@ impl GridRenderer {
                 if let Some(old_key) = cell_shape_keys[row_idx]
                     .get(cell.col)
                     .and_then(|k| k.as_ref())
+                    && *old_key == new_key
                 {
-                    if *old_key == new_key {
-                        continue;
-                    }
+                    continue;
                 }
 
                 let buf_width = if new_key.wide {
@@ -1294,8 +1293,8 @@ impl GridRenderer {
             .collect();
 
         let has_text = !text_areas.is_empty();
-        if has_text {
-            if let Err(e) = self.text_renderer.prepare(
+        if has_text
+            && let Err(e) = self.text_renderer.prepare(
                 device,
                 queue,
                 &mut self.font_system,
@@ -1303,9 +1302,9 @@ impl GridRenderer {
                 &self.viewport,
                 text_areas,
                 &mut self.swash_cache,
-            ) {
-                tracing::warn!("glyphon prepare failed: {}", e);
-            }
+            )
+        {
+            tracing::warn!("glyphon prepare failed: {}", e);
         }
 
         // ── Render pass: backgrounds + cursor rects ──────────────────────

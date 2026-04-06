@@ -184,6 +184,14 @@ pub struct GeneralConfig {
     pub show_status_bar: bool,
     /// Whether to show the workspace tab bar at the top of the window.
     pub show_tab_bar: bool,
+    /// Use client-side decorations (custom title bar with window controls).
+    /// Default: true on Linux, false on macOS and Windows.
+    pub use_csd: bool,
+}
+
+/// Platform-specific default for client-side decorations.
+fn default_use_csd() -> bool {
+    cfg!(target_os = "linux")
 }
 
 impl Default for GeneralConfig {
@@ -198,6 +206,7 @@ impl Default for GeneralConfig {
             padding: 4.0,
             show_status_bar: true,
             show_tab_bar: true,
+            use_csd: default_use_csd(),
         }
     }
 }
@@ -655,16 +664,20 @@ allowed_tools = ["read_file", "write_file"]
         let config = TherminalConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
-        assert!(decoded
-            .keybindings
-            .bindings
-            .iter()
-            .any(|b| b.action == KeyAction::SplitHorizontal));
-        assert!(decoded
-            .keybindings
-            .bindings
-            .iter()
-            .any(|b| b.action == KeyAction::ZoomPane));
+        assert!(
+            decoded
+                .keybindings
+                .bindings
+                .iter()
+                .any(|b| b.action == KeyAction::SplitHorizontal)
+        );
+        assert!(
+            decoded
+                .keybindings
+                .bindings
+                .iter()
+                .any(|b| b.action == KeyAction::ZoomPane)
+        );
     }
 
     #[test]

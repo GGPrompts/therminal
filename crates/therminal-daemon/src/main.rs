@@ -5,7 +5,7 @@ use tokio::net::UnixStream;
 use tracing::info;
 
 use therminal_daemon::lifecycle::LifecycleConfig;
-use therminal_daemon::{ensure_daemon, EnsureResult, BUILD_HASH, VERSION};
+use therminal_daemon::{BUILD_HASH, EnsureResult, VERSION, ensure_daemon};
 
 #[derive(Parser, Debug)]
 #[command(name = "therminal-daemon", about = "Therminal session daemon")]

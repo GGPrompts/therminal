@@ -92,7 +92,9 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
                             break;
                         }
                         if tokio::time::Instant::now() >= deadline {
-                            warn!("incompatible daemon did not release socket in time, force-removing");
+                            warn!(
+                                "incompatible daemon did not release socket in time, force-removing"
+                            );
                             std::fs::remove_file(&socket_path).ok();
                             break;
                         }

@@ -143,14 +143,15 @@ fn pty_bash_emits_osc_133_marks() {
 
     // Temporarily set SHELL to bash to ensure spawn_shell picks it up.
     let orig_shell = std::env::var("SHELL").ok();
-    std::env::set_var("SHELL", "bash");
+    // SAFETY: test-only env var mutation; these tests are #[ignore]d and run serially.
+    unsafe { std::env::set_var("SHELL", "bash") };
 
     let result = therminal_terminal::pty::spawn_shell(80, 24);
 
     // Restore SHELL.
     match orig_shell {
-        Some(s) => std::env::set_var("SHELL", s),
-        None => std::env::remove_var("SHELL"),
+        Some(s) => unsafe { std::env::set_var("SHELL", s) },
+        None => unsafe { std::env::remove_var("SHELL") },
     }
 
     let (master, mut child) = result.expect("failed to spawn bash PTY");
@@ -183,13 +184,13 @@ fn pty_zsh_emits_osc_133_marks() {
     }
 
     let orig_shell = std::env::var("SHELL").ok();
-    std::env::set_var("SHELL", "zsh");
+    unsafe { std::env::set_var("SHELL", "zsh") };
 
     let result = therminal_terminal::pty::spawn_shell(80, 24);
 
     match orig_shell {
-        Some(s) => std::env::set_var("SHELL", s),
-        None => std::env::remove_var("SHELL"),
+        Some(s) => unsafe { std::env::set_var("SHELL", s) },
+        None => unsafe { std::env::remove_var("SHELL") },
     }
 
     let (master, mut child) = result.expect("failed to spawn zsh PTY");
@@ -219,13 +220,13 @@ fn pty_fish_emits_osc_133_marks() {
     }
 
     let orig_shell = std::env::var("SHELL").ok();
-    std::env::set_var("SHELL", "fish");
+    unsafe { std::env::set_var("SHELL", "fish") };
 
     let result = therminal_terminal::pty::spawn_shell(80, 24);
 
     match orig_shell {
-        Some(s) => std::env::set_var("SHELL", s),
-        None => std::env::remove_var("SHELL"),
+        Some(s) => unsafe { std::env::set_var("SHELL", s) },
+        None => unsafe { std::env::remove_var("SHELL") },
     }
 
     let (master, mut child) = result.expect("failed to spawn fish PTY");
@@ -248,7 +249,7 @@ fn pty_fish_emits_osc_133_marks() {
 /// Verify that shell type detection works correctly for common paths.
 #[test]
 fn shell_type_detection() {
-    use therminal_terminal::pty::{detect_shell_type, ShellType};
+    use therminal_terminal::pty::{ShellType, detect_shell_type};
 
     assert_eq!(detect_shell_type("/bin/bash"), ShellType::Bash);
     assert_eq!(detect_shell_type("/usr/bin/zsh"), ShellType::Zsh);

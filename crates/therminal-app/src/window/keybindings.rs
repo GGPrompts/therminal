@@ -20,7 +20,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use therminal_core::config::{
-    parse_binding, KeyAction, ParsedKey, ParsedNamedKey, TherminalConfig,
+    KeyAction, ParsedKey, ParsedNamedKey, TherminalConfig, parse_binding,
 };
 
 // ── Binding key types ──────────────────────────────────────────────────
@@ -136,12 +136,10 @@ pub(crate) fn lookup_binding(
     // (e.g., Shift+/ → '?', Shift+= → '+'). Bindings use the unshifted
     // character. Use winit's key_without_modifiers() to get the layout-aware
     // unshifted key rather than a hardcoded US-layout table.
-    if shift {
-        if let Some(unshifted_bk) = key_without_modifiers_binding(key_event) {
-            let fallback = (ctrl, shift, alt, super_key, unshifted_bk);
-            if let Some(action) = map.get(&fallback) {
-                return Some(action.clone());
-            }
+    if shift && let Some(unshifted_bk) = key_without_modifiers_binding(key_event) {
+        let fallback = (ctrl, shift, alt, super_key, unshifted_bk);
+        if let Some(action) = map.get(&fallback) {
+            return Some(action.clone());
         }
     }
 

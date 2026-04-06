@@ -40,7 +40,7 @@ use crate::event_log::{EventLog, SessionEvent};
 use crate::osc633::CommandState;
 
 use ansi_strip::AnsiStripper;
-use cadence::{classify_output_cadence, is_spinner_pattern, is_streaming_cadence, MAX_CHUNK_STATS};
+use cadence::{MAX_CHUNK_STATS, classify_output_cadence, is_spinner_pattern, is_streaming_cadence};
 use patterns::Patterns;
 use persistence::{cleanup as do_cleanup, update_state_file_path, write_state_file};
 use types::StateFile;
@@ -373,11 +373,11 @@ impl AgentStateInference {
                     self.command_started_at_iso = Some(now_rfc3339());
                     // Capture the command text (may have arrived via OSC 633;E
                     // before the 633;C mark).
-                    if let Some(cmd) = command {
-                        if self.last_command.as_deref() != Some(cmd) {
-                            self.last_command = Some(cmd.to_string());
-                            self.dirty = true;
-                        }
+                    if let Some(cmd) = command
+                        && self.last_command.as_deref() != Some(cmd)
+                    {
+                        self.last_command = Some(cmd.to_string());
+                        self.dirty = true;
                     }
                     // Log command start event.
                     if let Some(ref mut log) = self.event_log {
@@ -403,11 +403,11 @@ impl AgentStateInference {
                 };
                 // Capture command text if we didn't get it during Executing
                 // (the E mark can arrive at any point before D).
-                if let Some(cmd) = command {
-                    if self.last_command.as_deref() != Some(cmd) {
-                        self.last_command = Some(cmd.to_string());
-                        self.dirty = true;
-                    }
+                if let Some(cmd) = command
+                    && self.last_command.as_deref() != Some(cmd)
+                {
+                    self.last_command = Some(cmd.to_string());
+                    self.dirty = true;
                 }
                 if let Some(ec) = exit_code {
                     if self.last_exit_code != Some(ec) {
@@ -580,12 +580,12 @@ impl AgentStateInference {
                 }
             }
 
-            if need_model && new_model.is_none() {
-                if let Some(caps) = self.patterns.model_pattern.captures(line) {
-                    if let Some(m) = caps.get(1) {
-                        new_model = Some(m.as_str().to_string());
-                    }
-                }
+            if need_model
+                && new_model.is_none()
+                && let Some(caps) = self.patterns.model_pattern.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                new_model = Some(m.as_str().to_string());
             }
 
             // Stop early if we found everything we need.
@@ -650,12 +650,12 @@ impl AgentStateInference {
                     tool_name: tool_name.clone(),
                 });
             }
-            if let InferredStatus::ToolUse { ref tool_name } = self.last_status {
-                if !matches!(new_status, InferredStatus::ToolUse { .. }) {
-                    self.emit(StateChangeNotification::ToolCompleted {
-                        tool_name: tool_name.clone(),
-                    });
-                }
+            if let InferredStatus::ToolUse { ref tool_name } = self.last_status
+                && !matches!(new_status, InferredStatus::ToolUse { .. })
+            {
+                self.emit(StateChangeNotification::ToolCompleted {
+                    tool_name: tool_name.clone(),
+                });
             }
             // Emit the general status change notification.
             self.emit(StateChangeNotification::StatusChanged {
@@ -757,12 +757,12 @@ impl AgentStateInference {
 
         // Check for tool call patterns.
         for line in lines_iter.clone().take(16) {
-            if let Some(caps) = self.patterns.tool_call.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    return InferredStatus::ToolUse {
-                        tool_name: m.as_str().to_string(),
-                    };
-                }
+            if let Some(caps) = self.patterns.tool_call.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                return InferredStatus::ToolUse {
+                    tool_name: m.as_str().to_string(),
+                };
             }
         }
 
@@ -800,12 +800,12 @@ impl AgentStateInference {
 
         // Check for tool use patterns (agent might be showing tool output).
         for line in lines_iter.clone().take(11) {
-            if let Some(caps) = self.patterns.tool_call.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    return InferredStatus::ToolUse {
-                        tool_name: m.as_str().to_string(),
-                    };
-                }
+            if let Some(caps) = self.patterns.tool_call.captures(line)
+                && let Some(m) = caps.get(1)
+            {
+                return InferredStatus::ToolUse {
+                    tool_name: m.as_str().to_string(),
+                };
             }
         }
 
@@ -827,20 +827,18 @@ impl AgentStateInference {
     /// Detect context percentage from recent output.
     fn detect_context_percent(&mut self) {
         for line in self.recent_lines.iter().rev().take(10) {
-            if let Some(caps) = self.patterns.context_percent.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    if let Ok(pct) = m.as_str().parse::<f32>() {
-                        if (0.0..=100.0).contains(&pct) {
-                            if self.context_percent != Some(pct) {
-                                trace!(field = "context_percent", value = pct, "state dirty");
-                                self.context_percent = Some(pct);
-                                self.dirty = true;
-                                self.emit(StateChangeNotification::ContextUpdated { percent: pct });
-                            }
-                            return;
-                        }
-                    }
+            if let Some(caps) = self.patterns.context_percent.captures(line)
+                && let Some(m) = caps.get(1)
+                && let Ok(pct) = m.as_str().parse::<f32>()
+                && (0.0..=100.0).contains(&pct)
+            {
+                if self.context_percent != Some(pct) {
+                    trace!(field = "context_percent", value = pct, "state dirty");
+                    self.context_percent = Some(pct);
+                    self.dirty = true;
+                    self.emit(StateChangeNotification::ContextUpdated { percent: pct });
                 }
+                return;
             }
         }
     }

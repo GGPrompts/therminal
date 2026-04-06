@@ -1,9 +1,9 @@
 //! Workspace manager: named workspace slots with independent pane layouts.
 
-use super::layout::{LayoutNode, LayoutSnapshot};
-use super::state::PaneState;
 use super::PaneId;
 use super::SplitDirection;
+use super::layout::{LayoutNode, LayoutSnapshot};
+use super::state::PaneState;
 
 /// A workspace holds an independent pane layout with its own focused pane.
 pub struct Workspace {
@@ -326,8 +326,8 @@ mod tests {
     use therminal_core::geometry::Rect;
 
     use super::*;
-    use crate::pane::state::PaneTermSize;
     use crate::pane::PaneListener;
+    use crate::pane::state::PaneTermSize;
 
     /// Helper to create a minimal test leaf node (no real PTY).
     fn test_leaf(id: PaneId, rect: Rect) -> LayoutNode {

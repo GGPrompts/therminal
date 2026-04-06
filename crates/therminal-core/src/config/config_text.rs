@@ -33,6 +33,10 @@ pub(super) fn default_config_text() -> String {
         d.general.show_status_bar
     ));
     out.push_str(&format!("# show_tab_bar = {}\n", d.general.show_tab_bar));
+    out.push_str(&format!(
+        "# use_csd = {}  # client-side decorations (default: true on Linux)\n",
+        d.general.use_csd
+    ));
     out.push_str("# [general.env]  # extra PTY environment variables\n");
     out.push_str("# MY_VAR = \"value\"\n");
     out.push('\n');

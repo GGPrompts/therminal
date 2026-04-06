@@ -44,7 +44,7 @@ use therminal_core::geometry::Rect;
 use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
 use therminal_terminal::interceptor::InterceptorConfig;
 
-use keybindings::{build_binding_map, lookup_binding, BindingLookup};
+use keybindings::{BindingLookup, build_binding_map, lookup_binding};
 use mouse::HeaderAction;
 
 // ── Custom event for waking the event loop from the PTY reader ───────────
@@ -143,6 +143,9 @@ pub struct App {
 
     /// Timestamp of last separator click (for double-click detection).
     last_separator_click: Option<Instant>,
+
+    /// Timestamp of last tab bar click (for CSD double-click-to-maximize).
+    last_tab_bar_click: Option<Instant>,
 }
 
 /// State for an in-progress separator drag.
@@ -217,6 +220,7 @@ impl App {
             separator_cursor_active: false,
             hyperlink_cursor_active: false,
             last_separator_click: None,
+            last_tab_bar_click: None,
         }
     }
 
@@ -329,7 +333,10 @@ impl App {
         // ── First pane (fills window minus status bar and tab bar) ─────
         let status_bar_h =
             crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
+        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+            self.config.general.show_tab_bar,
+            self.config.general.use_csd,
+        );
         let full_rect = Rect::new(
             0.0,
             tab_bar_h,
@@ -391,10 +398,10 @@ impl App {
         self.workspaces = Some(wm);
 
         // Resize initial pane with correct header height (0 for single pane).
-        if let Some(wm) = self.workspaces.as_mut() {
-            if let Some(renderer) = self.grid_renderer.as_ref() {
-                wm.layout_mut().resize_all_panes(renderer);
-            }
+        if let Some(wm) = self.workspaces.as_mut()
+            && let Some(renderer) = self.grid_renderer.as_ref()
+        {
+            wm.layout_mut().resize_all_panes(renderer);
         }
 
         let (cols, rows) = self
@@ -431,14 +438,13 @@ impl App {
         }
 
         // Recalculate layout tree and resize all pane PTYs.
-        if let Some(full_rect) = self.compute_layout_rect() {
-            if let (Some(wm), Some(renderer)) =
+        if let Some(full_rect) = self.compute_layout_rect()
+            && let (Some(wm), Some(renderer)) =
                 (self.workspaces.as_mut(), self.grid_renderer.as_ref())
-            {
-                let layout = wm.layout_mut();
-                layout.layout(full_rect);
-                layout.resize_all_panes(renderer);
-            }
+        {
+            let layout = wm.layout_mut();
+            layout.layout(full_rect);
+            layout.resize_all_panes(renderer);
         }
 
         debug!(
@@ -806,10 +812,10 @@ impl App {
             shift: state.shift_key(),
         };
 
-        if let Some(bytes) = input::encode_key(&key_code, &mods) {
-            if let Err(e) = pane.pty_writer.write_all(&bytes) {
-                warn!("Failed to write to pane {} PTY: {e}", pane.id);
-            }
+        if let Some(bytes) = input::encode_key(&key_code, &mods)
+            && let Err(e) = pane.pty_writer.write_all(&bytes)
+        {
+            warn!("Failed to write to pane {} PTY: {e}", pane.id);
         }
     }
 
@@ -905,10 +911,10 @@ impl App {
             self.binding_map.len()
         );
 
-        if self.config.general.title != old_config.general.title {
-            if let Some(w) = self.window.as_ref() {
-                w.set_title(&self.config.general.title);
-            }
+        if self.config.general.title != old_config.general.title
+            && let Some(w) = self.window.as_ref()
+        {
+            w.set_title(&self.config.general.title);
         }
 
         let font_changed = self.config.font.family != old_config.font.family
@@ -926,11 +932,9 @@ impl App {
             || self.config.colors.cursor != old_config.colors.cursor
             || self.config.colors.selection != old_config.colors.selection;
 
-        if colors_changed {
-            if let Some(renderer) = self.grid_renderer.as_mut() {
-                renderer.apply_color_overrides(&self.config.colors);
-                info!("color overrides updated via hot-reload");
-            }
+        if colors_changed && let Some(renderer) = self.grid_renderer.as_mut() {
+            renderer.apply_color_overrides(&self.config.colors);
+            info!("color overrides updated via hot-reload");
         }
 
         let status_bar_changed =
@@ -940,56 +944,56 @@ impl App {
         let needs_relayout =
             font_changed || padding_changed || status_bar_changed || tab_bar_changed;
 
-        if needs_relayout {
-            if let (Some(renderer), Some(gpu), Some(window)) = (
+        if needs_relayout
+            && let (Some(renderer), Some(gpu), Some(window)) = (
                 self.grid_renderer.as_mut(),
                 self.gpu.as_ref(),
                 self.window.as_ref(),
-            ) {
-                if padding_changed {
-                    renderer.set_padding(self.config.general.padding);
-                    info!(
-                        padding = self.config.general.padding,
-                        "padding updated via hot-reload"
-                    );
-                }
-
-                if font_changed {
-                    let scale = window.scale_factor() as f32;
-                    let mut new_font_config = FontConfig::new(
-                        self.config.font.family.clone(),
-                        self.config.font.size * scale,
-                    );
-                    new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
-                    new_font_config.line_height =
-                        self.config.font.size * self.config.font.line_height_scale * scale;
-                    renderer.update_font(
-                        new_font_config,
-                        &gpu.device,
-                        &gpu.queue,
-                        gpu.config.width,
-                        gpu.config.height,
-                    );
-
-                    info!(
-                        font_size = self.config.font.size,
-                        family = %self.config.font.family,
-                        "font config updated via hot-reload"
-                    );
-                }
-
-                // Resize all panes after font or padding change.
-                let full_rect = crate::pane::content_area_rect(
-                    gpu.config.width as f32,
-                    gpu.config.height as f32,
-                    self.config.general.show_status_bar,
-                    self.config.general.show_tab_bar,
+            )
+        {
+            if padding_changed {
+                renderer.set_padding(self.config.general.padding);
+                info!(
+                    padding = self.config.general.padding,
+                    "padding updated via hot-reload"
                 );
-                if let Some(wm) = self.workspaces.as_mut() {
-                    let layout = wm.layout_mut();
-                    layout.layout(full_rect);
-                    layout.resize_all_panes(renderer);
-                }
+            }
+
+            if font_changed {
+                let scale = window.scale_factor() as f32;
+                let mut new_font_config = FontConfig::new(
+                    self.config.font.family.clone(),
+                    self.config.font.size * scale,
+                );
+                new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
+                new_font_config.line_height =
+                    self.config.font.size * self.config.font.line_height_scale * scale;
+                renderer.update_font(
+                    new_font_config,
+                    &gpu.device,
+                    &gpu.queue,
+                    gpu.config.width,
+                    gpu.config.height,
+                );
+
+                info!(
+                    font_size = self.config.font.size,
+                    family = %self.config.font.family,
+                    "font config updated via hot-reload"
+                );
+            }
+
+            // Resize all panes after font or padding change.
+            let full_rect = crate::pane::content_area_rect(
+                gpu.config.width as f32,
+                gpu.config.height as f32,
+                self.config.general.show_status_bar,
+                self.config.general.show_tab_bar,
+            );
+            if let Some(wm) = self.workspaces.as_mut() {
+                let layout = wm.layout_mut();
+                layout.layout(full_rect);
+                layout.resize_all_panes(renderer);
             }
         }
 
@@ -1073,11 +1077,12 @@ impl App {
     /// Returns `None` if the GPU state is not yet initialized.
     pub(crate) fn compute_layout_rect(&self) -> Option<Rect> {
         let gpu = self.gpu.as_ref()?;
-        Some(crate::pane::content_area_rect(
+        Some(crate::pane::content_area_rect_csd(
             gpu.config.width as f32,
             gpu.config.height as f32,
             self.config.general.show_status_bar,
             self.config.general.show_tab_bar,
+            self.config.general.use_csd,
         ))
     }
 
@@ -1118,12 +1123,17 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
-        let attrs = Window::default_attributes()
+        let use_csd = self.config.general.use_csd;
+        let mut attrs = Window::default_attributes()
             .with_title(&self.config.general.title)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.general.window_width,
                 self.config.general.window_height,
             ));
+
+        if use_csd {
+            attrs = attrs.with_decorations(false);
+        }
 
         let window = Arc::new(
             event_loop
@@ -1313,38 +1323,102 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 // ── Right-click: open context menu ─────────────────────────
-                if state == ElementState::Pressed && button == MouseButton::Right {
-                    if let Some((px, py)) = self.cursor_position {
-                        self.open_context_menu(px as f32, py as f32);
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                        return;
+                if state == ElementState::Pressed
+                    && button == MouseButton::Right
+                    && let Some((px, py)) = self.cursor_position
+                {
+                    self.open_context_menu(px as f32, py as f32);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
                     }
+                    return;
                 }
 
-                // ── Tab bar click: switch workspace ───────────────────────
+                // ── Tab bar / CSD title bar click handling ─────────────────
                 if state == ElementState::Pressed
                     && button == MouseButton::Left
-                    && self.config.general.show_tab_bar
+                    && let Some((px, py)) = self.cursor_position
                 {
-                    if let Some((px, py)) = self.cursor_position {
-                        let tab_bar_h = crate::pane::effective_tab_bar_height(true);
-                        if (py as f32) < tab_bar_h {
+                    let use_csd = self.config.general.use_csd;
+                    let show_tab_bar = self.config.general.show_tab_bar;
+                    let tab_bar_h =
+                        crate::pane::effective_tab_bar_height_csd(show_tab_bar, use_csd);
+                    if (show_tab_bar || use_csd) && (py as f32) < tab_bar_h {
+                        // CSD window control buttons (right side).
+                        if use_csd {
+                            let surface_w = self
+                                .gpu
+                                .as_ref()
+                                .map(|g| g.config.width as f32)
+                                .unwrap_or(0.0);
+                            if let Some(action) =
+                                chrome::csd_button_hit_test(px as f32, tab_bar_h, surface_w)
+                            {
+                                match action {
+                                    chrome::CsdAction::Close => {
+                                        event_loop.exit();
+                                    }
+                                    chrome::CsdAction::Maximize => {
+                                        if let Some(w) = self.window.as_ref() {
+                                            w.set_maximized(!w.is_maximized());
+                                        }
+                                    }
+                                    chrome::CsdAction::Minimize => {
+                                        if let Some(w) = self.window.as_ref() {
+                                            w.set_minimized(true);
+                                        }
+                                    }
+                                }
+                                return;
+                            }
+                        }
+
+                        // Tab click: switch workspace.
+                        if show_tab_bar {
                             let workspace_ids = self
                                 .workspaces
                                 .as_ref()
                                 .map(|wm| wm.workspace_ids())
                                 .unwrap_or_default();
-                            if let Some(ws_id) = chrome::tab_bar_hit_test(px as f32, &workspace_ids)
+                            if let Some(ws_id) =
+                                chrome::tab_bar_hit_test(px as f32, &workspace_ids)
                             {
                                 self.switch_workspace(ws_id as u8);
+                                if let Some(w) = self.window.as_ref() {
+                                    w.request_redraw();
+                                }
+                                return;
                             }
+                        }
+
+                        // CSD: double-click empty area toggles maximize.
+                        if use_csd {
+                            let now = Instant::now();
+                            let is_double = self.last_tab_bar_click.is_some_and(|t| {
+                                now.duration_since(t) < Duration::from_millis(300)
+                            });
+                            if is_double {
+                                self.last_tab_bar_click = None;
+                                if let Some(w) = self.window.as_ref() {
+                                    w.set_maximized(!w.is_maximized());
+                                }
+                                return;
+                            }
+                            self.last_tab_bar_click = Some(now);
+
+                            // Start window drag on empty tab bar area.
                             if let Some(w) = self.window.as_ref() {
-                                w.request_redraw();
+                                if let Err(e) = w.drag_window() {
+                                    warn!("drag_window failed: {e}");
+                                }
                             }
                             return;
                         }
+
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
                     }
                 }
 
@@ -1358,69 +1432,69 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 // ── Separator drag: press starts drag or double-click resets ─
-                if state == ElementState::Pressed && button == MouseButton::Left {
-                    if let Some((px, py)) = self.cursor_position {
-                        // Double-click detection on separator.
-                        let now = Instant::now();
-                        let is_separator = self.separator_hit(px as f32, py as f32).is_some();
-                        if is_separator {
-                            let is_double = self.last_separator_click.is_some_and(|t| {
-                                now.duration_since(t) < Duration::from_millis(300)
-                            });
-                            if is_double {
-                                self.last_separator_click = None;
-                                self.try_separator_double_click(px as f32, py as f32);
-                                return;
-                            }
-                            self.last_separator_click = Some(now);
-                            if self.try_start_separator_drag(px as f32, py as f32) {
-                                return;
-                            }
-                        } else {
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && let Some((px, py)) = self.cursor_position
+                {
+                    // Double-click detection on separator.
+                    let now = Instant::now();
+                    let is_separator = self.separator_hit(px as f32, py as f32).is_some();
+                    if is_separator {
+                        let is_double = self
+                            .last_separator_click
+                            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(300));
+                        if is_double {
                             self.last_separator_click = None;
+                            self.try_separator_double_click(px as f32, py as f32);
+                            return;
                         }
+                        self.last_separator_click = Some(now);
+                        if self.try_start_separator_drag(px as f32, py as f32) {
+                            return;
+                        }
+                    } else {
+                        self.last_separator_click = None;
                     }
                 }
 
                 // Header button click detection (only when multiple panes).
                 let mut header_handled = false;
-                if state == ElementState::Pressed && button == MouseButton::Left {
-                    if let Some((px, py)) = self.cursor_position {
-                        if let Some(action) = self.header_hit_test(px, py) {
-                            header_handled = true;
-                            match action {
-                                HeaderAction::Focus(pane_id) => {
-                                    self.set_focused_pane(Some(pane_id));
-                                }
-                                HeaderAction::Close(pane_id) => {
-                                    self.close_pane_by_id(pane_id);
-                                }
-                                HeaderAction::SplitH(pane_id) => {
-                                    self.split_pane_by_id(pane_id, SplitDirection::Horizontal);
-                                }
-                                HeaderAction::SplitV(pane_id) => {
-                                    self.split_pane_by_id(pane_id, SplitDirection::Vertical);
-                                }
-                            }
-                            if let Some(w) = self.window.as_ref() {
-                                w.request_redraw();
-                            }
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && let Some((px, py)) = self.cursor_position
+                    && let Some(action) = self.header_hit_test(px, py)
+                {
+                    header_handled = true;
+                    match action {
+                        HeaderAction::Focus(pane_id) => {
+                            self.set_focused_pane(Some(pane_id));
                         }
+                        HeaderAction::Close(pane_id) => {
+                            self.close_pane_by_id(pane_id);
+                        }
+                        HeaderAction::SplitH(pane_id) => {
+                            self.split_pane_by_id(pane_id, SplitDirection::Horizontal);
+                        }
+                        HeaderAction::SplitV(pane_id) => {
+                            self.split_pane_by_id(pane_id, SplitDirection::Vertical);
+                        }
+                    }
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
                     }
                 }
 
                 if !header_handled {
                     // Focus-follows-click: if clicking in a different pane, switch focus.
-                    if state == ElementState::Pressed && button == MouseButton::Left {
-                        if let Some((px, py)) = self.cursor_position {
-                            if let Some(pane_id) = self.pane_at_position(px, py) {
-                                if self.focused_pane() != Some(pane_id) {
-                                    self.set_focused_pane(Some(pane_id));
-                                    if let Some(w) = self.window.as_ref() {
-                                        w.request_redraw();
-                                    }
-                                }
-                            }
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && let Some((px, py)) = self.cursor_position
+                        && let Some(pane_id) = self.pane_at_position(px, py)
+                        && self.focused_pane() != Some(pane_id)
+                    {
+                        self.set_focused_pane(Some(pane_id));
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
                         }
                     }
                     self.handle_mouse_input(state, button);

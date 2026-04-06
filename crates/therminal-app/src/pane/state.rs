@@ -10,9 +10,9 @@ use portable_pty::MasterPty;
 use therminal_core::geometry::Rect;
 use tracing::warn;
 
-use super::geometry::PANE_HEADER_HEIGHT;
 use super::PaneId;
 use super::PaneListener;
+use super::geometry::PANE_HEADER_HEIGHT;
 use crate::grid_renderer::GridRenderer;
 
 // ── Dimensions adapter ──────────────────────────────────────────────────

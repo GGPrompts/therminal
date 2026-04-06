@@ -20,21 +20,37 @@ pub fn effective_header_height(pane_count: usize) -> f32 {
 /// Height of the window status bar in physical pixels.
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
-/// Height of the workspace tab bar in physical pixels.
+/// Height of the workspace tab bar in physical pixels (standard mode).
 pub const TAB_BAR_HEIGHT: f32 = 24.0;
+
+/// Height of the tab bar when client-side decorations are active.
+/// Taller to accommodate window control buttons.
+pub const CSD_TAB_BAR_HEIGHT: f32 = 36.0;
+
+/// Width of a single CSD window control button (minimize, maximize, close).
+#[allow(dead_code)]
+pub const CSD_BUTTON_WIDTH: f32 = 46.0;
+
+/// Height of a CSD window control button.
+#[allow(dead_code)]
+pub const CSD_BUTTON_HEIGHT: f32 = 36.0;
 
 /// Return the effective status bar height: 0 when disabled, STATUS_BAR_HEIGHT otherwise.
 pub fn effective_status_bar_height(show: bool) -> f32 {
-    if show {
-        STATUS_BAR_HEIGHT
-    } else {
-        0.0
-    }
+    if show { STATUS_BAR_HEIGHT } else { 0.0 }
 }
 
 /// Return the effective tab bar height: 0 when disabled, TAB_BAR_HEIGHT otherwise.
 pub fn effective_tab_bar_height(show: bool) -> f32 {
-    if show {
+    if show { TAB_BAR_HEIGHT } else { 0.0 }
+}
+
+/// Return the effective tab bar height when CSD may be active.
+/// When CSD is on, the tab bar is always shown (it is the title bar).
+pub fn effective_tab_bar_height_csd(show_tab_bar: bool, use_csd: bool) -> f32 {
+    if use_csd {
+        CSD_TAB_BAR_HEIGHT
+    } else if show_tab_bar {
         TAB_BAR_HEIGHT
     } else {
         0.0
@@ -50,6 +66,20 @@ pub fn content_area_rect(
 ) -> Rect {
     let status_bar_h = effective_status_bar_height(show_status_bar);
     let tab_bar_h = effective_tab_bar_height(show_tab_bar);
+    Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
+}
+
+/// Compute the content area rect with CSD awareness.
+#[allow(dead_code)]
+pub fn content_area_rect_csd(
+    width: f32,
+    height: f32,
+    show_status_bar: bool,
+    show_tab_bar: bool,
+    use_csd: bool,
+) -> Rect {
+    let status_bar_h = effective_status_bar_height(show_status_bar);
+    let tab_bar_h = effective_tab_bar_height_csd(show_tab_bar, use_csd);
     Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
 }
 
