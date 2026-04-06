@@ -82,6 +82,20 @@ fn get_default_shell() -> String {
     }
     #[cfg(windows)]
     {
+        // Prefer PowerShell over cmd.exe for a modern shell experience.
+        // Check for pwsh (PowerShell 7+) first, then fall back to
+        // Windows PowerShell 5.1, then cmd.exe as last resort.
+        for candidate in &["pwsh.exe", "powershell.exe"] {
+            if std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                return candidate.to_string();
+            }
+        }
         std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_owned())
     }
 }
