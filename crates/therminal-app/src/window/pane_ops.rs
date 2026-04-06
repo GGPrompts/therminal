@@ -404,6 +404,28 @@ impl App {
         }
     }
 
+    /// Reset all split ratios to 50/50.
+    pub(crate) fn reset_all_ratios(&mut self) {
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
+
+        layout.reset_all_ratios();
+        layout.layout(full_rect);
+        if let Some(renderer) = self.grid_renderer.as_ref() {
+            layout.resize_all_panes(renderer);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     // ── Clipboard operations ───────────────────────────────────────────
 
     /// Copy the current selection to the clipboard (for Ctrl+Shift+C keybinding).

@@ -779,6 +779,7 @@ impl App {
             KeyAction::ClosePane => self.close_focused_pane(),
             KeyAction::ResizeGrow => self.adjust_focused_ratio(0.05),
             KeyAction::ResizeShrink => self.adjust_focused_ratio(-0.05),
+            KeyAction::ResizeReset => self.reset_all_ratios(),
             KeyAction::FocusNext => {
                 self.move_focus(crate::pane::FocusDirection::Next);
             }

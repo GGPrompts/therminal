@@ -155,7 +155,9 @@ pub(super) fn default_config_text() -> String {
     out.push_str("# [keybindings] — Key-action bindings merged on top of built-in defaults.\n");
     out.push_str("# Actions: copy | paste | font_size_up | font_size_down | font_size_reset\n");
     out.push_str("#          split_horizontal | split_vertical | split_auto | close_pane\n");
-    out.push_str("#          resize_grow | resize_shrink | focus_next | focus_prev\n");
+    out.push_str(
+        "#          resize_grow | resize_shrink | resize_reset | focus_next | focus_prev\n",
+    );
     out.push_str("#          focus_up | focus_down | focus_left | focus_right | zoom_pane\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("[keybindings]\n");

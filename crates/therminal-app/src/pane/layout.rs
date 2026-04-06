@@ -438,6 +438,23 @@ impl LayoutNode {
         }
     }
 
+    /// Recursively reset all split ratios to 0.5 (equal splits).
+    pub fn reset_all_ratios(&mut self) {
+        match self {
+            LayoutNode::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                *ratio = 0.5;
+                first.reset_all_ratios();
+                second.reset_all_ratios();
+            }
+            LayoutNode::Leaf(_) | LayoutNode::Empty => {}
+        }
+    }
+
     /// Hit-test for separator drag: find the split node whose separator is
     /// within `tolerance` pixels of `(px, py)`.
     ///

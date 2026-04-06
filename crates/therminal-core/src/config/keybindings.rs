@@ -31,6 +31,8 @@ pub enum KeyAction {
     ResizeGrow,
     /// Shrink the focused pane's split ratio.
     ResizeShrink,
+    /// Reset all split ratios to 50/50.
+    ResizeReset,
     /// Move focus to the next pane.
     FocusNext,
     /// Move focus to the previous pane.
@@ -83,6 +85,7 @@ impl KeyAction {
             KeyAction::ClosePane => "Close focused pane",
             KeyAction::ResizeGrow => "Grow pane ratio",
             KeyAction::ResizeShrink => "Shrink pane ratio",
+            KeyAction::ResizeReset => "Reset pane ratios",
             KeyAction::FocusNext => "Focus next pane",
             KeyAction::FocusPrev => "Focus previous pane",
             KeyAction::FocusUp => "Focus pane above",
@@ -112,6 +115,7 @@ impl KeyAction {
             | KeyAction::ClosePane
             | KeyAction::ResizeGrow
             | KeyAction::ResizeShrink
+            | KeyAction::ResizeReset
             | KeyAction::FocusNext
             | KeyAction::FocusPrev
             | KeyAction::FocusUp
@@ -206,6 +210,10 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+-".to_string(),
                     action: KeyAction::ResizeShrink,
+                },
+                Keybinding {
+                    key: "ctrl+shift+0".to_string(),
+                    action: KeyAction::ResizeReset,
                 },
                 // Focus movement (directional arrows)
                 Keybinding {
