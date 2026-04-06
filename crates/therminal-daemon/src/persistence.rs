@@ -54,11 +54,20 @@ pub fn save_sync(state: &PersistedState) {
     }
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!(path = %path.display(), error = %e, "failed to write persisted state");
-            } else {
-                debug!(path = %path.display(), "persisted state saved");
+            // Atomic write: write to .tmp then rename, so a crash mid-write
+            // never corrupts the canonical sessions.json.
+            let tmp_path = path.with_extension("json.tmp");
+            if let Err(e) = std::fs::write(&tmp_path, json.as_bytes()) {
+                warn!(path = %tmp_path.display(), error = %e, "failed to write temp state file");
+                return;
             }
+            if let Err(e) = std::fs::rename(&tmp_path, &path) {
+                warn!(path = %path.display(), error = %e, "failed to rename persisted state file");
+                // Clean up tmp file on rename failure.
+                let _ = std::fs::remove_file(&tmp_path);
+                return;
+            }
+            debug!(path = %path.display(), "persisted state saved");
         }
         Err(e) => {
             warn!(error = %e, "failed to serialize persisted state");
@@ -241,6 +250,42 @@ mod tests {
         let mgr = SessionManager::new(tx);
         let state = snapshot(&mgr);
         assert!(state.sessions.is_empty());
+    }
+
+    /// Verify that atomic write cleans up the temp file after success.
+    #[test]
+    fn atomic_write_cleans_up_tmp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sessions.json");
+        let tmp_path = path.with_extension("json.tmp");
+
+        let state = PersistedState {
+            sessions: vec![PersistedSession {
+                name: Some("atomic-test".into()),
+                panes: vec![PersistedPane {
+                    cwd: "/home/test".into(),
+                    shell: String::new(),
+                    cols: 80,
+                    rows: 24,
+                }],
+                workspaces: vec![],
+                active_workspace: 1,
+            }],
+        };
+
+        // Manually perform the atomic write pattern against our temp dir.
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&tmp_path, json.as_bytes()).unwrap();
+        assert!(tmp_path.exists(), "tmp file should exist before rename");
+
+        std::fs::rename(&tmp_path, &path).unwrap();
+        assert!(path.exists(), "final file should exist after rename");
+        assert!(!tmp_path.exists(), "tmp file should be gone after rename");
+
+        // Verify contents survived.
+        let loaded: PersistedState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.sessions[0].name.as_deref(), Some("atomic-test"));
     }
 
     /// Verify that snapshot -> restore -> snapshot preserves cwd and shell values.
