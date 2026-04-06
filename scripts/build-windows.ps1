@@ -1,12 +1,23 @@
 param(
     [switch]$Debug,
     [switch]$NoCopy,
-    [string]$Destination
+    [string]$Destination,
+    [string]$RepoRoot
 )
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$scriptRepoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $scriptRepoRoot
+} else {
+    $RepoRoot
+}
+
+if (-not (Test-Path (Join-Path $repoRoot "Cargo.toml"))) {
+    throw "Repo root does not contain Cargo.toml: $repoRoot"
+}
+
 Set-Location $repoRoot
 
 $profile = if ($Debug) { "debug" } else { "release" }
@@ -42,4 +53,3 @@ if (-not $NoCopy) {
     Copy-Item -Force $exePath $Destination
     Write-Host "Copied to: $Destination"
 }
-
