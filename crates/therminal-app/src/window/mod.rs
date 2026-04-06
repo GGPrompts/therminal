@@ -139,6 +139,9 @@ pub struct App {
     /// Whether the cursor is currently showing a resize icon (for separator hover).
     separator_cursor_active: bool,
 
+    /// Whether the cursor is currently showing a pointer icon (for hyperlink hover).
+    hyperlink_cursor_active: bool,
+
     /// Timestamp of last separator click (for double-click detection).
     last_separator_click: Option<Instant>,
 }
@@ -214,6 +217,7 @@ impl App {
             saved_layout: None,
             separator_drag: None,
             separator_cursor_active: false,
+            hyperlink_cursor_active: false,
             last_separator_click: None,
         }
     }
@@ -324,14 +328,15 @@ impl App {
         );
         grid_renderer.apply_color_overrides(&self.config.colors);
 
-        // ── First pane (fills window minus status bar) ─────────────────
+        // ── First pane (fills window minus status bar and tab bar) ─────
         let status_bar_h =
             crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         let full_rect = Rect::new(
             0.0,
-            0.0,
+            tab_bar_h,
             config.width as f32,
-            config.height as f32 - status_bar_h,
+            config.height as f32 - status_bar_h - tab_bar_h,
         );
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -339,6 +344,7 @@ impl App {
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
             osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = self.build_spawn_options();
@@ -420,14 +426,16 @@ impl App {
             renderer.resize(&gpu.device, &gpu.queue, new_size.width, new_size.height);
         }
 
-        // Recalculate layout tree and resize all pane PTYs (minus status bar).
+        // Recalculate layout tree and resize all pane PTYs (minus status bar and tab bar).
         let status_bar_h =
             crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+        let tab_bar_h =
+            crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
         let full_rect = Rect::new(
             0.0,
-            0.0,
+            tab_bar_h,
             new_size.width as f32,
-            new_size.height as f32 - status_bar_h,
+            new_size.height as f32 - status_bar_h - tab_bar_h,
         );
         if let (Some(wm), Some(renderer)) = (self.workspaces.as_mut(), self.grid_renderer.as_ref())
         {
@@ -583,6 +591,38 @@ impl App {
                 });
             chrome::draw_status_bar(
                 &status_info,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
+
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+        }
+
+        // ── Tab bar ─────────────────────────────────────────────────────
+        if self.config.general.show_tab_bar {
+            let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
+                (wm.workspace_ids(), wm.active_id())
+            } else {
+                (vec![1], 1)
+            };
+
+            let tab_info = chrome::TabBarInfo {
+                workspace_ids,
+                active_workspace,
+            };
+
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("tab_bar_encoder"),
+                });
+            chrome::draw_tab_bar(
+                &tab_info,
                 renderer,
                 &gpu.device,
                 &gpu.queue,
@@ -878,8 +918,11 @@ impl App {
 
         let status_bar_changed =
             self.config.general.show_status_bar != old_config.general.show_status_bar;
+        let tab_bar_changed =
+            self.config.general.show_tab_bar != old_config.general.show_tab_bar;
 
-        let needs_relayout = font_changed || padding_changed || status_bar_changed;
+        let needs_relayout =
+            font_changed || padding_changed || status_bar_changed || tab_bar_changed;
 
         if needs_relayout {
             if let (Some(renderer), Some(gpu), Some(window)) = (
@@ -922,11 +965,13 @@ impl App {
                 // Resize all panes after font or padding change.
                 let status_bar_h =
                     crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+                let tab_bar_h =
+                    crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
                 let full_rect = Rect::new(
                     0.0,
-                    0.0,
+                    tab_bar_h,
                     gpu.config.width as f32,
-                    gpu.config.height as f32 - status_bar_h,
+                    gpu.config.height as f32 - status_bar_h - tab_bar_h,
                 );
                 if let Some(wm) = self.workspaces.as_mut() {
                     let layout = wm.layout_mut();
@@ -958,13 +1003,22 @@ impl App {
         }
     }
 
+    /// Compute the content area rect (window minus status bar and tab bar).
+    fn content_area_rect(&self, width: f32, height: f32) -> Rect {
+        let status_bar_h =
+            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+        let tab_bar_h = crate::pane::effective_tab_bar_height(self.config.general.show_tab_bar);
+        Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
+    }
+
     /// Adjust font size by `delta` points, resize panes, and request a redraw.
     fn adjust_font_size_action(&mut self, delta: f32) {
         if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_mut(), self.gpu.as_ref()) {
             let new_size = renderer.adjust_font_size(delta);
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
 
-            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = self
+                .content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
             if let Some(wm) = self.workspaces.as_mut() {
                 let lay = wm.layout_mut();
                 lay.layout(full_rect);
@@ -984,7 +1038,8 @@ impl App {
             let new_size = renderer.reset_font_size();
             renderer.resize(&gpu.device, &gpu.queue, gpu.config.width, gpu.config.height);
 
-            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = self
+                .content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
             if let Some(wm) = self.workspaces.as_mut() {
                 let layout = wm.layout_mut();
                 layout.layout(full_rect);
@@ -1217,6 +1272,32 @@ impl ApplicationHandler<UserEvent> for App {
                             w.request_redraw();
                         }
                         return;
+                    }
+                }
+
+                // ── Tab bar click: switch workspace ───────────────────────
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && self.config.general.show_tab_bar
+                {
+                    if let Some((px, py)) = self.cursor_position {
+                        let tab_bar_h = crate::pane::effective_tab_bar_height(true);
+                        if (py as f32) < tab_bar_h {
+                            let workspace_ids = self
+                                .workspaces
+                                .as_ref()
+                                .map(|wm| wm.workspace_ids())
+                                .unwrap_or_default();
+                            if let Some(ws_id) =
+                                chrome::tab_bar_hit_test(px as f32, &workspace_ids)
+                            {
+                                self.switch_workspace(ws_id as u8);
+                            }
+                            if let Some(w) = self.window.as_ref() {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                     }
                 }
 

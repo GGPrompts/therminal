@@ -156,6 +156,7 @@ impl TherminalConfig {
             "# show_status_bar = {}\n",
             d.general.show_status_bar
         ));
+        out.push_str(&format!("# show_tab_bar = {}\n", d.general.show_tab_bar));
         out.push_str("# [general.env]  # extra PTY environment variables\n");
         out.push_str("# MY_VAR = \"value\"\n");
         out.push('\n');
@@ -238,6 +239,10 @@ impl TherminalConfig {
         out.push_str(&format!(
             "# osc_1337 = {}  # iTerm2 extensions\n",
             d.terminal.osc_1337
+        ));
+        out.push_str(&format!(
+            "# osc_7777 = {}  # cooperative agent self-reporting\n",
+            d.terminal.osc_7777
         ));
         out.push('\n');
 
@@ -398,6 +403,8 @@ pub struct GeneralConfig {
     pub padding: f32,
     /// Whether to show the status bar at the bottom of the window.
     pub show_status_bar: bool,
+    /// Whether to show the workspace tab bar at the top of the window.
+    pub show_tab_bar: bool,
 }
 
 impl Default for GeneralConfig {
@@ -411,6 +418,7 @@ impl Default for GeneralConfig {
             env: HashMap::new(),
             padding: 4.0,
             show_status_bar: true,
+            show_tab_bar: true,
         }
     }
 }
@@ -1045,6 +1053,8 @@ pub struct TerminalConfig {
     pub osc_7: bool,
     /// Intercept OSC 1337 sequences (iTerm2).
     pub osc_1337: bool,
+    /// Intercept OSC 7777 sequences (cooperative agent self-reporting).
+    pub osc_7777: bool,
 }
 
 impl Default for TerminalConfig {
@@ -1054,6 +1064,7 @@ impl Default for TerminalConfig {
             osc_133: true,
             osc_7: true,
             osc_1337: true,
+            osc_7777: true,
         }
     }
 }

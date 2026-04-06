@@ -104,6 +104,35 @@ impl RegionIndex {
                     metadata,
                 });
             }
+            InterceptedEvent::AgentReport {
+                agent,
+                state,
+                tool,
+                tokens,
+                model,
+            } => {
+                let mut metadata = HashMap::new();
+                metadata.insert("agent".to_string(), agent.clone());
+                if let Some(s) = state {
+                    metadata.insert("state".to_string(), s.clone());
+                }
+                if let Some(t) = tool {
+                    metadata.insert("tool".to_string(), t.clone());
+                }
+                if let Some(tk) = tokens {
+                    metadata.insert("tokens".to_string(), tk.to_string());
+                }
+                if let Some(m) = model {
+                    metadata.insert("model".to_string(), m.clone());
+                }
+                self.regions.push(Region {
+                    kind: RegionKind::Annotation,
+                    start_line: self.current_line,
+                    end_line: Some(self.current_line),
+                    timestamp: Instant::now(),
+                    metadata,
+                });
+            }
         }
     }
 

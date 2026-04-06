@@ -93,6 +93,7 @@ impl App {
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
             osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
@@ -132,7 +133,7 @@ impl App {
 
             // Resize all panes after split.
             let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
             let layout = ws_layout_mut!(self).unwrap();
             let renderer = self.grid_renderer.as_ref().unwrap();
             layout.layout(full_rect);
@@ -181,7 +182,7 @@ impl App {
                 // Relayout.
                 let gpu = self.gpu.as_ref().unwrap();
                 let full_rect =
-                    Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+                    self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
                 let layout = ws_layout_mut!(self).unwrap();
                 let renderer = self.grid_renderer.as_ref().unwrap();
                 layout.layout(full_rect);
@@ -214,6 +215,7 @@ impl App {
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
             osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
@@ -256,7 +258,7 @@ impl App {
             self.last_split_direction = direction;
 
             let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
             let layout = ws_layout_mut!(self).unwrap();
             let renderer = self.grid_renderer.as_ref().unwrap();
             layout.layout(full_rect);
@@ -297,7 +299,7 @@ impl App {
 
                 let gpu = self.gpu.as_ref().unwrap();
                 let full_rect =
-                    Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+                    self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
                 let layout = ws_layout_mut!(self).unwrap();
                 let renderer = self.grid_renderer.as_ref().unwrap();
                 layout.layout(full_rect);
@@ -368,7 +370,7 @@ impl App {
         if layout.adjust_ratio(focused, delta) {
             // Relayout.
             let gpu = self.gpu.as_ref().unwrap();
-            let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+            let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
             let renderer = self.grid_renderer.as_ref().unwrap();
             layout.layout(full_rect);
             layout.resize_all_panes(renderer);
@@ -524,7 +526,7 @@ impl App {
             None => return,
         };
 
-        let full_rect = Rect::new(0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32);
+        let full_rect = self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
 
         // Rebuild the layout tree from the snapshot by spawning new panes.
         let scrollback = self.config.general.scrollback_lines;
@@ -533,6 +535,7 @@ impl App {
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
             osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
@@ -679,14 +682,8 @@ impl App {
             None => return,
         };
 
-        let status_bar_h =
-            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let full_rect = Rect::new(
-            0.0,
-            0.0,
-            gpu.config.width as f32,
-            gpu.config.height as f32 - status_bar_h,
-        );
+        let full_rect =
+            self.content_area_rect(gpu.config.width as f32, gpu.config.height as f32);
 
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -694,6 +691,7 @@ impl App {
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
             osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
@@ -779,6 +777,7 @@ impl App {
             osc_133: self.config.terminal.osc_133,
             osc_7: self.config.terminal.osc_7,
             osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
