@@ -820,6 +820,23 @@ impl App {
         }
     }
 
+    /// Create a new workspace tab by finding the next unused slot (1-9).
+    pub(crate) fn create_new_workspace(&mut self) {
+        let existing = self
+            .workspaces
+            .as_ref()
+            .map(|wm| wm.workspace_ids())
+            .unwrap_or_default();
+        // Find the lowest unused workspace ID in 1..=9.
+        let next_id = (1..=9u8).find(|n| !existing.contains(&(*n as usize)));
+        match next_id {
+            Some(n) => self.switch_workspace(n),
+            None => {
+                info!("all workspace slots (1-9) are in use");
+            }
+        }
+    }
+
     /// Send the focused pane to workspace `n` (1-9).
     pub(crate) fn send_to_workspace(&mut self, n: u8) {
         let focused = match self.focused_pane() {

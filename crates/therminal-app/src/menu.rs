@@ -24,6 +24,12 @@ pub(crate) enum MenuContext {
         #[allow(dead_code)]
         text: String,
     },
+    /// Right-click on a tab in the tab bar.
+    Tab {
+        /// The workspace ID of the tab that was right-clicked.
+        #[allow(dead_code)]
+        workspace_id: usize,
+    },
 }
 
 /// A single item in a context menu.
@@ -252,6 +258,57 @@ pub(crate) fn build_selection_menu(
         position,
         selected_index: None,
         context: MenuContext::Selection { text },
+    }
+}
+
+/// Build the context menu for a tab bar right-click.
+pub(crate) fn build_tab_menu(
+    workspace_id: usize,
+    bindings: &[therminal_core::config::Keybinding],
+    position: (f32, f32),
+) -> ContextMenu {
+    let hint = |action: &KeyAction| hotkey_for_action(bindings, action);
+
+    ContextMenu {
+        sections: vec![
+            MenuSection(vec![
+                MenuItem {
+                    label: "New Tab",
+                    hotkey_hint: hint(&KeyAction::NewWorkspace),
+                    action: KeyAction::NewWorkspace,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Rename Tab",
+                    hotkey_hint: hint(&KeyAction::RenameWorkspace),
+                    action: KeyAction::RenameWorkspace,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Close Tab",
+                    hotkey_hint: hint(&KeyAction::CloseAllPanes),
+                    action: KeyAction::CloseAllPanes,
+                    enabled: true,
+                },
+            ]),
+            MenuSection(vec![
+                MenuItem {
+                    label: "Split Horizontal",
+                    hotkey_hint: hint(&KeyAction::SplitHorizontal),
+                    action: KeyAction::SplitHorizontal,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Split Vertical",
+                    hotkey_hint: hint(&KeyAction::SplitVertical),
+                    action: KeyAction::SplitVertical,
+                    enabled: true,
+                },
+            ]),
+        ],
+        position,
+        selected_index: None,
+        context: MenuContext::Tab { workspace_id },
     }
 }
 

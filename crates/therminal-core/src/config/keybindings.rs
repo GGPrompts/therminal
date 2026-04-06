@@ -61,6 +61,10 @@ pub enum KeyAction {
     SwitchWorkspace(u8),
     /// Send focused pane to workspace N (1-9).
     SendToWorkspace(u8),
+    /// Create a new workspace tab.
+    NewWorkspace,
+    /// Rename the current (or targeted) workspace tab.
+    RenameWorkspace,
     // ── Hotspot actions (used by action palette, not keybindable) ────────
     /// Copy a hotspot text to the clipboard.
     HotspotCopy(String),
@@ -100,6 +104,8 @@ impl KeyAction {
             KeyAction::SwapPrev => "Swap pane with previous",
             KeyAction::SwitchWorkspace(_) => "Switch workspace",
             KeyAction::SendToWorkspace(_) => "Send pane to workspace",
+            KeyAction::NewWorkspace => "New workspace tab",
+            KeyAction::RenameWorkspace => "Rename workspace tab",
             KeyAction::HotspotCopy(_) => "Copy to clipboard",
             KeyAction::HotspotOpenInEditor(_) => "Open in editor",
             KeyAction::HotspotOpenExternal(_) => "Open externally",
@@ -128,7 +134,9 @@ impl KeyAction {
             | KeyAction::SwapNext
             | KeyAction::SwapPrev
             | KeyAction::SwitchWorkspace(_)
-            | KeyAction::SendToWorkspace(_) => "Pane Management",
+            | KeyAction::SendToWorkspace(_)
+            | KeyAction::NewWorkspace
+            | KeyAction::RenameWorkspace => "Pane Management",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
             KeyAction::HotspotCopy(_)
@@ -264,6 +272,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+u".to_string(),
                     action: KeyAction::RestoreLayout,
+                },
+                // New workspace tab
+                Keybinding {
+                    key: "ctrl+shift+t".to_string(),
+                    action: KeyAction::NewWorkspace,
                 },
                 // Pane swap
                 Keybinding {

@@ -841,6 +841,13 @@ impl App {
             KeyAction::SendToWorkspace(n) => {
                 self.send_to_workspace(n);
             }
+            KeyAction::NewWorkspace => {
+                self.create_new_workspace();
+            }
+            KeyAction::RenameWorkspace => {
+                // Rename is a placeholder until inline rename UI is implemented.
+                info!("rename workspace: not yet implemented");
+            }
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
@@ -920,12 +927,37 @@ impl App {
 
     // ── Context menu ──────────────────────────────────────────────────
 
-    /// Open a context menu at the given pixel position.
+    /// Open a context menu at the given pixel position, or pass through to
+    /// the PTY if the pane has mouse reporting enabled (like tmux does).
     fn open_context_menu(&mut self, px: f32, py: f32) {
         let pane_id = match self.pane_at_position(px as f64, py as f64) {
             Some(id) => id,
             None => return,
         };
+
+        // Smart pass-through: if the terminal app has mouse reporting enabled,
+        // forward the right-click to the PTY instead of showing our menu.
+        // This lets TUI apps like btop, lazygit, etc. handle their own menus.
+        let mode = self.pane_term_mode(pane_id);
+        let mouse_mode = mode.contains(alacritty_terminal::term::TermMode::MOUSE_REPORT_CLICK)
+            || mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE)
+            || mode.contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
+            || mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
+
+        if mouse_mode {
+            // Encode the right-click as a mouse press event and send to the PTY.
+            if let Some((col, row)) = self.pixel_to_grid_for_pane(px as f64, py as f64, pane_id) {
+                let mods = self.input_mods();
+                let bytes = therminal_terminal::input::encode_mouse_press(
+                    therminal_terminal::input::MouseButton::Right,
+                    col,
+                    row,
+                    &mods,
+                );
+                self.pty_write_to_pane(&bytes, pane_id);
+            }
+            return;
+        }
 
         let bindings = &self.config.keybindings.bindings;
 
@@ -989,6 +1021,10 @@ impl App {
                 if let Err(e) = open::that(text) {
                     info!("failed to open externally {text}: {e}");
                 }
+            }
+            KeyAction::NewWorkspace => self.create_new_workspace(),
+            KeyAction::RenameWorkspace => {
+                info!("rename workspace: not yet implemented");
             }
             _ => {
                 info!("menu action {:?} not handled", action);
@@ -1436,12 +1472,55 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // ── Right-click: open context menu ─────────────────────────
+                // ── Right-click: tab bar menu or pane context menu ──────────
                 if state == ElementState::Pressed
                     && button == MouseButton::Right
                     && let Some((px, py)) = self.cursor_position
                 {
-                    self.open_context_menu(px as f32, py as f32);
+                    // Check if the right-click is in the tab bar area.
+                    let show_tab_bar = self.config.general.show_tab_bar;
+                    let use_csd = self.config.general.use_csd;
+                    let tab_bar_h =
+                        crate::pane::effective_tab_bar_height_csd(show_tab_bar, use_csd);
+                    if show_tab_bar && (py as f32) < tab_bar_h {
+                        // Right-click on a tab: open tab context menu.
+                        let workspace_ids = self
+                            .workspaces
+                            .as_ref()
+                            .map(|wm| wm.workspace_ids())
+                            .unwrap_or_default();
+                        let tab_labels: Vec<String> = workspace_ids
+                            .iter()
+                            .map(|&ws_id| {
+                                self.workspaces
+                                    .as_ref()
+                                    .and_then(|wm| wm.focused_pane_status(ws_id))
+                                    .and_then(|status| {
+                                        status.cwd.as_ref().map(|cwd| {
+                                            let basename = std::path::Path::new(cwd)
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or(cwd);
+                                            format!("{ws_id}: {basename}")
+                                        })
+                                    })
+                                    .unwrap_or_else(|| format!("{ws_id}"))
+                            })
+                            .collect();
+                        if let Some(ws_id) =
+                            chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels)
+                        {
+                            let bindings = &self.config.keybindings.bindings;
+                            let menu = crate::menu::build_tab_menu(
+                                ws_id,
+                                bindings,
+                                (px as f32, py as f32),
+                            );
+                            self.active_menu = Some(menu);
+                        }
+                    } else {
+                        self.open_context_menu(px as f32, py as f32);
+                    }
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
