@@ -14,3 +14,4 @@ logs/
 /region-index/
 /shell-integration/
 .beads/metadata.json
+.perles/
