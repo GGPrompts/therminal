@@ -73,7 +73,7 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "m
 
 # Config
 toml = "1.1"
-notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 
 # MCP
 rmcp = { version = "1", features = ["server", "transport-io", "transport-async-rw"] }
@@ -83,9 +83,9 @@ schemars = "1"
 open = "5"
 bytemuck = { version = "1", features = ["derive"] }
 raw-window-handle = "0.6"
-pollster = "0.3"
+pollster = "0.4"
 tempfile = "3"
-dirs = "5"
+dirs = "6"
 libc = "0.2"
 
 [patch.crates-io]

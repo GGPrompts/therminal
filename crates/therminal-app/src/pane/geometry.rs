@@ -41,6 +41,7 @@ pub fn effective_status_bar_height(show: bool) -> f32 {
 }
 
 /// Return the effective tab bar height: 0 when disabled, TAB_BAR_HEIGHT otherwise.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn effective_tab_bar_height(show: bool) -> f32 {
     if show { TAB_BAR_HEIGHT } else { 0.0 }
 }
@@ -58,6 +59,7 @@ pub fn effective_tab_bar_height_csd(show_tab_bar: bool, use_csd: bool) -> f32 {
 }
 
 /// Compute the content area rect (window area minus status bar and tab bar).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn content_area_rect(
     width: f32,
     height: f32,

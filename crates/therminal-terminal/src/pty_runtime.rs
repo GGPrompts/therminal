@@ -257,4 +257,8 @@ impl MasterPty for TakenPtyMaster {
     fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         None
     }
+
+    fn tty_name(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }

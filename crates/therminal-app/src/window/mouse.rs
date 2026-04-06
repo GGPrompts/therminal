@@ -357,6 +357,15 @@ impl App {
         let (px, py) = (position.x, position.y);
         self.cursor_position = Some((px, py));
 
+        // ── CSD button hover: request redraw for hover highlights ─────────
+        if self.config.general.use_csd {
+            let bar_h =
+                crate::pane::effective_tab_bar_height_csd(self.config.general.show_tab_bar, true);
+            if (py as f32) < bar_h {
+                self.request_redraw();
+            }
+        }
+
         // ── Separator drag in progress ────────────────────────────────────
         if self.separator_drag.is_some() {
             self.update_separator_drag(px as f32, py as f32);

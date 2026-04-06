@@ -967,6 +967,9 @@ const TAB_ACTIVE_BG_COLOR: [f32; 4] = HEADER_BG_COLOR;
 const TAB_ACTIVE_UNDERLINE_COLOR: [f32; 4] = FOCUS_BORDER_COLOR;
 
 /// Draw the workspace tab bar at the top of the window.
+///
+/// When `show_tabs` is false (CSD-only mode), the background bar is still
+/// drawn but no workspace tabs are rendered.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_tab_bar(
     info: &TabBarInfo,
@@ -977,10 +980,11 @@ pub(crate) fn draw_tab_bar(
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
+    bar_h: f32,
+    show_tabs: bool,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
 
-    let bar_h = crate::pane::TAB_BAR_HEIGHT;
     let sw = surface_width as f32;
     let sh = surface_height as f32;
 
@@ -1011,6 +1015,11 @@ pub(crate) fn draw_tab_bar(
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.draw(0..6, 0..1);
+    }
+
+    // Skip tab content rendering when tabs are hidden (CSD-only title bar).
+    if !show_tabs {
+        return;
     }
 
     // ── Per-tab rects (active tab gets highlighted bg + underline) ──────
@@ -1204,6 +1213,312 @@ pub(crate) fn tab_bar_hit_test(px: f32, workspace_ids: &[usize]) -> Option<usize
     }
     let tab_index = (px / TAB_WIDTH).floor() as usize;
     workspace_ids.get(tab_index).copied()
+}
+
+// ── CSD (client-side decorations) ────────────────────────────────────
+
+/// Actions triggered by CSD window control buttons.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CsdAction {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// Width of each CSD window control button.
+const CSD_BTN_W: f32 = crate::pane::CSD_BUTTON_WIDTH;
+
+/// Color for CSD close button on hover (red accent).
+const CSD_CLOSE_COLOR: [f32; 4] = [0.85, 0.25, 0.25, 1.0];
+
+/// Color for CSD minimize/maximize button on hover (subtle highlight).
+const CSD_HOVER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.1];
+
+/// Hit-test CSD window control buttons (right-aligned in the tab bar).
+/// Button layout (right to left): [close] [maximize] [minimize].
+/// On macOS, traffic lights would go left, but macOS defaults to no CSD.
+pub(crate) fn csd_button_hit_test(px: f32, bar_h: f32, surface_width: f32) -> Option<CsdAction> {
+    if bar_h <= 0.0 {
+        return None;
+    }
+    let close_x = surface_width - CSD_BTN_W;
+    let max_x = close_x - CSD_BTN_W;
+    let min_x = max_x - CSD_BTN_W;
+
+    if px >= close_x {
+        Some(CsdAction::Close)
+    } else if px >= max_x {
+        Some(CsdAction::Maximize)
+    } else if px >= min_x {
+        Some(CsdAction::Minimize)
+    } else {
+        None
+    }
+}
+
+/// Draw CSD window control buttons (minimize, maximize/restore, close)
+/// on the right side of the tab bar.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_csd_buttons(
+    renderer: &mut GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+    bar_h: f32,
+    hover_x: Option<f32>,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+
+    let sw = surface_width as f32;
+    let sh = surface_height as f32;
+
+    let close_x = sw - CSD_BTN_W;
+    let max_x = close_x - CSD_BTN_W;
+    let min_x = max_x - CSD_BTN_W;
+
+    let mut verts: Vec<ColorVertex> = Vec::new();
+
+    // Determine hovered button for highlight.
+    let hovered = hover_x.and_then(|hx| {
+        if hx >= close_x {
+            Some(0) // close
+        } else if hx >= max_x {
+            Some(1) // maximize
+        } else if hx >= min_x {
+            Some(2) // minimize
+        } else {
+            None
+        }
+    });
+
+    // Close button hover highlight (red).
+    if hovered == Some(0) {
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            close_x,
+            0.0,
+            CSD_BTN_W,
+            bar_h,
+            sw,
+            sh,
+            CSD_CLOSE_COLOR,
+        ));
+    }
+    // Maximize button hover highlight.
+    if hovered == Some(1) {
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            max_x,
+            0.0,
+            CSD_BTN_W,
+            bar_h,
+            sw,
+            sh,
+            CSD_HOVER_COLOR,
+        ));
+    }
+    // Minimize button hover highlight.
+    if hovered == Some(2) {
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            min_x,
+            0.0,
+            CSD_BTN_W,
+            bar_h,
+            sw,
+            sh,
+            CSD_HOVER_COLOR,
+        ));
+    }
+
+    if !verts.is_empty() {
+        let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("csd_hover_vbuf"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("csd_hover_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, buf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    // ── Button icon text (Unicode symbols) ──────────────────────────────
+    let font_size = (bar_h * 0.45).max(10.0);
+    let metrics = Metrics::new(font_size, bar_h);
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_width as i32,
+        bottom: surface_height as i32,
+    };
+
+    let icon_color = GlyphColor::rgba(
+        PaletteColor::INK.r,
+        PaletteColor::INK.g,
+        PaletteColor::INK.b,
+        200,
+    );
+    let close_icon_color = if hovered == Some(0) {
+        GlyphColor::rgba(255, 255, 255, 255)
+    } else {
+        icon_color
+    };
+
+    let family = renderer.font_config.family.clone();
+
+    // Minimize: horizontal line (U+2500)
+    let min_label = "\u{2500}";
+    let min_slot = "csd_min";
+    ensure_shaped(
+        min_slot,
+        min_label,
+        metrics,
+        CSD_BTN_W,
+        bar_h,
+        min_label,
+        Attrs::new().family(Family::Name(&family)).color(icon_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+
+    // Maximize: square (U+25A1)
+    let max_label = "\u{25A1}";
+    let max_slot = "csd_max";
+    ensure_shaped(
+        max_slot,
+        max_label,
+        metrics,
+        CSD_BTN_W,
+        bar_h,
+        max_label,
+        Attrs::new().family(Family::Name(&family)).color(icon_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+
+    // Close: X mark (U+2715)
+    let close_label = "\u{2715}";
+    let close_slot = "csd_close";
+    let close_key = format!(
+        "{close_label}|{}",
+        if hovered == Some(0) { "h" } else { "n" }
+    );
+    ensure_shaped(
+        close_slot,
+        &close_key,
+        metrics,
+        CSD_BTN_W,
+        bar_h,
+        close_label,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(close_icon_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+
+    // Center each icon in its button.
+    let center_x = |slot: &str, btn_x: f32| -> f32 {
+        let buf = cached_buf(&renderer.overlay_cache, slot);
+        let tw = buf
+            .layout_runs()
+            .next()
+            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            .unwrap_or(0.0);
+        btn_x + ((CSD_BTN_W - tw) / 2.0).max(0.0)
+    };
+
+    let min_cx = center_x(min_slot, min_x);
+    let max_cx = center_x(max_slot, max_x);
+    let close_cx = center_x(close_slot, close_x);
+
+    renderer.viewport.update(
+        queue,
+        Resolution {
+            width: surface_width,
+            height: surface_height,
+        },
+    );
+
+    let areas: Vec<TextArea<'_>> = vec![
+        TextArea {
+            buffer: cached_buf(&renderer.overlay_cache, min_slot),
+            left: min_cx,
+            top: 0.0,
+            scale: 1.0,
+            bounds,
+            default_color: icon_color,
+            custom_glyphs: &[],
+        },
+        TextArea {
+            buffer: cached_buf(&renderer.overlay_cache, max_slot),
+            left: max_cx,
+            top: 0.0,
+            scale: 1.0,
+            bounds,
+            default_color: icon_color,
+            custom_glyphs: &[],
+        },
+        TextArea {
+            buffer: cached_buf(&renderer.overlay_cache, close_slot),
+            left: close_cx,
+            top: 0.0,
+            scale: 1.0,
+            bounds,
+            default_color: close_icon_color,
+            custom_glyphs: &[],
+        },
+    ];
+
+    if let Err(e) = renderer.overlay_text_renderer.prepare(
+        device,
+        queue,
+        &mut renderer.font_system,
+        &mut renderer.overlay_atlas,
+        &renderer.viewport,
+        areas,
+        &mut renderer.swash_cache,
+    ) {
+        tracing::warn!("CSD button text prepare failed: {e}");
+    }
+
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("csd_text_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        if let Err(e) = renderer.overlay_text_renderer.render(
+            &renderer.overlay_atlas,
+            &renderer.viewport,
+            &mut pass,
+        ) {
+            tracing::warn!("CSD button text render failed: {e}");
+        }
+    }
 }
 
 /// Abbreviate a path for status bar display: replace the home directory with `~`

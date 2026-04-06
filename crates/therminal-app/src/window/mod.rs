@@ -610,8 +610,9 @@ impl App {
             gpu.queue.submit(std::iter::once(encoder.finish()));
         }
 
-        // ── Tab bar ─────────────────────────────────────────────────────
-        if self.config.general.show_tab_bar {
+        // ── Tab bar / CSD title bar ────────────────────────────────────
+        let use_csd = self.config.general.use_csd;
+        if self.config.general.show_tab_bar || use_csd {
             let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
                 (wm.workspace_ids(), wm.active_id())
             } else {
@@ -622,6 +623,11 @@ impl App {
                 workspace_ids,
                 active_workspace,
             };
+
+            let bar_h = crate::pane::effective_tab_bar_height_csd(
+                self.config.general.show_tab_bar,
+                use_csd,
+            );
 
             let mut encoder = gpu
                 .device
@@ -637,7 +643,28 @@ impl App {
                 &view,
                 gpu.config.width,
                 gpu.config.height,
+                bar_h,
+                self.config.general.show_tab_bar,
             );
+
+            // Draw CSD window control buttons on top of the tab bar.
+            if use_csd {
+                let hover_x = self
+                    .cursor_position
+                    .filter(|(_, py)| (*py as f32) < bar_h)
+                    .map(|(px, _)| px as f32);
+                chrome::draw_csd_buttons(
+                    renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut encoder,
+                    &view,
+                    gpu.config.width,
+                    gpu.config.height,
+                    bar_h,
+                    hover_x,
+                );
+            }
 
             gpu.queue.submit(std::iter::once(encoder.finish()));
         }
@@ -984,11 +1011,12 @@ impl App {
             }
 
             // Resize all panes after font or padding change.
-            let full_rect = crate::pane::content_area_rect(
+            let full_rect = crate::pane::content_area_rect_csd(
                 gpu.config.width as f32,
                 gpu.config.height as f32,
                 self.config.general.show_status_bar,
                 self.config.general.show_tab_bar,
+                self.config.general.use_csd,
             );
             if let Some(wm) = self.workspaces.as_mut() {
                 let layout = wm.layout_mut();
@@ -1380,8 +1408,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .as_ref()
                                 .map(|wm| wm.workspace_ids())
                                 .unwrap_or_default();
-                            if let Some(ws_id) =
-                                chrome::tab_bar_hit_test(px as f32, &workspace_ids)
+                            if let Some(ws_id) = chrome::tab_bar_hit_test(px as f32, &workspace_ids)
                             {
                                 self.switch_workspace(ws_id as u8);
                                 if let Some(w) = self.window.as_ref() {
@@ -1407,10 +1434,10 @@ impl ApplicationHandler<UserEvent> for App {
                             self.last_tab_bar_click = Some(now);
 
                             // Start window drag on empty tab bar area.
-                            if let Some(w) = self.window.as_ref() {
-                                if let Err(e) = w.drag_window() {
-                                    warn!("drag_window failed: {e}");
-                                }
+                            if let Some(w) = self.window.as_ref()
+                                && let Err(e) = w.drag_window()
+                            {
+                                warn!("drag_window failed: {e}");
                             }
                             return;
                         }
