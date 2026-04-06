@@ -146,6 +146,10 @@ pub struct App {
 
     /// Timestamp of last tab bar click (for CSD double-click-to-maximize).
     last_tab_bar_click: Option<Instant>,
+
+    /// Cooldown timestamp for destructive actions (close pane/window) to prevent
+    /// double-close from keyboard repeat firing two events in the same batch.
+    last_close_action: Option<Instant>,
 }
 
 /// State for an in-progress separator drag.
@@ -221,6 +225,7 @@ impl App {
             hyperlink_cursor_active: false,
             last_separator_click: None,
             last_tab_bar_click: None,
+            last_close_action: None,
         }
     }
 

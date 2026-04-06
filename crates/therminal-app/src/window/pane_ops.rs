@@ -6,7 +6,7 @@
 use std::io::Write as IoWrite;
 
 use alacritty_terminal::term::TermMode;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::pane::{
     FocusDirection, LayoutNode, LayoutSnapshot, PaneCallbacks, PaneId, SpatialDirection,
@@ -115,7 +115,18 @@ impl App {
     }
 
     /// Close the currently focused pane.
+    ///
+    /// Includes a 100ms cooldown to prevent double-close from keyboard repeat
+    /// firing two events in the same winit event batch.
     pub(crate) fn close_focused_pane(&mut self) {
+        if let Some(last) = self.last_close_action
+            && last.elapsed() < std::time::Duration::from_millis(100)
+        {
+            debug!("close_focused_pane: debounced (< 100ms since last close)");
+            return;
+        }
+        self.last_close_action = Some(std::time::Instant::now());
+
         let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
@@ -212,7 +223,17 @@ impl App {
     }
 
     /// Close a specific pane by ID.
+    ///
+    /// Includes a 100ms cooldown to prevent double-close from keyboard repeat.
     pub(crate) fn close_pane_by_id(&mut self, target_id: PaneId) {
+        if let Some(last) = self.last_close_action
+            && last.elapsed() < std::time::Duration::from_millis(100)
+        {
+            debug!("close_pane_by_id: debounced (< 100ms since last close)");
+            return;
+        }
+        self.last_close_action = Some(std::time::Instant::now());
+
         let pane_count_before = self.get_layout().map(|l| l.pane_count()).unwrap_or(0);
 
         info!(
@@ -453,6 +474,14 @@ impl App {
     /// Close all panes, snapshotting the layout tree for later restore.
     /// Drops all PTYs immediately and does a single rebalance at the end.
     pub(crate) fn close_all_panes(&mut self) {
+        if let Some(last) = self.last_close_action
+            && last.elapsed() < std::time::Duration::from_millis(100)
+        {
+            debug!("close_all_panes: debounced (< 100ms since last close)");
+            return;
+        }
+        self.last_close_action = Some(std::time::Instant::now());
+
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
             None => return,
