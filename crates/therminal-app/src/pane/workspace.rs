@@ -4,11 +4,16 @@ use super::PaneId;
 use super::SplitDirection;
 use super::layout::{LayoutNode, LayoutSnapshot};
 use super::state::PaneState;
+use therminal_protocol::daemon::WorkspaceInfo;
 
 /// A workspace holds an independent pane layout with its own focused pane.
 pub struct Workspace {
     /// Workspace number (1-9).
     pub id: usize,
+    /// Human-readable workspace name (default: the slot number as a string).
+    /// Used by `workspace_info()` for daemon sync.
+    #[allow(dead_code)]
+    pub name: String,
     /// Root of this workspace's layout tree.
     pub layout: LayoutNode,
     /// Currently focused pane within this workspace.
@@ -32,6 +37,7 @@ impl WorkspaceManager {
     pub fn new(layout: LayoutNode, focused_pane: Option<PaneId>) -> Self {
         let ws = Workspace {
             id: 1,
+            name: "1".to_string(),
             layout,
             focused_pane,
         };
@@ -106,6 +112,7 @@ impl WorkspaceManager {
                 if let Some((layout, pane_id)) = create_pane() {
                     let ws = Workspace {
                         id: n,
+                        name: n.to_string(),
                         layout,
                         focused_pane: Some(pane_id),
                     };
@@ -247,6 +254,7 @@ impl WorkspaceManager {
                 // Create new workspace with the moved pane as the only pane.
                 let ws = Workspace {
                     id: target_n,
+                    name: target_n.to_string(),
                     layout: LayoutNode::Leaf(pane),
                     focused_pane: Some(pane_id),
                 };
@@ -297,6 +305,31 @@ impl WorkspaceManager {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.workspaces.is_empty()
+    }
+
+    /// Build a list of `WorkspaceInfo` for syncing to the daemon.
+    ///
+    /// This captures the current workspace topology (IDs, names, pane assignments,
+    /// focus) so the daemon can store it for MCP tools and reattach.
+    #[allow(dead_code)]
+    pub fn workspace_info(&self) -> Vec<WorkspaceInfo> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .map(|(order, ws)| WorkspaceInfo {
+                id: ws.id as u64,
+                name: ws.name.clone(),
+                order: order as u32,
+                pane_ids: ws.layout.pane_ids(),
+                focused_pane: ws.focused_pane,
+            })
+            .collect()
+    }
+
+    /// Rename the active workspace.
+    #[allow(dead_code)]
+    pub fn rename_active(&mut self, name: String) {
+        self.workspaces[self.active_idx].name = name;
     }
 
     /// Remove the active workspace if its layout is Empty and there are other
@@ -684,5 +717,62 @@ mod tests {
         // Should now be on workspace 2.
         assert_eq!(wm.workspace_ids(), vec![2]);
         assert_eq!(wm.active_id(), 2);
+    }
+
+    // ── workspace_info (daemon sync) ────────────────────────────────
+
+    #[test]
+    fn workspace_info_single_workspace() {
+        let wm = WorkspaceManager::new(two_pane_split(1, 2), Some(1));
+        let info = wm.workspace_info();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].id, 1);
+        assert_eq!(info[0].name, "1");
+        assert_eq!(info[0].order, 0);
+        assert_eq!(info[0].focused_pane, Some(1));
+        let mut pane_ids = info[0].pane_ids.clone();
+        pane_ids.sort();
+        assert_eq!(pane_ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn workspace_info_multiple_workspaces() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.switch_to(3, || Some((test_leaf(30, default_rect()), 30)));
+        wm.switch_to(1, || panic!("should not create"));
+
+        let info = wm.workspace_info();
+        assert_eq!(info.len(), 2);
+        // Order matches internal Vec order.
+        assert_eq!(info[0].id, 1);
+        assert_eq!(info[0].order, 0);
+        assert_eq!(info[1].id, 3);
+        assert_eq!(info[1].order, 1);
+        assert_eq!(info[1].pane_ids, vec![30]);
+    }
+
+    #[test]
+    fn workspace_info_after_send_pane() {
+        let mut wm = WorkspaceManager::new(two_pane_split(1, 2), Some(1));
+        wm.send_pane_to(2, 3, || None);
+
+        let info = wm.workspace_info();
+        assert_eq!(info.len(), 2);
+
+        // Workspace 1 should have pane 1.
+        let ws1 = info.iter().find(|w| w.id == 1).unwrap();
+        assert_eq!(ws1.pane_ids, vec![1]);
+
+        // Workspace 3 should have pane 2.
+        let ws3 = info.iter().find(|w| w.id == 3).unwrap();
+        assert_eq!(ws3.pane_ids, vec![2]);
+    }
+
+    #[test]
+    fn rename_active_workspace() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.rename_active("build".to_string());
+        let info = wm.workspace_info();
+        assert_eq!(info[0].name, "build");
     }
 }

@@ -357,6 +357,12 @@ pub fn format_notification(event: &DaemonEvent) -> String {
         } => {
             format!("%pane-output {pane_id}\n")
         }
+        DaemonEvent::WorkspaceChanged {
+            session_id,
+            active_workspace,
+        } => {
+            format!("%workspace-changed {session_id} {active_workspace}\n")
+        }
     }
 }
 

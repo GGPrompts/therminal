@@ -84,6 +84,8 @@ pub fn snapshot(mgr: &SessionManager) -> PersistedState {
         sessions.push(PersistedSession {
             name: session.name.clone(),
             panes,
+            workspaces: session.workspace_state.clone(),
+            active_workspace: session.active_workspace,
         });
     }
     PersistedState { sessions }
@@ -180,6 +182,8 @@ mod tests {
                         rows: 24,
                     },
                 ],
+                workspaces: vec![],
+                active_workspace: 1,
             }],
         };
 
@@ -215,6 +219,8 @@ mod tests {
                     cols: 80,
                     rows: 24,
                 }],
+                workspaces: vec![],
+                active_workspace: 1,
             }],
         };
 

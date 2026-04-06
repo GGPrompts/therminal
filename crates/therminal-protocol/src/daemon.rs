@@ -134,9 +134,7 @@ pub enum IpcRequest {
     ///
     /// Used by the app on attach to restore workspace layout, and by MCP
     /// tools to query workspace state without the app being connected.
-    GetWorkspaces {
-        session_id: SessionId,
-    },
+    GetWorkspaces { session_id: SessionId },
 }
 
 /// Typed IPC responses.
@@ -229,6 +227,11 @@ pub enum DaemonEvent {
         pane_id: PaneId,
         data: Vec<u8>,
     },
+    /// Workspace topology changed for a session.
+    WorkspaceChanged {
+        session_id: SessionId,
+        active_workspace: WorkspaceId,
+    },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -238,6 +241,7 @@ pub enum EventKind {
     SessionCreated,
     SessionDestroyed,
     PaneOutput,
+    WorkspaceChanged,
 }
 
 impl DaemonEvent {
@@ -248,6 +252,7 @@ impl DaemonEvent {
             DaemonEvent::SessionCreated { .. } => EventKind::SessionCreated,
             DaemonEvent::SessionDestroyed { .. } => EventKind::SessionDestroyed,
             DaemonEvent::PaneOutput { .. } => EventKind::PaneOutput,
+            DaemonEvent::WorkspaceChanged { .. } => EventKind::WorkspaceChanged,
         }
     }
 }
@@ -320,6 +325,12 @@ pub struct PersistedSession {
     pub name: Option<String>,
     /// Panes in this session (flat list; layout topology preserved by order).
     pub panes: Vec<PersistedPane>,
+    /// Workspace topology at time of save. Empty for legacy data.
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// Which workspace was active at time of save (0 = unknown/legacy).
+    #[serde(default)]
+    pub active_workspace: WorkspaceId,
 }
 
 /// Top-level persisted daemon state, serialised to `sessions.json`.
@@ -483,5 +494,133 @@ mod tests {
         let encoded = encode_ipc(&msg).unwrap();
         let decoded = decode_ipc(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn set_workspace_state_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 7,
+            payload: IpcRequest::SetWorkspaceState {
+                session_id: 1,
+                workspaces: vec![
+                    WorkspaceInfo {
+                        id: 1,
+                        name: "main".into(),
+                        order: 0,
+                        pane_ids: vec![10, 11],
+                        focused_pane: Some(10),
+                    },
+                    WorkspaceInfo {
+                        id: 3,
+                        name: "logs".into(),
+                        order: 1,
+                        pane_ids: vec![20],
+                        focused_pane: Some(20),
+                    },
+                ],
+                active_workspace: 1,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn get_workspaces_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 8,
+            payload: IpcRequest::GetWorkspaces { session_id: 1 },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn workspaces_response_round_trip() {
+        let msg = IpcMessage::Response {
+            request_id: 8,
+            payload: IpcResponse::Workspaces {
+                session_id: 1,
+                workspaces: vec![WorkspaceInfo {
+                    id: 1,
+                    name: "default".into(),
+                    order: 0,
+                    pane_ids: vec![5],
+                    focused_pane: Some(5),
+                }],
+                active_workspace: 1,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn workspace_changed_event_round_trip() {
+        let msg = IpcMessage::Event {
+            payload: DaemonEvent::WorkspaceChanged {
+                session_id: 1,
+                active_workspace: 3,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn workspace_changed_event_kind() {
+        let e = DaemonEvent::WorkspaceChanged {
+            session_id: 1,
+            active_workspace: 2,
+        };
+        assert_eq!(e.kind(), EventKind::WorkspaceChanged);
+    }
+
+    #[test]
+    fn workspace_info_serde_json_round_trip() {
+        let info = WorkspaceInfo {
+            id: 2,
+            name: "build".into(),
+            order: 1,
+            pane_ids: vec![100, 200],
+            focused_pane: Some(100),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: WorkspaceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, parsed);
+    }
+
+    #[test]
+    fn persisted_session_workspace_defaults() {
+        // Legacy JSON without workspace fields should deserialize with defaults.
+        let json = r#"{"name":"old","panes":[]}"#;
+        let session: PersistedSession = serde_json::from_str(json).unwrap();
+        assert!(session.workspaces.is_empty());
+        assert_eq!(session.active_workspace, 0);
+    }
+
+    #[test]
+    fn persisted_session_with_workspaces_round_trip() {
+        let session = PersistedSession {
+            name: Some("test".into()),
+            panes: vec![],
+            workspaces: vec![WorkspaceInfo {
+                id: 1,
+                name: "main".into(),
+                order: 0,
+                pane_ids: vec![1],
+                focused_pane: Some(1),
+            }],
+            active_workspace: 1,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let parsed: PersistedSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.workspaces.len(), 1);
+        assert_eq!(parsed.active_workspace, 1);
+        assert_eq!(parsed.workspaces[0].name, "main");
     }
 }

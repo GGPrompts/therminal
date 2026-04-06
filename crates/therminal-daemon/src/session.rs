@@ -25,8 +25,8 @@ use therminal_terminal::region_index::RegionIndex;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use therminal_protocol::daemon::DaemonEvent;
-pub use therminal_protocol::{PaneId, SessionId, WindowId};
+use therminal_protocol::daemon::{DaemonEvent, WorkspaceInfo};
+pub use therminal_protocol::{PaneId, SessionId, WindowId, WorkspaceId};
 
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
@@ -527,6 +527,11 @@ pub struct Session {
     pub windows: Vec<Window>,
     pub created_at_secs: u64,
     event_tx: broadcast::Sender<DaemonEvent>,
+    /// Workspace topology as reported by the app. The daemon stores this
+    /// so MCP tools and reattaching clients can query it.
+    pub workspace_state: Vec<WorkspaceInfo>,
+    /// Which workspace the app is currently viewing.
+    pub active_workspace: WorkspaceId,
 }
 
 impl Session {
@@ -543,6 +548,8 @@ impl Session {
             windows: Vec::new(),
             created_at_secs,
             event_tx,
+            workspace_state: Vec::new(),
+            active_workspace: 1,
         }
     }
 
@@ -873,6 +880,43 @@ impl SessionManager {
             .map(|s| s.id)
     }
 
+    /// Set the workspace topology for a session.
+    ///
+    /// The app calls this whenever workspace state changes (switch, create,
+    /// rename, pane move). The daemon stores it as the source of truth so
+    /// MCP tools and reattaching clients can query it.
+    pub fn set_workspace_state(
+        &mut self,
+        session_id: SessionId,
+        workspaces: Vec<WorkspaceInfo>,
+        active_workspace: WorkspaceId,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        session.workspace_state = workspaces;
+        session.active_workspace = active_workspace;
+        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+            session_id,
+            active_workspace,
+        });
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Get the workspace topology for a session.
+    pub fn get_workspace_state(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(Vec<WorkspaceInfo>, WorkspaceId), String> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        Ok((session.workspace_state.clone(), session.active_workspace))
+    }
+
     /// Return the ID of the first (default) session, if any.
     pub fn default_session_id(&self) -> Option<SessionId> {
         self.sessions.keys().next().copied()
@@ -1086,11 +1130,18 @@ impl SessionManager {
                 }
             }
 
+            // Restore workspace topology if saved.
+            if !persisted_session.workspaces.is_empty() {
+                session.workspace_state = persisted_session.workspaces.clone();
+                session.active_workspace = persisted_session.active_workspace;
+            }
+
             let pane_count = session.pane_count();
             info!(
                 session_id = session_id,
                 name = ?persisted_session.name,
                 pane_count,
+                workspaces = persisted_session.workspaces.len(),
                 "restored session from persisted state"
             );
 
@@ -1190,5 +1241,88 @@ mod tests {
         let mut mgr = SessionManager::new(tx);
         mgr.shutdown(); // Should not panic
         assert_eq!(mgr.session_count(), 0);
+    }
+
+    #[test]
+    fn session_default_workspace_state() {
+        let tx = make_event_tx();
+        let session = Session::new(Some("test".into()), tx);
+        assert!(session.workspace_state.is_empty());
+        assert_eq!(session.active_workspace, 1);
+    }
+
+    #[test]
+    fn set_workspace_state_nonexistent_session() {
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let result = mgr.set_workspace_state(999, vec![], 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_workspace_state_nonexistent_session() {
+        let tx = make_event_tx();
+        let mgr = SessionManager::new(tx);
+        let result = mgr.get_workspace_state(999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[ignore] // Requires a real TTY
+    fn workspace_state_round_trip_via_session_manager() {
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let session_id = mgr.create_session(Some("ws-test".into())).unwrap();
+
+        let workspaces = vec![
+            WorkspaceInfo {
+                id: 1,
+                name: "main".into(),
+                order: 0,
+                pane_ids: vec![10],
+                focused_pane: Some(10),
+            },
+            WorkspaceInfo {
+                id: 3,
+                name: "logs".into(),
+                order: 1,
+                pane_ids: vec![20, 21],
+                focused_pane: Some(20),
+            },
+        ];
+
+        mgr.set_workspace_state(session_id, workspaces.clone(), 3)
+            .unwrap();
+
+        let (got_ws, got_active) = mgr.get_workspace_state(session_id).unwrap();
+        assert_eq!(got_ws.len(), 2);
+        assert_eq!(got_active, 3);
+        assert_eq!(got_ws[0].name, "main");
+        assert_eq!(got_ws[1].pane_ids, vec![20, 21]);
+    }
+
+    #[test]
+    #[ignore] // Requires a real TTY
+    fn workspace_state_broadcasts_event() {
+        let tx = make_event_tx();
+        let mut rx = tx.subscribe();
+        let mut mgr = SessionManager::new(tx);
+        let session_id = mgr.create_session(Some("evt-test".into())).unwrap();
+
+        // Drain the SessionCreated event.
+        let _ = rx.try_recv();
+
+        mgr.set_workspace_state(session_id, vec![], 2).unwrap();
+
+        match rx.try_recv() {
+            Ok(DaemonEvent::WorkspaceChanged {
+                session_id: sid,
+                active_workspace,
+            }) => {
+                assert_eq!(sid, session_id);
+                assert_eq!(active_workspace, 2);
+            }
+            other => panic!("expected WorkspaceChanged, got: {other:?}"),
+        }
     }
 }

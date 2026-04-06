@@ -560,6 +560,30 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::SetWorkspaceState {
+            session_id,
+            workspaces,
+            active_workspace,
+        } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.set_workspace_state(*session_id, workspaces.clone(), *active_workspace) {
+                Ok(()) => IpcResponse::WorkspaceStateSet {
+                    session_id: *session_id,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::GetWorkspaces { session_id } => {
+            let mgr = session_mgr.lock().await;
+            match mgr.get_workspace_state(*session_id) {
+                Ok((workspaces, active_workspace)) => IpcResponse::Workspaces {
+                    session_id: *session_id,
+                    workspaces,
+                    active_workspace,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
         IpcRequest::RequestHandoffFds => {
             #[cfg(unix)]
             {
