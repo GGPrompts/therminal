@@ -100,6 +100,16 @@ struct WaitForOutputParam {
     since_line: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetHotspotsParam {
+    /// The numeric pane ID to scan for hotspots.
+    pane_id: u64,
+    /// Optional hotspot type filter. One of: file, url, git_ref, issue.
+    hotspot_type: Option<String>,
+    /// Maximum number of hotspots to return (default 50).
+    limit: Option<usize>,
+}
+
 fn default_timeout_ms() -> u64 {
     30_000
 }
@@ -211,6 +221,30 @@ const MIN_PANE_COLS: u16 = 10;
 
 /// Minimum rows required per pane (derived from MIN_PANE_HEIGHT / typical cell height).
 const MIN_PANE_ROWS: u16 = 4;
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct HotspotInfo {
+    /// The hotspot type: "file", "url", "git_ref", or "issue".
+    #[serde(rename = "type")]
+    hotspot_type: String,
+    /// The matched text.
+    text: String,
+    /// Row number in the visible grid (0-based).
+    line: usize,
+    /// First column of the match (0-based, inclusive).
+    col_start: usize,
+    /// One-past-last column of the match (exclusive).
+    col_end: usize,
+    /// Type-specific metadata. For files: resolved absolute path. For URLs: the URL.
+    /// For git refs: the ref text. For issues: the issue reference.
+    metadata: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct GetHotspotsResult {
+    pane_id: u64,
+    hotspots: Vec<HotspotInfo>,
+}
 
 // Reserved for terminal.semantic.query_history (Phase 4).
 #[allow(dead_code)]
@@ -686,6 +720,99 @@ impl TherminalMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
+    async fn handle_get_hotspots(
+        &self,
+        params: GetHotspotsParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        use therminal_terminal::hotspot_detection::{HotspotKind, detect_hotspots_from_text};
+
+        // Validate hotspot_type filter if provided.
+        let kind_filter: Option<&str> = match params.hotspot_type.as_deref() {
+            None => None,
+            Some(s @ ("file" | "url" | "git_ref" | "issue")) => Some(s),
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "unknown hotspot_type: {other}. Valid values: file, url, git_ref, issue"
+                ))]));
+            }
+        };
+
+        let limit = params.limit.unwrap_or(50);
+
+        // Capture visible pane content.
+        let mgr = self.session_mgr.lock().await;
+        let snap = match mgr.capture_pane(params.pane_id) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "get_hotspots failed: {e}"
+                ))]));
+            }
+        };
+        drop(mgr);
+
+        // Convert grid rows to strings.
+        let rows: Vec<String> = snap
+            .grid
+            .iter()
+            .map(|row| row.iter().map(|(ch, _)| ch).collect())
+            .collect();
+
+        let detected = detect_hotspots_from_text(&rows);
+
+        let mut hotspots = Vec::new();
+        for h in detected {
+            let type_str = h.kind.as_str();
+
+            // Apply type filter.
+            if let Some(filter) = kind_filter
+                && type_str != filter
+            {
+                continue;
+            }
+
+            // Build type-specific metadata.
+            let mut metadata = std::collections::HashMap::new();
+            match &h.kind {
+                HotspotKind::FilePath | HotspotKind::ErrorLocation => {
+                    let (path_part, line_suffix) = split_file_path_parts(&h.text);
+                    metadata.insert("path".to_string(), path_part.to_string());
+                    if !line_suffix.is_empty() {
+                        metadata.insert("location".to_string(), line_suffix.to_string());
+                    }
+                }
+                HotspotKind::Url => {
+                    metadata.insert("url".to_string(), h.text.clone());
+                }
+                HotspotKind::GitRef => {
+                    metadata.insert("ref".to_string(), h.text.clone());
+                }
+                HotspotKind::IssueRef => {
+                    metadata.insert("ref".to_string(), h.text.clone());
+                }
+            }
+
+            hotspots.push(HotspotInfo {
+                hotspot_type: type_str.to_string(),
+                text: h.text,
+                line: h.line,
+                col_start: h.col_start,
+                col_end: h.col_end,
+                metadata,
+            });
+
+            if hotspots.len() >= limit {
+                break;
+            }
+        }
+
+        let result = GetHotspotsResult {
+            pane_id: params.pane_id,
+            hotspots,
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
     async fn handle_wait_for_output(
         &self,
         params: WaitForOutputParam,
@@ -837,6 +964,16 @@ fn build_content_preview(region: &therminal_terminal::region_index::Region) -> S
     }
 }
 
+/// Split a file path like `src/main.rs:42:5` into (`src/main.rs`, `:42:5`).
+fn split_file_path_parts(text: &str) -> (&str, &str) {
+    if let Some(idx) = text.find(':')
+        && text[idx + 1..].starts_with(|c: char| c.is_ascii_digit())
+    {
+        return (&text[..idx], &text[idx..]);
+    }
+    (text, "")
+}
+
 // ── Helpers for pane lookup ─────────────────────────────────────────────
 
 /// Find (session_id, cols, rows) for a pane by ID across all sessions.
@@ -923,6 +1060,11 @@ fn tool_definitions() -> Vec<Tool> {
             "Wait for output matching a pattern (string or regex) to appear in a pane. Subscribes to live PTY output and returns on first match or timeout. Useful for waiting for command completion, prompts, or specific output.",
             schema_for_type::<WaitForOutputParam>(),
         ),
+        Tool::new(
+            "terminal.semantic.get_hotspots",
+            "Scan visible pane content for actionable hotspots: file paths, URLs, git refs (hashes and branches), and issue references. Returns matches with type, position, text, and type-specific metadata.",
+            schema_for_type::<GetHotspotsParam>(),
+        ),
     ]
 }
 
@@ -1005,6 +1147,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.panes.wait_for_output" => {
                 let params: WaitForOutputParam = parse_args(args)?;
                 self.handle_wait_for_output(params).await
+            }
+            "terminal.semantic.get_hotspots" => {
+                let params: GetHotspotsParam = parse_args(args)?;
+                self.handle_get_hotspots(params).await
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),

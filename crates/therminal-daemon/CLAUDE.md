@@ -76,6 +76,7 @@ Tools exposed:
 | `terminal.sessions.destroy` | Admin | Kill a session |
 | `terminal.panes.get_content` | Observer | Read visible pane content |
 | `terminal.panes.write` | Writer | Send input to a pane's PTY |
+| `terminal.semantic.get_hotspots` | Observer | Scan pane for file paths, URLs, git refs, issue refs |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 
