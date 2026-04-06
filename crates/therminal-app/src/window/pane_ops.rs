@@ -143,7 +143,10 @@ impl App {
             PaneRemoveResult::LastInWorkspace => {
                 if wm.gc_empty_workspaces() {
                     // Switched to another workspace that still has panes.
-                    info!("Last pane in workspace closed, switched to workspace {}", wm.active_id());
+                    info!(
+                        "Last pane in workspace closed, switched to workspace {}",
+                        wm.active_id()
+                    );
                     let focus = wm.focused_pane();
                     self.set_focused_pane(focus);
                     self.relayout_and_redraw();
@@ -306,7 +309,8 @@ impl App {
             PaneRemoveResult::NotFound => {
                 warn!(
                     target_id,
-                    pane_count_before, "Pane not found in any workspace (double-close or stale event?)"
+                    pane_count_before,
+                    "Pane not found in any workspace (double-close or stale event?)"
                 );
             }
         }

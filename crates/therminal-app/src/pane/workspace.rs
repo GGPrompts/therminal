@@ -345,7 +345,10 @@ impl WorkspaceManager {
 
     /// Total pane count across all workspaces.
     pub fn total_pane_count(&self) -> usize {
-        self.workspaces.iter().map(|ws| ws.layout.pane_count()).sum()
+        self.workspaces
+            .iter()
+            .map(|ws| ws.layout.pane_count())
+            .sum()
     }
 
     /// Remove a pane from whichever workspace contains it.
@@ -390,12 +393,13 @@ impl WorkspaceManager {
         if self.workspaces.len() <= 1 {
             return false;
         }
-        let idx = match self.workspaces.iter().position(|ws| {
-            matches!(ws.layout, LayoutNode::Empty) || ws.layout.pane_count() == 0
-        }) {
-            Some(idx) => idx,
-            None => return false,
-        };
+        let idx =
+            match self.workspaces.iter().position(|ws| {
+                matches!(ws.layout, LayoutNode::Empty) || ws.layout.pane_count() == 0
+            }) {
+                Some(idx) => idx,
+                None => return false,
+            };
         let was_active = idx == self.active_idx;
         self.workspaces.remove(idx);
         // Adjust active_idx after removal.
