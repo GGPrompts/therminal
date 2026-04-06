@@ -116,6 +116,46 @@ fn shell_integration_dir() -> PathBuf {
     therminal_runtime::paths::resources_dir().join("shell-integration")
 }
 
+/// Convert a Windows path like `C:\Users\foo\bar` to WSL format `/mnt/c/Users/foo/bar`.
+/// Returns the original path as a string if it doesn't look like a Windows absolute path.
+fn windows_to_wsl_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if s.len() >= 3 && s.as_bytes()[1] == b':' {
+        let drive = (s.as_bytes()[0] as char).to_ascii_lowercase();
+        let rest = s[2..].replace('\\', "/");
+        format!("/mnt/{drive}{rest}")
+    } else {
+        s.into_owned()
+    }
+}
+
+/// Prepare a bash rcfile wrapper for WSL that uses Linux-format paths.
+///
+/// The wrapper sources the integration script (given as a WSL path) then
+/// the user's real `.bashrc`.
+fn prepare_wsl_bash_rcfile(wsl_integration_path: &str) -> Result<PathBuf, PtyError> {
+    let cache_dir = therminal_runtime::paths::cache_dir();
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| PtyError::Integration(format!("create cache dir: {e}")))?;
+
+    let wrapper_path = cache_dir.join("wsl_bash_rcfile.bash");
+    let content = format!(
+        r#"# Therminal WSL bash wrapper — auto-generated, do not edit.
+# Sources shell integration, then the user's real .bashrc.
+if [ -f "{integration}" ]; then
+    . "{integration}"
+fi
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+"#,
+        integration = wsl_integration_path
+    );
+    std::fs::write(&wrapper_path, content)
+        .map_err(|e| PtyError::Integration(format!("write wsl bash rcfile: {e}")))?;
+    Ok(wrapper_path)
+}
+
 /// Prepare a bash rcfile wrapper that sources the integration script then
 /// the user's real `.bashrc`.
 ///
@@ -310,12 +350,9 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
             Ok(cmd)
         }
         ShellType::Wsl => {
-            // WSL launches a Linux shell on Windows. The Linux shell will
-            // detect TERM_PROGRAM=therminal and auto-source integration
-            // scripts from the user's dotfiles (if installed in WSL).
-            //
-            // THERMINAL_RESOURCES_DIR needs to be a WSL-accessible path.
-            // Convert the Windows path to /mnt/<drive>/... format.
+            // WSL launches a Linux shell on Windows. We inject shell integration
+            // by generating a bash rcfile wrapper and passing it via
+            // `wsl -- bash --rcfile <wrapper>`.
             let mut cmd = CommandBuilder::new(shell);
             // Start in the Linux home directory instead of /mnt/c/...
             cmd.arg("--cd");
@@ -325,17 +362,25 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
 
             // Convert Windows resources path to WSL path for the Linux shell.
             let resources = therminal_runtime::paths::resources_dir();
-            let resources_str = resources.to_string_lossy();
-            // Convert C:\foo\bar -> /mnt/c/foo/bar
-            if resources_str.len() >= 3 && resources_str.as_bytes()[1] == b':' {
-                let drive = (resources_str.as_bytes()[0] as char).to_ascii_lowercase();
-                let rest = resources_str[2..].replace('\\', "/");
-                cmd.env("THERMINAL_RESOURCES_DIR", format!("/mnt/{drive}{rest}"));
-            } else {
-                cmd.env("THERMINAL_RESOURCES_DIR", &resources);
-            }
+            let wsl_resources = windows_to_wsl_path(&resources);
+            cmd.env("THERMINAL_RESOURCES_DIR", &wsl_resources);
 
-            debug!(shell = shell, "wsl: launching with TERM_PROGRAM forwarding");
+            // Generate a bash rcfile that sources integration + user's .bashrc,
+            // using WSL-compatible paths so bash inside WSL can read them.
+            let wsl_integration = format!("{wsl_resources}/shell-integration/therminal.bash");
+            let rcfile = prepare_wsl_bash_rcfile(&wsl_integration)?;
+            let wsl_rcfile = windows_to_wsl_path(&rcfile);
+
+            // Launch bash inside WSL with our rcfile wrapper.
+            cmd.args(["--", "bash", "--rcfile", &wsl_rcfile]);
+            // BASH_ENV for non-interactive subshells.
+            cmd.env("BASH_ENV", &wsl_integration);
+
+            debug!(
+                shell = shell,
+                rcfile = %wsl_rcfile,
+                "wsl: launching bash with --rcfile for integration"
+            );
             Ok(cmd)
         }
         ShellType::Unknown => {
@@ -685,27 +730,34 @@ mod tests {
 
     #[test]
     fn wsl_path_conversion_logic() {
-        // Verify the drive letter → /mnt/<drive>/... conversion used in
-        // build_shell_command for ShellType::Wsl.
-        let windows_path = r"C:\Users\marci\AppData\Roaming\therminal\resources";
-        let bytes = windows_path.as_bytes();
-        assert!(bytes.len() >= 3 && bytes[1] == b':');
-        let drive = (bytes[0] as char).to_ascii_lowercase();
-        let rest = windows_path[2..].replace('\\', "/");
-        let wsl_path = format!("/mnt/{drive}{rest}");
+        let result = windows_to_wsl_path(Path::new(
+            r"C:\Users\marci\AppData\Roaming\therminal\resources",
+        ));
         assert_eq!(
-            wsl_path,
+            result,
             "/mnt/c/Users/marci/AppData/Roaming/therminal/resources"
         );
     }
 
     #[test]
     fn wsl_path_conversion_other_drives() {
-        let windows_path = r"D:\projects\therminal\resources";
-        let bytes = windows_path.as_bytes();
-        let drive = (bytes[0] as char).to_ascii_lowercase();
-        let rest = windows_path[2..].replace('\\', "/");
-        let wsl_path = format!("/mnt/{drive}{rest}");
-        assert_eq!(wsl_path, "/mnt/d/projects/therminal/resources");
+        let result = windows_to_wsl_path(Path::new(r"D:\projects\therminal\resources"));
+        assert_eq!(result, "/mnt/d/projects/therminal/resources");
+    }
+
+    #[test]
+    fn wsl_path_conversion_unix_passthrough() {
+        let result = windows_to_wsl_path(Path::new("/usr/local/bin"));
+        assert_eq!(result, "/usr/local/bin");
+    }
+
+    #[test]
+    fn wsl_bash_rcfile_sources_integration() {
+        let rcfile =
+            prepare_wsl_bash_rcfile("/mnt/c/therminal/resources/shell-integration/therminal.bash")
+                .expect("failed to prepare wsl rcfile");
+        let content = std::fs::read_to_string(&rcfile).unwrap();
+        assert!(content.contains("/mnt/c/therminal/resources/shell-integration/therminal.bash"));
+        assert!(content.contains("$HOME/.bashrc"));
     }
 }
