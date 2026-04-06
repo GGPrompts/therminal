@@ -269,6 +269,7 @@ impl MasterPty for TakenPtyMaster {
         None
     }
 
+    #[cfg(unix)]
     fn tty_name(&self) -> Option<std::path::PathBuf> {
         None
     }

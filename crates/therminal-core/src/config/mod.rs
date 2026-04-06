@@ -185,13 +185,15 @@ pub struct GeneralConfig {
     /// Whether to show the workspace tab bar at the top of the window.
     pub show_tab_bar: bool,
     /// Use client-side decorations (custom title bar with window controls).
-    /// Default: true on Linux, false on macOS and Windows.
+    /// Default: true on Linux and Windows, false on macOS.
     pub use_csd: bool,
 }
 
 /// Platform-specific default for client-side decorations.
+/// Enabled on Linux and Windows (replaces native title bar with integrated tabs).
+/// Disabled on macOS where the native title bar is expected.
 fn default_use_csd() -> bool {
-    cfg!(target_os = "linux")
+    cfg!(any(target_os = "linux", target_os = "windows"))
 }
 
 impl Default for GeneralConfig {

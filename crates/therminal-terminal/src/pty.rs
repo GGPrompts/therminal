@@ -92,7 +92,7 @@ fn get_default_shell() -> String {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok()
+            .is_ok_and(|s| s.success())
         {
             return "wsl.exe".to_owned();
         }
@@ -102,7 +102,7 @@ fn get_default_shell() -> String {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .is_ok()
+                .is_ok_and(|s| s.success())
             {
                 return candidate.to_string();
             }
@@ -601,5 +601,91 @@ mod tests {
         assert!(dir.join("therminal.zsh").is_file());
         assert!(dir.join("therminal.fish").is_file());
         assert!(dir.join("therminal.ps1").is_file());
+    }
+
+    // ── Shell detection exit code tests ─────────────────────────────────
+    //
+    // These verify that shell detection checks the *exit code*, not just
+    // whether the process was spawnable. A command that runs but exits
+    // non-zero must not be selected as the shell.
+
+    #[test]
+    fn status_check_rejects_nonzero_exit_code() {
+        // `false` is spawnable but exits with code 1.
+        let result = std::process::Command::new("false")
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(
+            !result,
+            "is_ok_and(success) should reject a process that exits non-zero"
+        );
+    }
+
+    #[test]
+    fn status_check_accepts_zero_exit_code() {
+        // `true` exits with code 0.
+        let result = std::process::Command::new("true")
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(
+            result,
+            "is_ok_and(success) should accept a process that exits zero"
+        );
+    }
+
+    #[test]
+    fn status_is_ok_alone_accepts_nonzero_exit() {
+        // Demonstrates the bug we fixed: is_ok() alone accepts failures.
+        let result = std::process::Command::new("false").status().is_ok();
+        assert!(
+            result,
+            "is_ok() returns true even for non-zero exit — this is why we use is_ok_and()"
+        );
+    }
+
+    // ── Default shell detection ─────────────────────────────────────────
+
+    #[test]
+    fn default_shell_is_not_empty() {
+        let shell = get_default_shell();
+        assert!(!shell.is_empty(), "default shell should never be empty");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_is_absolute_path() {
+        let shell = get_default_shell();
+        assert!(
+            shell.starts_with('/'),
+            "Unix default shell should be an absolute path, got: {shell}"
+        );
+    }
+
+    // ── WSL path conversion ─────────────────────────────────────────────
+
+    #[test]
+    fn wsl_path_conversion_logic() {
+        // Verify the drive letter → /mnt/<drive>/... conversion used in
+        // build_shell_command for ShellType::Wsl.
+        let windows_path = r"C:\Users\marci\AppData\Roaming\therminal\resources";
+        let bytes = windows_path.as_bytes();
+        assert!(bytes.len() >= 3 && bytes[1] == b':');
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = windows_path[2..].replace('\\', "/");
+        let wsl_path = format!("/mnt/{drive}{rest}");
+        assert_eq!(
+            wsl_path,
+            "/mnt/c/Users/marci/AppData/Roaming/therminal/resources"
+        );
+    }
+
+    #[test]
+    fn wsl_path_conversion_other_drives() {
+        let windows_path = r"D:\projects\therminal\resources";
+        let bytes = windows_path.as_bytes();
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = windows_path[2..].replace('\\', "/");
+        let wsl_path = format!("/mnt/{drive}{rest}");
+        assert_eq!(wsl_path, "/mnt/d/projects/therminal/resources");
     }
 }

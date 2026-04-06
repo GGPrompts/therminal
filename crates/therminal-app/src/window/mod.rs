@@ -651,8 +651,18 @@ impl App {
                 self.config.general.show_tab_bar,
             );
 
+            // Submit tab bar before CSD buttons — both use the shared
+            // overlay_text_renderer, and a second prepare() overwrites the
+            // vertex buffer that the first render pass references.
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+
             // Draw CSD window control buttons on top of the tab bar.
             if use_csd {
+                let mut encoder =
+                    gpu.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("csd_buttons_encoder"),
+                        });
                 let hover_x = self
                     .cursor_position
                     .filter(|(_, py)| (*py as f32) < bar_h)
@@ -668,9 +678,8 @@ impl App {
                     bar_h,
                     hover_x,
                 );
+                gpu.queue.submit(std::iter::once(encoder.finish()));
             }
-
-            gpu.queue.submit(std::iter::once(encoder.finish()));
         }
 
         // ── Help overlay (on top of everything) ─────────────────────────
