@@ -58,3 +58,117 @@ pub const MIN_PANE_WIDTH: f32 = 80.0;
 
 /// Minimum pane height in physical pixels.
 pub const MIN_PANE_HEIGHT: f32 = 60.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── effective_header_height ────────────────────────────────────────
+
+    #[test]
+    fn header_height_zero_for_single_pane() {
+        assert_eq!(effective_header_height(1), 0.0);
+    }
+
+    #[test]
+    fn header_height_zero_for_zero_panes() {
+        assert_eq!(effective_header_height(0), 0.0);
+    }
+
+    #[test]
+    fn header_height_present_for_multiple_panes() {
+        assert_eq!(effective_header_height(2), PANE_HEADER_HEIGHT);
+        assert_eq!(effective_header_height(10), PANE_HEADER_HEIGHT);
+    }
+
+    // ── effective_status_bar_height ───────────────────────────────────
+
+    #[test]
+    fn status_bar_height_when_shown() {
+        assert_eq!(effective_status_bar_height(true), STATUS_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn status_bar_height_when_hidden() {
+        assert_eq!(effective_status_bar_height(false), 0.0);
+    }
+
+    // ── effective_tab_bar_height ──────────────────────────────────────
+
+    #[test]
+    fn tab_bar_height_when_shown() {
+        assert_eq!(effective_tab_bar_height(true), TAB_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn tab_bar_height_when_hidden() {
+        assert_eq!(effective_tab_bar_height(false), 0.0);
+    }
+
+    // ── content_area_rect ────────────────────────────────────────────
+
+    #[test]
+    fn content_area_no_bars() {
+        let r = content_area_rect(800.0, 600.0, false, false);
+        assert_eq!(r.x(), 0.0);
+        assert_eq!(r.y(), 0.0);
+        assert_eq!(r.width(), 800.0);
+        assert_eq!(r.height(), 600.0);
+    }
+
+    #[test]
+    fn content_area_status_bar_only() {
+        let r = content_area_rect(800.0, 600.0, true, false);
+        assert_eq!(r.x(), 0.0);
+        assert_eq!(r.y(), 0.0);
+        assert_eq!(r.width(), 800.0);
+        assert_eq!(r.height(), 600.0 - STATUS_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn content_area_tab_bar_only() {
+        let r = content_area_rect(800.0, 600.0, false, true);
+        assert_eq!(r.x(), 0.0);
+        assert_eq!(r.y(), TAB_BAR_HEIGHT);
+        assert_eq!(r.width(), 800.0);
+        assert_eq!(r.height(), 600.0 - TAB_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn content_area_both_bars() {
+        let r = content_area_rect(800.0, 600.0, true, true);
+        assert_eq!(r.x(), 0.0);
+        assert_eq!(r.y(), TAB_BAR_HEIGHT);
+        assert_eq!(r.width(), 800.0);
+        assert_eq!(r.height(), 600.0 - STATUS_BAR_HEIGHT - TAB_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn content_area_preserves_width_with_bars() {
+        // Width should never be affected by bars.
+        let r = content_area_rect(1920.0, 1080.0, true, true);
+        assert_eq!(r.width(), 1920.0);
+    }
+
+    #[test]
+    fn content_area_small_window() {
+        // Even with a tiny window, the math should not panic.
+        let r = content_area_rect(100.0, 50.0, true, true);
+        assert_eq!(r.y(), TAB_BAR_HEIGHT);
+        // Height might go negative for pathologically small windows -- that is fine,
+        // the layout code handles it. We just verify no panic.
+        let expected_h = 50.0 - STATUS_BAR_HEIGHT - TAB_BAR_HEIGHT;
+        assert_eq!(r.height(), expected_h);
+    }
+
+    // ── Rect identity checks ─────────────────────────────────────────
+
+    #[test]
+    fn content_area_rect_origin_at_top_left_when_no_tab_bar() {
+        let r = content_area_rect(640.0, 480.0, true, false);
+        assert_eq!(r.x(), 0.0);
+        assert_eq!(r.y(), 0.0);
+        assert_eq!(r.right(), 640.0);
+        assert_eq!(r.bottom(), 480.0 - STATUS_BAR_HEIGHT);
+    }
+}

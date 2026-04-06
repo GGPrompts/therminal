@@ -316,3 +316,373 @@ impl WorkspaceManager {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use alacritty_terminal::sync::FairMutex;
+    use alacritty_terminal::term::{Config as TermConfig, Term};
+    use therminal_core::geometry::Rect;
+
+    use super::*;
+    use crate::pane::state::PaneTermSize;
+    use crate::pane::PaneListener;
+
+    /// Helper to create a minimal test leaf node (no real PTY).
+    fn test_leaf(id: PaneId, rect: Rect) -> LayoutNode {
+        let term = Term::new(
+            TermConfig::default(),
+            &PaneTermSize {
+                columns: 80,
+                screen_lines: 24,
+            },
+            PaneListener,
+        );
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        LayoutNode::Leaf(PaneState {
+            id,
+            term: Arc::new(FairMutex::new(term)),
+            pty_writer: writer,
+            pty_master: pair.master,
+            viewport: rect,
+            scrollback_lines: 1000,
+            status: Arc::new(Mutex::new(super::super::state::PaneStatus::default())),
+        })
+    }
+
+    fn default_rect() -> Rect {
+        Rect::new(0.0, 0.0, 800.0, 600.0)
+    }
+
+    /// Helper to build a two-pane split layout.
+    fn two_pane_split(id_a: PaneId, id_b: PaneId) -> LayoutNode {
+        let r = default_rect();
+        LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(test_leaf(id_a, r)),
+            second: Box::new(test_leaf(id_b, r)),
+        }
+    }
+
+    // ── WorkspaceManager::new ────────────────────────────────────────
+
+    #[test]
+    fn new_manager_has_one_workspace() {
+        let wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        assert_eq!(wm.active_id(), 1);
+        assert_eq!(wm.focused_pane(), Some(1));
+        assert_eq!(wm.workspace_ids(), vec![1]);
+    }
+
+    #[test]
+    fn new_manager_layout_matches() {
+        let wm = WorkspaceManager::new(test_leaf(42, default_rect()), Some(42));
+        assert_eq!(wm.layout().pane_ids(), vec![42]);
+    }
+
+    // ── focused_pane / set_focused_pane ──────────────────────────────
+
+    #[test]
+    fn set_focused_pane_updates() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+        assert_eq!(wm.focused_pane(), Some(1));
+
+        wm.set_focused_pane(Some(2));
+        assert_eq!(wm.focused_pane(), Some(2));
+    }
+
+    #[test]
+    fn set_focused_pane_to_none() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.set_focused_pane(None);
+        assert_eq!(wm.focused_pane(), None);
+    }
+
+    // ── take_layout / set_layout ─────────────────────────────────────
+
+    #[test]
+    fn take_layout_replaces_with_empty() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        let taken = wm.take_layout();
+        assert_eq!(taken.pane_ids(), vec![1]);
+        assert_eq!(wm.layout().pane_count(), 0); // Now Empty
+    }
+
+    #[test]
+    fn set_layout_replaces_current() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.set_layout(test_leaf(99, default_rect()));
+        assert_eq!(wm.layout().pane_ids(), vec![99]);
+    }
+
+    // ── save_layout / take_saved_layout / has_saved_layout ───────────
+
+    #[test]
+    fn save_and_take_layout_roundtrip() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+
+        assert!(!wm.has_saved_layout());
+
+        wm.save_layout();
+        assert!(wm.has_saved_layout());
+
+        let snap = wm.take_saved_layout();
+        assert!(snap.is_some());
+        assert!(!wm.has_saved_layout());
+
+        // Verify snapshot structure: should be a Split with two Leaf children.
+        let snap = snap.unwrap();
+        match &snap {
+            LayoutSnapshot::Split {
+                direction,
+                first,
+                second,
+                ..
+            } => {
+                assert_eq!(*direction, SplitDirection::Horizontal);
+                assert!(matches!(first.as_ref(), LayoutSnapshot::Leaf));
+                assert!(matches!(second.as_ref(), LayoutSnapshot::Leaf));
+            }
+            _ => panic!("Expected Split snapshot, got Leaf"),
+        }
+    }
+
+    #[test]
+    fn take_saved_layout_clears_it() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.save_layout();
+        assert!(wm.has_saved_layout());
+
+        let _ = wm.take_saved_layout();
+        assert!(!wm.has_saved_layout());
+
+        // Second take returns None.
+        assert!(wm.take_saved_layout().is_none());
+    }
+
+    #[test]
+    fn take_saved_layout_without_save_returns_none() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        assert!(wm.take_saved_layout().is_none());
+    }
+
+    #[test]
+    fn save_layout_snapshot_leaf_count_matches() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+        wm.save_layout();
+        let snap = wm.take_saved_layout().unwrap();
+        assert_eq!(LayoutNode::snapshot_leaf_count(&snap), 2);
+    }
+
+    #[test]
+    fn save_layout_single_pane_snapshot() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.save_layout();
+        let snap = wm.take_saved_layout().unwrap();
+        assert!(matches!(snap, LayoutSnapshot::Leaf));
+        assert_eq!(LayoutNode::snapshot_leaf_count(&snap), 1);
+    }
+
+    // ── switch_to ────────────────────────────────────────────────────
+
+    #[test]
+    fn switch_to_same_workspace_returns_false() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        let switched = wm.switch_to(1, || None);
+        assert!(!switched);
+        assert_eq!(wm.active_id(), 1);
+    }
+
+    #[test]
+    fn switch_to_new_workspace_creates_it() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        let switched = wm.switch_to(3, || Some((test_leaf(10, default_rect()), 10)));
+        assert!(switched);
+        assert_eq!(wm.active_id(), 3);
+        assert_eq!(wm.focused_pane(), Some(10));
+        assert_eq!(wm.layout().pane_ids(), vec![10]);
+    }
+
+    #[test]
+    fn switch_to_new_workspace_fails_if_no_pane_created() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        let switched = wm.switch_to(2, || None);
+        assert!(!switched);
+        assert_eq!(wm.active_id(), 1); // stays on workspace 1
+    }
+
+    #[test]
+    fn switch_to_out_of_range_returns_false() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        assert!(!wm.switch_to(0, || None));
+        assert!(!wm.switch_to(10, || None));
+    }
+
+    #[test]
+    fn switch_back_to_existing_workspace_preserves_layout() {
+        let mut wm = WorkspaceManager::new(two_pane_split(1, 2), Some(1));
+        // Switch to workspace 2
+        wm.switch_to(2, || Some((test_leaf(10, default_rect()), 10)));
+        assert_eq!(wm.active_id(), 2);
+
+        // Switch back to workspace 1
+        let switched = wm.switch_to(1, || panic!("should not create"));
+        assert!(switched);
+        assert_eq!(wm.active_id(), 1);
+        assert_eq!(wm.layout().pane_ids(), vec![1, 2]);
+        assert_eq!(wm.focused_pane(), Some(1));
+    }
+
+    // ── workspace_ids ────────────────────────────────────────────────
+
+    #[test]
+    fn workspace_ids_sorted_after_creation() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.switch_to(5, || Some((test_leaf(50, default_rect()), 50)));
+        wm.switch_to(3, || Some((test_leaf(30, default_rect()), 30)));
+        assert_eq!(wm.workspace_ids(), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn workspace_ids_consistent_after_switch() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.switch_to(2, || Some((test_leaf(20, default_rect()), 20)));
+        wm.switch_to(1, || panic!("should not create"));
+        // Switching back does not duplicate or remove workspace IDs.
+        assert_eq!(wm.workspace_ids(), vec![1, 2]);
+    }
+
+    // ── send_pane_to ─────────────────────────────────────────────────
+
+    #[test]
+    fn send_pane_to_new_workspace() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+
+        let sent = wm.send_pane_to(2, 3, || None);
+        assert!(sent);
+
+        // Workspace 1 should now have only pane 1.
+        assert_eq!(wm.layout().pane_ids(), vec![1]);
+
+        // Workspace 3 should exist with pane 2.
+        assert_eq!(wm.workspace_ids(), vec![1, 3]);
+    }
+
+    #[test]
+    fn send_pane_to_same_workspace_returns_false() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+        let sent = wm.send_pane_to(1, 1, || None);
+        assert!(!sent);
+    }
+
+    #[test]
+    fn send_pane_to_out_of_range_returns_false() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+        assert!(!wm.send_pane_to(1, 0, || None));
+        assert!(!wm.send_pane_to(1, 10, || None));
+    }
+
+    #[test]
+    fn send_focused_pane_updates_focus() {
+        let layout = two_pane_split(1, 2);
+        let mut wm = WorkspaceManager::new(layout, Some(1));
+
+        // Send the focused pane (1) to workspace 2.
+        let sent = wm.send_pane_to(1, 2, || None);
+        assert!(sent);
+
+        // Focus should move to the remaining pane (2).
+        assert_eq!(wm.focused_pane(), Some(2));
+        assert_eq!(wm.layout().pane_ids(), vec![2]);
+    }
+
+    #[test]
+    fn send_last_pane_creates_default() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+
+        let sent = wm.send_pane_to(1, 2, || Some((test_leaf(99, default_rect()), 99)));
+        assert!(sent);
+
+        // Workspace 1 should now have the default pane.
+        assert_eq!(wm.layout().pane_ids(), vec![99]);
+        assert_eq!(wm.focused_pane(), Some(99));
+    }
+
+    #[test]
+    fn send_nonexistent_pane_returns_false() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        let sent = wm.send_pane_to(999, 2, || None);
+        assert!(!sent);
+    }
+
+    #[test]
+    fn send_pane_to_existing_workspace_adds_split() {
+        let mut wm = WorkspaceManager::new(two_pane_split(1, 2), Some(1));
+        // Create workspace 2 with a single pane.
+        wm.switch_to(2, || Some((test_leaf(10, default_rect()), 10)));
+        // Switch back to workspace 1.
+        wm.switch_to(1, || panic!("should not create"));
+
+        // Send pane 2 to workspace 2 (which already has pane 10).
+        let sent = wm.send_pane_to(2, 2, || None);
+        assert!(sent);
+
+        // Workspace 1 should now have only pane 1.
+        assert_eq!(wm.layout().pane_ids(), vec![1]);
+
+        // Switch to workspace 2 and verify it has both panes.
+        wm.switch_to(2, || panic!("should not create"));
+        let ids = wm.layout().pane_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&10));
+        assert!(ids.contains(&2));
+    }
+
+    // ── remove_empty_active ──────────────────────────────────────────
+
+    #[test]
+    fn remove_empty_active_with_single_workspace_returns_false() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        assert!(!wm.remove_empty_active());
+    }
+
+    #[test]
+    fn remove_empty_active_with_non_empty_layout_returns_false() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.switch_to(2, || Some((test_leaf(20, default_rect()), 20)));
+        wm.switch_to(1, || panic!("should not create"));
+        // Workspace 1 is not empty, so remove should fail.
+        assert!(!wm.remove_empty_active());
+    }
+
+    #[test]
+    fn remove_empty_active_removes_and_switches() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.switch_to(2, || Some((test_leaf(20, default_rect()), 20)));
+        wm.switch_to(1, || panic!("should not create"));
+
+        // Make workspace 1 empty.
+        wm.set_layout(LayoutNode::Empty);
+        assert!(wm.remove_empty_active());
+
+        // Should now be on workspace 2.
+        assert_eq!(wm.workspace_ids(), vec![2]);
+        assert_eq!(wm.active_id(), 2);
+    }
+}
