@@ -362,6 +362,8 @@ pub struct SpawnOptions {
     pub shell: String,
     /// Extra environment variables to merge into the PTY environment.
     pub env: std::collections::HashMap<String, String>,
+    /// Working directory for the spawned shell. Empty = inherit current directory.
+    pub cwd: String,
 }
 
 /// Spawn the user's default shell in a new PTY of the given size.
@@ -406,6 +408,11 @@ pub fn spawn_shell_with_options(
     // Merge extra env vars from config.
     for (k, v) in &options.env {
         cmd.env(k, v);
+    }
+
+    // Set working directory if specified.
+    if !options.cwd.is_empty() {
+        cmd.cwd(&options.cwd);
     }
 
     let child = pair.slave.spawn_command(cmd).map_err(PtyError::Spawn)?;
@@ -576,6 +583,7 @@ mod tests {
         let opts = SpawnOptions {
             shell: String::new(),
             env,
+            ..Default::default()
         };
         assert_eq!(opts.env.len(), 2);
         assert_eq!(opts.env["EDITOR"], "nvim");

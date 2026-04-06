@@ -199,6 +199,17 @@ impl<L: EventListener> Drop for PtyPaneCore<L> {
 
 // ── Reader loop ────────────────────────────────────────────────────────
 
+/// Public entry point for running a PTY reader loop on an externally-provided
+/// reader and `Term`. Used by the daemon to re-attach reader threads to PTY
+/// FDs received via SCM_RIGHTS during handoff.
+pub fn reader_loop_external<H: PtyReaderHandler>(
+    reader: Box<dyn IoRead + Send>,
+    term: Arc<FairMutex<Term<H::Listener>>>,
+    handler: H,
+) {
+    reader_loop(reader, term, handler);
+}
+
 fn reader_loop<H: PtyReaderHandler>(
     mut reader: Box<dyn IoRead + Send>,
     term: Arc<FairMutex<Term<H::Listener>>>,

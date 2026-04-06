@@ -560,6 +560,70 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::RequestHandoffFds => {
+            #[cfg(unix)]
+            {
+                use crate::fd_passing;
+
+                let mgr = session_mgr.lock().await;
+                let (payload, fds) = mgr.collect_handoff_fds();
+
+                if fds.is_empty() {
+                    // No sessions to hand off -- just shut down.
+                    let lc = Arc::clone(lifecycle);
+                    tokio::spawn(async move {
+                        if let Err(e) = lc.initiate_shutdown().await {
+                            error!(error = %e, "shutdown failed");
+                        }
+                    });
+                    return IpcResponse::HandoffReady {
+                        handoff_socket: String::new(),
+                        pane_count: 0,
+                    };
+                }
+
+                // Create a temporary socket for FD transfer.
+                let runtime_dir = therminal_runtime::paths::runtime_dir();
+                let handoff_path = runtime_dir.join("handoff.sock");
+
+                // Remove stale socket.
+                let _ = std::fs::remove_file(&handoff_path);
+
+                let handoff_path_str = handoff_path.display().to_string();
+                let pane_count = fds.len();
+
+                // Spawn a task that listens on the handoff socket, sends FDs,
+                // then triggers shutdown.
+                let lc = Arc::clone(lifecycle);
+                tokio::spawn(async move {
+                    match fd_passing::serve_handoff_fds(&handoff_path, &payload, &fds).await {
+                        Ok(()) => {
+                            info!("handoff FDs sent successfully");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to send handoff FDs");
+                        }
+                    }
+                    // Clean up handoff socket.
+                    let _ = std::fs::remove_file(&handoff_path);
+                    // Initiate shutdown after FD transfer.
+                    if let Err(e) = lc.initiate_shutdown().await {
+                        error!(error = %e, "shutdown after handoff failed");
+                    }
+                });
+
+                IpcResponse::HandoffReady {
+                    handoff_socket: handoff_path_str,
+                    pane_count,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                IpcResponse::Error {
+                    message: "FD-passing handoff is only supported on Unix".to_string(),
+                }
+            }
+        }
     }
 }
 

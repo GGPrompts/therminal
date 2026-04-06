@@ -24,6 +24,8 @@
 pub mod client;
 pub mod control;
 pub mod ensure;
+#[cfg(unix)]
+pub mod fd_passing;
 pub mod framing;
 pub mod handoff;
 pub mod lifecycle;

@@ -1088,6 +1088,7 @@ impl App {
         therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+            ..Default::default()
         }
     }
 

@@ -76,6 +76,7 @@ impl App {
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+            ..Default::default()
         };
         let proxy = self.event_proxy.clone();
         // Direct field access needed here: layout_mut + renderer + config must coexist.
@@ -180,6 +181,7 @@ impl App {
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+            ..Default::default()
         };
         let proxy = self.event_proxy.clone();
         // Direct field access needed here: layout_mut + renderer + config must coexist.
@@ -574,6 +576,7 @@ impl App {
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+            ..Default::default()
         };
         let proxy = self.event_proxy.clone();
 
@@ -715,6 +718,7 @@ impl App {
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+            ..Default::default()
         };
         let proxy = self.event_proxy.clone();
 
@@ -777,6 +781,7 @@ impl App {
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
             env: self.config.general.env.clone(),
+            ..Default::default()
         };
         let proxy = self.event_proxy.clone();
 

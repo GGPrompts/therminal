@@ -1,4 +1,4 @@
-//! `ensure_daemon()` — the primary entry point for daemon lifecycle management.
+//! `ensure_daemon()` -- the primary entry point for daemon lifecycle management.
 //!
 //! Called by the terminal app (or CLI) to guarantee a daemon is running with
 //! a compatible protocol version. Handles three cases:
@@ -61,7 +61,11 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
     // Ensure runtime directory exists
     therminal_runtime::paths::ensure_runtime_dir().context("failed to create runtime directory")?;
 
-    // Check existing daemon — handoff is based on protocol version, not build hash
+    // On Unix, the handoff may return received FDs to restore into the new daemon.
+    #[cfg(unix)]
+    let mut received_handoff: Option<handoff::ReceivedHandoff> = None;
+
+    // Check existing daemon -- handoff is based on protocol version, not build hash
     match handoff::check_daemon(&socket_path, therminal_protocol::PROTOCOL_VERSION).await {
         DaemonCheck::Reuse => {
             info!("reusing existing daemon");
@@ -74,18 +78,25 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
                 protocol_version = therminal_protocol::PROTOCOL_VERSION,
                 "performing protocol version handoff"
             );
-            handoff::perform_handoff(&socket_path).await?;
+            #[cfg(unix)]
+            {
+                received_handoff = handoff::perform_handoff(&socket_path).await?;
+            }
+            #[cfg(not(unix))]
+            {
+                handoff::perform_handoff(&socket_path).await?;
+            }
         }
         DaemonCheck::IncompatibleDaemon => {
             warn!(
-                "incompatible daemon detected on socket — attempting graceful shutdown before starting fresh"
+                "incompatible daemon detected on socket \
+                 -- attempting graceful shutdown before starting fresh"
             );
             // Try to shut down whatever is listening, even though it
             // may not understand our protocol.  If it fails, force-remove.
             match client::request_shutdown(&socket_path).await {
                 Ok(_) => {
                     info!("incompatible daemon acknowledged shutdown, waiting for socket removal");
-                    // Give it a moment to release the socket.
                     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
                     loop {
                         if !socket_path.exists() {
@@ -122,13 +133,24 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
     }
 
     // Start new daemon
+    #[cfg(unix)]
+    let lifecycle = start_daemon(socket_path, config, received_handoff).await?;
+    #[cfg(not(unix))]
     let lifecycle = start_daemon(socket_path, config).await?;
+
     Ok(EnsureResult::Started { lifecycle })
 }
 
 /// Start a new daemon instance, binding the control socket and entering
 /// the accept loop.
-async fn start_daemon(socket_path: PathBuf, config: LifecycleConfig) -> Result<Arc<Lifecycle>> {
+///
+/// On Unix, if `received_handoff` is `Some`, restores sessions from the
+/// received PTY master FDs before entering the accept loop.
+async fn start_daemon(
+    socket_path: PathBuf,
+    config: LifecycleConfig,
+    #[cfg(unix)] mut received_handoff: Option<handoff::ReceivedHandoff>,
+) -> Result<Arc<Lifecycle>> {
     let lifecycle = Arc::new(Lifecycle::new(config));
 
     // Starting -> Binding
@@ -142,6 +164,21 @@ async fn start_daemon(socket_path: PathBuf, config: LifecycleConfig) -> Result<A
     )
     .await
     .context("failed to bind daemon socket")?;
+
+    // Restore sessions from handoff FDs before transitioning to Ready.
+    #[cfg(unix)]
+    if let Some(ref mut handoff) = received_handoff
+        && let Some(fds) = handoff.take_fds()
+    {
+        let session_mgr = server.session_manager();
+        let mut mgr = session_mgr.lock().await;
+        let restored = mgr.restore_from_handoff(&handoff.payload, fds);
+        lifecycle.set_session_count(mgr.session_count());
+        info!(
+            restored_panes = restored,
+            "sessions restored from handoff FDs"
+        );
+    }
 
     // Binding -> Ready
     lifecycle.transition(DaemonState::Ready)?;

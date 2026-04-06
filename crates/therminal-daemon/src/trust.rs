@@ -46,7 +46,9 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.get_geometry"
         | "terminal.panes.get_content"
         | "terminal.semantic.query_history" => Some(ToolCategory::Observer),
-        "terminal.sessions.create" | "terminal.panes.write" => Some(ToolCategory::Writer),
+        "terminal.sessions.create" | "terminal.panes.write" | "terminal.panes.create" => {
+            Some(ToolCategory::Writer)
+        }
         "terminal.sessions.destroy" => Some(ToolCategory::Admin),
         _ => None,
     }
@@ -258,6 +260,10 @@ mod tests {
         );
         assert_eq!(
             tool_category("terminal.sessions.create"),
+            Some(ToolCategory::Writer)
+        );
+        assert_eq!(
+            tool_category("terminal.panes.create"),
             Some(ToolCategory::Writer)
         );
         assert_eq!(

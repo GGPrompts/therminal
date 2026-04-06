@@ -114,6 +114,12 @@ pub enum IpcRequest {
     KillPane { pane_id: PaneId },
     /// Select (focus) a specific pane.
     SelectPane { pane_id: PaneId },
+    /// Request handoff with FD passing (Unix only).
+    ///
+    /// The daemon responds with `HandoffReady` containing a temporary socket
+    /// path where the old daemon will send PTY FDs via SCM_RIGHTS, then
+    /// initiates graceful shutdown.
+    RequestHandoffFds,
 }
 
 /// Typed IPC responses.
@@ -168,6 +174,16 @@ pub enum IpcResponse {
     PaneKilled { pane_id: PaneId },
     /// Pane selected (focused).
     PaneSelected { pane_id: PaneId },
+    /// Handoff ready: the old daemon has prepared FDs for transfer.
+    ///
+    /// The new daemon should connect to `handoff_socket` to receive the
+    /// PTY master FDs and session metadata via SCM_RIGHTS.
+    HandoffReady {
+        /// Path to the temporary Unix socket for FD transfer.
+        handoff_socket: String,
+        /// Number of panes (FDs) that will be sent.
+        pane_count: usize,
+    },
     /// Generic error response.
     Error { message: String },
 }
@@ -209,6 +225,32 @@ impl DaemonEvent {
             DaemonEvent::PaneOutput { .. } => EventKind::PaneOutput,
         }
     }
+}
+
+// ── Handoff FD-passing metadata ──────────────────────────────────────────
+
+/// Metadata for a single pane being transferred during FD-passing handoff.
+///
+/// The actual PTY master file descriptor is sent out-of-band via SCM_RIGHTS;
+/// this struct carries the session/pane topology and terminal dimensions so
+/// the new daemon can reconstruct its `Session`/`Pane` structs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffPaneMeta {
+    pub session_id: SessionId,
+    pub session_name: Option<String>,
+    pub pane_id: PaneId,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// The full handoff payload sent from the old daemon to the new daemon.
+///
+/// `panes` is ordered to match the FD array sent via SCM_RIGHTS: `panes[i]`
+/// corresponds to the i-th file descriptor in the ancillary data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffPayload {
+    /// Ordered list of pane metadata, one per FD.
+    pub panes: Vec<HandoffPaneMeta>,
 }
 
 // ── Framing helpers ───────────────────────────────────────────────────────

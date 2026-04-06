@@ -3128,6 +3128,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "clap",
+ "libc",
  "portable-pty",
  "regex",
  "rmcp",

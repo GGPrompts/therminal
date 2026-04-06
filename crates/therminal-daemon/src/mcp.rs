@@ -87,6 +87,20 @@ struct GetPaneGeometryParam {
     pane_id: u64,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpawnPaneParam {
+    /// Session ID to create the pane in. If omitted, uses the default (first) session.
+    session_id: Option<u64>,
+    /// Shell command to run. If omitted, spawns the user's default shell.
+    command: Option<String>,
+    /// Working directory for the new pane. If omitted, inherits the current directory.
+    cwd: Option<String>,
+    /// Split direction: "horizontal" or "vertical". Defaults to "vertical" when splitting.
+    split_direction: Option<String>,
+    /// Pane ID to split from. If specified, the new pane is created as a sibling of this pane.
+    split_from: Option<u64>,
+}
+
 // ── Tool result types ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -140,6 +154,14 @@ struct PaneInfo {
 #[derive(Debug, Serialize, JsonSchema)]
 struct ListPanesResult {
     panes: Vec<PaneInfo>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct SpawnPaneResult {
+    pane_id: u64,
+    session_id: u64,
+    cols: u16,
+    rows: u16,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -297,6 +319,109 @@ impl TherminalMcpServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "failed to create session: {e}"
             ))])),
+        }
+    }
+
+    async fn handle_spawn_pane(&self, params: SpawnPaneParam) -> Result<CallToolResult, ErrorData> {
+        use therminal_terminal::pty::SpawnOptions;
+
+        // Build spawn options from params.
+        let spawn_options = SpawnOptions {
+            shell: params.command.unwrap_or_default(),
+            cwd: params.cwd.unwrap_or_default(),
+            ..Default::default()
+        };
+
+        // Determine horizontal flag from split_direction (default: vertical).
+        let horizontal = match params.split_direction.as_deref() {
+            Some("horizontal") => true,
+            Some("vertical") | None => false,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "invalid split_direction: {other}. Valid values: \"horizontal\", \"vertical\""
+                ))]));
+            }
+        };
+
+        let mut mgr = self.session_mgr.lock().await;
+
+        if let Some(split_from_id) = params.split_from {
+            // Split from an existing pane.
+            match mgr.split_pane_with_options(split_from_id, horizontal, &spawn_options) {
+                Ok(new_pane_id) => {
+                    // Find the session and pane to get dimensions.
+                    let (session_id, cols, rows) =
+                        find_pane_info(&mgr, new_pane_id).unwrap_or((0, 80, 24));
+                    let result = SpawnPaneResult {
+                        pane_id: new_pane_id,
+                        session_id,
+                        cols,
+                        rows,
+                    };
+                    Ok(CallToolResult::success(vec![json_content(&result)?]))
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "split_pane failed: {e}"
+                ))])),
+            }
+        } else {
+            // Create in an existing session or a new one.
+            let session_id = if let Some(sid) = params.session_id {
+                if mgr.get_session_info(sid).is_none() {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "session not found: {sid}"
+                    ))]));
+                }
+                sid
+            } else if let Some(sid) = mgr.default_session_id() {
+                sid
+            } else {
+                // No sessions exist -- create one.
+                match mgr.create_session_with_options(None, &spawn_options) {
+                    Ok(sid) => {
+                        // The session was just created with a default pane;
+                        // find that pane and return it.
+                        let (pane_id, cols, rows) =
+                            find_first_pane_in_session(&mgr, sid).unwrap_or((0, 80, 24));
+                        let result = SpawnPaneResult {
+                            pane_id,
+                            session_id: sid,
+                            cols,
+                            rows,
+                        };
+                        return Ok(CallToolResult::success(vec![json_content(&result)?]));
+                    }
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "failed to create session: {e}"
+                        ))]));
+                    }
+                }
+            };
+
+            // Session exists -- split from its first pane.
+            if let Some((first_pane_id, _, _)) = find_first_pane_in_session(&mgr, session_id) {
+                match mgr.split_pane_with_options(first_pane_id, horizontal, &spawn_options) {
+                    Ok(new_pane_id) => {
+                        let (_, cols, rows) =
+                            find_pane_info(&mgr, new_pane_id).unwrap_or((session_id, 80, 24));
+                        let result = SpawnPaneResult {
+                            pane_id: new_pane_id,
+                            session_id,
+                            cols,
+                            rows,
+                        };
+                        Ok(CallToolResult::success(vec![json_content(&result)?]))
+                    }
+                    Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "split_pane failed: {e}"
+                    ))])),
+                }
+            } else {
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "session {session_id} has no panes to split from"
+                ))]))
+            }
         }
     }
 
@@ -557,6 +682,33 @@ fn build_content_preview(region: &therminal_terminal::region_index::Region) -> S
     }
 }
 
+// ── Helpers for pane lookup ─────────────────────────────────────────────
+
+/// Find (session_id, cols, rows) for a pane by ID across all sessions.
+fn find_pane_info(mgr: &SessionManager, pane_id: u64) -> Option<(u64, u16, u16)> {
+    for (session_id, session) in mgr.iter_sessions() {
+        for window in &session.windows {
+            if let Some(pane) = window.pane(pane_id) {
+                return Some((*session_id, pane.cols(), pane.rows()));
+            }
+        }
+    }
+    None
+}
+
+/// Find (pane_id, cols, rows) of the first pane in a session.
+fn find_first_pane_in_session(mgr: &SessionManager, session_id: u64) -> Option<(u64, u16, u16)> {
+    for (sid, session) in mgr.iter_sessions() {
+        if *sid == session_id
+            && let Some(window) = session.windows.first()
+            && let Some(pane) = window.panes.first()
+        {
+            return Some((pane.id, pane.cols(), pane.rows()));
+        }
+    }
+    None
+}
+
 // ── Tool definitions ────────────────────────────────────────────────────
 
 fn tool_definitions() -> Vec<Tool> {
@@ -580,6 +732,11 @@ fn tool_definitions() -> Vec<Tool> {
             "terminal.sessions.destroy",
             "Destroy a terminal session and all its panes",
             schema_for_type::<SessionIdParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.create",
+            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command and working directory.",
+            schema_for_type::<SpawnPaneParam>(),
         ),
         Tool::new(
             "terminal.panes.list",
@@ -660,6 +817,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.sessions.destroy" => {
                 let params: SessionIdParam = parse_args(args)?;
                 self.handle_destroy_session(params).await
+            }
+            "terminal.panes.create" => {
+                let params: SpawnPaneParam = parse_args(args)?;
+                self.handle_spawn_pane(params).await
             }
             "terminal.panes.list" => {
                 let params: ListPanesParam = parse_args(args)?;
