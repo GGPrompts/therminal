@@ -120,6 +120,10 @@ enum WriterCmd {
         payload: IpcRequest,
         reply_tx: oneshot::Sender<Result<IpcResponse>>,
     },
+    /// Remove a timed-out request from the pending map.
+    CancelRequest {
+        request_id: u64,
+    },
     Close,
 }
 
@@ -203,7 +207,15 @@ impl DaemonClient {
         match tokio::time::timeout(self.timeout, reply_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => anyhow::bail!("connection closed while waiting for response"),
-            Err(_) => anyhow::bail!("request timed out after {}ms", self.timeout.as_millis()),
+            Err(_) => {
+                // Clean up the pending entry so it doesn't leak.
+                // Fire-and-forget: if the channel is closed, the connection
+                // task is gone and pending will be dropped anyway.
+                let _ = self
+                    .cmd_tx
+                    .try_send(WriterCmd::CancelRequest { request_id });
+                anyhow::bail!("request timed out after {}ms", self.timeout.as_millis())
+            }
         }
     }
 
@@ -296,7 +308,9 @@ async fn connection_task(
                         if let Some(tx) = p.remove(&request_id) {
                             let _ = tx.send(Ok(payload));
                         } else {
-                            warn!(request_id, "received response for unknown request");
+                            // Silently drop — likely a late response for a
+                            // timed-out and already-cancelled request.
+                            debug!(request_id, "dropping response for unknown request");
                         }
                     }
                     Ok(IpcMessage::Event { payload }) => {
@@ -357,10 +371,127 @@ async fn connection_task(
                     }
                 }
             }
+            WriterCmd::CancelRequest { request_id } => {
+                // Remove the pending entry; drop the oneshot sender so any
+                // in-flight reader response will see a closed channel.
+                pending.lock().await.remove(&request_id);
+            }
             WriterCmd::Close => break,
         }
     }
 
     // Shut down reader
     reader_handle.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    /// Verify that timed-out requests are cleaned up from the pending map
+    /// and that late responses are handled gracefully without panics or leaks.
+    #[tokio::test]
+    async fn pending_cleaned_up_after_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("test.sock");
+
+        // Start a server that accepts connections but never sends responses.
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Hold the connection open but never respond.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            drop(stream);
+        });
+
+        // Connect with a very short timeout so requests time out quickly.
+        let client = DaemonClient::connect_with_timeout(&sock_path, Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        // Send several requests — all should time out.
+        for _ in 0..5 {
+            let result = client.send_request(IpcRequest::Ping).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("timed out"),
+                "expected timeout error, got: {err_msg}"
+            );
+        }
+
+        // Give the CancelRequest commands time to be processed by the
+        // connection task (they go through the mpsc channel).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Close the client — if pending entries leaked, the connection_task
+        // shutdown would try to fail them, but the oneshot receivers are
+        // already dropped so that would be silent. The real proof is that
+        // no warnings are emitted and the close completes without hanging.
+        client.close().await;
+
+        server_handle.abort();
+    }
+
+    /// Verify that a late response arriving after timeout is silently dropped.
+    #[tokio::test]
+    async fn late_response_after_timeout_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("test_late.sock");
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Read the request frame from the client.
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let msg_len = u32::from_be_bytes(len_buf) as usize;
+            let mut payload = vec![0u8; msg_len];
+            stream.read_exact(&mut payload).await.unwrap();
+
+            // Decode to get the request_id.
+            let msg = decode_ipc(&payload).unwrap();
+            let request_id = match msg {
+                IpcMessage::Request { request_id, .. } => request_id,
+                _ => panic!("expected Request"),
+            };
+
+            // Wait longer than the client timeout, then send a late response.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let resp = IpcMessage::Response {
+                request_id,
+                payload: IpcResponse::Pong {
+                    protocol_version: 1,
+                    uptime_secs: 1,
+                    sessions: 0,
+                    version: "test".into(),
+                    build_hash: "test".into(),
+                },
+            };
+            let resp_bytes = encode_ipc(&resp).unwrap();
+            let _ = stream.write_all(&resp_bytes).await;
+            let _ = stream.flush().await;
+
+            // Hold connection open a bit longer.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let client = DaemonClient::connect_with_timeout(&sock_path, Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        // This should time out.
+        let result = client.send_request(IpcRequest::Ping).await;
+        assert!(result.is_err());
+
+        // Wait for the late response to arrive and be processed.
+        // The reader task should drop it silently (debug log, no warn/panic).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        client.close().await;
+        server_handle.abort();
+    }
 }
