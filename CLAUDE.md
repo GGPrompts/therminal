@@ -98,6 +98,10 @@ If it needs the live PTY stream or GPU surface, it belongs in the terminal. If i
 
 **Therminal is the platform, not the monolith.** It stays fast and focused on its privileged position — the live PTY stream and GPU surface — while the ecosystem grows around the MCP interface.
 
+### Harness integrations: documented, not built-in
+
+There is **no plugin system** and no harness-specific code paths for Claude Code, Codex, Aider, etc. The MCP server is the stable contract — any harness that speaks MCP can drive therminal. Per-harness setup (config snippets, trust tier recommendations, known quirks) lives in `docs/integrations/`. If a harness needs something therminal doesn't expose, the answer is to extend the MCP surface, not to special-case the harness.
+
 ## Task Tracking
 
 Issue tracking via beads (prefix: `tn`).
