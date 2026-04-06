@@ -40,9 +40,10 @@ impl ToolCategory {
 /// Returns `None` for unknown tool names (handled separately as invalid).
 pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
     match tool_name {
-        "terminal.sessions.list" | "terminal.sessions.get" | "terminal.panes.get_content" => {
-            Some(ToolCategory::Observer)
-        }
+        "terminal.sessions.list"
+        | "terminal.sessions.get"
+        | "terminal.panes.list"
+        | "terminal.panes.get_content" => Some(ToolCategory::Observer),
         "terminal.sessions.create" | "terminal.panes.write" => Some(ToolCategory::Writer),
         "terminal.sessions.destroy" => Some(ToolCategory::Admin),
         _ => None,
@@ -235,6 +236,10 @@ mod tests {
         );
         assert_eq!(
             tool_category("terminal.sessions.get"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            tool_category("terminal.panes.list"),
             Some(ToolCategory::Observer)
         );
         assert_eq!(

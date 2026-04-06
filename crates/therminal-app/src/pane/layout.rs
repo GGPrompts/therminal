@@ -287,6 +287,85 @@ impl LayoutNode {
         }
     }
 
+    /// Collect (pane_id, viewport_rect) pairs for all leaves.
+    pub fn pane_viewports(&self) -> Vec<(super::PaneId, Rect)> {
+        let mut out = Vec::new();
+        self.collect_viewports(&mut out);
+        out
+    }
+
+    fn collect_viewports(&self, out: &mut Vec<(super::PaneId, Rect)>) {
+        match self {
+            LayoutNode::Leaf(pane) => out.push((pane.id, pane.viewport)),
+            LayoutNode::Split { first, second, .. } => {
+                first.collect_viewports(out);
+                second.collect_viewports(out);
+            }
+            LayoutNode::Empty => {}
+        }
+    }
+
+    /// Find the nearest pane in a spatial direction from the focused pane.
+    ///
+    /// Uses viewport center points. A candidate must lie in the correct
+    /// direction (its center is strictly past the focused pane's edge).
+    /// Among valid candidates, the nearest by Euclidean distance wins.
+    pub fn spatial_adjacent_pane(
+        &self,
+        focused_id: super::PaneId,
+        direction: SpatialDirection,
+    ) -> Option<super::PaneId> {
+        let viewports = self.pane_viewports();
+        let focused_rect = viewports.iter().find(|(id, _)| *id == focused_id)?.1;
+        let fc = focused_rect.center();
+
+        let mut best: Option<(super::PaneId, f32)> = None;
+
+        for &(id, rect) in &viewports {
+            if id == focused_id {
+                continue;
+            }
+            let c = rect.center();
+
+            // Check that the candidate is in the correct direction.
+            // Use the focused pane's edge as the threshold, not just the center,
+            // so that adjacent panes with overlapping center ranges still qualify.
+            let in_direction = match direction {
+                SpatialDirection::Up => c.y < fc.y,
+                SpatialDirection::Down => c.y > fc.y,
+                SpatialDirection::Left => c.x < fc.x,
+                SpatialDirection::Right => c.x > fc.x,
+            };
+
+            if !in_direction {
+                continue;
+            }
+
+            // Score: prefer candidates along the primary axis, penalise
+            // perpendicular offset so diagonals don't beat direct neighbours.
+            let dist = match direction {
+                SpatialDirection::Up | SpatialDirection::Down => {
+                    let primary = (c.y - fc.y).abs();
+                    let cross = (c.x - fc.x).abs();
+                    primary + cross * 0.5
+                }
+                SpatialDirection::Left | SpatialDirection::Right => {
+                    let primary = (c.x - fc.x).abs();
+                    let cross = (c.y - fc.y).abs();
+                    primary + cross * 0.5
+                }
+            };
+
+            match best {
+                None => best = Some((id, dist)),
+                Some((_, best_dist)) if dist < best_dist => best = Some((id, dist)),
+                _ => {}
+            }
+        }
+
+        best.map(|(id, _)| id)
+    }
+
     /// Swap the positions of two panes in the tree by exchanging their `PaneState` contents.
     /// Returns `true` if both panes were found and swapped.
     pub fn swap_pane(&mut self, a: super::PaneId, b: super::PaneId) -> bool {
@@ -589,11 +668,20 @@ impl LayoutNode {
     }
 }
 
-/// Direction for focus navigation.
+/// Direction for focus navigation (cycling order).
 #[derive(Debug, Clone, Copy)]
 pub enum FocusDirection {
     Next,
     Prev,
+}
+
+/// Direction for spatial (geometric) focus navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialDirection {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 // ── Layout snapshot for restore ────────────────────────────────────────

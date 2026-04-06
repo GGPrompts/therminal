@@ -61,6 +61,12 @@ struct PaneIdParam {
     pane_id: u64,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListPanesParam {
+    /// Optional session ID to filter panes by. If omitted, returns panes from all sessions.
+    session_id: Option<u64>,
+}
+
 // ── Tool result types ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -100,6 +106,20 @@ struct PaneContentResult {
     cursor_line: usize,
     cols: usize,
     rows: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct PaneInfo {
+    pane_id: u64,
+    session_id: u64,
+    cols: u16,
+    rows: u16,
+    title: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ListPanesResult {
+    panes: Vec<PaneInfo>,
 }
 
 // ── Helper: serialize to JSON content ───────────────────────────────────
@@ -249,6 +269,31 @@ impl TherminalMcpServer {
         }
     }
 
+    async fn handle_list_panes(&self, params: ListPanesParam) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+        let mut panes = Vec::new();
+        for (session_id, session) in mgr.iter_sessions() {
+            if let Some(filter_id) = params.session_id
+                && *session_id != filter_id
+            {
+                continue;
+            }
+            for window in &session.windows {
+                for pane in &window.panes {
+                    panes.push(PaneInfo {
+                        pane_id: pane.id,
+                        session_id: *session_id,
+                        cols: pane.cols(),
+                        rows: pane.rows(),
+                        title: String::new(),
+                    });
+                }
+            }
+        }
+        let result = ListPanesResult { panes };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
     async fn handle_read_pane_content(
         &self,
         params: PaneIdParam,
@@ -301,6 +346,11 @@ fn tool_definitions() -> Vec<Tool> {
             "terminal.sessions.destroy",
             "Destroy a terminal session and all its panes",
             schema_for_type::<SessionIdParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.list",
+            "List all panes with their dimensions, session membership, and title. Optionally filter by session ID.",
+            schema_for_type::<ListPanesParam>(),
         ),
         Tool::new(
             "terminal.panes.write",
@@ -366,6 +416,10 @@ impl ServerHandler for TherminalMcpServer {
             "terminal.sessions.destroy" => {
                 let params: SessionIdParam = parse_args(args)?;
                 self.handle_destroy_session(params).await
+            }
+            "terminal.panes.list" => {
+                let params: ListPanesParam = parse_args(args)?;
+                self.handle_list_panes(params).await
             }
             "terminal.panes.write" => {
                 let params: WriteToPaneParam = parse_args(args)?;

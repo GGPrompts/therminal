@@ -183,6 +183,16 @@ impl Pane {
         })
     }
 
+    /// Get the number of columns.
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    /// Get the number of rows.
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
     /// Write bytes to the pane's PTY (forwarding keystrokes).
     pub fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.pty_writer.write_all(data)?;
@@ -408,6 +418,11 @@ impl SessionManager {
 
         self.sessions.insert(session_id, session);
         Ok(session_id)
+    }
+
+    /// Iterate over all sessions.
+    pub fn iter_sessions(&self) -> impl Iterator<Item = (&SessionId, &Session)> {
+        self.sessions.iter()
     }
 
     /// List all session IDs.
