@@ -21,6 +21,9 @@
 //! # }
 //! ```
 
+pub mod agent_events;
+pub mod claude_session_log;
+pub mod claude_state;
 pub mod client;
 pub mod control;
 pub mod ensure;

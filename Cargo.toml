@@ -90,6 +90,7 @@ pollster = "0.4"
 tempfile = "3"
 dirs = "6"
 libc = "0.2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
