@@ -86,11 +86,19 @@ pub fn runtime_dir() -> PathBuf {
     platform_runtime_dir()
 }
 
-/// Return the full path for a named Unix socket.
+/// Return the full path for a named IPC endpoint.
 ///
-/// Example: `socket_path("daemon")` -> `<runtime_dir>/daemon.sock`
+/// - **Unix**: `<runtime_dir>/<name>.sock` (Unix domain socket)
+/// - **Windows**: `\\.\pipe\therminal-<name>` (named pipe)
+///
+/// Example (Linux): `socket_path("daemon")` -> `/run/user/1000/therminal/daemon.sock`
+/// Example (Windows): `socket_path("mcp")` -> `\\.\pipe\therminal-mcp`
 pub fn socket_path(name: &str) -> PathBuf {
-    runtime_dir().join(format!("{name}.sock"))
+    if cfg!(windows) {
+        PathBuf::from(format!(r"\\.\pipe\therminal-{name}"))
+    } else {
+        runtime_dir().join(format!("{name}.sock"))
+    }
 }
 
 /// Return the full path for a named pidfile.

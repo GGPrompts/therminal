@@ -2,7 +2,6 @@ mod clipboard;
 mod color_mapping;
 mod grid_renderer;
 mod hotspot_detection;
-#[cfg(unix)]
 mod mcp_stdio;
 mod menu;
 mod pane;
@@ -66,13 +65,7 @@ fn main() -> Result<()> {
             .with_writer(std::io::stderr)
             .init();
 
-        #[cfg(unix)]
         return mcp_stdio::run();
-
-        #[cfg(not(unix))]
-        anyhow::bail!(
-            "The MCP stdio bridge requires Unix sockets and is not yet supported on Windows."
-        );
     }
 
     tracing_subscriber::fmt()
