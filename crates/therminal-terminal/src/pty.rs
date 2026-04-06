@@ -201,20 +201,24 @@ fi
 
     // .zprofile — sourced for login shells before .zshrc
     let zprofile_content = r#"# Therminal zsh integration — auto-generated, do not edit.
-# Source the real .zprofile if it exists.
-if [ -f "${ZDOTDIR:-$HOME}/.zprofile" ]; then
-    . "${ZDOTDIR:-$HOME}/.zprofile"
+# Source the real .zprofile (using saved original ZDOTDIR) if it exists.
+_therminal_real_zdotdir="${_THERMINAL_ORIG_ZDOTDIR:-$HOME}"
+if [ -f "${_therminal_real_zdotdir}/.zprofile" ]; then
+    . "${_therminal_real_zdotdir}/.zprofile"
 fi
+unset _therminal_real_zdotdir
 "#;
     std::fs::write(zdotdir.join(".zprofile"), zprofile_content)
         .map_err(|e| PtyError::Integration(format!("write .zprofile: {e}")))?;
 
     // .zlogin — sourced for login shells after .zshrc
     let zlogin_content = r#"# Therminal zsh integration — auto-generated, do not edit.
-# Source the real .zlogin if it exists.
-if [ -f "${ZDOTDIR:-$HOME}/.zlogin" ]; then
-    . "${ZDOTDIR:-$HOME}/.zlogin"
+# Source the real .zlogin (using saved original ZDOTDIR) if it exists.
+_therminal_real_zdotdir="${_THERMINAL_ORIG_ZDOTDIR:-$HOME}"
+if [ -f "${_therminal_real_zdotdir}/.zlogin" ]; then
+    . "${_therminal_real_zdotdir}/.zlogin"
 fi
+unset _therminal_real_zdotdir
 "#;
     std::fs::write(zdotdir.join(".zlogin"), zlogin_content)
         .map_err(|e| PtyError::Integration(format!("write .zlogin: {e}")))?;
@@ -522,6 +526,22 @@ mod tests {
         assert!(
             rc_content.contains("therminal.zsh"),
             ".zshrc should source integration script"
+        );
+
+        let zprofile = zdotdir.join(".zprofile");
+        assert!(zprofile.exists(), ".zprofile should exist");
+        let profile_content = std::fs::read_to_string(&zprofile).unwrap();
+        assert!(
+            profile_content.contains("_THERMINAL_ORIG_ZDOTDIR"),
+            ".zprofile should reference saved original ZDOTDIR, not current ZDOTDIR"
+        );
+
+        let zlogin = zdotdir.join(".zlogin");
+        assert!(zlogin.exists(), ".zlogin should exist");
+        let login_content = std::fs::read_to_string(&zlogin).unwrap();
+        assert!(
+            login_content.contains("_THERMINAL_ORIG_ZDOTDIR"),
+            ".zlogin should reference saved original ZDOTDIR, not current ZDOTDIR"
         );
     }
 
