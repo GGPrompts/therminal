@@ -508,8 +508,13 @@ impl App {
                     self.workspaces.as_ref(),
                     self.rename_state.as_ref(),
                 );
+                let surface_w = self
+                    .gpu
+                    .as_ref()
+                    .map(|g| g.config.width as f32)
+                    .unwrap_or(0.0);
                 if let Some(ws_id) =
-                    chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels)
+                    chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w)
                 {
                     let bindings = &self.config.keybindings.bindings;
                     let menu = crate::menu::build_tab_menu(ws_id, bindings, (px as f32, py as f32));
@@ -575,8 +580,13 @@ impl App {
                         self.workspaces.as_ref(),
                         self.rename_state.as_ref(),
                     );
+                    let surface_w = self
+                        .gpu
+                        .as_ref()
+                        .map(|g| g.config.width as f32)
+                        .unwrap_or(0.0);
                     if let Some(ws_id) =
-                        chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels)
+                        chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w)
                     {
                         self.switch_workspace(ws_id as u8);
                         if let Some(w) = self.window.as_ref() {

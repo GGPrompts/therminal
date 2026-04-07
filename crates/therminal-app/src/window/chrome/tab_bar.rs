@@ -19,8 +19,10 @@ pub(crate) struct TabBarInfo {
 }
 
 const TAB_MIN_WIDTH: f32 = 48.0;
+const TAB_MAX_WIDTH: f32 = 200.0;
 const TAB_CHAR_WIDTH: f32 = 8.0;
 const TAB_PADDING: f32 = 16.0;
+const TAB_ELLIPSIS: char = '…';
 const TAB_BAR_BG_COLOR: [f32; 4] = STATUS_BAR_BG_COLOR;
 const TAB_ACTIVE_BG_COLOR: [f32; 4] = HEADER_BG_COLOR;
 const TAB_ACTIVE_UNDERLINE_COLOR: [f32; 4] = FOCUS_BORDER_COLOR;
@@ -79,11 +81,8 @@ pub(crate) fn draw_tab_bar(
         return;
     }
 
-    let tab_widths: Vec<f32> = info
-        .tab_labels
-        .iter()
-        .map(|label| (label.len() as f32 * TAB_CHAR_WIDTH + TAB_PADDING).max(TAB_MIN_WIDTH))
-        .collect();
+    let slot_w = slot_width(sw, info.tab_labels.len());
+    let tab_widths: Vec<f32> = info.tab_labels.iter().map(|_| slot_w).collect();
 
     let tab_offsets: Vec<f32> = tab_widths
         .iter()
@@ -185,7 +184,8 @@ pub(crate) fn draw_tab_bar(
         } else {
             inactive_color
         };
-        let label = &info.tab_labels[i];
+        let label_owned = truncate_label(&info.tab_labels[i], tab_w);
+        let label = label_owned.as_str();
         let active_tag = if is_active { "a" } else { "i" };
         let slot = format!("tab_{ws_id}");
         let key = format!("{label}|{active_tag}");
@@ -293,19 +293,51 @@ pub(crate) fn tab_bar_hit_test(
     px: f32,
     workspace_ids: &[usize],
     tab_labels: &[String],
+    bar_width: f32,
 ) -> Option<usize> {
     if workspace_ids.is_empty() {
         return None;
     }
-    let mut cumulative_x = 0.0f32;
-    for (i, label) in tab_labels.iter().enumerate() {
-        let tab_w = (label.len() as f32 * TAB_CHAR_WIDTH + TAB_PADDING).max(TAB_MIN_WIDTH);
-        if px < cumulative_x + tab_w {
-            return workspace_ids.get(i).copied();
-        }
-        cumulative_x += tab_w;
+    let slot_w = slot_width(bar_width, tab_labels.len());
+    if slot_w <= 0.0 {
+        return None;
     }
-    None
+    if px < 0.0 {
+        return workspace_ids.first().copied();
+    }
+    let idx = (px / slot_w).floor() as usize;
+    workspace_ids.get(idx).copied()
+}
+
+/// Per-tab slot width: divides the bar evenly, capped at TAB_MAX_WIDTH and
+/// floored at TAB_MIN_WIDTH. Tabs always share width — no overflow allowed.
+fn slot_width(bar_width: f32, tab_count: usize) -> f32 {
+    if tab_count == 0 {
+        return 0.0;
+    }
+    let even = bar_width / tab_count as f32;
+    even.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+}
+
+/// Truncate a label so its rendered width fits within `slot_w` (accounting
+/// for TAB_PADDING). Appends an ellipsis when characters are dropped.
+fn truncate_label(label: &str, slot_w: f32) -> String {
+    let avail = (slot_w - TAB_PADDING).max(0.0);
+    let max_chars = (avail / TAB_CHAR_WIDTH).floor() as usize;
+    let char_count = label.chars().count();
+    if char_count <= max_chars {
+        return label.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars == 1 {
+        return TAB_ELLIPSIS.to_string();
+    }
+    let keep = max_chars - 1;
+    let mut out: String = label.chars().take(keep).collect();
+    out.push(TAB_ELLIPSIS);
+    out
 }
 
 #[cfg(test)]
@@ -316,81 +348,68 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    /// Compute the expected tab width for a label, mirroring `tab_bar_hit_test`.
-    fn tab_w(label: &str) -> f32 {
-        (label.len() as f32 * TAB_CHAR_WIDTH + TAB_PADDING).max(TAB_MIN_WIDTH)
+    #[test]
+    fn slot_width_divides_evenly_under_max() {
+        // 4 tabs in 600 px → 150 each, below TAB_MAX_WIDTH.
+        assert_eq!(slot_width(600.0, 4), 150.0);
+    }
+
+    #[test]
+    fn slot_width_caps_at_max() {
+        // 1 tab in 1000 px → would be 1000, capped to TAB_MAX_WIDTH.
+        assert_eq!(slot_width(1000.0, 1), TAB_MAX_WIDTH);
+    }
+
+    #[test]
+    fn slot_width_floors_at_min() {
+        // 100 tabs in 100 px → 1 each, raised to TAB_MIN_WIDTH.
+        assert_eq!(slot_width(100.0, 100), TAB_MIN_WIDTH);
+    }
+
+    #[test]
+    fn truncate_label_short_unchanged() {
+        // slot 200 → avail 184 → 23 chars max → "hello" passes through.
+        assert_eq!(truncate_label("hello", 200.0), "hello");
+    }
+
+    #[test]
+    fn truncate_label_long_gets_ellipsis() {
+        // slot 48 → avail 32 → 4 chars max → 3 chars + ellipsis.
+        let out = truncate_label("verylonglabel", 48.0);
+        assert!(out.ends_with(TAB_ELLIPSIS));
+        assert_eq!(out.chars().count(), 4);
     }
 
     #[test]
     fn tab_bar_hit_test_empty_workspaces_returns_none() {
-        assert!(tab_bar_hit_test(0.0, &[], &[]).is_none());
-        assert!(tab_bar_hit_test(100.0, &[], &labels(&["ws1"])).is_none());
+        assert!(tab_bar_hit_test(0.0, &[], &[], 800.0).is_none());
+        assert!(tab_bar_hit_test(100.0, &[], &labels(&["ws1"]), 800.0).is_none());
     }
 
     #[test]
-    fn tab_bar_hit_test_single_tab_at_origin() {
-        let ids = vec![1usize];
-        let ls = labels(&["alpha"]);
-        // Any x in [0, tab_w("alpha")) must return workspace 1.
-        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls), Some(1));
-        assert_eq!(tab_bar_hit_test(tab_w("alpha") - 0.001, &ids, &ls), Some(1));
+    fn tab_bar_hit_test_uses_clamped_slot() {
+        // 4 tabs in 800 px → slot_w = 200.
+        let ids = vec![1usize, 2, 3, 4];
+        let ls = labels(&["a", "b", "c", "d"]);
+        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls, 800.0), Some(1));
+        assert_eq!(tab_bar_hit_test(199.9, &ids, &ls, 800.0), Some(1));
+        assert_eq!(tab_bar_hit_test(200.0, &ids, &ls, 800.0), Some(2));
+        assert_eq!(tab_bar_hit_test(599.9, &ids, &ls, 800.0), Some(3));
+        assert_eq!(tab_bar_hit_test(700.0, &ids, &ls, 800.0), Some(4));
     }
 
     #[test]
-    fn tab_bar_hit_test_single_tab_beyond_width_returns_none() {
-        let ids = vec![1usize];
-        let ls = labels(&["alpha"]);
-        assert!(tab_bar_hit_test(tab_w("alpha"), &ids, &ls).is_none());
-        assert!(tab_bar_hit_test(tab_w("alpha") + 100.0, &ids, &ls).is_none());
-    }
-
-    #[test]
-    fn tab_bar_hit_test_two_tabs_correct_workspace() {
+    fn tab_bar_hit_test_beyond_last_tab_returns_none() {
         let ids = vec![1usize, 2];
-        let ls = labels(&["one", "two"]);
-        let w1 = tab_w("one");
-        let w2 = tab_w("two");
-
-        // Click in the first tab.
-        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls), Some(1));
-        assert_eq!(tab_bar_hit_test(w1 - 1.0, &ids, &ls), Some(1));
-
-        // Click exactly at the start of the second tab.
-        assert_eq!(tab_bar_hit_test(w1, &ids, &ls), Some(2));
-        assert_eq!(tab_bar_hit_test(w1 + w2 - 1.0, &ids, &ls), Some(2));
-
-        // Click beyond both tabs.
-        assert!(tab_bar_hit_test(w1 + w2, &ids, &ls).is_none());
-    }
-
-    #[test]
-    fn tab_bar_hit_test_short_labels_respect_min_width() {
-        // A single-character label must still produce a tab of at least TAB_MIN_WIDTH.
-        let ids = vec![7usize];
-        let ls = labels(&["X"]);
-        let expected_w = TAB_MIN_WIDTH; // "X" * 8 + 16 = 24 < 48, so clamped to 48.
-        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls), Some(7));
-        assert_eq!(tab_bar_hit_test(expected_w - 0.001, &ids, &ls), Some(7));
-        assert!(tab_bar_hit_test(expected_w, &ids, &ls).is_none());
-    }
-
-    #[test]
-    fn tab_bar_hit_test_three_tabs_middle_selected() {
-        let ids = vec![10usize, 20, 30];
-        let ls = labels(&["first", "second", "third"]);
-        let w0 = tab_w("first");
-        let w1 = tab_w("second");
-
-        // Middle tab.
-        let mid_px = w0 + w1 / 2.0;
-        assert_eq!(tab_bar_hit_test(mid_px, &ids, &ls), Some(20));
+        let ls = labels(&["a", "b"]);
+        // 2 tabs in 800 px → slot_w capped at TAB_MAX_WIDTH = 200.
+        assert!(tab_bar_hit_test(2.0 * TAB_MAX_WIDTH, &ids, &ls, 800.0).is_none());
     }
 
     #[test]
     fn tab_bar_hit_test_negative_x_hits_first_tab() {
-        // Negative x is less than cumulative_x (0) + tab_w, so it hits the first tab.
         let ids = vec![1usize];
         let ls = labels(&["hello"]);
-        assert_eq!(tab_bar_hit_test(-10.0, &ids, &ls), Some(1));
+        assert_eq!(tab_bar_hit_test(-10.0, &ids, &ls, 800.0), Some(1));
     }
 }
