@@ -20,7 +20,7 @@ pub(super) const SEPARATOR_COLOR: [f32; 4] = {
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
         c.b as f32 / 255.0,
-        0.9,
+        1.0,
     ]
 };
 
@@ -37,7 +37,7 @@ pub(super) const SEPARATOR_FOCUS_COLOR: [f32; 4] = {
 
 /// Pane header background color for the focused pane.
 pub(crate) const HEADER_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::VOID_1;
+    let c = PaletteColor::VOID_2;
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
@@ -53,7 +53,7 @@ pub(crate) const HEADER_BG_DIM_COLOR: [f32; 4] = {
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
         c.b as f32 / 255.0,
-        0.92,
+        1.0,
     ]
 };
 
@@ -65,7 +65,7 @@ pub(crate) const HEADER_BUTTON_MARGIN: f32 = 4.0;
 
 /// Status bar background color.
 pub(super) const STATUS_BAR_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::VOID_1;
+    let c = PaletteColor::VOID_0;
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
