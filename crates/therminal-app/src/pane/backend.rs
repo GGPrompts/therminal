@@ -136,6 +136,16 @@ impl PaneBackendKind {
         }
     }
 
+    /// Returns the PTY child process group leader pid for terminal backends.
+    pub fn root_pid(&self) -> Option<u32> {
+        match self {
+            PaneBackendKind::Terminal { pty_master, .. } => {
+                pty_master.process_group_leader().map(|p| p as u32)
+            }
+            _ => None,
+        }
+    }
+
     /// Resize the backend to match new grid dimensions, with access to renderer
     /// metrics for the terminal case.
     pub fn resize_to_viewport(

@@ -59,6 +59,23 @@ impl WorkspaceManager {
         }
     }
 
+    /// Collect the PTY root pids of every pane across every workspace.
+    /// Used by the swarm watcher's "current" scope filter to compute the set
+    /// of Claude Code sessions owned by this therminal instance.
+    pub fn collect_all_root_pids(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for ws in &self.workspaces {
+            for id in ws.layout.pane_ids() {
+                if let Some(pane) = ws.layout.find_pane(id)
+                    && let Some(pid) = pane.backend.root_pid()
+                {
+                    out.push(pid);
+                }
+            }
+        }
+        out
+    }
+
     /// The active workspace number (1-9).
     pub fn active_id(&self) -> usize {
         self.workspaces[self.active_idx].id

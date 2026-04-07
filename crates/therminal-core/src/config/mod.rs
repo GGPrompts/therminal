@@ -248,6 +248,22 @@ pub struct GeneralConfig {
     pub auto_tile: bool,
     /// Debounce interval (ms) for auto-tile spawn/exit events to avoid layout thrashing.
     pub auto_tile_debounce_ms: u64,
+    /// Scope filter for the Claude subagent swarm watcher.
+    /// `All` shows subagents from any Claude Code session on the machine.
+    /// `Current` restricts to subagents whose parent session belongs to a
+    /// Claude Code process running under one of THIS therminal instance's panes.
+    pub swarm_watch_scope: SwarmWatchScope,
+}
+
+/// Scope filter for the Claude subagent swarm watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SwarmWatchScope {
+    /// Show subagents from any Claude Code session on the machine.
+    #[default]
+    All,
+    /// Only show subagents whose parent session is owned by this therminal instance.
+    Current,
 }
 
 /// Platform-specific default for client-side decorations.
@@ -273,6 +289,7 @@ impl Default for GeneralConfig {
             use_csd: default_use_csd(),
             auto_tile: true,
             auto_tile_debounce_ms: 200,
+            swarm_watch_scope: SwarmWatchScope::All,
         }
     }
 }

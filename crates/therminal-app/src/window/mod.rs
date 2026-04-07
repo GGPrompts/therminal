@@ -193,6 +193,12 @@ pub struct App {
     /// quickly don't briefly flash a pane onto the screen.
     pub(crate) swarm_debouncer: Option<crate::pane::auto_tile::SwarmDebouncer>,
 
+    /// Shared list of live pane root PIDs, read by the swarm watcher thread
+    /// when `general.swarm_watch_scope = "current"` to restrict subagents to
+    /// those whose parent Claude Code session belongs to this instance. Only
+    /// populated when the provider was supplied to the watcher.
+    pub(crate) swarm_pane_pids: Option<crate::pane::swarm_watcher::PanePidProvider>,
+
     /// Map of subagent agent_id -> pane_id for panes spawned by the swarm
     /// watcher, so reclaim events can find the right pane to close.
     pub(crate) swarm_panes: HashMap<String, PaneId>,

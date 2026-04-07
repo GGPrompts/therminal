@@ -32,6 +32,9 @@ base64 = { workspace = true }
 regex = { workspace = true }
 open = { workspace = true }
 notify-rust = { workspace = true }
+sysinfo = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

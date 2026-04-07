@@ -1257,6 +1257,20 @@ impl App {
     /// events. Called from `handle_redraw_requested` (parallel to
     /// `poll_auto_tile`) and from the `SwarmWatcherTick` user-event handler.
     pub(crate) fn poll_swarm_watcher(&mut self) {
+        // Refresh the shared pane-pid list for the swarm watcher's
+        // owned-session computation. Cheap (visit each leaf once) and only
+        // populated when the user opted into `swarm_watch_scope = "current"`.
+        if let Some(provider) = self.swarm_pane_pids.clone() {
+            let pids = self
+                .workspaces
+                .as_ref()
+                .map(|w| w.collect_all_root_pids())
+                .unwrap_or_default();
+            if let Ok(mut g) = provider.lock() {
+                *g = pids;
+            }
+        }
+
         let events = match self.swarm_debouncer.as_mut() {
             Some(d) => d.poll(),
             None => return,

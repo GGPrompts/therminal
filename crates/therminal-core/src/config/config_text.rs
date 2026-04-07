@@ -49,6 +49,13 @@ pub(super) fn default_config_text() -> String {
         "# auto_tile_debounce_ms = {}  # debounce interval (ms) for spawn/exit events\n",
         d.general.auto_tile_debounce_ms
     ));
+    out.push_str(&format!(
+        "# swarm_watch_scope = \"{}\"  # \"all\" or \"current\" — restrict subagent panes to this instance\n",
+        match d.general.swarm_watch_scope {
+            crate::config::SwarmWatchScope::All => "all",
+            crate::config::SwarmWatchScope::Current => "current",
+        }
+    ));
     out.push_str("# [general.env]  # extra PTY environment variables\n");
     out.push_str("# MY_VAR = \"value\"\n");
     out.push('\n');

@@ -116,8 +116,20 @@ impl App {
         // channel. The bridge also sends a tiny wake `UserEvent` so the winit
         // loop polls the debouncer; the debouncer applies a 1.5s window so
         // spawn-then-reclaim cycles cancel before any pane is created.
+        let swarm_pane_pids: Option<crate::pane::swarm_watcher::PanePidProvider> = if config
+            .general
+            .auto_tile
+            && config.general.swarm_watch_scope == therminal_core::config::SwarmWatchScope::Current
+        {
+            Some(Arc::new(std::sync::Mutex::new(Vec::new())))
+        } else {
+            None
+        };
         let swarm_debouncer = if config.general.auto_tile {
-            let raw_rx = crate::pane::swarm_watcher::spawn();
+            let raw_rx = crate::pane::swarm_watcher::spawn(
+                config.general.swarm_watch_scope,
+                swarm_pane_pids.clone(),
+            );
             let (deb_tx, deb_rx) =
                 std::sync::mpsc::channel::<crate::pane::swarm_watcher::SwarmWatcherEvent>();
             let proxy = event_proxy.clone();
@@ -178,6 +190,7 @@ impl App {
             last_close_action: None,
             auto_tile_debouncer,
             swarm_debouncer,
+            swarm_pane_pids,
             swarm_panes: std::collections::HashMap::new(),
             visual_bell_start: None,
             zoomed_layout: None,
