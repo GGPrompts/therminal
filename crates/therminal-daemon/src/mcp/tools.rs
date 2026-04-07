@@ -11,16 +11,16 @@ use tracing::debug;
 
 use super::{
     AgentDetailsResult, AgentInfoResult, CommandInfo, CreateSessionParam, DestroyPaneResult,
-    GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
+    EventInfo, GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
     GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson,
     ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult, ListWorkspacesParam,
     ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo,
-    QueryCommandsParam, QueryCommandsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult,
-    SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult, SessionIdParam,
-    SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer,
-    WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
-    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
-    json_content,
+    QueryCommandsParam, QueryCommandsResult, QueryEventsParam, QueryEventsResult,
+    QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
+    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
+    SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer, WaitForOutputParam,
+    WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
+    build_content_preview, find_first_pane_in_session, find_pane_info, json_content,
 };
 
 impl TherminalMcpServer {
@@ -456,6 +456,60 @@ impl TherminalMcpServer {
         let result = QueryCommandsResult {
             pane_id: params.pane_id,
             commands,
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return recent structured events from a pane's in-memory `EventLog`.
+    ///
+    /// Snapshots the per-pane ring buffer (capped at 5000 entries) and
+    /// applies the optional `since_timestamp_secs` filter, then keeps the
+    /// newest `limit` entries (default 100). Result `events` are returned
+    /// oldest-first within the truncated window. The JSONL file is never
+    /// read — only the in-memory ring is exposed.
+    pub(super) async fn handle_query_events(
+        &self,
+        params: QueryEventsParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        let limit = params.limit.unwrap_or(100);
+        let stored =
+            match mgr.pane_event_log_snapshot(params.pane_id, params.since_timestamp_secs, limit) {
+                Some(events) => events,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "pane not found: {}",
+                        params.pane_id
+                    ))]));
+                }
+            };
+
+        let events: Vec<EventInfo> = stored
+            .into_iter()
+            .map(|s| {
+                // Serialize the SessionEvent (uses #[serde(tag = "event")]
+                // internally) so we get an object like {"event": "spawn",
+                // "command": ..., "cwd": ...}. Split off the tag for the
+                // typed `event_type` field, leaving the rest as `details`.
+                let mut value = serde_json::to_value(&s.event)
+                    .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+                let event_type = value
+                    .as_object_mut()
+                    .and_then(|m| m.remove("event"))
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                EventInfo {
+                    timestamp_secs: s.timestamp_secs,
+                    event_type,
+                    details: value,
+                }
+            })
+            .collect();
+
+        let result = QueryEventsResult {
+            pane_id: params.pane_id,
+            events,
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
@@ -944,6 +998,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.semantic.query_commands",
             "Return recent shell commands with exit codes and durations from the OSC 633 CommandTracker. Supports `since_line` and `limit` (default 20). Stub: currently returns an empty list because the CommandTracker is not yet plumbed from the reader thread into the daemon-side Pane.",
             schema_for_type::<QueryCommandsParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.query_events",
+            "Return recent structured lifecycle events for a pane from its in-memory EventLog (spawn, status_change, command_start, command_finish, resize, pty_eof, bell). Supports `since_timestamp_secs` (Unix seconds) and `limit` (default 100). The buffer is capped at 5000 entries; the JSONL file on disk is never read.",
+            schema_for_type::<QueryEventsParam>(),
         ),
         Tool::new(
             "terminal.agents.get_details",

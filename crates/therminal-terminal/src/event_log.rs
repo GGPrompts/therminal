@@ -162,6 +162,25 @@ impl EventLog {
             self.rotate();
         }
 
+        // Always push into the in-memory ring buffer, regardless of whether
+        // a file writer is attached.
+        let timestamp_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if self.buffer.len() >= self.max_entries {
+            self.buffer.pop_front();
+        }
+        self.buffer.push_back(StoredEvent {
+            timestamp_secs,
+            event: event.clone(),
+        });
+
+        let Some(writer) = self.writer.as_mut() else {
+            self.count += 1;
+            return;
+        };
+
         let entry = LogEntry {
             ts: now_iso8601(),
             event,
@@ -169,11 +188,11 @@ impl EventLog {
 
         match serde_json::to_string(&entry) {
             Ok(json) => {
-                if let Err(e) = writeln!(self.writer, "{json}") {
+                if let Err(e) = writeln!(writer, "{json}") {
                     warn!(error = %e, "Failed to write event log entry");
                     return;
                 }
-                if let Err(e) = self.writer.flush() {
+                if let Err(e) = writer.flush() {
                     warn!(error = %e, "Failed to flush event log");
                     return;
                 }
@@ -185,6 +204,32 @@ impl EventLog {
         }
     }
 
+    /// Snapshot recent events from the in-memory ring buffer.
+    ///
+    /// Filters by `since_timestamp_secs` (inclusive — events at or after
+    /// the given Unix timestamp), then keeps the **newest** `limit`
+    /// entries, returned **oldest-first** for natural transcript order.
+    ///
+    /// Returns at most `min(limit, max_entries)` events. The buffer is
+    /// already capped at `max_entries` (default 5000).
+    pub fn snapshot(&self, since_timestamp_secs: Option<u64>, limit: usize) -> Vec<StoredEvent> {
+        let cap = limit.min(self.max_entries);
+        if cap == 0 {
+            return Vec::new();
+        }
+        let filtered: Vec<&StoredEvent> = self
+            .buffer
+            .iter()
+            .filter(|e| match since_timestamp_secs {
+                Some(since) => e.timestamp_secs >= since,
+                None => true,
+            })
+            .collect();
+        let total = filtered.len();
+        let start = total.saturating_sub(cap);
+        filtered[start..].iter().map(|e| (*e).clone()).collect()
+    }
+
     /// Return the path to the event log file.
     pub fn path(&self) -> &Path {
         &self.path
@@ -193,6 +238,11 @@ impl EventLog {
     /// Truncate the file and reset the entry count (simple rotation).
     fn rotate(&mut self) {
         debug!(path = %self.path.display(), entries = self.count, "Rotating event log (truncate)");
+        if self.writer.is_none() {
+            // In-memory only — the ring buffer takes care of bounding.
+            self.count = 0;
+            return;
+        }
         // Re-open the file in truncate mode.
         match OpenOptions::new()
             .create(true)
@@ -201,7 +251,7 @@ impl EventLog {
             .open(&self.path)
         {
             Ok(file) => {
-                self.writer = BufWriter::new(file);
+                self.writer = Some(BufWriter::new(file));
                 self.count = 0;
             }
             Err(e) => {
@@ -322,6 +372,46 @@ mod tests {
         assert_eq!(lines.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_memory_snapshot_respects_limit() {
+        let mut log = EventLog::in_memory(100);
+        for _ in 0..5 {
+            log.log(&SessionEvent::Bell);
+        }
+        let snap = log.snapshot(None, 3);
+        assert_eq!(snap.len(), 3);
+        // Limit > buffer returns all.
+        let snap = log.snapshot(None, 100);
+        assert_eq!(snap.len(), 5);
+    }
+
+    #[test]
+    fn in_memory_snapshot_filters_since_timestamp() {
+        let mut log = EventLog::in_memory(100);
+        log.log(&SessionEvent::Bell);
+        let snap = log.snapshot(Some(0), 10);
+        assert_eq!(snap.len(), 1);
+        // Filter at u64::MAX yields nothing.
+        let snap = log.snapshot(Some(u64::MAX), 10);
+        assert_eq!(snap.len(), 0);
+    }
+
+    #[test]
+    fn in_memory_buffer_caps_at_max_entries() {
+        let mut log = EventLog::in_memory(3);
+        for _ in 0..7 {
+            log.log(&SessionEvent::Bell);
+        }
+        let snap = log.snapshot(None, 100);
+        assert_eq!(snap.len(), 3, "ring buffer must cap at max_entries");
+    }
+
+    #[test]
+    fn empty_log_snapshot_is_empty() {
+        let log = EventLog::in_memory(100);
+        assert!(log.snapshot(None, 100).is_empty());
     }
 
     #[test]

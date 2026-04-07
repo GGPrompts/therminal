@@ -66,7 +66,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (18 tools):
+Tools exposed (19 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -81,6 +81,7 @@ Tools exposed (18 tools):
 | `terminal.panes.get_geometry` | Observer | Get pane dimensions and split feasibility |
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
 | `terminal.panes.wait_for_output` | Observer | Wait for output matching a pattern (string/regex) |
+| `terminal.panes.query_events` | Observer | Snapshot recent structured lifecycle events from a pane's in-memory `EventLog` (spawn / status_change / command_start / command_finish / resize / pty_eof / bell). Supports `since_timestamp_secs` and `limit` (default 100). Backed by a per-pane `Arc<Mutex<EventLog>>` ring buffer (5000-entry cap); the JSONL file on disk is never read. |
 | `terminal.semantic.query_history` | Observer | Query semantic region index (Prompt, Command, Output, Error) |
 | `terminal.semantic.query_commands` | Observer | Return recent shell commands with exit codes and durations from the OSC 633 `CommandTracker`. Supports `since_line` and `limit` (default 20, capped at 20). Backed by a per-pane `Arc<Mutex<CommandTracker>>` shared between the reader thread's `TherminalInterceptor` and the daemon-side `Pane`; handlers take a cheap cloned snapshot under the lock. |
 | `terminal.semantic.get_hotspots` | Observer | Scan pane for file paths, URLs, git refs, issue refs |

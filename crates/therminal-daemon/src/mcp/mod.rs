@@ -107,6 +107,19 @@ pub(super) struct QueryCommandsParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct QueryEventsParam {
+    /// The numeric pane ID to query.
+    pub(super) pane_id: u64,
+    /// Only return events whose Unix-seconds timestamp is at or after this
+    /// value. If omitted, returns all events in the buffer up to `limit`.
+    pub(super) since_timestamp_secs: Option<u64>,
+    /// Maximum number of events to return (default 100). The underlying
+    /// in-memory ring is capped at 5000 entries; values above that cap
+    /// have no effect.
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct GetPaneGeometryParam {
     /// The numeric pane ID.
     pub(super) pane_id: u64,
@@ -537,6 +550,26 @@ pub(super) struct QueryCommandsResult {
     pub(super) commands: Vec<CommandInfo>,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct EventInfo {
+    /// Unix timestamp (seconds) when the event was logged.
+    pub(super) timestamp_secs: u64,
+    /// Event variant tag (e.g. `spawn`, `status_change`, `command_start`,
+    /// `command_finish`, `resize`, `pty_eof`, `bell`). Returned as a free-form
+    /// string so adding new variants does not break the wire format.
+    pub(super) event_type: String,
+    /// Variant-specific payload as a JSON object. Empty object for variants
+    /// like `bell` that have no payload.
+    pub(super) details: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct QueryEventsResult {
+    pub(super) pane_id: u64,
+    /// Recent events, oldest-first within the truncated window.
+    pub(super) events: Vec<EventInfo>,
+}
+
 // ── Helper: serialize to JSON content ───────────────────────────────────
 
 pub(super) fn json_content<T: Serialize>(value: &T) -> Result<Content, ErrorData> {
@@ -889,6 +922,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: QueryCommandsParam = parse_args(args)?;
                 self.handle_query_commands(params).await
             }
+            "terminal.panes.query_events" => {
+                let params: QueryEventsParam = parse_args(args)?;
+                self.handle_query_events(params).await
+            }
             "terminal.panes.wait_for_output" => {
                 let params: WaitForOutputParam = parse_args(args)?;
                 self.handle_wait_for_output(params).await
@@ -1104,6 +1141,7 @@ pub(crate) mod tests {
             "terminal.panes.wait_for_output",
             "terminal.semantic.query_history",
             "terminal.semantic.query_commands",
+            "terminal.panes.query_events",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
             "terminal.workspaces.get_layout",
@@ -1217,6 +1255,7 @@ pub(crate) mod tests {
             "terminal.panes.wait_for_output",
             "terminal.semantic.query_history",
             "terminal.semantic.query_commands",
+            "terminal.panes.query_events",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
             "terminal.workspaces.get_layout",
@@ -1230,7 +1269,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 18, "expected exactly 18 tools");
+        assert_eq!(all_tools.len(), 19, "expected exactly 19 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -1405,7 +1444,7 @@ pub(crate) mod tests {
     #[test]
     fn tool_definitions_returns_16_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 18, "expected exactly 18 tool definitions");
+        assert_eq!(tools.len(), 19, "expected exactly 19 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1427,6 +1466,7 @@ pub(crate) mod tests {
             "terminal.panes.get_content",
             "terminal.semantic.query_history",
             "terminal.semantic.query_commands",
+            "terminal.panes.query_events",
             "terminal.panes.wait_for_output",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
@@ -1923,6 +1963,170 @@ pub(crate) mod tests {
         let cmds = parsed["commands"].as_array().expect("commands array");
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0]["command_text"], "false");
+    }
+
+    // ── terminal.panes.query_events ─────────────────────────────────────
+
+    #[test]
+    fn sandboxed_agent_can_call_query_events() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.panes.query_events", &agent)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn supervised_agent_can_call_query_events() {
+        let server = make_server(supervised_config());
+        let agent = agent("supervised-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.panes.query_events", &agent)
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn query_events_nonexistent_pane_returns_tool_error() {
+        let server = make_server(trusted_config());
+        let params = super::QueryEventsParam {
+            pane_id: 999_999,
+            since_timestamp_secs: None,
+            limit: None,
+        };
+        let result = server
+            .handle_query_events(params)
+            .await
+            .expect("handler should not error at transport level");
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn query_events_fresh_pane_returns_empty() {
+        use therminal_terminal::event_log::SessionEvent;
+
+        let server = make_server(trusted_config());
+        let pane_id = {
+            let mut mgr = server.session_mgr.lock().await;
+            let session_id = mgr
+                .create_session(Some("evt-session".to_string()))
+                .expect("create session");
+            mgr.iter_sessions()
+                .find(|(id, _)| **id == session_id)
+                .and_then(|(_, s)| s.windows.first())
+                .and_then(|w| w.panes.first())
+                .map(|p| p.id)
+                .expect("session has at least one pane")
+        };
+
+        let params = super::QueryEventsParam {
+            pane_id,
+            since_timestamp_secs: None,
+            limit: None,
+        };
+        let result = server
+            .handle_query_events(params)
+            .await
+            .expect("handler ok");
+        assert_ne!(result.is_error, Some(true));
+        let json = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(parsed["events"].as_array().unwrap().len(), 0);
+
+        // Inject a few events directly via the shared Arc.
+        let log_arc = {
+            let mgr = server.session_mgr.lock().await;
+            mgr.pane_event_log_arc(pane_id).expect("event log arc")
+        };
+        {
+            let mut log = log_arc.lock().unwrap();
+            log.log(&SessionEvent::Spawn {
+                command: "bash".into(),
+                cwd: "/home/test".into(),
+            });
+            log.log(&SessionEvent::Bell);
+            log.log(&SessionEvent::Bell);
+            log.log(&SessionEvent::Resize { cols: 80, rows: 24 });
+        }
+
+        // Default limit returns all four oldest-first.
+        let params = super::QueryEventsParam {
+            pane_id,
+            since_timestamp_secs: None,
+            limit: None,
+        };
+        let result = server
+            .handle_query_events(params)
+            .await
+            .expect("handler ok");
+        let json = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let events = parsed["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["event_type"], "spawn");
+        assert_eq!(events[0]["details"]["command"], "bash");
+        assert_eq!(events[3]["event_type"], "resize");
+
+        // Limit caps to most recent.
+        let params = super::QueryEventsParam {
+            pane_id,
+            since_timestamp_secs: None,
+            limit: Some(1),
+        };
+        let result = server
+            .handle_query_events(params)
+            .await
+            .expect("handler ok");
+        let json = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let events = parsed["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "resize");
+
+        // since_timestamp_secs in the far future filters everything out.
+        let params = super::QueryEventsParam {
+            pane_id,
+            since_timestamp_secs: Some(u64::MAX),
+            limit: None,
+        };
+        let result = server
+            .handle_query_events(params)
+            .await
+            .expect("handler ok");
+        let json = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(parsed["events"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn query_events_tool_is_registered() {
+        use std::collections::HashSet;
+        let tools = tool_definitions();
+        let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains("terminal.panes.query_events"));
     }
 
     #[test]

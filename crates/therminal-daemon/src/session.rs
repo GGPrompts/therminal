@@ -20,6 +20,7 @@ use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi;
 use portable_pty::MasterPty;
 use therminal_terminal::agent_registry::{AgentEntry, AgentRegistry, AgentStatus};
+use therminal_terminal::event_log::{DEFAULT_MAX_ENTRIES, EventLog, StoredEvent};
 use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
 use therminal_terminal::osc633::{CommandBlock, CommandTracker};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
@@ -298,6 +299,11 @@ pub struct Pane {
     /// holds the same `Arc` so PTY bytes feed it; daemon-side accessors
     /// snapshot it for MCP `terminal.semantic.query_commands`.
     command_tracker: Arc<Mutex<CommandTracker>>,
+    /// Per-pane in-memory structured event log. Backs the
+    /// `terminal.panes.query_events` MCP tool. The daemon does not write
+    /// JSONL to disk for these — only the rolling in-memory ring is used,
+    /// capped at `DEFAULT_MAX_ENTRIES` (5000) events.
+    event_log: Arc<Mutex<EventLog>>,
 }
 
 impl Pane {
@@ -366,6 +372,7 @@ impl Pane {
             shell: spawn_options.shell.clone(),
             inference,
             command_tracker,
+            event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),
         })
     }
 
@@ -462,6 +469,7 @@ impl Pane {
             shell: String::new(), // Unknown for handoff panes
             inference,
             command_tracker,
+            event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),
         })
     }
 
@@ -494,6 +502,28 @@ impl Pane {
     #[cfg(test)]
     pub fn command_tracker_arc(&self) -> Arc<Mutex<CommandTracker>> {
         Arc::clone(&self.command_tracker)
+    }
+
+    /// Snapshot the per-pane in-memory event log. Returns events filtered
+    /// by `since_timestamp_secs` (inclusive) and capped at `limit`. Source
+    /// is the rolling in-memory ring (`DEFAULT_MAX_ENTRIES` cap), no JSONL
+    /// file is read. Returns oldest-first within the truncated window.
+    pub fn event_log_snapshot(
+        &self,
+        since_timestamp_secs: Option<u64>,
+        limit: usize,
+    ) -> Vec<StoredEvent> {
+        self.event_log
+            .lock()
+            .map(|log| log.snapshot(since_timestamp_secs, limit))
+            .unwrap_or_default()
+    }
+
+    /// Test-only: shared event log Arc, so unit tests can directly inject
+    /// `SessionEvent`s without driving them through the full pty pipeline.
+    #[cfg(test)]
+    pub fn event_log_arc(&self) -> Arc<Mutex<EventLog>> {
+        Arc::clone(&self.event_log)
     }
 
     /// Access the pane's semantic region index.
@@ -923,6 +953,39 @@ impl SessionManager {
             for window in &session.windows {
                 if let Some(pane) = window.pane(pane_id) {
                     return Some(pane.command_tracker_snapshot());
+                }
+            }
+        }
+        None
+    }
+
+    /// Snapshot a pane's in-memory event log by pane ID. Returns `None`
+    /// if the pane does not exist; otherwise the (possibly empty) list of
+    /// recent events filtered by the optional `since_timestamp_secs` and
+    /// capped at `limit`.
+    pub fn pane_event_log_snapshot(
+        &self,
+        pane_id: PaneId,
+        since_timestamp_secs: Option<u64>,
+        limit: usize,
+    ) -> Option<Vec<StoredEvent>> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.event_log_snapshot(since_timestamp_secs, limit));
+                }
+            }
+        }
+        None
+    }
+
+    /// Test-only: shared event log Arc for a pane.
+    #[cfg(test)]
+    pub fn pane_event_log_arc(&self, pane_id: PaneId) -> Option<Arc<Mutex<EventLog>>> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.event_log_arc());
                 }
             }
         }

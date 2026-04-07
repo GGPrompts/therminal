@@ -46,6 +46,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.get_geometry"
         | "terminal.panes.get_content"
         | "terminal.panes.wait_for_output"
+        | "terminal.panes.query_events"
         | "terminal.semantic.query_history"
         | "terminal.semantic.query_commands"
         | "terminal.semantic.get_hotspots"
