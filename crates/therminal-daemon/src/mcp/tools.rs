@@ -10,18 +10,18 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use tracing::debug;
 
 use super::{
-    AgentDetailsResult, AgentInfoResult, AgentStatusResult, CommandInfo, CreateSessionParam,
-    DestroyPaneResult, EmptyParams, EventInfo, GetHotspotsParam, GetHotspotsResult,
-    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
-    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
-    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
-    PaneContentResult, PaneIdParam, PaneInfo, QueryCommandsParam, QueryCommandsResult,
-    QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult,
-    SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult, SessionIdParam,
-    SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer,
-    WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
-    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
-    json_content,
+    AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentStatusResult, CommandInfo,
+    CreateSessionParam, DestroyPaneResult, EmptyParams, EventInfo, FindWithCapacityParam,
+    FindWithCapacityResult, GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam,
+    GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo,
+    LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult,
+    ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult,
+    PaneIdParam, PaneInfo, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
+    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
+    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
+    SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer, WaitForOutputParam,
+    WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
+    build_content_preview, find_first_pane_in_session, find_pane_info, json_content,
 };
 
 impl TherminalMcpServer {
@@ -450,6 +450,63 @@ impl TherminalMcpServer {
             context_percent,
             model,
         };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return all agents whose remaining context-window capacity meets the
+    /// threshold.
+    ///
+    /// `threshold_percent` is interpreted as the minimum *remaining* percent.
+    /// For each agent in the registry, look up the matching `PaneCapacityCache`
+    /// entry and compute `remaining_percent = 100.0 - context_percent`. If no
+    /// capacity entry exists (or `context_percent` is `None`), the agent is
+    /// included by design — unknown capacity is treated as "potentially has
+    /// capacity" so callers don't accidentally exclude fresh panes. Results
+    /// are sorted by `remaining_percent` descending; unknown sorts last.
+    pub(super) async fn handle_find_with_capacity(
+        &self,
+        params: FindWithCapacityParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+        let threshold = params.threshold_percent;
+
+        let mut agents: Vec<AgentCapacityInfo> = mgr
+            .list_agents()
+            .into_iter()
+            .filter_map(|entry| {
+                let capacity = mgr.pane_capacity(entry.pane_id);
+                let (context_percent, model) = match capacity {
+                    Some(e) => (e.context_percent, e.model),
+                    None => (None, None),
+                };
+                let remaining_percent = context_percent.map(|c| 100.0 - c);
+                let include = match remaining_percent {
+                    None => true,
+                    Some(r) => r >= threshold,
+                };
+                if !include {
+                    return None;
+                }
+                Some(AgentCapacityInfo {
+                    pane_id: entry.pane_id,
+                    agent_type: Some(entry.agent_type.as_str().to_string()),
+                    status: entry.status.as_str().to_string(),
+                    context_percent,
+                    remaining_percent,
+                    model,
+                })
+            })
+            .collect();
+
+        // Sort descending by remaining_percent; None last.
+        agents.sort_by(|a, b| match (a.remaining_percent, b.remaining_percent) {
+            (Some(ap), Some(bp)) => bp.partial_cmp(&ap).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+
+        let result = FindWithCapacityResult { agents };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -1062,6 +1119,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.agents.get_status",
             "Get a dynamic mode + capacity snapshot for the agent in a pane: agent_type, status, current_tool (from AgentRegistry) plus context_percent and model (from PaneCapacityCache). Strict subset of terminal.agents.get_details intended for sibling-agent coordination. Returns an error if neither registry nor capacity data is known for the pane.",
             schema_for_type::<PaneIdParam>(),
+        ),
+        Tool::new(
+            "terminal.agents.find_with_capacity",
+            "Return all detected agents whose REMAINING context-window capacity is at least `threshold_percent` (0.0 - 100.0). `remaining_percent = 100.0 - context_percent`. Agents whose capacity is unknown (no PaneCapacityCache entry) are INCLUDED — treated as 'potentially has capacity' so callers don't accidentally exclude fresh panes. Results are sorted by `remaining_percent` descending; agents with unknown capacity sort last.",
+            schema_for_type::<FindWithCapacityParam>(),
         ),
     ]
 }

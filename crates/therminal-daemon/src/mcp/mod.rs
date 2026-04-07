@@ -532,6 +532,44 @@ pub(super) struct AgentStatusResult {
     pub(super) model: Option<String>,
 }
 
+/// Parameters for `terminal.agents.find_with_capacity`.
+///
+/// `threshold_percent` is interpreted as the minimum REMAINING context-window
+/// percent (0.0 - 100.0). Agents whose remaining capacity is unknown are
+/// included by design (treated as "potentially has capacity").
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct FindWithCapacityParam {
+    /// Minimum remaining context-window percent (0.0 - 100.0). An agent is
+    /// included if `remaining_percent >= threshold_percent`. Agents with
+    /// unknown capacity are always included.
+    pub(super) threshold_percent: f32,
+}
+
+/// One agent's capacity snapshot, as returned by
+/// `terminal.agents.find_with_capacity`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct AgentCapacityInfo {
+    pub(super) pane_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) agent_type: Option<String>,
+    pub(super) status: String,
+    /// Currently used context-window percent (0.0 - 100.0). `None` when no
+    /// `PaneCapacityCache` entry exists for the pane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) context_percent: Option<f32>,
+    /// Remaining context-window percent (`100.0 - context_percent`). `None`
+    /// when capacity is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) remaining_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) model: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct FindWithCapacityResult {
+    pub(super) agents: Vec<AgentCapacityInfo>,
+}
+
 // Reserved for terminal.semantic.query_history (Phase 4).
 #[allow(dead_code)]
 #[derive(Debug, Serialize, JsonSchema)]
@@ -996,6 +1034,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_get_agent_status(params).await
             }
+            "terminal.agents.find_with_capacity" => {
+                let params: FindWithCapacityParam = parse_args(args)?;
+                self.handle_find_with_capacity(params).await
+            }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -1194,6 +1236,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.find_with_capacity",
         ];
         for tool in &observer_tools {
             assert!(
@@ -1488,11 +1531,11 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 20 tools must be returned.
+    /// Lock in the count: exactly 21 tools must be returned.
     #[test]
-    fn tool_definitions_returns_20_tools() {
+    fn tool_definitions_returns_21_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 20, "expected exactly 20 tool definitions");
+        assert_eq!(tools.len(), 21, "expected exactly 21 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1522,6 +1565,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.find_with_capacity",
         ];
         for name in &expected {
             assert!(names.contains(name), "missing tool definition: {name}");
@@ -1925,6 +1969,118 @@ pub(crate) mod tests {
             .await
             .expect("handler should not error at transport level");
         assert_eq!(result.is_error, Some(true));
+    }
+
+    // ── terminal.agents.find_with_capacity ──────────────────────────────
+
+    /// `terminal.agents.find_with_capacity` must be advertised in
+    /// `tool_definitions()`.
+    #[test]
+    fn find_with_capacity_tool_is_registered() {
+        let defs = super::tools::tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            names.contains(&"terminal.agents.find_with_capacity"),
+            "tool_definitions missing terminal.agents.find_with_capacity: {names:?}"
+        );
+    }
+
+    /// Observer-tier enforcement: a Sandboxed-tier caller is permitted.
+    #[test]
+    fn sandboxed_agent_can_call_find_with_capacity() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.agents.find_with_capacity", &agent)
+                .is_ok()
+        );
+    }
+
+    /// Lock the trust category: must classify as Observer so it remains
+    /// gated by `enforce_trust` even if dispatch arms are reordered.
+    #[test]
+    fn find_with_capacity_is_observer_tier() {
+        use crate::trust::{ToolCategory, tool_category};
+        assert_eq!(
+            tool_category("terminal.agents.find_with_capacity"),
+            Some(ToolCategory::Observer)
+        );
+    }
+
+    /// Threshold filtering and sort order:
+    ///   - pane 1: 20% used → 80% remaining (included at threshold 50)
+    ///   - pane 2: 80% used → 20% remaining (excluded)
+    ///   - pane 3: no capacity entry → unknown (included)
+    /// Sort: 80% remaining first, then unknown last.
+    #[tokio::test]
+    async fn find_with_capacity_filters_and_sorts() {
+        use crate::pane_capacity::PaneCapacityEntry;
+        use therminal_terminal::state_inference::AgentType;
+
+        let server = make_server(trusted_config());
+        {
+            let mut mgr = server.session_mgr.lock().await;
+            mgr.register_agent(1, "a1".to_string(), AgentType::Claude, None);
+            mgr.register_agent(2, "a2".to_string(), AgentType::Claude, None);
+            mgr.register_agent(3, "a3".to_string(), AgentType::Claude, None);
+            let cache = mgr.pane_capacity_cache();
+            cache.upsert(
+                1,
+                PaneCapacityEntry {
+                    context_percent: Some(20.0),
+                    model: Some("claude-opus".to_string()),
+                    status: None,
+                    session_id: "s1".to_string(),
+                    updated_at: 0,
+                },
+            );
+            cache.upsert(
+                2,
+                PaneCapacityEntry {
+                    context_percent: Some(80.0),
+                    model: Some("claude-opus".to_string()),
+                    status: None,
+                    session_id: "s2".to_string(),
+                    updated_at: 0,
+                },
+            );
+            // pane 3: no capacity entry on purpose.
+        }
+
+        let params = super::FindWithCapacityParam {
+            threshold_percent: 50.0,
+        };
+        let result = server
+            .handle_find_with_capacity(params)
+            .await
+            .expect("handler should not error at transport level");
+        assert_ne!(result.is_error, Some(true));
+
+        // Extract the agents JSON from the call result.
+        let payload = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("json");
+        let agents = v["agents"].as_array().expect("agents array");
+        let ids: Vec<u64> = agents
+            .iter()
+            .map(|a| a["pane_id"].as_u64().unwrap())
+            .collect();
+
+        // Pane 2 (20% remaining) is excluded; pane 1 (80% remaining) sorts
+        // first; pane 3 (unknown) sorts last.
+        assert_eq!(ids, vec![1, 3], "got: {ids:?}");
+
+        // Pane 1 carries computed remaining_percent = 80.0
+        assert!((agents[0]["remaining_percent"].as_f64().unwrap() - 80.0).abs() < 1e-6);
+        assert!((agents[0]["context_percent"].as_f64().unwrap() - 20.0).abs() < 1e-6);
+        // Pane 3 has neither (skipped via skip_serializing_if).
+        assert!(agents[1].get("remaining_percent").is_none());
+        assert!(agents[1].get("context_percent").is_none());
     }
 
     // ── terminal.semantic.query_commands ────────────────────────────────

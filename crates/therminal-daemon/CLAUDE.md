@@ -66,7 +66,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (20 tools):
+Tools exposed (21 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -88,6 +88,7 @@ Tools exposed (20 tools):
 | `terminal.workspaces.list` | Observer | List workspace tabs with names, pane counts, active status |
 | `terminal.workspaces.get_layout` | Observer | Get binary layout tree + focused_pane for a workspace. Currently returns a degraded horizontal cascade until the real `LayoutNode` tree is plumbed into the daemon (tn-vs0u). |
 | `terminal.agents.list` | Observer | List detected AI agents with type, status, pane location |
+| `terminal.agents.find_with_capacity` | Observer | Return agents whose REMAINING context-window capacity (`100 - context_percent`) is at least `threshold_percent`. Iterates `list_agents()`, joins with `pane_capacity()`, sorts descending by `remaining_percent`. Agents with unknown capacity (no `PaneCapacityCache` entry) are INCLUDED — treated as "potentially has capacity" so callers don't accidentally skip fresh panes — and sort last. |
 | `terminal.agents.get_status` | Observer | Dynamic mode + capacity snapshot for a single pane's agent: `pane_id`, `agent_type`, `status`, `current_tool`, `context_percent`, `model`. Strict subset of `get_details` intended for sibling-agent coordination. Combines `AgentRegistry` (mode) with `pane_capacity()` (capacity). Errors when neither lookup yields anything for the pane. |
 | `terminal.agents.get_details` | Observer | Get inference details for a pane's agent: `agent_type`, `model`, `context_percent`, `consecutive_failures`, `last_command`, `last_exit_code`, `last_command_duration_ms`. Backed by a per-pane `AgentStateInference` engine fed from the PTY reader thread; `agent_type` falls back from `AgentRegistry` to the engine's own detection when no registry entry exists. |
 
