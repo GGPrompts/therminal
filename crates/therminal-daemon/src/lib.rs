@@ -36,6 +36,7 @@ pub mod handoff;
 pub mod ipc_transport;
 pub mod lifecycle;
 pub mod mcp;
+pub mod pane_capacity;
 pub mod persistence;
 pub mod server;
 pub mod session;

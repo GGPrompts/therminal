@@ -777,6 +777,8 @@ pub struct SessionManager {
     persistence: Option<crate::persistence::PersistenceHandle>,
     /// Central registry of all detected agents across panes.
     agent_registry: AgentRegistry,
+    /// Per-pane agent capacity cache fed by the Claude state poller.
+    pane_capacity: Arc<crate::pane_capacity::PaneCapacityCache>,
 }
 
 impl SessionManager {
@@ -789,7 +791,24 @@ impl SessionManager {
             default_rows: 24,
             persistence: None,
             agent_registry: AgentRegistry::new(),
+            pane_capacity: crate::pane_capacity::PaneCapacityCache::shared(),
         }
+    }
+
+    /// Shared handle to the per-pane capacity cache. Cloned by `ensure.rs`
+    /// into the Claude state poller bridge task so it can write entries
+    /// without holding the session manager mutex.
+    pub fn pane_capacity_cache(&self) -> Arc<crate::pane_capacity::PaneCapacityCache> {
+        Arc::clone(&self.pane_capacity)
+    }
+
+    /// Look up the most recent agent capacity entry for a pane. Returns a
+    /// clone of the small DTO; the cache stays locked only briefly.
+    pub fn pane_capacity(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<crate::pane_capacity::PaneCapacityEntry> {
+        self.pane_capacity.get(pane_id)
     }
 
     /// Attach a persistence handle for debounced state saving.

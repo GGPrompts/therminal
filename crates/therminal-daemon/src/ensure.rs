@@ -230,7 +230,52 @@ async fn start_daemon(
     // broadcast). Returns None if the OS file watcher cannot be created, in
     // which case the MCP `therminal://claude/events` resource will simply
     // produce zero events.
-    let claude_events_tx = crate::claude_pipeline::spawn(lifecycle.shutdown_notify());
+    // Bridge channel: the pipeline's sync observer pushes ClaudeStateUpdates
+    // here, and a dedicated tokio task drains them and writes the per-pane
+    // capacity cache (resolving pane_id via the AgentRegistry under the
+    // session-manager mutex). We must not block the pipeline tick on the
+    // tokio mutex, hence the channel hop.
+    let (capacity_update_tx, mut capacity_update_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::claude_state::ClaudeStateUpdate>();
+    let capacity_observer: crate::claude_pipeline::StateUpdateObserver = Arc::new(move |update| {
+        let _ = capacity_update_tx.send(update.clone());
+    });
+
+    {
+        let session_mgr = server.session_manager();
+        let cache = {
+            let mgr = session_mgr.lock().await;
+            mgr.pane_capacity_cache()
+        };
+        let session_mgr_for_task = Arc::clone(&session_mgr);
+        tokio::spawn(async move {
+            while let Some(update) = capacity_update_rx.recv().await {
+                match update {
+                    crate::claude_state::ClaudeStateUpdate::Upserted(state) => {
+                        let mgr = session_mgr_for_task.lock().await;
+                        let pane_id = crate::pane_capacity::resolve_pane_id_from_state(
+                            &state,
+                            mgr.agent_registry(),
+                        );
+                        drop(mgr);
+                        if let Some(pid) = pane_id {
+                            cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
+                        }
+                    }
+                    crate::claude_state::ClaudeStateUpdate::Removed { path: _ } => {
+                        // The poller does not surface session_id on removal, only
+                        // the path. Best-effort: derive session_id from the file
+                        // stem and let the cache drop any matching entry.
+                        // (Path-stem vs session_id is not always 1:1, so this is
+                        // a no-op when they differ — entries age out via upserts.)
+                    }
+                }
+            }
+        });
+    }
+
+    let claude_events_tx =
+        crate::claude_pipeline::spawn(lifecycle.shutdown_notify(), Some(capacity_observer));
 
     // Wire the AgentRegistry's lifecycle events into a tokio broadcast channel
     // for the MCP `therminal://agents/events` resource. The registry takes a

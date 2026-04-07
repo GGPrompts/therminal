@@ -18,7 +18,13 @@ use tokio::sync::{Notify, broadcast};
 use tracing::{debug, warn};
 
 use crate::claude_jsonl_tailer::{ClaudeJsonlRegistry, TaggedAgentEvent};
-use crate::claude_state::ClaudeStatePoller;
+use crate::claude_state::{ClaudeStatePoller, ClaudeStateUpdate};
+
+/// Optional observer invoked for every drained `ClaudeStateUpdate` *before*
+/// it is forwarded to the JSONL registry. Used by `ensure.rs` to populate
+/// the per-pane capacity cache. Type-erased so this module stays free of
+/// `SessionManager` knowledge.
+pub type StateUpdateObserver = Arc<dyn Fn(&ClaudeStateUpdate) + Send + Sync>;
 
 /// Default fan-out broadcast capacity. Subscribers that lag past this many
 /// events will receive `Lagged` and resync.
@@ -34,7 +40,10 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// Returns `None` if the poller cannot be constructed (e.g. notify watcher
 /// init failure on a stripped-down container) — the daemon should log and
 /// continue running without the pipeline rather than aborting startup.
-pub fn spawn(shutdown: Arc<Notify>) -> Option<broadcast::Sender<TaggedAgentEvent>> {
+pub fn spawn(
+    shutdown: Arc<Notify>,
+    observer: Option<StateUpdateObserver>,
+) -> Option<broadcast::Sender<TaggedAgentEvent>> {
     let poller = match ClaudeStatePoller::new() {
         Ok(p) => p,
         Err(e) => {
@@ -47,6 +56,7 @@ pub fn spawn(shutdown: Arc<Notify>) -> Option<broadcast::Sender<TaggedAgentEvent
         ClaudeJsonlRegistry::new(),
         DEFAULT_POLL_INTERVAL,
         shutdown,
+        observer,
     ))
 }
 
@@ -58,6 +68,7 @@ pub fn spawn_with(
     mut registry: ClaudeJsonlRegistry,
     interval: Duration,
     shutdown: Arc<Notify>,
+    observer: Option<StateUpdateObserver>,
 ) -> broadcast::Sender<TaggedAgentEvent> {
     let updates_rx = poller
         .updates()
@@ -81,6 +92,9 @@ pub fn spawn_with(
                     // 2. Forward those updates into the registry, installing/dropping
                     //    JSONL tailers as Claude sessions come and go.
                     while let Ok(update) = updates_rx.try_recv() {
+                        if let Some(obs) = observer.as_ref() {
+                            obs(&update);
+                        }
                         registry.apply_update(&update, None);
                     }
 
@@ -140,6 +154,7 @@ mod tests {
             registry,
             Duration::from_millis(20),
             Arc::new(Notify::new()),
+            None,
         );
 
         let mut sub = tx.subscribe();
@@ -167,6 +182,7 @@ mod tests {
             registry,
             Duration::from_millis(20),
             Arc::new(Notify::new()),
+            None,
         );
 
         let mut sub_a = tx.subscribe();
