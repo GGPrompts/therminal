@@ -60,7 +60,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 **MCP server & trust**
 - MCP server in the daemon with stdio bridge (`therminal mcp`) for Claude Code integration
 - Cross-platform IPC: Unix sockets (Linux/macOS), named pipes (Windows)
-- 15 tools across 5 domains (sessions, panes, semantic, workspaces, agents)
+- 18 tools across 5 domains (sessions, panes, semantic, workspaces, agents)
 - MCP Resources with subscription-based pane content streaming (`terminal://pane/{id}/output`) and live Claude Code event streaming (`therminal://claude/events`)
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at the MCP handler layer
 - Sliding-window rate limiter for destructive tools; all decisions audit-logged
