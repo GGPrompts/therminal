@@ -363,6 +363,73 @@ impl WorkspaceManager {
             .collect()
     }
 
+    /// Reconstruct a `WorkspaceManager` from a list of `WorkspaceInfo`
+    /// returned by `IpcRequest::GetWorkspaces`.
+    ///
+    /// `make_leaf` is invoked once per daemon `PaneId` and is responsible
+    /// for materialising a `PaneState` (typically by allocating a fresh
+    /// local id, inserting it into the caller's `PaneIdMap`, and calling
+    /// `build_remote_pane_state`). When a pane returns `None`, that leaf
+    /// is dropped from its workspace's layout (becomes `LayoutNode::Empty`).
+    ///
+    /// The reconstructed manager:
+    /// - prefers `WorkspaceInfo.layout` (real binary tree) when present;
+    /// - falls back to a flat horizontal cascade of `pane_ids` when not;
+    /// - sets `focused_pane` from the daemon-side focus, translated via
+    ///   `make_leaf`'s emitted `PaneState.id` (whichever local id was
+    ///   assigned when that daemon pane was materialised);
+    /// - selects the active workspace from `active_workspace_id` (falls
+    ///   back to the first workspace).
+    ///
+    /// Returns `None` if `infos` is empty.
+    pub fn from_workspace_info<F>(
+        infos: &[WorkspaceInfo],
+        active_workspace_id: therminal_protocol::WorkspaceId,
+        make_leaf: &mut F,
+    ) -> Option<Self>
+    where
+        F: FnMut(therminal_protocol::PaneId) -> Option<PaneState>,
+    {
+        if infos.is_empty() {
+            return None;
+        }
+        let mut workspaces = Vec::with_capacity(infos.len());
+        for info in infos {
+            // Track daemon→local id mapping for *this* workspace so we
+            // can translate `focused_pane` after the leaves are built.
+            let mut daemon_to_local: std::collections::HashMap<therminal_protocol::PaneId, PaneId> =
+                std::collections::HashMap::new();
+            let mut leaf_builder = |dpid: therminal_protocol::PaneId| -> Option<PaneState> {
+                let pane = make_leaf(dpid)?;
+                daemon_to_local.insert(dpid, pane.id);
+                Some(pane)
+            };
+            let layout = match &info.layout {
+                Some(snap) => LayoutNode::from_protocol_snapshot(snap, &mut leaf_builder),
+                None => LayoutNode::from_flat_pane_ids(&info.pane_ids, &mut leaf_builder),
+            };
+            let focused_pane = info
+                .focused_pane
+                .and_then(|d| daemon_to_local.get(&d).copied())
+                .or_else(|| layout.pane_ids().first().copied());
+            workspaces.push(Workspace {
+                id: info.id as usize,
+                name: info.name.clone(),
+                layout,
+                focused_pane,
+            });
+        }
+        let active_idx = workspaces
+            .iter()
+            .position(|w| w.id == active_workspace_id as usize)
+            .unwrap_or(0);
+        Some(Self {
+            workspaces,
+            active_idx,
+            saved_layout: None,
+        })
+    }
+
     /// Rename the active workspace.
     #[allow(dead_code)]
     pub fn rename_active(&mut self, name: String) {
@@ -488,6 +555,42 @@ mod tests {
     use crate::pane::PaneListener;
     use crate::pane::backend::PaneBackendKind;
     use crate::pane::state::PaneTermSize;
+
+    /// Helper: build a minimal `PaneState` (Terminal backend) for tests
+    /// that need raw `PaneState` rather than a `LayoutNode::Leaf`.
+    fn test_pane_state(id: PaneId) -> PaneState {
+        let term = Term::new(
+            TermConfig::default(),
+            &PaneTermSize {
+                columns: 80,
+                screen_lines: 24,
+            },
+            PaneListener::new(),
+        );
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        PaneState {
+            id,
+            viewport: default_rect(),
+            status: Arc::new(Mutex::new(super::super::state::PaneStatus::default())),
+            region_index: Arc::new(Mutex::new(
+                therminal_terminal::region_index::RegionIndex::new(),
+            )),
+            backend: PaneBackendKind::Terminal {
+                term: Arc::new(FairMutex::new(term)),
+                pty_writer: writer,
+                pty_master: pair.master,
+                scrollback_lines: 1000,
+            },
+        }
+    }
 
     /// Helper to create a minimal test leaf node (no real PTY).
     fn test_leaf(id: PaneId, rect: Rect) -> LayoutNode {
@@ -923,5 +1026,101 @@ mod tests {
         let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
         assert!(!wm.rename(7, "ghost".to_string()));
         assert_eq!(wm.name_for(7), None);
+    }
+
+    // ── from_workspace_info (tn-ytw2 attach reconstruction) ─────────────
+
+    #[test]
+    fn from_workspace_info_reconstructs_split_layout_and_focus() {
+        use therminal_protocol::daemon::{
+            LayoutSnapshot as ProtoSnap, LayoutSplitDirection, WorkspaceInfo,
+        };
+
+        // Daemon-side topology: workspace 1 with a horizontal split between
+        // daemon panes 100 and 200, focus on 200. Workspace 2 with a single
+        // daemon pane 300 and no `layout` field (None → flat fallback).
+        let ws1 = WorkspaceInfo {
+            id: 1,
+            name: "build".to_string(),
+            order: 0,
+            pane_ids: vec![100, 200],
+            focused_pane: Some(200),
+            layout: Some(ProtoSnap::Split {
+                direction: LayoutSplitDirection::Horizontal,
+                ratio: 0.4,
+                first: Box::new(ProtoSnap::Leaf { pane_id: 100 }),
+                second: Box::new(ProtoSnap::Leaf { pane_id: 200 }),
+            }),
+        };
+        let ws2 = WorkspaceInfo {
+            id: 2,
+            name: "logs".to_string(),
+            order: 1,
+            pane_ids: vec![300],
+            focused_pane: None,
+            layout: None,
+        };
+
+        // make_leaf assigns sequential local ids and records the mapping
+        // so the test can verify focus translation.
+        let mut next_local: PaneId = 1;
+        let mut mapping: std::collections::HashMap<therminal_protocol::PaneId, PaneId> =
+            std::collections::HashMap::new();
+        let mut make_leaf = |dpid: therminal_protocol::PaneId| -> Option<PaneState> {
+            let local = next_local;
+            next_local += 1;
+            mapping.insert(dpid, local);
+            Some(test_pane_state(local))
+        };
+
+        let wm = WorkspaceManager::from_workspace_info(&[ws1, ws2], 2, &mut make_leaf)
+            .expect("reconstruction succeeded");
+        drop(make_leaf);
+
+        // Active workspace is the one matching active_workspace_id (2).
+        assert_eq!(wm.active_id(), 2);
+        assert_eq!(wm.workspace_ids(), vec![1, 2]);
+
+        // Workspace 1: split layout preserved with two leaves.
+        let ws1_info = &wm.workspaces[0];
+        assert_eq!(ws1_info.id, 1);
+        assert_eq!(ws1_info.name, "build");
+        match &ws1_info.layout {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                assert_eq!(*direction, SplitDirection::Horizontal);
+                assert!((ratio - 0.4).abs() < 1e-6);
+                assert!(matches!(first.as_ref(), LayoutNode::Leaf(_)));
+                assert!(matches!(second.as_ref(), LayoutNode::Leaf(_)));
+            }
+            other => panic!(
+                "expected Split, got {other:?}",
+                other = match other {
+                    LayoutNode::Leaf(_) => "Leaf",
+                    LayoutNode::Empty => "Empty",
+                    LayoutNode::Split { .. } => unreachable!(),
+                }
+            ),
+        }
+        // Focused pane should be the local id mapped from daemon id 200.
+        let local_for_200 = mapping[&200];
+        assert_eq!(ws1_info.focused_pane, Some(local_for_200));
+
+        // Workspace 2: single-leaf flat fallback (layout was None).
+        let ws2_info = &wm.workspaces[1];
+        assert_eq!(ws2_info.id, 2);
+        assert!(matches!(ws2_info.layout, LayoutNode::Leaf(_)));
+        let local_for_300 = mapping[&300];
+        assert_eq!(ws2_info.focused_pane, Some(local_for_300));
+    }
+
+    #[test]
+    fn from_workspace_info_empty_returns_none() {
+        let mut make_leaf = |_dpid: therminal_protocol::PaneId| -> Option<PaneState> { None };
+        assert!(WorkspaceManager::from_workspace_info(&[], 1, &mut make_leaf).is_none());
     }
 }

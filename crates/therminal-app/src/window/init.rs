@@ -364,6 +364,47 @@ impl App {
                 "no tokio runtime available; remote attach mode requires one — falling back to local"
             );
         }
+        // ── tn-ytw2: try attach to existing daemon session before create ─
+        if let (true, Some(handle)) = (use_remote, remote_handle.clone()) {
+            let dc = self.daemon_client.as_ref().expect("checked above").clone();
+            let socket = dc.socket_path().to_path_buf();
+            match self.try_attach_existing_session(
+                Arc::clone(&dc),
+                handle.clone(),
+                socket.clone(),
+                full_rect,
+                &grid_renderer,
+                scrollback,
+                interceptor_cfg.clone(),
+                proxy.clone(),
+            ) {
+                Ok(true) => {
+                    self.window = Some(window);
+                    self.gpu = Some(GpuState {
+                        surface,
+                        device,
+                        queue,
+                        config,
+                    });
+                    self.grid_renderer = Some(grid_renderer);
+                    if let Some(wm) = self.workspaces.as_mut()
+                        && let Some(renderer) = self.grid_renderer.as_ref()
+                    {
+                        wm.layout_mut()
+                            .resize_all_panes(renderer, self.config.general.show_pane_headers);
+                    }
+                    info!("attached to existing daemon session");
+                    return;
+                }
+                Ok(false) => {
+                    info!("no existing daemon sessions; falling through to fresh-session spawn");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "attach to existing session failed; falling through to fresh-session spawn");
+                }
+            }
+        }
+
         if let (true, Some(handle)) = (use_remote, remote_handle) {
             let dc = self.daemon_client.as_ref().expect("checked above").clone();
             let socket = dc.socket_path().to_path_buf();
@@ -405,9 +446,10 @@ impl App {
                 socket,
                 callbacks,
             ) {
-                Ok((pane, daemon_pane_id)) => {
+                Ok((pane, daemon_session_id, daemon_pane_id)) => {
                     let pane_id = pane.id;
                     self.pane_id_map.insert(pane_id, daemon_pane_id);
+                    self.daemon_session_id = Some(daemon_session_id);
                     info!(pane_id, "spawned initial pane in REMOTE attach mode");
                     let layout = LayoutNode::Leaf(pane);
                     let wm = WorkspaceManager::new(layout, Some(pane_id));
@@ -504,6 +546,194 @@ impl App {
             .map(|r| r.grid_size(init_width, init_height))
             .unwrap_or((80, 24));
         info!("Initial pane {pane_id}: {cols}x{rows}");
+    }
+
+    /// tn-ytw2 Phase A: try to attach to an existing daemon session and
+    /// reconstruct its workspace layout into `self.workspaces`.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — attached: `self.workspaces`, `self.daemon_session_id`,
+    ///   and `self.pane_id_map` are populated; caller should NOT spawn a
+    ///   fresh pane.
+    /// - `Ok(false)` — daemon has no sessions; caller should fall through
+    ///   to fresh-session spawn.
+    /// - `Err(_)` — RPC failed / timed out / returned malformed data;
+    ///   caller should log and fall through to fresh-session spawn.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_attach_existing_session(
+        &mut self,
+        daemon_client: Arc<therminal_daemon_client::DaemonClient>,
+        tokio_handle: tokio::runtime::Handle,
+        daemon_socket: std::path::PathBuf,
+        full_rect: Rect,
+        renderer: &GridRenderer,
+        scrollback: usize,
+        interceptor_cfg: InterceptorConfig,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Result<bool, anyhow::Error> {
+        use therminal_protocol::daemon::{IpcRequest, IpcResponse};
+        let rpc_timeout = std::time::Duration::from_secs(5);
+
+        // 1. ListSessions
+        let list_resp = tokio_handle.block_on(async {
+            tokio::time::timeout(
+                rpc_timeout,
+                daemon_client.send_request(IpcRequest::ListSessions),
+            )
+            .await
+        });
+        let list_resp = match list_resp {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => anyhow::bail!("ListSessions timed out"),
+        };
+        let session_ids = match list_resp {
+            IpcResponse::Sessions { session_ids } => session_ids,
+            IpcResponse::Error { message } => anyhow::bail!("ListSessions error: {message}"),
+            other => anyhow::bail!("unexpected response to ListSessions: {other:?}"),
+        };
+        if session_ids.is_empty() {
+            return Ok(false);
+        }
+        let session_id = session_ids[0];
+        info!(
+            session_id,
+            total = session_ids.len(),
+            "attaching to existing daemon session (first of N)"
+        );
+
+        // 2. GetWorkspaces
+        let ws_resp = tokio_handle.block_on(async {
+            tokio::time::timeout(
+                rpc_timeout,
+                daemon_client.send_request(IpcRequest::GetWorkspaces { session_id }),
+            )
+            .await
+        });
+        let ws_resp = match ws_resp {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => anyhow::bail!("GetWorkspaces timed out"),
+        };
+        let (mut workspaces_info, active_workspace) = match ws_resp {
+            IpcResponse::Workspaces {
+                workspaces,
+                active_workspace,
+                ..
+            } => (workspaces, active_workspace),
+            IpcResponse::Error { message } => anyhow::bail!("GetWorkspaces error: {message}"),
+            other => anyhow::bail!("unexpected response to GetWorkspaces: {other:?}"),
+        };
+        if workspaces_info.is_empty() {
+            // Daemon session exists but has never published workspace_state
+            // (pre-tn-k3yo persisted session). Bail to fresh-session spawn:
+            // we have no manifest of which panes belong to this session.
+            tracing::warn!(
+                session_id,
+                "existing daemon session has empty workspace state; cannot reconstruct — falling back to fresh-session spawn"
+            );
+            return Ok(false);
+        }
+        // Stable order by `order` field.
+        workspaces_info.sort_by_key(|w| w.order);
+
+        // 3. Build leaves. We need to feed `from_workspace_info` a closure
+        //    that allocates local ids, inserts into the map, and builds a
+        //    remote backend per daemon pane id. We collect (local_id, daemon_id)
+        //    pairs into a side buffer so we can populate `self.pane_id_map`
+        //    after the WorkspaceManager has been built (the closure can't
+        //    borrow self mutably while make_leaf also captures self).
+        let interceptor_for_leaf = interceptor_cfg.clone();
+        let dc_for_leaf = Arc::clone(&daemon_client);
+        let socket_for_leaf = daemon_socket.clone();
+        let handle_for_leaf = tokio_handle.clone();
+        let mut id_pairs: Vec<(crate::pane::PaneId, therminal_protocol::PaneId)> = Vec::new();
+        let (cols, rows) = crate::pane::grid_size_for_rect(full_rect, renderer);
+        let cols = cols.max(2);
+        let rows = rows.max(1);
+
+        let wm = {
+            let id_pairs = &mut id_pairs;
+            let mut make_leaf =
+                |daemon_pane_id: therminal_protocol::PaneId| -> Option<crate::pane::PaneState> {
+                    let local_id = crate::pane::next_pane_id();
+                    let p1 = proxy.clone();
+                    let p2 = proxy.clone();
+                    let p3 = proxy.clone();
+                    let p4 = proxy.clone();
+                    // Capture local_id at construction time (tn-pgz6 fix).
+                    let on_exit_local_id = local_id;
+                    let on_bell_local_id = local_id;
+                    let callbacks = crate::pane::PaneCallbacks {
+                        wake: Box::new(move || {
+                            let _ = p1.send_event(UserEvent::PtyOutput);
+                        }),
+                        on_exit: Box::new(move || {
+                            let _ = p2.send_event(UserEvent::PaneExited(on_exit_local_id));
+                        }),
+                        on_bell: Box::new(move || {
+                            let _ = p3.send_event(UserEvent::Bell(on_bell_local_id));
+                        }),
+                        on_notification: Box::new(move |text| {
+                            let _ = p4.send_event(UserEvent::DesktopNotification {
+                                title: "Therminal".to_string(),
+                                body: text,
+                                source: NotificationSource::Osc9,
+                            });
+                        }),
+                    };
+                    match crate::pane::remote_spawn::build_remote_pane_state(
+                        local_id,
+                        daemon_pane_id,
+                        full_rect,
+                        cols,
+                        rows,
+                        scrollback,
+                        interceptor_for_leaf.clone(),
+                        Arc::clone(&dc_for_leaf),
+                        handle_for_leaf.clone(),
+                        socket_for_leaf.clone(),
+                        callbacks,
+                    ) {
+                        Ok(state) => {
+                            id_pairs.push((local_id, daemon_pane_id));
+                            Some(state)
+                        }
+                        Err(e) => {
+                            tracing::warn!(daemon_pane_id, error = %e, "build_remote_pane_state failed during attach");
+                            None
+                        }
+                    }
+                };
+            match crate::pane::WorkspaceManager::from_workspace_info(
+                &workspaces_info,
+                active_workspace,
+                &mut make_leaf,
+            ) {
+                Some(wm) => wm,
+                None => {
+                    anyhow::bail!("WorkspaceManager::from_workspace_info returned None");
+                }
+            }
+        };
+        // 4. Populate the bidirectional pane id map.
+        for (local, daemon) in &id_pairs {
+            self.pane_id_map.insert(*local, *daemon);
+        }
+        info!(
+            session_id,
+            panes = id_pairs.len(),
+            workspaces = workspaces_info.len(),
+            "reconstructed workspace manager from daemon state"
+        );
+
+        // 5. Layout the tree against full_rect so each leaf gets a viewport.
+        self.workspaces = Some(wm);
+        if let Some(wm) = self.workspaces.as_mut() {
+            wm.layout_mut().layout(full_rect);
+        }
+        self.daemon_session_id = Some(session_id);
+        Ok(true)
     }
 
     /// Build PTY spawn options from the current config (shell override + env).

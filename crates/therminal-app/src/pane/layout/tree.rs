@@ -109,6 +109,78 @@ impl LayoutNode {
         }
     }
 
+    /// Reconstruct a `LayoutNode` from a protocol `LayoutSnapshot`,
+    /// invoking `make_leaf` to materialise a `PaneState` for each leaf.
+    ///
+    /// The snapshot's leaves carry **daemon** pane ids; `make_leaf` is
+    /// responsible for translating to a local id and building the actual
+    /// `PaneState` (typically via `build_remote_pane_state`). If
+    /// `make_leaf` returns `None` for a leaf, that leaf becomes
+    /// `LayoutNode::Empty` so the rest of the tree still loads.
+    pub fn from_protocol_snapshot<F>(
+        snap: &therminal_protocol::daemon::LayoutSnapshot,
+        make_leaf: &mut F,
+    ) -> LayoutNode
+    where
+        F: FnMut(therminal_protocol::PaneId) -> Option<PaneState>,
+    {
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        match snap {
+            LayoutSnapshot::Leaf { pane_id } => match make_leaf(*pane_id) {
+                Some(p) => LayoutNode::Leaf(p),
+                None => LayoutNode::Empty,
+            },
+            LayoutSnapshot::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => LayoutNode::Split {
+                direction: match direction {
+                    LayoutSplitDirection::Horizontal => SplitDirection::Horizontal,
+                    LayoutSplitDirection::Vertical => SplitDirection::Vertical,
+                },
+                ratio: *ratio,
+                first: Box::new(LayoutNode::from_protocol_snapshot(first, make_leaf)),
+                second: Box::new(LayoutNode::from_protocol_snapshot(second, make_leaf)),
+            },
+        }
+    }
+
+    /// Build a flat horizontal cascade of leaves from a list of pane ids.
+    /// Used as a fallback when no `LayoutSnapshot` is available (e.g.
+    /// pre-tn-k3yo persisted sessions).
+    pub fn from_flat_pane_ids<F>(
+        ids: &[therminal_protocol::PaneId],
+        make_leaf: &mut F,
+    ) -> LayoutNode
+    where
+        F: FnMut(therminal_protocol::PaneId) -> Option<PaneState>,
+    {
+        let mut leaves: Vec<LayoutNode> = ids
+            .iter()
+            .filter_map(|id| make_leaf(*id).map(LayoutNode::Leaf))
+            .collect();
+        if leaves.is_empty() {
+            return LayoutNode::Empty;
+        }
+        if leaves.len() == 1 {
+            return leaves.remove(0);
+        }
+        // Right-leaning cascade.
+        let mut iter = leaves.into_iter();
+        let mut acc = iter.next().unwrap();
+        for next in iter {
+            acc = LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(acc),
+                second: Box::new(next),
+            };
+        }
+        acc
+    }
+
     /// Collect all pane IDs in order (left-to-right / top-to-bottom).
     pub fn pane_ids(&self) -> Vec<crate::pane::PaneId> {
         let mut ids = Vec::new();

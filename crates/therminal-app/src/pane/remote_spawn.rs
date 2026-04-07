@@ -65,7 +65,14 @@ pub fn spawn_remote_pane(
     tokio_handle: tokio::runtime::Handle,
     daemon_socket: std::path::PathBuf,
     callbacks: PaneCallbacks,
-) -> Result<(PaneState, therminal_protocol::PaneId), anyhow::Error> {
+) -> Result<
+    (
+        PaneState,
+        therminal_protocol::SessionId,
+        therminal_protocol::PaneId,
+    ),
+    anyhow::Error,
+> {
     let (cols, rows) = grid_size_for_rect(viewport, renderer);
     let cols = cols.max(2);
     let rows = rows.max(1);
@@ -144,6 +151,47 @@ pub fn spawn_remote_pane(
         session_id, remote_pane_id, "spawned remote pane via daemon"
     );
 
+    let state = build_remote_pane_state(
+        local_id,
+        remote_pane_id,
+        viewport,
+        cols,
+        rows,
+        scrollback_lines,
+        interceptor_config,
+        daemon_client,
+        tokio_handle,
+        daemon_socket,
+        callbacks,
+    )?;
+    Ok((state, session_id, remote_pane_id))
+}
+
+/// Build a `PaneState` whose backend is a `RemotePty` subscribed to a
+/// pre-existing daemon pane.
+///
+/// This is the reusable guts of the subscription worker + `Term` wiring,
+/// independent of whether the daemon session is brand new or pre-existing.
+/// Both `spawn_remote_pane` (fresh) and `attach_to_existing_session`
+/// (loading) call into this helper.
+///
+/// Caller is responsible for having already discovered `remote_pane_id`
+/// (via `CreateSession`+`GetWorkspaces`, or via `GetWorkspaces` on an
+/// existing session at attach time).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_remote_pane_state(
+    local_id: PaneId,
+    remote_pane_id: therminal_protocol::PaneId,
+    viewport: Rect,
+    cols: usize,
+    rows: usize,
+    scrollback_lines: usize,
+    interceptor_config: InterceptorConfig,
+    daemon_client: Arc<DaemonClient>,
+    tokio_handle: tokio::runtime::Handle,
+    daemon_socket: std::path::PathBuf,
+    callbacks: PaneCallbacks,
+) -> Result<PaneState, anyhow::Error> {
     // ── 2. Build the local Term that the renderer reads from ──────────
     let term_config = TermConfig {
         scrolling_history: scrollback_lines,
@@ -162,10 +210,6 @@ pub fn spawn_remote_pane(
     let region_index = Arc::new(Mutex::new(RegionIndex::new()));
 
     // ── 3. Spawn the worker thread that runs advance_with_interceptor ─
-    //
-    // The worker reads byte chunks from a std::sync::mpsc channel that
-    // is fed by the tokio forwarder task below. This mirrors the local
-    // PTY reader_loop() — only the byte source differs.
     let (byte_tx, byte_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -198,11 +242,6 @@ pub fn spawn_remote_pane(
         .map_err(|e| anyhow::anyhow!("failed to spawn remote pty worker: {e}"))?;
 
     // ── 4. Spawn the tokio forwarder: subscribe to PaneOutput events ──
-    //
-    // We open a *dedicated* DaemonClient connection for this pane so
-    // multiple RemotePty panes don't fight over a single shared event
-    // receiver on the primary client. Input/resize still go via the
-    // shared `daemon_client` to keep the request multiplexer hot.
     let shutdown_for_forwarder = Arc::clone(&shutdown);
     let forwarder_socket = daemon_socket.clone();
     tokio_handle.spawn(async move {
@@ -229,7 +268,7 @@ pub fn spawn_remote_pane(
                     if pane_id == remote_pane_id =>
                 {
                     if byte_tx.send(data).is_err() {
-                        break; // worker gone
+                        break;
                     }
                 }
                 Some(DaemonEvent::PaneExited { pane_id, .. }) if pane_id == remote_pane_id => {
@@ -237,7 +276,7 @@ pub fn spawn_remote_pane(
                     break;
                 }
                 None => break,
-                _ => {} // unrelated event for another pane
+                _ => {}
             }
         }
     });
@@ -259,7 +298,7 @@ pub fn spawn_remote_pane(
         }
     });
 
-    let state = PaneState {
+    Ok(PaneState {
         id: local_id,
         viewport,
         status,
@@ -272,8 +311,7 @@ pub fn spawn_remote_pane(
             tokio_handle,
             shutdown,
         },
-    };
-    Ok((state, remote_pane_id))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
