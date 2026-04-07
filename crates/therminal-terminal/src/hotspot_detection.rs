@@ -112,12 +112,29 @@ pub static URL_RE: LazyLock<Regex> =
 /// coordinates. This function is designed to work with plain text (e.g.
 /// from a `PaneSnapshot` grid) without requiring GPU render types.
 pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
+    detect_hotspots_from_text_with_wrap(rows, &[])
+}
+
+/// Like [`detect_hotspots_from_text`], but accepts per-row wrap state.
+///
+/// `is_continuation[row]` should be `true` when the previous physical row
+/// hard-wrapped into this row (alacritty's `WRAPLINE` flag on the last cell
+/// of `row - 1`). Matches that begin at column 0 of a continuation row are
+/// suppressed, since they are almost certainly the tail of a wrapped path
+/// or URL whose head lives on the previous row. This is a v1 mitigation for
+/// the false-underline bug; the real fix is to join wrapped logical lines
+/// before regex scanning (tracked as a follow-up issue).
+pub fn detect_hotspots_from_text_with_wrap(
+    rows: &[String],
+    is_continuation: &[bool],
+) -> Vec<TextHotspot> {
     let mut hotspots = Vec::new();
 
     for (row, text) in rows.iter().enumerate() {
         if text.trim().is_empty() {
             continue;
         }
+        let suppress_col0 = is_continuation.get(row).copied().unwrap_or(false);
 
         // byte offset -> column index
         let char_starts: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
@@ -137,6 +154,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         // URLs first (highest priority, least ambiguous).
         for m in URL_RE.find_iter(text) {
             let (sc, ec) = byte_to_cols(m.start(), m.end());
+            if suppress_col0 && sc == 0 {
+                continue;
+            }
             hotspots.push(TextHotspot {
                 kind: HotspotKind::Url,
                 text: m.as_str().to_string(),
@@ -150,6 +170,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         for cap in RUST_ERROR_RE.captures_iter(text) {
             if let Some(m) = cap.get(1) {
                 let (sc, ec) = byte_to_cols(m.start(), m.end());
+                if suppress_col0 && sc == 0 {
+                    continue;
+                }
                 hotspots.push(TextHotspot {
                     kind: HotspotKind::ErrorLocation,
                     text: m.as_str().to_string(),
@@ -164,6 +187,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         for cap in TS_ERROR_RE.captures_iter(text) {
             if let Some(m) = cap.get(0) {
                 let (sc, ec) = byte_to_cols(m.start(), m.end());
+                if suppress_col0 && sc == 0 {
+                    continue;
+                }
                 hotspots.push(TextHotspot {
                     kind: HotspotKind::ErrorLocation,
                     text: m.as_str().to_string(),
@@ -177,6 +203,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         // File paths (skip ranges already covered by error locations).
         for m in FILE_PATH_RE.find_iter(text) {
             let (sc, ec) = byte_to_cols(m.start(), m.end());
+            if suppress_col0 && sc == 0 {
+                continue;
+            }
             let dominated = hotspots.iter().any(|h| {
                 h.row == row
                     && (h.kind == HotspotKind::ErrorLocation || h.kind == HotspotKind::Url)
@@ -214,6 +243,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         // Git hashes.
         for m in GIT_HASH_RE.find_iter(text) {
             let (sc, ec) = byte_to_cols(m.start(), m.end());
+            if suppress_col0 && sc == 0 {
+                continue;
+            }
             let dominated = hotspots
                 .iter()
                 .any(|h| h.row == row && h.start_col <= sc && h.end_col >= ec);
@@ -232,6 +264,9 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
         // Issue references (`#123`, `PREFIX-456`).
         for m in ISSUE_REF_RE.find_iter(text) {
             let (sc, ec) = byte_to_cols(m.start(), m.end());
+            if suppress_col0 && sc == 0 {
+                continue;
+            }
             hotspots.push(TextHotspot {
                 kind: HotspotKind::IssueRef,
                 text: m.as_str().to_string(),
@@ -478,6 +513,37 @@ mod tests {
             .collect();
         assert_eq!(fp.len(), 1);
         assert_eq!(fp[0].text, "crates/therminal-app/src/window/mod.rs:120:5");
+    }
+
+    #[test]
+    fn suppresses_col0_match_on_wrap_continuation() {
+        // A long path that wraps: row 0 ends mid-path, row 1 starts with the
+        // tail. The tail at col 0 of a continuation row must NOT match.
+        let rows = vec![
+            "see crates/therminal-app/src/window/eve".to_string(),
+            "nt_handler.rs:42 boom".to_string(),
+        ];
+        let cont = vec![false, true];
+        let hotspots = detect_hotspots_from_text_with_wrap(&rows, &cont);
+        let row1: Vec<_> = hotspots.iter().filter(|h| h.row == 1).collect();
+        assert!(
+            row1.is_empty(),
+            "row 1 should have no standalone match (wrap continuation), got {row1:?}"
+        );
+    }
+
+    #[test]
+    fn one_line_path_still_matches_with_wrap_array() {
+        // Negative regression: passing wrap state must not break normal detection.
+        let rows = vec!["edit ./src/main.rs:10 now".to_string()];
+        let cont = vec![false];
+        let hotspots = detect_hotspots_from_text_with_wrap(&rows, &cont);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "./src/main.rs:10");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_displ
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
-use therminal_terminal::hotspot_detection::{TextHotspot, detect_hotspots_from_text};
+use therminal_terminal::hotspot_detection::{TextHotspot, detect_hotspots_from_text_with_wrap};
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 
@@ -44,6 +44,28 @@ fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
             }
         }
     }
+}
+
+/// Compute per-row "is continuation" flags from cell wrap state.
+///
+/// Row `r` is a continuation when row `r - 1` had its last cell flagged
+/// `WRAPLINE` (alacritty's hard-wrap marker). Used to suppress hotspot
+/// matches anchored at column 0 of a wrapped line — see
+/// `detect_hotspots_from_text_with_wrap`.
+fn compute_wrap_continuation(cells: &[RenderCell], screen_lines: usize) -> Vec<bool> {
+    // Track the max column with a WRAPLINE flag per row, then convert to
+    // "row r+1 is continuation" by shifting.
+    let mut row_wraps = vec![false; screen_lines];
+    for cell in cells {
+        if cell.row < screen_lines && cell.flags.contains(Flags::WRAPLINE) {
+            row_wraps[cell.row] = true;
+        }
+    }
+    let mut is_cont = vec![false; screen_lines];
+    if screen_lines > 1 {
+        is_cont[1..screen_lines].copy_from_slice(&row_wraps[..(screen_lines - 1)]);
+    }
+    is_cont
 }
 
 /// Extract row text strings from a cell grid for text-based hotspot detection.
@@ -326,7 +348,10 @@ fn render_single_pane(
 
         detect_urls_in_cells(&mut damaged_cells, screen_lines);
         let row_texts = extract_row_text_from_cells(&damaged_cells, screen_lines);
-        let hotspots = detect_hotspots_from_text(&row_texts);
+        // Use the full cell set for wrap state — damaged cells alone may
+        // not include the previous row's last cell (where WRAPLINE lives).
+        let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
+        let hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
 
         // O(1) copy-back: build a HashMap from detected URLs keyed by (row, col),
         // then single-pass over `cells` to apply. Avoids O(N*M) linear search.
@@ -359,7 +384,8 @@ fn render_single_pane(
         // Full damage — detect on all cells.
         detect_urls_in_cells(&mut cells, screen_lines);
         let row_texts = extract_row_text_from_cells(&cells, screen_lines);
-        let hotspots = detect_hotspots_from_text(&row_texts);
+        let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
+        let hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
 
         // Row-indexed hotspot application: O(C + H) instead of O(H*C).
         apply_hotspots_to_cells(&mut cells, &hotspots);
