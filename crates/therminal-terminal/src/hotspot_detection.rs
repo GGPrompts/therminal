@@ -119,161 +119,215 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
 ///
 /// `is_continuation[row]` should be `true` when the previous physical row
 /// hard-wrapped into this row (alacritty's `WRAPLINE` flag on the last cell
-/// of `row - 1`). Matches that begin at column 0 of a continuation row are
-/// suppressed, since they are almost certainly the tail of a wrapped path
-/// or URL whose head lives on the previous row. This is a v1 mitigation for
-/// the false-underline bug; the real fix is to join wrapped logical lines
-/// before regex scanning (tracked as a follow-up issue).
+/// of `row - 1`). Physical rows that share a logical (hard-wrapped) line are
+/// joined into a single string before regex scanning, then matches are mapped
+/// back to per-row column spans. A single match crossing N physical rows
+/// produces N `TextHotspot`s — one per row — all sharing the same `text`
+/// (the full joined match), so click-to-open on any row resolves to the
+/// same target.
 pub fn detect_hotspots_from_text_with_wrap(
     rows: &[String],
     is_continuation: &[bool],
 ) -> Vec<TextHotspot> {
     let mut hotspots = Vec::new();
 
-    for (row, text) in rows.iter().enumerate() {
-        if text.trim().is_empty() {
+    // Walk rows, grouping consecutive rows linked by `is_continuation` into
+    // logical lines. For each logical line we build a joined String plus an
+    // origin map giving (row, col_in_row) per char.
+    let mut i = 0;
+    while i < rows.len() {
+        let start = i;
+        let mut end = i + 1;
+        while end < rows.len() && is_continuation.get(end).copied().unwrap_or(false) {
+            end += 1;
+        }
+        i = end;
+
+        if rows[start..end].iter().all(|r| r.trim().is_empty()) {
             continue;
         }
-        let suppress_col0 = is_continuation.get(row).copied().unwrap_or(false);
 
-        // byte offset -> column index
-        let char_starts: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
-
-        let byte_to_cols = |byte_start: usize, byte_end: usize| -> (usize, usize) {
-            let start_col = char_starts
-                .iter()
-                .position(|&b| b == byte_start)
-                .unwrap_or(0);
-            let end_col = char_starts
-                .iter()
-                .position(|&b| b >= byte_end)
-                .unwrap_or(char_starts.len());
-            (start_col, end_col)
-        };
-
-        // URLs first (highest priority, least ambiguous).
-        for m in URL_RE.find_iter(text) {
-            let (sc, ec) = byte_to_cols(m.start(), m.end());
-            if suppress_col0 && sc == 0 {
-                continue;
+        // Build joined text + per-char origin and per-char byte start.
+        let mut joined = String::new();
+        let mut origins_by_char: Vec<(usize, usize)> = Vec::new();
+        let mut char_byte_starts: Vec<usize> = Vec::new();
+        for (offset, row_text) in rows[start..end].iter().enumerate() {
+            let row_index = start + offset;
+            for (col, ch) in row_text.chars().enumerate() {
+                char_byte_starts.push(joined.len());
+                joined.push(ch);
+                origins_by_char.push((row_index, col));
             }
-            hotspots.push(TextHotspot {
-                kind: HotspotKind::Url,
-                text: m.as_str().to_string(),
-                row,
-                start_col: sc,
-                end_col: ec,
-            });
+        }
+        if joined.trim().is_empty() {
+            continue;
         }
 
-        // Rust error locations (`--> file.rs:42:5`).
-        for cap in RUST_ERROR_RE.captures_iter(text) {
-            if let Some(m) = cap.get(1) {
-                let (sc, ec) = byte_to_cols(m.start(), m.end());
-                if suppress_col0 && sc == 0 {
-                    continue;
+        // Translate a (byte_start, byte_end) match in `joined` into per-row
+        // spans (row, start_col, end_col). A single regex match that crosses
+        // a row boundary produces multiple consecutive spans.
+        let byte_range_to_spans =
+            |byte_start: usize, byte_end: usize| -> Vec<(usize, usize, usize)> {
+                let start_char = char_byte_starts
+                    .iter()
+                    .position(|&b| b == byte_start)
+                    .unwrap_or(0);
+                let end_char = char_byte_starts
+                    .iter()
+                    .position(|&b| b >= byte_end)
+                    .unwrap_or(char_byte_starts.len());
+                if end_char <= start_char {
+                    return Vec::new();
                 }
+                let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+                let mut k = start_char;
+                while k < end_char {
+                    let (row, col) = origins_by_char[k];
+                    let mut last_col = col;
+                    let mut k2 = k + 1;
+                    while k2 < end_char {
+                        let (r2, c2) = origins_by_char[k2];
+                        if r2 != row || c2 != last_col + 1 {
+                            break;
+                        }
+                        last_col = c2;
+                        k2 += 1;
+                    }
+                    spans.push((row, col, last_col + 1));
+                    k = k2;
+                }
+                spans
+            };
+
+        let push_match = |hotspots: &mut Vec<TextHotspot>,
+                          kind: HotspotKind,
+                          full_text: &str,
+                          spans: Vec<(usize, usize, usize)>| {
+            for (row, sc, ec) in spans {
                 hotspots.push(TextHotspot {
-                    kind: HotspotKind::ErrorLocation,
-                    text: m.as_str().to_string(),
+                    kind: kind.clone(),
+                    text: full_text.to_string(),
                     row,
                     start_col: sc,
                     end_col: ec,
                 });
+            }
+        };
+
+        // Track claimed (row, col) ranges for dominance suppression.
+        let mut claimed: Vec<(HotspotKind, usize, usize, usize)> = Vec::new();
+        let is_dominated = |claimed: &[(HotspotKind, usize, usize, usize)],
+                            spans: &[(usize, usize, usize)],
+                            only_higher: bool|
+         -> bool {
+            spans.iter().any(|(row, sc, ec)| {
+                claimed.iter().any(|(k, r, s, e)| {
+                    r == row
+                        && *s <= *sc
+                        && *e >= *ec
+                        && (!only_higher
+                            || matches!(k, HotspotKind::Url | HotspotKind::ErrorLocation))
+                })
+            })
+        };
+
+        // URLs first.
+        for m in URL_RE.find_iter(&joined) {
+            let spans = byte_range_to_spans(m.start(), m.end());
+            if spans.is_empty() {
+                continue;
+            }
+            for s in &spans {
+                claimed.push((HotspotKind::Url, s.0, s.1, s.2));
+            }
+            push_match(&mut hotspots, HotspotKind::Url, m.as_str(), spans);
+        }
+
+        // Rust error locations (`--> file.rs:42:5`).
+        for cap in RUST_ERROR_RE.captures_iter(&joined) {
+            if let Some(m) = cap.get(1) {
+                let spans = byte_range_to_spans(m.start(), m.end());
+                if spans.is_empty() {
+                    continue;
+                }
+                for s in &spans {
+                    claimed.push((HotspotKind::ErrorLocation, s.0, s.1, s.2));
+                }
+                push_match(&mut hotspots, HotspotKind::ErrorLocation, m.as_str(), spans);
             }
         }
 
         // TypeScript/C# error locations (`file.ts(42,15)`).
-        for cap in TS_ERROR_RE.captures_iter(text) {
+        for cap in TS_ERROR_RE.captures_iter(&joined) {
             if let Some(m) = cap.get(0) {
-                let (sc, ec) = byte_to_cols(m.start(), m.end());
-                if suppress_col0 && sc == 0 {
+                let spans = byte_range_to_spans(m.start(), m.end());
+                if spans.is_empty() {
                     continue;
                 }
-                hotspots.push(TextHotspot {
-                    kind: HotspotKind::ErrorLocation,
-                    text: m.as_str().to_string(),
-                    row,
-                    start_col: sc,
-                    end_col: ec,
-                });
+                for s in &spans {
+                    claimed.push((HotspotKind::ErrorLocation, s.0, s.1, s.2));
+                }
+                push_match(&mut hotspots, HotspotKind::ErrorLocation, m.as_str(), spans);
             }
         }
 
-        // File paths (skip ranges already covered by error locations).
-        for m in FILE_PATH_RE.find_iter(text) {
-            let (sc, ec) = byte_to_cols(m.start(), m.end());
-            if suppress_col0 && sc == 0 {
+        // File paths.
+        for m in FILE_PATH_RE.find_iter(&joined) {
+            let spans = byte_range_to_spans(m.start(), m.end());
+            if spans.is_empty() || is_dominated(&claimed, &spans, true) {
                 continue;
             }
-            let dominated = hotspots.iter().any(|h| {
-                h.row == row
-                    && (h.kind == HotspotKind::ErrorLocation || h.kind == HotspotKind::Url)
-                    && h.start_col <= sc
-                    && h.end_col >= ec
-            });
-            if dominated {
-                continue;
+            for s in &spans {
+                claimed.push((HotspotKind::FilePath, s.0, s.1, s.2));
             }
-            let txt = m.as_str();
-            hotspots.push(TextHotspot {
-                kind: HotspotKind::FilePath,
-                text: txt.to_string(),
-                row,
-                start_col: sc,
-                end_col: ec,
-            });
+            push_match(&mut hotspots, HotspotKind::FilePath, m.as_str(), spans);
         }
 
-        // Git branch names.
-        for cap in GIT_BRANCH_RE.captures_iter(text) {
-            let m = cap.get(1).or_else(|| cap.get(2));
-            if let Some(m) = m {
-                let (sc, ec) = byte_to_cols(m.start(), m.end());
-                hotspots.push(TextHotspot {
-                    kind: HotspotKind::GitRef,
-                    text: m.as_str().to_string(),
-                    row,
-                    start_col: sc,
-                    end_col: ec,
-                });
+        // Git branch names — applied per physical row (anchored regex).
+        for (offset, row_text) in rows[start..end].iter().enumerate() {
+            let row_index = start + offset;
+            for cap in GIT_BRANCH_RE.captures_iter(row_text) {
+                let m = cap.get(1).or_else(|| cap.get(2));
+                if let Some(m) = m {
+                    let char_starts: Vec<usize> = row_text.char_indices().map(|(b, _)| b).collect();
+                    let sc = char_starts
+                        .iter()
+                        .position(|&b| b == m.start())
+                        .unwrap_or(0);
+                    let ec = char_starts
+                        .iter()
+                        .position(|&b| b >= m.end())
+                        .unwrap_or(char_starts.len());
+                    hotspots.push(TextHotspot {
+                        kind: HotspotKind::GitRef,
+                        text: m.as_str().to_string(),
+                        row: row_index,
+                        start_col: sc,
+                        end_col: ec,
+                    });
+                }
             }
         }
 
         // Git hashes.
-        for m in GIT_HASH_RE.find_iter(text) {
-            let (sc, ec) = byte_to_cols(m.start(), m.end());
-            if suppress_col0 && sc == 0 {
+        for m in GIT_HASH_RE.find_iter(&joined) {
+            let spans = byte_range_to_spans(m.start(), m.end());
+            if spans.is_empty() || is_dominated(&claimed, &spans, false) {
                 continue;
             }
-            let dominated = hotspots
-                .iter()
-                .any(|h| h.row == row && h.start_col <= sc && h.end_col >= ec);
-            if dominated {
-                continue;
+            for s in &spans {
+                claimed.push((HotspotKind::GitRef, s.0, s.1, s.2));
             }
-            hotspots.push(TextHotspot {
-                kind: HotspotKind::GitRef,
-                text: m.as_str().to_string(),
-                row,
-                start_col: sc,
-                end_col: ec,
-            });
+            push_match(&mut hotspots, HotspotKind::GitRef, m.as_str(), spans);
         }
 
         // Issue references (`#123`, `PREFIX-456`).
-        for m in ISSUE_REF_RE.find_iter(text) {
-            let (sc, ec) = byte_to_cols(m.start(), m.end());
-            if suppress_col0 && sc == 0 {
+        for m in ISSUE_REF_RE.find_iter(&joined) {
+            let spans = byte_range_to_spans(m.start(), m.end());
+            if spans.is_empty() {
                 continue;
             }
-            hotspots.push(TextHotspot {
-                kind: HotspotKind::IssueRef,
-                text: m.as_str().to_string(),
-                row,
-                start_col: sc,
-                end_col: ec,
-            });
+            push_match(&mut hotspots, HotspotKind::IssueRef, m.as_str(), spans);
         }
     }
 
@@ -516,20 +570,68 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_col0_match_on_wrap_continuation() {
-        // A long path that wraps: row 0 ends mid-path, row 1 starts with the
-        // tail. The tail at col 0 of a continuation row must NOT match.
+    fn wrapped_file_path_joins_across_rows() {
+        // The exact tn-4mi0 / tn-a2qd fixture: a long path that hard-wraps
+        // between two physical rows. After joining, the FULL path matches
+        // and the underline spans both rows.
         let rows = vec![
             "see crates/therminal-app/src/window/eve".to_string(),
             "nt_handler.rs:42 boom".to_string(),
         ];
         let cont = vec![false, true];
         let hotspots = detect_hotspots_from_text_with_wrap(&rows, &cont);
-        let row1: Vec<_> = hotspots.iter().filter(|h| h.row == 1).collect();
-        assert!(
-            row1.is_empty(),
-            "row 1 should have no standalone match (wrap continuation), got {row1:?}"
-        );
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 2, "expected 2 spans, got {fp:?}");
+        let full = "crates/therminal-app/src/window/event_handler.rs:42";
+        assert_eq!(fp[0].text, full);
+        assert_eq!(fp[1].text, full);
+        assert_eq!(fp[0].row, 0);
+        assert_eq!(fp[0].start_col, 4);
+        assert_eq!(fp[0].end_col, rows[0].chars().count());
+        assert_eq!(fp[1].row, 1);
+        assert_eq!(fp[1].start_col, 0);
+        assert_eq!(fp[1].end_col, "nt_handler.rs:42".chars().count());
+    }
+
+    #[test]
+    fn wrapped_url_joins_across_rows() {
+        let rows = vec![
+            "visit https://example.com/very/long/".to_string(),
+            "path/to/file?query=foo done".to_string(),
+        ];
+        let cont = vec![false, true];
+        let hotspots = detect_hotspots_from_text_with_wrap(&rows, &cont);
+        let urls: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::Url)
+            .collect();
+        assert_eq!(urls.len(), 2, "expected 2 url spans, got {urls:?}");
+        let full = "https://example.com/very/long/path/to/file?query=foo";
+        assert_eq!(urls[0].text, full);
+        assert_eq!(urls[1].text, full);
+        assert_eq!(urls[0].row, 0);
+        assert_eq!(urls[1].row, 1);
+        assert_eq!(urls[1].start_col, 0);
+    }
+
+    #[test]
+    fn non_continuation_rows_do_not_join() {
+        let rows = vec![
+            "edit ./src/main.rs:10 now".to_string(),
+            "another line entirely".to_string(),
+        ];
+        let cont = vec![false, false];
+        let hotspots = detect_hotspots_from_text_with_wrap(&rows, &cont);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "./src/main.rs:10");
+        assert_eq!(fp[0].row, 0);
     }
 
     #[test]
