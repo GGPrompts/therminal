@@ -224,6 +224,12 @@ pub(crate) fn build_pane_menu(
                     action: KeyAction::Paste,
                     enabled: true,
                 },
+                MenuItem {
+                    label: "Copy pane ID",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(pane_id.to_string()),
+                    enabled: true,
+                },
             ]),
         ],
         position,
@@ -852,4 +858,23 @@ pub(crate) fn render_context_menu(
     }
 
     queue.submit(std::iter::once(encoder.finish()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_menu_has_copy_pane_id_with_numeric_payload() {
+        let menu = build_pane_menu(7, &[], (0.0, 0.0));
+        let item = menu
+            .flat_items()
+            .into_iter()
+            .find(|i| i.label == "Copy pane ID")
+            .expect("Copy pane ID entry present");
+        match &item.action {
+            KeyAction::HotspotCopy(s) => assert_eq!(s, "7"),
+            other => panic!("expected HotspotCopy, got {other:?}"),
+        }
+    }
 }
