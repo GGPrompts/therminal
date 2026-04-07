@@ -82,8 +82,8 @@ fn main() -> Result<()> {
     // Open a persistent connection to therminal-daemon before window
     // creation. This is the first wiring step toward making the GUI a
     // daemon client (epic tn-382v); local PTY rendering is unaffected.
-    let daemon_client = match connect_daemon() {
-        Ok(client) => Some(client),
+    let (daemon_client, daemon_runtime) = match connect_daemon() {
+        Ok((client, handle)) => (Some(client), Some(handle)),
         Err(e) => {
             let socket_hint = if cfg!(windows) {
                 r"\\.\pipe\therminal-daemon (start therminal-daemon.exe)".to_string()
@@ -104,7 +104,7 @@ fn main() -> Result<()> {
         }
     };
 
-    window::run(daemon_client)
+    window::run(daemon_client, daemon_runtime)
 }
 
 /// Open a persistent IPC connection to the therminal-daemon control socket.
@@ -112,7 +112,10 @@ fn main() -> Result<()> {
 /// Pings the daemon to validate the connection, then logs the reported
 /// version, protocol_version, and socket path. Returns the live client so
 /// the GUI can store it for later request multiplexing.
-fn connect_daemon() -> Result<std::sync::Arc<therminal_daemon_client::DaemonClient>> {
+fn connect_daemon() -> Result<(
+    std::sync::Arc<therminal_daemon_client::DaemonClient>,
+    tokio::runtime::Handle,
+)> {
     use therminal_daemon_client::DaemonClient;
     use therminal_protocol::daemon::IpcResponse;
 
@@ -122,13 +125,16 @@ fn connect_daemon() -> Result<std::sync::Arc<therminal_daemon_client::DaemonClie
     // DaemonClient spawns its own connection task on it and outlives this
     // function for the rest of the process lifetime. This avoids forcing
     // `main` to be `#[tokio::main]` while keeping the existing sync winit
-    // entry point intact.
+    // entry point intact. The handle is returned so the window/init attach
+    // flow (tn-ytw2) can drive RPCs without relying on `Handle::try_current`
+    // (which returns None when called from the winit event loop thread).
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .thread_name("therminal-daemon-rt")
         .build()?;
     let rt = Box::leak(Box::new(rt));
+    let handle = rt.handle().clone();
 
     let (client, pong) = rt.block_on(async {
         let client = DaemonClient::connect(&socket_path).await?;
@@ -152,5 +158,5 @@ fn connect_daemon() -> Result<std::sync::Arc<therminal_daemon_client::DaemonClie
         anyhow::bail!("unexpected daemon response to Ping: {:?}", pong);
     }
 
-    Ok(std::sync::Arc::new(client))
+    Ok((std::sync::Arc::new(client), handle))
 }

@@ -272,6 +272,13 @@ pub struct App {
     #[allow(dead_code)]
     pub(crate) daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>,
 
+    /// Handle to the leaked tokio runtime that hosts the `DaemonClient`.
+    /// Used by `init_gpu` (tn-ytw2) to drive attach-flow RPCs from the
+    /// winit event-loop thread, which has no ambient tokio context — so
+    /// `Handle::try_current()` returns None there. This stored handle is
+    /// always valid because the runtime is intentionally leaked in `main`.
+    pub(crate) daemon_runtime: Option<tokio::runtime::Handle>,
+
     /// Local↔daemon `PaneId` mapping for remote-mode panes (tn-pgz6).
     /// Empty in pure local mode.
     pub(crate) pane_id_map: PaneIdMap,
@@ -650,8 +657,10 @@ impl App {
             active_workspace,
         };
 
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!("publish_workspace_state: no tokio runtime in current thread");
+        // Use the stored daemon runtime handle (see main.rs::connect_daemon).
+        // `Handle::try_current()` is None on the winit event-loop thread.
+        let Some(handle) = self.daemon_runtime.clone() else {
+            tracing::warn!("publish_workspace_state: no daemon runtime handle");
             return;
         };
         let client = Arc::clone(client);
@@ -882,7 +891,10 @@ impl ApplicationHandler<UserEvent> for App {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /// Create the event loop, set control flow to Wait, and run the app.
-pub fn run(daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>) -> Result<()> {
+pub fn run(
+    daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>,
+    daemon_runtime: Option<tokio::runtime::Handle>,
+) -> Result<()> {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("Therminal panic: {info}");
         eprintln!("Backtrace: {:?}", std::backtrace::Backtrace::capture());
@@ -894,6 +906,7 @@ pub fn run(daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>) ->
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
     app.daemon_client = daemon_client;
+    app.daemon_runtime = daemon_runtime;
     event_loop.run_app(&mut app)?;
 
     Ok(())

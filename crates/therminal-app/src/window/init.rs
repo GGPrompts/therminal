@@ -198,6 +198,7 @@ impl App {
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
             toast: None,
             daemon_client: None,
+            daemon_runtime: None,
             pane_id_map: super::PaneIdMap::default(),
             daemon_session_id: None,
         }
@@ -354,14 +355,17 @@ impl App {
             );
         }
 
+        // Use the stored handle from the leaked daemon runtime (main.rs).
+        // `Handle::try_current()` is None on the winit event-loop thread
+        // because that thread has no ambient tokio context.
         let remote_handle = if use_remote {
-            tokio::runtime::Handle::try_current().ok()
+            self.daemon_runtime.clone()
         } else {
             None
         };
         if use_remote && remote_handle.is_none() {
             tracing::warn!(
-                "no tokio runtime available; remote attach mode requires one — falling back to local"
+                "remote attach mode requires a daemon runtime handle (set in main::connect_daemon) — falling back to local"
             );
         }
         // ── tn-ytw2: try attach to existing daemon session before create ─
