@@ -198,6 +198,8 @@ impl App {
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
             toast: None,
             daemon_client: None,
+            pane_id_map: super::PaneIdMap::default(),
+            daemon_session_id: None,
         }
     }
 
@@ -365,23 +367,24 @@ impl App {
         if let (true, Some(handle)) = (use_remote, remote_handle) {
             let dc = self.daemon_client.as_ref().expect("checked above").clone();
             let socket = dc.socket_path().to_path_buf();
+            // tn-pgz6: pre-allocate the local pane id so the on_exit
+            // callback can capture it and target the correct pane on exit.
+            let local_id = crate::pane::next_pane_id();
             let p1 = proxy.clone();
             let p2 = proxy.clone();
             let p3 = proxy.clone();
             let p4 = proxy.clone();
+            let on_exit_local_id = local_id;
+            let on_bell_local_id = local_id;
             let callbacks = crate::pane::PaneCallbacks {
                 wake: Box::new(move || {
                     let _ = p1.send_event(UserEvent::PtyOutput);
                 }),
                 on_exit: Box::new(move || {
-                    // The local pane id is captured by the worker
-                    // thread on the calling side; we can't know it
-                    // here yet, so we send a generic redraw and let
-                    // the next ResizePane attempt fail to clean up.
-                    let _ = p2.send_event(UserEvent::PtyOutput);
+                    let _ = p2.send_event(UserEvent::PaneExited(on_exit_local_id));
                 }),
                 on_bell: Box::new(move || {
-                    let _ = p3.send_event(UserEvent::Bell(0));
+                    let _ = p3.send_event(UserEvent::Bell(on_bell_local_id));
                 }),
                 on_notification: Box::new(move |text| {
                     let _ = p4.send_event(UserEvent::DesktopNotification {
@@ -392,6 +395,7 @@ impl App {
                 }),
             };
             match crate::pane::remote_spawn::spawn_remote_pane(
+                local_id,
                 full_rect,
                 &grid_renderer,
                 scrollback,
@@ -401,8 +405,9 @@ impl App {
                 socket,
                 callbacks,
             ) {
-                Ok(pane) => {
+                Ok((pane, daemon_pane_id)) => {
                     let pane_id = pane.id;
+                    self.pane_id_map.insert(pane_id, daemon_pane_id);
                     info!(pane_id, "spawned initial pane in REMOTE attach mode");
                     let layout = LayoutNode::Leaf(pane);
                     let wm = WorkspaceManager::new(layout, Some(pane_id));

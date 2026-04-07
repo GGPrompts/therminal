@@ -24,7 +24,7 @@ use tracing::{info, warn};
 use super::PaneId;
 use super::PaneListener;
 use super::backend::PaneBackendKind;
-use super::spawn::{PaneCallbacks, next_pane_id};
+use super::spawn::PaneCallbacks;
 use super::state::{PaneState, PaneStatus, grid_size_for_rect};
 use crate::grid_renderer::GridRenderer;
 
@@ -56,6 +56,7 @@ use crate::grid_renderer::GridRenderer;
 /// on EOF semantics that the daemon does not yet broadcast.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_remote_pane(
+    local_id: PaneId,
     viewport: Rect,
     renderer: &GridRenderer,
     scrollback_lines: usize,
@@ -64,18 +65,31 @@ pub fn spawn_remote_pane(
     tokio_handle: tokio::runtime::Handle,
     daemon_socket: std::path::PathBuf,
     callbacks: PaneCallbacks,
-) -> Result<PaneState, anyhow::Error> {
-    let local_id = next_pane_id();
+) -> Result<(PaneState, therminal_protocol::PaneId), anyhow::Error> {
     let (cols, rows) = grid_size_for_rect(viewport, renderer);
     let cols = cols.max(2);
     let rows = rows.max(1);
 
-    // ── 1. Create the remote session/pane ──────────────────────────────
+    // ── 1. Create the remote session/pane and discover its real pane id ─
+    //
+    // tn-pgz6: we no longer assume `pane_id == session_id`. After
+    // CreateSession we issue GetWorkspaces to ask the daemon which pane id
+    // it actually allocated for the new session's first pane. Both calls
+    // are wrapped in a 5s timeout so a slow/hung daemon doesn't freeze
+    // GUI startup.
+    let rpc_timeout = std::time::Duration::from_secs(5);
     let create_resp = tokio_handle.block_on(async {
-        daemon_client
-            .send_request(IpcRequest::CreateSession { name: None })
-            .await
-    })?;
+        tokio::time::timeout(
+            rpc_timeout,
+            daemon_client.send_request(IpcRequest::CreateSession { name: None }),
+        )
+        .await
+    });
+    let create_resp = match create_resp {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => anyhow::bail!("daemon CreateSession timed out after {rpc_timeout:?}"),
+    };
     let session_id = match create_resp {
         IpcResponse::SessionCreated { session_id } => session_id,
         IpcResponse::Error { message } => {
@@ -85,12 +99,46 @@ pub fn spawn_remote_pane(
             anyhow::bail!("unexpected daemon response to CreateSession: {other:?}");
         }
     };
-    // The daemon allocates pane ids monotonically; for the proof-of-life
-    // path we assume the session's first pane id matches its session id
-    // numerically (true today since the daemon spawns one pane per fresh
-    // session and uses a shared counter). A real attach handshake lands
-    // in tn-ytw2.
-    let remote_pane_id = session_id;
+    let workspaces_resp = tokio_handle.block_on(async {
+        tokio::time::timeout(
+            rpc_timeout,
+            daemon_client.send_request(IpcRequest::GetWorkspaces { session_id }),
+        )
+        .await
+    });
+    let workspaces_resp = match workspaces_resp {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => anyhow::bail!("daemon GetWorkspaces timed out after {rpc_timeout:?}"),
+    };
+    let remote_pane_id = match workspaces_resp {
+        IpcResponse::Workspaces { workspaces, .. } => {
+            // Look at the first workspace's focused pane (or first pane id).
+            // The daemon spawns one pane per fresh session so this is
+            // unambiguous; if it ever returns nothing that's a daemon bug.
+            let pid = workspaces
+                .first()
+                .and_then(|w| w.focused_pane.or_else(|| w.pane_ids.first().copied()));
+            match pid {
+                Some(p) => p,
+                None => {
+                    tracing::error!(
+                        session_id,
+                        "daemon returned empty workspace state for fresh session"
+                    );
+                    anyhow::bail!(
+                        "daemon GetWorkspaces returned no panes for session {session_id}"
+                    );
+                }
+            }
+        }
+        IpcResponse::Error { message } => {
+            anyhow::bail!("daemon GetWorkspaces failed: {message}");
+        }
+        other => {
+            anyhow::bail!("unexpected daemon response to GetWorkspaces: {other:?}");
+        }
+    };
     info!(
         local_id,
         session_id, remote_pane_id, "spawned remote pane via daemon"
@@ -211,7 +259,7 @@ pub fn spawn_remote_pane(
         }
     });
 
-    Ok(PaneState {
+    let state = PaneState {
         id: local_id,
         viewport,
         status,
@@ -224,7 +272,8 @@ pub fn spawn_remote_pane(
             tokio_handle,
             shutdown,
         },
-    })
+    };
+    Ok((state, remote_pane_id))
 }
 
 #[allow(clippy::too_many_arguments)]

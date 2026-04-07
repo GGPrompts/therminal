@@ -39,6 +39,47 @@ use winit::window::{Window, WindowId};
 use crate::grid_renderer::{FontConfig, GridRenderer};
 use crate::menu::ContextMenu;
 use crate::pane::{AutoTileDebouncer, LayoutNode, PaneId, SplitDirection, WorkspaceManager};
+
+/// Bidirectional mapping between the GUI's local `PaneId` space and the
+/// daemon's separately-counted `PaneId` space.
+///
+/// In remote attach mode the GUI still allocates its own monotonic local
+/// ids (via `pane::spawn::next_pane_id`) so the layout tree, focus state,
+/// and event-loop addressing stay independent of daemon state. The daemon
+/// independently assigns its own ids when sessions/panes are created.
+/// This map is the single source of truth for translating between the two
+/// spaces; every IPC call that takes a `pane_id` must look up the daemon
+/// id here, and every inbound daemon event must be resolved back to a
+/// local id before touching GUI state. Local-mode panes never touch this
+/// map.
+#[derive(Default)]
+pub(crate) struct PaneIdMap {
+    local_to_daemon: HashMap<PaneId, therminal_protocol::PaneId>,
+    daemon_to_local: HashMap<therminal_protocol::PaneId, PaneId>,
+}
+
+impl PaneIdMap {
+    pub(crate) fn insert(&mut self, local: PaneId, daemon: therminal_protocol::PaneId) {
+        self.local_to_daemon.insert(local, daemon);
+        self.daemon_to_local.insert(daemon, local);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn daemon_for_local(&self, local: PaneId) -> Option<therminal_protocol::PaneId> {
+        self.local_to_daemon.get(&local).copied()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn local_for_daemon(&self, daemon: therminal_protocol::PaneId) -> Option<PaneId> {
+        self.daemon_to_local.get(&daemon).copied()
+    }
+
+    pub(crate) fn remove_by_local(&mut self, local: PaneId) {
+        if let Some(daemon) = self.local_to_daemon.remove(&local) {
+            self.daemon_to_local.remove(&daemon);
+        }
+    }
+}
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::ConfigWatcher;
 use therminal_core::font::PLATFORM_MONOSPACE;
@@ -230,6 +271,16 @@ pub struct App {
     /// observers) clone a handle without re-connecting.
     #[allow(dead_code)]
     pub(crate) daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>,
+
+    /// Local↔daemon `PaneId` mapping for remote-mode panes (tn-pgz6).
+    /// Empty in pure local mode.
+    pub(crate) pane_id_map: PaneIdMap,
+
+    /// Daemon `SessionId` this GUI is publishing workspace state under.
+    /// `None` in local mode or before the remote attach completes. Set by
+    /// the remote-spawn / attach path (tn-pgz6, tn-ytw2). When `None` the
+    /// `publish_workspace_state()` helper short-circuits.
+    pub(crate) daemon_session_id: Option<therminal_protocol::SessionId>,
 }
 
 impl App {
@@ -548,6 +599,82 @@ impl App {
         }
     }
 
+    /// Publish the current workspace topology to the daemon (tn-k3yo).
+    ///
+    /// Called after every GUI-side topology mutation (split, close, swap,
+    /// workspace switch/create/rename, send-pane-to-workspace) so the
+    /// daemon's stored `WorkspaceInfo` snapshots stay in sync with what
+    /// the user sees. Required by the attach path (tn-ytw2) and by MCP
+    /// `terminal.workspaces.list` queries.
+    ///
+    /// Behaviour:
+    /// - No daemon client → no-op (local mode pays nothing).
+    /// - No `daemon_session_id` yet → debug log + no-op (pre-attach).
+    /// - Wrapped in a 500ms `tokio::time::timeout`; failures are logged
+    ///   at warn level and swallowed. This MUST never block the UI thread.
+    ///
+    /// Note: in remote mode the `WorkspaceInfo.pane_ids` should be daemon
+    /// `PaneId`s. We translate via `pane_id_map.daemon_for_local()`. Any
+    /// local id without a mapping is dropped from the published list and
+    /// a debug line is emitted — this should only happen transiently
+    /// during pane setup.
+    pub(crate) fn publish_workspace_state(&self) {
+        let Some(client) = self.daemon_client.as_ref() else {
+            return;
+        };
+        let Some(session_id) = self.daemon_session_id else {
+            debug!("publish_workspace_state: no daemon_session_id yet; skipping (pre-attach)");
+            return;
+        };
+        let Some(wm) = self.workspaces.as_ref() else {
+            return;
+        };
+
+        // Translate local pane ids → daemon pane ids in the snapshot.
+        let mut workspaces_info = wm.workspace_info();
+        for ws in workspaces_info.iter_mut() {
+            ws.pane_ids = ws
+                .pane_ids
+                .iter()
+                .filter_map(|local| self.pane_id_map.daemon_for_local(*local))
+                .collect();
+            ws.focused_pane = ws
+                .focused_pane
+                .and_then(|local| self.pane_id_map.daemon_for_local(local));
+        }
+        let active_workspace = wm.active_id() as therminal_protocol::WorkspaceId;
+
+        let request = therminal_protocol::daemon::IpcRequest::SetWorkspaceState {
+            session_id,
+            workspaces: workspaces_info,
+            active_workspace,
+        };
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("publish_workspace_state: no tokio runtime in current thread");
+            return;
+        };
+        let client = Arc::clone(client);
+        let result = handle.block_on(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                client.send_request(request),
+            )
+            .await
+        });
+        match result {
+            Ok(Ok(_)) => {
+                debug!(session_id, "published workspace state to daemon");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "publish_workspace_state: daemon request failed");
+            }
+            Err(_) => {
+                tracing::warn!("publish_workspace_state: daemon request timed out (>500ms)");
+            }
+        }
+    }
+
     /// Request a window redraw (convenience wrapper).
     pub(crate) fn request_redraw(&self) {
         if let Some(w) = self.window.as_ref() {
@@ -822,6 +949,27 @@ mod rename_state_tests {
         }
         let labels = build_tab_labels(&[1, 2], None, Some(&state));
         assert_eq!(labels[0], "1: 1abc_");
+    }
+
+    #[test]
+    fn pane_id_map_insert_and_lookup() {
+        use super::PaneIdMap;
+        let mut m = PaneIdMap::default();
+        m.insert(42, 7);
+        assert_eq!(m.daemon_for_local(42), Some(7));
+        assert_eq!(m.local_for_daemon(7), Some(42));
+        assert_eq!(m.daemon_for_local(99), None);
+        assert_eq!(m.local_for_daemon(99), None);
+    }
+
+    #[test]
+    fn pane_id_map_remove_clears_both_directions() {
+        use super::PaneIdMap;
+        let mut m = PaneIdMap::default();
+        m.insert(42, 7);
+        m.remove_by_local(42);
+        assert_eq!(m.daemon_for_local(42), None);
+        assert_eq!(m.local_for_daemon(7), None);
     }
 
     #[test]

@@ -175,6 +175,7 @@ impl App {
             self.last_split_direction = direction;
             self.set_focused_pane(Some(new_id));
             self.relayout_and_redraw();
+            self.publish_workspace_state();
         } else {
             self.request_redraw();
         }
@@ -297,6 +298,7 @@ impl App {
                 warn!("Focused pane {focused} not found in layout");
             }
         }
+        self.publish_workspace_state();
     }
 
     /// Toggle zoom on the focused pane.
@@ -447,6 +449,7 @@ impl App {
             self.last_split_direction = direction;
             self.set_focused_pane(Some(new_id));
             self.relayout_and_redraw();
+            self.publish_workspace_state();
         } else {
             self.request_redraw();
         }
@@ -463,6 +466,10 @@ impl App {
             return;
         }
         self.last_close_action = Some(std::time::Instant::now());
+
+        // tn-pgz6: drop any local↔daemon PaneId mapping for this pane.
+        // No-op for local-mode panes (never inserted).
+        self.pane_id_map.remove_by_local(target_id);
 
         // If zoomed, restore the full layout so tree removal works correctly.
         if self.zoomed_layout.is_some() {
@@ -535,6 +542,7 @@ impl App {
                 );
             }
         }
+        self.publish_workspace_state();
     }
 
     /// Move focus to the next or previous pane (cycling order).
@@ -588,6 +596,7 @@ impl App {
         {
             // Focus stays on the original pane ID (it moved to the new position).
             self.request_redraw();
+            self.publish_workspace_state();
         }
     }
 
@@ -801,6 +810,7 @@ impl App {
 
         self.selection_pane = None;
         self.selection_in_progress = false;
+        self.publish_workspace_state();
     }
 
     /// Spawn N panes with auto-tiling layout.
@@ -1054,6 +1064,7 @@ impl App {
         if switched {
             info!("Switched to workspace {n}");
             self.relayout_and_redraw();
+            self.publish_workspace_state();
         }
     }
 
@@ -1137,6 +1148,7 @@ impl App {
         if moved {
             info!("Sent pane {focused} to workspace {n}");
             self.relayout_and_redraw();
+            self.publish_workspace_state();
         }
     }
 
