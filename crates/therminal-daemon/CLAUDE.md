@@ -6,7 +6,7 @@ Session manager, event bus, multiplexer, MCP server, trust enforcement.
 
 The daemon uses a **socket-as-lock** pattern -- successful socket bind = ownership of the daemon role, no pidfiles needed.
 
-**BUILD_HASH**: `build.rs` embeds `<git-short-hash>-<unix-timestamp>` at compile time via `env!("BUILD_HASH")`. Used for version-mismatch detection during handoff.
+**BUILD_HASH**: `build.rs` embeds `<git-short-hash>` at compile time via `env!("BUILD_HASH")`. Informational only — surfaced in startup logs and `Pong` responses. Daemon handoff is driven by `PROTOCOL_VERSION`, not by BUILD_HASH (see `ensure.rs::ensure_daemon`). The hash is stable across no-op rebuilds: `build.rs` declares only `rerun-if-changed=src/`, so two builds with identical source produce the same BUILD_HASH and the daemon crate does not relink. (Earlier versions appended `-<unix-timestamp>` and declared `rerun-if-changed=../../.git/HEAD`; both were removed because they invalidated cargo's incremental machinery on every build, especially in the Windows native build dir which rsyncs without `.git/`.)
 
 **State machine**: `Starting -> Binding -> Ready -> Running -> Draining -> Stopped`
 

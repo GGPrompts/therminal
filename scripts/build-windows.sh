@@ -26,7 +26,11 @@ WIN_BUILD_DIR_NATIVE="C:\\Users\\${USER}\\therminal-build"
 
 echo "=== Syncing to ${WIN_BUILD_DIR} ==="
 mkdir -p "${WIN_BUILD_DIR}"
-rsync -a --delete \
+## Use checksum compare (-c) instead of mtime so unchanged files keep their
+## existing destination mtime — otherwise rsync -a rewrites mtimes from the
+## WSL source on every sync and cargo rebuilds the world. Drop -p/-o/-g/-t
+## (i.e. don't use -a) since Windows doesn't honor Unix perms anyway.
+rsync -rlc --delete \
     --exclude target \
     --exclude .git \
     --exclude '.claude/worktrees' \
