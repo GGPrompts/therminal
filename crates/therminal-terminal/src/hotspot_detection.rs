@@ -57,14 +57,18 @@ pub struct TextHotspot {
 // ── Compiled regexes ─────────────────────────────────────────────────────
 
 /// File path with optional `:line` or `:line:col`.
-/// Matches absolute (`/foo/bar.rs:42:5`), relative (`./src/main.rs:10`),
-/// and bare (`src/lib.rs:7`) paths. Requires a dot-extension to avoid
-/// false positives on random slash-separated text.
+/// Matches EITHER paths with a leading prefix (`./`, `../`, `/`) OR
+/// any path whose final segment ends in a known source/config/doc
+/// extension from a curated whitelist. This avoids false positives on
+/// plain `word.word` tokens (e.g. `2.0`, `1.5x`, `Loaded.files`).
 pub static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?:\.{0,2}/)?(?:[A-Za-z0-9_\-]+/)*[A-Za-z0-9_\-]+\.[A-Za-z0-9_]+(?::\d+(?::\d+)?)?",
-    )
-    .unwrap()
+    // Keep extension list in sync with the module docs / tests.
+    const EXT: &str = r"rs|ts|tsx|jsx|js|mjs|cjs|py|md|toml|json|yaml|yml|html|css|scss|sh|bash|zsh|fish|ps1|go|java|kt|swift|c|h|cpp|hpp|rb|php|lua|sql|xml|lock|txt|log|env|gitignore|dockerfile";
+    let pat = format!(
+        r"(?:(?:\.{{1,2}}/|/)(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-.]+(?:\.(?:{ext}))?|(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]+\.(?:{ext}))(?::\d+(?::\d+)?)?",
+        ext = EXT
+    );
+    Regex::new(&pat).unwrap()
 });
 
 /// Rust-style error location: `  --> src/file.rs:42:5`
@@ -183,9 +187,6 @@ pub fn detect_hotspots_from_text(rows: &[String]) -> Vec<TextHotspot> {
                 continue;
             }
             let txt = m.as_str();
-            if !txt.contains('/') {
-                continue;
-            }
             hotspots.push(TextHotspot {
                 kind: HotspotKind::FilePath,
                 text: txt.to_string(),
@@ -411,6 +412,72 @@ mod tests {
                 .iter()
                 .any(|h| h.kind == HotspotKind::GitRef && h.row == 1)
         );
+    }
+
+    #[test]
+    fn no_false_positive_on_word_dot_word() {
+        for line in &[
+            "Searching for matches",
+            "42 files updated",
+            "Loaded config successfully",
+            "Channeling energy",
+            "version 2.0 released",
+            "running at 1.5x speed",
+        ] {
+            let hotspots = detect(&[line]);
+            let fp: Vec<_> = hotspots
+                .iter()
+                .filter(|h| h.kind == HotspotKind::FilePath)
+                .collect();
+            assert!(
+                fp.is_empty(),
+                "expected no file-path match in {line:?}, got {fp:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_bare_filename_with_known_extension() {
+        let hotspots = detect(&["edit Cargo.toml now"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "Cargo.toml");
+    }
+
+    #[test]
+    fn detects_relative_path_with_line_col() {
+        let hotspots = detect(&["see ./src/main.rs:42 here"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "./src/main.rs:42");
+    }
+
+    #[test]
+    fn detects_absolute_python_path() {
+        let hotspots = detect(&["open /home/user/foo.py please"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "/home/user/foo.py");
+    }
+
+    #[test]
+    fn detects_nested_path_with_line_col() {
+        let hotspots = detect(&["at crates/therminal-app/src/window/mod.rs:120:5 boom"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "crates/therminal-app/src/window/mod.rs:120:5");
     }
 
     #[test]
