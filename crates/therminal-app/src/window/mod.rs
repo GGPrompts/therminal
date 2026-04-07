@@ -600,6 +600,11 @@ impl App {
         if let Some(wm) = self.workspaces.as_mut() {
             wm.set_focused_pane(id);
         }
+        // tn-beez Phase B: mirror focus to the daemon so MCP
+        // `terminal.panes.list` focused_pane matches the GUI.
+        if let Some(id) = id {
+            self.select_pane_remote(id);
+        }
     }
 
     /// Compute the content area rect from GPU dimensions and config flags.

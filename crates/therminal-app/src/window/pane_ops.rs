@@ -4,6 +4,7 @@
 //! with pane PTYs for clipboard/selection operations.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use alacritty_terminal::term::TermMode;
 use tracing::{debug, info, warn};
@@ -13,9 +14,237 @@ use crate::pane::{
     SpatialDirection, SplitDirection,
 };
 use therminal_core::geometry::Rect;
+use therminal_protocol::daemon::{IpcRequest, IpcResponse};
 use therminal_terminal::interceptor::InterceptorConfig;
 
 use super::{App, EventLoopProxy, NotificationSource, UserEvent};
+
+/// Timeout for daemon pane-op RPCs driven from the UI thread. Chosen so a
+/// hung daemon rolls back to a local error instead of freezing the GUI.
+const DAEMON_OP_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl App {
+    /// Returns `true` if the GUI should drive pane lifecycle through the
+    /// daemon (tn-beez Phase B). Requires `attach_mode = Remote`, an
+    /// active daemon client, an attached session, and a runtime handle.
+    pub(crate) fn is_daemon_mode(&self) -> bool {
+        matches!(
+            self.config.mcp.attach_mode,
+            therminal_core::config::AttachMode::Remote
+        ) && self.daemon_client.is_some()
+            && self.daemon_session_id.is_some()
+            && self.daemon_runtime.is_some()
+    }
+
+    /// Drive a daemon RPC from the winit event-loop thread using the
+    /// stored runtime handle. Wraps the request in `DAEMON_OP_TIMEOUT` so
+    /// a hung daemon can't freeze the UI. Returns the decoded response
+    /// or an error string for logging.
+    fn daemon_rpc_blocking(&self, request: IpcRequest) -> Result<IpcResponse, String> {
+        let client = self
+            .daemon_client
+            .as_ref()
+            .ok_or_else(|| "no daemon client".to_string())?;
+        let handle = self
+            .daemon_runtime
+            .as_ref()
+            .ok_or_else(|| "no daemon runtime handle".to_string())?;
+        let client = Arc::clone(client);
+        let handle = handle.clone();
+        let result = handle.block_on(async move {
+            tokio::time::timeout(DAEMON_OP_TIMEOUT, client.send_request(request)).await
+        });
+        match result {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(e)) => Err(format!("daemon rpc error: {e}")),
+            Err(_) => Err(format!("daemon rpc timed out after {DAEMON_OP_TIMEOUT:?}")),
+        }
+    }
+
+    /// Phase B split path: ask the daemon to split `source_local`'s
+    /// daemon-side pane, then materialise a new `RemotePty` leaf locally
+    /// and insert it into the layout tree.
+    ///
+    /// Returns `Some(new_local_id)` on success, `None` on any failure
+    /// (with a warn!-level log). Callers should NOT mutate the layout
+    /// themselves — this helper owns both the RPC and the tree insert.
+    pub(crate) fn split_pane_remote(
+        &mut self,
+        source_local: PaneId,
+        direction: SplitDirection,
+    ) -> Option<PaneId> {
+        let daemon_source = match self.pane_id_map.daemon_for_local(source_local) {
+            Some(d) => d,
+            None => {
+                warn!(
+                    source_local,
+                    "split_pane_remote: no daemon id mapping (local-mode pane pre-cutover); bailing"
+                );
+                return None;
+            }
+        };
+        let horizontal = matches!(direction, SplitDirection::Horizontal);
+
+        let resp = match self.daemon_rpc_blocking(IpcRequest::SplitPane {
+            pane_id: daemon_source,
+            horizontal,
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "split_pane_remote: RPC failed — NOT mutating local layout");
+                self.show_toast("daemon split failed");
+                return None;
+            }
+        };
+        let new_daemon_pane_id = match resp {
+            IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
+            IpcResponse::Error { message } => {
+                warn!(message, "split_pane_remote: daemon returned error");
+                self.show_toast(format!("split failed: {message}"));
+                return None;
+            }
+            other => {
+                warn!(?other, "split_pane_remote: unexpected response variant");
+                return None;
+            }
+        };
+
+        // Gather immutable deps before mutable-borrowing the layout.
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_for_closure = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
+            osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
+        };
+        let dc_for_closure = Arc::clone(self.daemon_client.as_ref()?);
+        let handle_for_closure = self.daemon_runtime.as_ref()?.clone();
+        let socket_for_closure = dc_for_closure.socket_path().to_path_buf();
+        let proxy = self.event_proxy.clone();
+
+        let local_id = crate::pane::next_pane_id();
+
+        // Build the PaneState inside the layout closure so we can use the
+        // viewport Rect assigned by `split_pane`.
+        let renderer_ref = self.grid_renderer.as_ref()?;
+        let layout = self.workspaces.as_mut().map(|wm| wm.layout_mut())?;
+        let callbacks = make_pane_callbacks(&proxy, local_id);
+        let build_result: std::cell::RefCell<Option<anyhow::Error>> = std::cell::RefCell::new(None);
+        let new_id = layout.split_pane(source_local, direction, |viewport| {
+            let (cols, rows) = crate::pane::grid_size_for_rect(viewport, renderer_ref);
+            let cols = cols.max(2);
+            let rows = rows.max(1);
+            match crate::pane::remote_spawn::build_remote_pane_state(
+                local_id,
+                new_daemon_pane_id,
+                viewport,
+                cols,
+                rows,
+                scrollback,
+                interceptor_for_closure,
+                dc_for_closure,
+                handle_for_closure,
+                socket_for_closure,
+                callbacks,
+            ) {
+                Ok(state) => Some(state),
+                Err(e) => {
+                    *build_result.borrow_mut() = Some(e);
+                    None
+                }
+            }
+        });
+
+        if let Some(new_id) = new_id {
+            self.pane_id_map.insert(new_id, new_daemon_pane_id);
+            info!(
+                source_local,
+                new_local = new_id,
+                new_daemon = new_daemon_pane_id,
+                "split_pane_remote: daemon split + local mount complete"
+            );
+            Some(new_id)
+        } else {
+            if let Some(e) = build_result.into_inner() {
+                warn!(error = %e, "split_pane_remote: build_remote_pane_state failed AFTER daemon split — daemon now has orphan pane");
+                // Best effort: ask daemon to kill the orphan pane we couldn't mount.
+                let _ = self.daemon_rpc_blocking(IpcRequest::KillPane {
+                    pane_id: new_daemon_pane_id,
+                });
+            }
+            None
+        }
+    }
+
+    /// Phase B close path: ask the daemon to kill `source_local`'s
+    /// daemon-side pane BEFORE we drop the local pane state. On daemon
+    /// failure the local pane is left intact (user-visible) so the GUI
+    /// never diverges from the daemon silently.
+    ///
+    /// Returns `true` if the RPC succeeded (caller may proceed to drop
+    /// local state); `false` if the caller should abort the local close.
+    pub(crate) fn kill_pane_remote(&mut self, source_local: PaneId) -> bool {
+        let daemon_id = match self.pane_id_map.daemon_for_local(source_local) {
+            Some(d) => d,
+            None => {
+                // Local-only pane (pre-cutover); caller should fall through
+                // to pure local close.
+                debug!(
+                    source_local,
+                    "kill_pane_remote: no daemon id mapping — proceeding with local close only"
+                );
+                return true;
+            }
+        };
+        match self.daemon_rpc_blocking(IpcRequest::KillPane { pane_id: daemon_id }) {
+            Ok(IpcResponse::PaneKilled { .. }) => true,
+            Ok(IpcResponse::Error { message }) => {
+                warn!(
+                    source_local,
+                    daemon_id, message, "kill_pane_remote: daemon error — keeping local pane"
+                );
+                self.show_toast(format!("kill failed: {message}"));
+                false
+            }
+            Ok(other) => {
+                warn!(
+                    source_local,
+                    daemon_id,
+                    ?other,
+                    "kill_pane_remote: unexpected response — keeping local pane"
+                );
+                false
+            }
+            Err(e) => {
+                warn!(
+                    source_local,
+                    daemon_id, error = %e,
+                    "kill_pane_remote: RPC failed — keeping local pane"
+                );
+                self.show_toast("daemon kill failed");
+                false
+            }
+        }
+    }
+
+    /// Best-effort `SelectPane` to keep daemon focus metadata in sync with
+    /// the GUI's focused pane. Fire-and-forget: failures are logged at
+    /// debug level. Only runs in daemon mode.
+    pub(crate) fn select_pane_remote(&self, local_id: PaneId) {
+        if !self.is_daemon_mode() {
+            return;
+        }
+        let Some(daemon_id) = self.pane_id_map.daemon_for_local(local_id) else {
+            return;
+        };
+        match self.daemon_rpc_blocking(IpcRequest::SelectPane { pane_id: daemon_id }) {
+            Ok(_) => {}
+            Err(e) => debug!(error = %e, local_id, daemon_id, "select_pane_remote failed"),
+        }
+    }
+}
 
 /// Validate a candidate inherited cwd: only return `Some` if the path is
 /// non-empty and points to an existing directory. Used by split paths so a
@@ -119,6 +348,21 @@ impl App {
             Some(id) => id,
             None => return,
         };
+        // tn-beez Phase B: in daemon mode, route splits through the daemon
+        // so the resulting pane id is the canonical daemon id and shows up
+        // in MCP `terminal.panes.list` + persists across daemon restart.
+        if self.is_daemon_mode() {
+            if let Some(new_id) = self.split_pane_remote(focused, direction) {
+                info!("split_focused_pane: daemon split {focused} -> {new_id}");
+                self.last_split_direction = direction;
+                self.set_focused_pane(Some(new_id));
+                self.relayout_and_redraw();
+                self.publish_workspace_state();
+            } else {
+                self.request_redraw();
+            }
+            return;
+        }
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,
@@ -258,6 +502,13 @@ impl App {
             None => return,
         };
 
+        // tn-beez Phase B: ask the daemon to kill the pane first. If that
+        // fails, leave the local pane intact so GUI and daemon stay in sync.
+        if self.is_daemon_mode() && !self.kill_pane_remote(focused) {
+            return;
+        }
+        self.pane_id_map.remove_by_local(focused);
+
         // Use remove_pane_any which searches all workspaces and handles cleanup.
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
@@ -390,6 +641,20 @@ impl App {
 
     /// Split a specific pane by ID.
     pub(crate) fn split_pane_by_id(&mut self, target_id: PaneId, direction: SplitDirection) {
+        // tn-beez Phase B: daemon mode routes through the daemon so the
+        // new pane carries a daemon id (visible to MCP / persisted).
+        if self.is_daemon_mode() {
+            if let Some(new_id) = self.split_pane_remote(target_id, direction) {
+                info!("split_pane_by_id: daemon split {target_id} -> {new_id}");
+                self.last_split_direction = direction;
+                self.set_focused_pane(Some(new_id));
+                self.relayout_and_redraw();
+                self.publish_workspace_state();
+            } else {
+                self.request_redraw();
+            }
+            return;
+        }
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,
@@ -467,6 +732,15 @@ impl App {
         }
         self.last_close_action = Some(std::time::Instant::now());
 
+        // tn-beez Phase B: issue a best-effort KillPane to the daemon so
+        // user-initiated closes tear down the remote child. Errors are
+        // tolerated because `close_pane_by_id` is also called from the
+        // `PaneExited` event path where the remote child is already gone.
+        if self.is_daemon_mode()
+            && let Some(daemon_id) = self.pane_id_map.daemon_for_local(target_id)
+        {
+            let _ = self.daemon_rpc_blocking(IpcRequest::KillPane { pane_id: daemon_id });
+        }
         // tn-pgz6: drop any local↔daemon PaneId mapping for this pane.
         // No-op for local-mode panes (never inserted).
         self.pane_id_map.remove_by_local(target_id);

@@ -602,10 +602,13 @@ pub struct McpConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AttachMode {
-    /// GUI spawns and owns local PTY children (legacy / default).
-    #[default]
+    /// GUI spawns and owns local PTY children (legacy escape hatch).
+    /// Kept for one release after tn-beez so users can opt out if the
+    /// daemon-driven path regresses for their workflow.
     Local,
-    /// GUI streams PTY bytes from the daemon over IPC.
+    /// GUI streams PTY bytes from the daemon over IPC (default as of
+    /// tn-beez Phase B — the GUI is a daemon client end-to-end).
+    #[default]
     Remote,
 }
 
