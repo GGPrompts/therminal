@@ -8,9 +8,15 @@ pub const SEPARATOR_GAP: f32 = 2.0;
 /// Height of the pane header strip in physical pixels (when multiple panes exist).
 pub const PANE_HEADER_HEIGHT: f32 = 20.0;
 
-/// Return the effective header height: 0 when single pane, PANE_HEADER_HEIGHT otherwise.
-pub fn effective_header_height(pane_count: usize) -> f32 {
-    if pane_count <= 1 {
+/// Return the effective header height.
+///
+/// Returns 0 when:
+/// - `show_pane_headers` is `false` (user disabled headers globally), or
+/// - there is only a single pane (single-pane layouts never show a header).
+///
+/// Otherwise returns [`PANE_HEADER_HEIGHT`].
+pub fn effective_header_height(pane_count: usize, show_pane_headers: bool) -> f32 {
+    if !show_pane_headers || pane_count <= 1 {
         0.0
     } else {
         PANE_HEADER_HEIGHT
@@ -99,18 +105,26 @@ mod tests {
 
     #[test]
     fn header_height_zero_for_single_pane() {
-        assert_eq!(effective_header_height(1), 0.0);
+        assert_eq!(effective_header_height(1, true), 0.0);
     }
 
     #[test]
     fn header_height_zero_for_zero_panes() {
-        assert_eq!(effective_header_height(0), 0.0);
+        assert_eq!(effective_header_height(0, true), 0.0);
     }
 
     #[test]
     fn header_height_present_for_multiple_panes() {
-        assert_eq!(effective_header_height(2), PANE_HEADER_HEIGHT);
-        assert_eq!(effective_header_height(10), PANE_HEADER_HEIGHT);
+        assert_eq!(effective_header_height(2, true), PANE_HEADER_HEIGHT);
+        assert_eq!(effective_header_height(10, true), PANE_HEADER_HEIGHT);
+    }
+
+    #[test]
+    fn header_height_zero_when_disabled_even_with_many_panes() {
+        // show_pane_headers = false should suppress headers regardless of pane count.
+        assert_eq!(effective_header_height(2, false), 0.0);
+        assert_eq!(effective_header_height(10, false), 0.0);
+        assert_eq!(effective_header_height(1, false), 0.0);
     }
 
     // ── effective_status_bar_height ───────────────────────────────────

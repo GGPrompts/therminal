@@ -26,7 +26,9 @@ pub(crate) fn draw_pane_focus_border(
     use crate::color_mapping::pixel_rect_to_ndc;
 
     let vp = pane.viewport;
-    let t = 2.0_f32;
+    // Slightly stronger border (3px) so focus is unambiguous when per-pane
+    // headers are hidden via `general.show_pane_headers = false`.
+    let t = 3.0_f32;
     let sw = surface_width as f32;
     let sh = surface_height as f32;
 

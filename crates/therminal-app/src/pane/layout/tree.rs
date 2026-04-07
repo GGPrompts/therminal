@@ -56,8 +56,11 @@ impl LayoutNode {
     }
 
     /// Resize all pane PTYs to match their current viewport rects.
-    pub fn resize_all_panes(&mut self, renderer: &GridRenderer) {
-        let header_h = effective_header_height(self.pane_count());
+    ///
+    /// `show_pane_headers` controls whether the per-pane header strip eats
+    /// vertical space (see `effective_header_height`).
+    pub fn resize_all_panes(&mut self, renderer: &GridRenderer, show_pane_headers: bool) {
+        let header_h = effective_header_height(self.pane_count(), show_pane_headers);
         self.resize_all_panes_with_header(renderer, header_h);
     }
 

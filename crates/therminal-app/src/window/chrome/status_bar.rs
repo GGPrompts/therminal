@@ -27,6 +27,10 @@ pub(crate) struct StatusBarInfo {
     pub active_workspace: usize,
     /// Whether a pane is currently zoomed to fullscreen.
     pub is_zoomed: bool,
+    /// 1-indexed display number of the focused pane (left-to-right tree order),
+    /// surfaced in the footer center section so users can identify the active
+    /// pane even when per-pane headers are hidden via `show_pane_headers = false`.
+    pub focused_pane_id: Option<usize>,
 }
 
 /// Pixel rect (x, y, width, height) returned by chrome hit-test producers.
@@ -152,7 +156,7 @@ pub(crate) fn draw_status_bar(
         230,
     );
 
-    let center_text = info.cwd.as_deref().map(abbreviate_path).unwrap_or_default();
+    let center_text = compose_center_text(info.cwd.as_deref(), info.focused_pane_id);
     let center_color = GlyphColor::rgba(
         PaletteColor::INK.r,
         PaletteColor::INK.g,
@@ -427,6 +431,81 @@ pub(crate) fn status_bar_hit_test(
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StatusBarHit {
     AgentIndicator,
+}
+
+/// Compose the center section of the status bar from cwd and the focused
+/// pane's display number. Extracted for unit testing.
+pub(super) fn compose_center_text(cwd: Option<&str>, focused_pane_id: Option<usize>) -> String {
+    let cwd_text = cwd.map(abbreviate_path).unwrap_or_default();
+    match (focused_pane_id, cwd_text.is_empty()) {
+        (Some(n), false) => format!("{cwd_text}  ·  pane {n}"),
+        (Some(n), true) => format!("pane {n}"),
+        (None, _) => cwd_text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_info(cwd: Option<&str>, focused_pane_id: Option<usize>) -> StatusBarInfo {
+        StatusBarInfo {
+            agent_name: None,
+            cwd: cwd.map(String::from),
+            dimensions: (80, 24),
+            last_exit_code: None,
+            show_agent_indicator: false,
+            workspace_ids: vec![1],
+            active_workspace: 1,
+            is_zoomed: false,
+            focused_pane_id,
+        }
+    }
+
+    #[test]
+    fn status_bar_info_carries_focused_pane_id() {
+        let info = make_info(Some("/tmp"), Some(3));
+        assert_eq!(info.focused_pane_id, Some(3));
+    }
+
+    #[test]
+    fn center_text_includes_pane_number_when_present() {
+        // unset HOME so abbreviate_path leaves the literal path alone.
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: test runs single-threaded for this var; restored at the end.
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        let s = compose_center_text(Some("/tmp/foo"), Some(2));
+        assert!(s.contains("/tmp/foo"));
+        assert!(s.contains("pane 2"));
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("HOME", v);
+            }
+        }
+    }
+
+    #[test]
+    fn center_text_falls_back_to_pane_only_without_cwd() {
+        let s = compose_center_text(None, Some(7));
+        assert_eq!(s, "pane 7");
+    }
+
+    #[test]
+    fn center_text_omits_pane_when_focused_id_missing() {
+        let prev = std::env::var("HOME").ok();
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        let s = compose_center_text(Some("/tmp/foo"), None);
+        assert_eq!(s, "/tmp/foo");
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("HOME", v);
+            }
+        }
+    }
 }
 
 /// Abbreviate a path for status bar display: replace the home directory with `~`

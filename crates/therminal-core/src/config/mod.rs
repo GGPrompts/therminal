@@ -234,6 +234,11 @@ pub struct GeneralConfig {
     pub padding: f32,
     /// Whether to show the status bar at the bottom of the window.
     pub show_status_bar: bool,
+    /// Whether to show the per-pane header strip in multi-pane layouts.
+    /// When false, headers are hidden even with multiple panes; focus is
+    /// indicated solely by the focus border, and footer surfaces focused-pane
+    /// info. Single-pane layouts never show a header regardless.
+    pub show_pane_headers: bool,
     /// Whether to show the workspace tab bar at the top of the window.
     pub show_tab_bar: bool,
     /// Use client-side decorations (custom title bar with window controls).
@@ -263,6 +268,7 @@ impl Default for GeneralConfig {
             env: HashMap::new(),
             padding: 4.0,
             show_status_bar: true,
+            show_pane_headers: true,
             show_tab_bar: true,
             use_csd: default_use_csd(),
             auto_tile: true,
@@ -1340,6 +1346,31 @@ show_status_bar = false
             !loaded.general.show_status_bar,
             "show_status_bar override must survive save/load round-trip"
         );
+    }
+
+    /// show_pane_headers round-trips with non-default value.
+    #[test]
+    fn show_pane_headers_round_trips_through_toml() {
+        let toml_str = r#"
+[general]
+show_pane_headers = false
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.general.show_pane_headers,
+            "show_pane_headers should be false when set explicitly"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+        assert!(
+            !loaded.general.show_pane_headers,
+            "show_pane_headers override must survive save/load round-trip"
+        );
+        // Sanity: default is true.
+        assert!(TherminalConfig::default().general.show_pane_headers);
     }
 
     /// Dead fields: ui_font_family and display_font_family are parsed but

@@ -111,7 +111,8 @@ impl App {
         let pane = layout.find_pane(pane_id)?;
 
         let vp = pane.viewport;
-        let header_h = crate::pane::effective_header_height(pane_count);
+        let header_h =
+            crate::pane::effective_header_height(pane_count, self.config.general.show_pane_headers);
         let col = ((px as f32 - vp.x() - renderer.padding_x()) / renderer.cell_width).floor();
         let row =
             ((py as f32 - vp.y() - renderer.padding_y() - header_h) / renderer.cell_height).floor();
@@ -182,6 +183,12 @@ impl App {
         let layout = self.get_layout()?;
         let pane_count = layout.pane_count();
         if pane_count <= 1 {
+            return None;
+        }
+        // When the user has disabled pane headers globally, there is no
+        // header strip to hit-test — fall through so the right-click context
+        // menu (and other pane-body handlers) own the click area.
+        if !self.config.general.show_pane_headers {
             return None;
         }
 

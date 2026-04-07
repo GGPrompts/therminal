@@ -379,7 +379,8 @@ impl App {
         if let Some(wm) = self.workspaces.as_mut()
             && let Some(renderer) = self.grid_renderer.as_ref()
         {
-            wm.layout_mut().resize_all_panes(renderer);
+            wm.layout_mut()
+                .resize_all_panes(renderer, self.config.general.show_pane_headers);
         }
 
         let (cols, rows) = self
@@ -431,7 +432,7 @@ impl App {
         {
             let layout = wm.layout_mut();
             layout.layout(full_rect);
-            layout.resize_all_panes(renderer);
+            layout.resize_all_panes(renderer, self.config.general.show_pane_headers);
         }
 
         tracing::debug!(

@@ -101,6 +101,7 @@ pub(crate) fn render_panes_recursive(
     focused: Option<PaneId>,
     show_focus: bool,
     pane_count: usize,
+    show_pane_headers: bool,
     pane_counter: &mut usize,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
@@ -121,6 +122,7 @@ pub(crate) fn render_panes_recursive(
                 idx,
                 focused == Some(pane.id) && show_focus,
                 pane_count,
+                show_pane_headers,
                 renderer,
                 device,
                 queue,
@@ -142,6 +144,7 @@ pub(crate) fn render_panes_recursive(
                 focused,
                 show_focus,
                 pane_count,
+                show_pane_headers,
                 pane_counter,
                 renderer,
                 device,
@@ -155,6 +158,7 @@ pub(crate) fn render_panes_recursive(
                 focused,
                 show_focus,
                 pane_count,
+                show_pane_headers,
                 pane_counter,
                 renderer,
                 device,
@@ -194,6 +198,7 @@ fn render_single_pane(
     pane_index: usize,
     draw_focus_border: bool,
     pane_count: usize,
+    show_pane_headers: bool,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -243,8 +248,8 @@ fn render_single_pane(
         drop(term_guard);
 
         // Draw pane header (multi-pane) even when content is unchanged.
-        let header_h = crate::pane::effective_header_height(pane_count);
-        if pane_count > 1 {
+        let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
+        if pane_count > 1 && show_pane_headers {
             draw_pane_header(
                 pane,
                 pane_index,
@@ -391,9 +396,9 @@ fn render_single_pane(
         apply_hotspots_to_cells(&mut cells, &hotspots);
     }
 
-    // ── Draw pane header strip (only when multiple panes) ────────────────
-    let header_h = crate::pane::effective_header_height(pane_count);
-    if pane_count > 1 {
+    // ── Draw pane header strip (only when multiple panes and enabled) ──
+    let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
+    if pane_count > 1 && show_pane_headers {
         draw_pane_header(
             pane,
             pane_index,

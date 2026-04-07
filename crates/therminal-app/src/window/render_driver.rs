@@ -99,11 +99,13 @@ impl App {
         renderer.clear_frame_maps();
 
         let mut pane_counter = 0;
+        let show_pane_headers = self.config.general.show_pane_headers;
         render::render_panes_recursive(
             layout,
             focused,
             show_focus,
             pane_count,
+            show_pane_headers,
             &mut pane_counter,
             renderer,
             &gpu.device,
@@ -153,6 +155,21 @@ impl App {
                 (vec![1], 1)
             };
 
+            // Compute the 1-indexed display number of the focused pane within
+            // the layout's left-to-right traversal order, so the footer can
+            // surface "pane N" even when per-pane headers are hidden.
+            let focused_pane_id = self
+                .workspaces
+                .as_ref()
+                .and_then(|wm| wm.focused_pane())
+                .and_then(|fid| {
+                    layout
+                        .pane_ids()
+                        .iter()
+                        .position(|pid| *pid == fid)
+                        .map(|i| i + 1)
+                });
+
             let status_info = chrome::StatusBarInfo {
                 agent_name,
                 cwd,
@@ -162,6 +179,7 @@ impl App {
                 workspace_ids,
                 active_workspace,
                 is_zoomed: self.zoomed_layout.is_some(),
+                focused_pane_id,
             };
 
             let mut encoder = gpu

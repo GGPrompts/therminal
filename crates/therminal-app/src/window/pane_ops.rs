@@ -604,6 +604,7 @@ impl App {
             None => return,
         };
 
+        let show_pane_headers = self.config.general.show_pane_headers;
         // Direct field access needed: layout_mut + grid_renderer must coexist.
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
@@ -613,7 +614,7 @@ impl App {
         if layout.adjust_ratio(focused, delta) {
             layout.layout(full_rect);
             if let Some(renderer) = self.grid_renderer.as_ref() {
-                layout.resize_all_panes(renderer);
+                layout.resize_all_panes(renderer, show_pane_headers);
             }
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
@@ -628,6 +629,7 @@ impl App {
             None => return,
         };
 
+        let show_pane_headers = self.config.general.show_pane_headers;
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
             None => return,
@@ -636,7 +638,7 @@ impl App {
         layout.reset_all_ratios();
         layout.layout(full_rect);
         if let Some(renderer) = self.grid_renderer.as_ref() {
-            layout.resize_all_panes(renderer);
+            layout.resize_all_panes(renderer, show_pane_headers);
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
