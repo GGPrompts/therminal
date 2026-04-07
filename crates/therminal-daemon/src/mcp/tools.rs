@@ -406,32 +406,52 @@ impl TherminalMcpServer {
 
     /// Return recent shell commands captured via OSC 633 `CommandTracker`.
     ///
-    /// The pane must exist. The `commands` list is currently always empty
-    /// because the per-pane `CommandTracker` lives inside the reader thread's
-    /// `TherminalInterceptor` and is not yet accessible from the daemon-side
-    /// `Pane` struct — same plumbing gap as `terminal.agents.get_details`.
-    /// A follow-up issue tracks wiring the tracker through so this tool can
-    /// return real data.
+    /// Snapshots the per-pane `CommandTracker` (cloned under the lock) and
+    /// applies the optional `since_line` filter, then keeps the newest
+    /// `limit` entries (default 20). Result `commands` are returned
+    /// oldest-first within the truncated window.
     pub(super) async fn handle_query_commands(
         &self,
         params: QueryCommandsParam,
     ) -> Result<CallToolResult, ErrorData> {
         let mgr = self.session_mgr.lock().await;
 
-        if find_pane_info(&mgr, params.pane_id).is_none() {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "pane not found: {}",
-                params.pane_id
-            ))]));
-        }
+        let blocks = match mgr.pane_command_blocks(params.pane_id) {
+            Some(b) => b,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "pane not found: {}",
+                    params.pane_id
+                ))]));
+            }
+        };
 
-        let limit = params.limit.unwrap_or(20);
-        let _since_line = params.since_line.unwrap_or(0);
+        let limit = params.limit.unwrap_or(20).min(20);
+        let since_line = params.since_line.unwrap_or(0);
 
-        // Stub: CommandTracker not yet plumbed into daemon Pane. Return
-        // an empty list while respecting `limit` as a no-op.
-        let commands: Vec<CommandInfo> = Vec::new();
-        let commands = commands.into_iter().take(limit).collect();
+        // Filter by `since_line`, drop all but the newest `limit` blocks,
+        // and return them oldest-first within the truncated window.
+        let filtered: Vec<_> = blocks
+            .into_iter()
+            .filter(|b| b.start_line >= since_line)
+            .collect();
+        let total = filtered.len();
+        let start = total.saturating_sub(limit);
+        let commands: Vec<CommandInfo> = filtered[start..]
+            .iter()
+            .map(|b| CommandInfo {
+                command_text: b.command.clone(),
+                exit_code: b.exit_code,
+                duration_ms: b.duration.map(|d| d.as_millis() as u64),
+                start_line: b.start_line,
+                end_line: b.end_line,
+                timestamp_secs: b.started_at.and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
+            })
+            .collect();
 
         let result = QueryCommandsResult {
             pane_id: params.pane_id,

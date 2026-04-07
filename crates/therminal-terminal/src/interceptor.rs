@@ -18,7 +18,7 @@
 //!
 //! [`SequenceInterceptor`]: alacritty_terminal::vte::SequenceInterceptor
 
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 
 use tracing::{debug, trace};
 
@@ -99,8 +99,10 @@ pub struct TherminalInterceptor {
     config: InterceptorConfig,
     /// Channel for sending intercepted events.
     event_tx: mpsc::Sender<InterceptedEvent>,
-    /// Inline command tracker for OSC 633 marks.
-    pub command_tracker: CommandTracker,
+    /// Shared command tracker for OSC 633/133 marks. Wrapped in
+    /// `Arc<Mutex<...>>` so the daemon can hold a clone on its `Pane`
+    /// and snapshot the tracker from a different thread.
+    pub command_tracker: Arc<Mutex<CommandTracker>>,
 }
 
 impl TherminalInterceptor {
@@ -113,7 +115,24 @@ impl TherminalInterceptor {
             Self {
                 config,
                 event_tx: tx,
-                command_tracker: CommandTracker::new(),
+                command_tracker: Arc::new(Mutex::new(CommandTracker::new())),
+            },
+            rx,
+        )
+    }
+
+    /// Create with the given config and a shared command tracker. Used by
+    /// callers that need to read the tracker from a different thread.
+    pub fn new_with_tracker(
+        config: InterceptorConfig,
+        command_tracker: Arc<Mutex<CommandTracker>>,
+    ) -> (Self, mpsc::Receiver<InterceptedEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            Self {
+                config,
+                event_tx: tx,
+                command_tracker,
             },
             rx,
         )
@@ -122,6 +141,13 @@ impl TherminalInterceptor {
     /// Create with default config.
     pub fn with_defaults() -> (Self, mpsc::Receiver<InterceptedEvent>) {
         Self::new(InterceptorConfig::default())
+    }
+
+    /// Create with default config and a shared command tracker.
+    pub fn with_defaults_and_tracker(
+        command_tracker: Arc<Mutex<CommandTracker>>,
+    ) -> (Self, mpsc::Receiver<InterceptedEvent>) {
+        Self::new_with_tracker(InterceptorConfig::default(), command_tracker)
     }
 
     /// Send an event, logging if the receiver has been dropped.
@@ -144,7 +170,9 @@ impl TherminalInterceptor {
         };
 
         debug!("OSC 633: {:?}", mark);
-        self.command_tracker.apply(&mark);
+        if let Ok(mut t) = self.command_tracker.lock() {
+            t.apply(&mark);
+        }
         self.emit(InterceptedEvent::Osc633(mark));
 
         // Consume: alacritty_terminal ignores OSC 633 anyway, but consuming
@@ -166,7 +194,9 @@ impl TherminalInterceptor {
         };
 
         debug!("OSC 133 (FinalTerm): {:?}", mark);
-        self.command_tracker.apply(&mark);
+        if let Ok(mut t) = self.command_tracker.lock() {
+            t.apply(&mark);
+        }
         self.emit(InterceptedEvent::Osc133(mark));
 
         // Consume: alacritty_terminal also ignores these.
@@ -588,8 +618,9 @@ mod tests {
             );
         }
 
-        assert_eq!(interceptor.command_tracker.blocks.len(), 1);
-        let block = &interceptor.command_tracker.blocks[0];
+        let blocks = interceptor.command_tracker.lock().unwrap().snapshot();
+        assert_eq!(blocks.len(), 1);
+        let block = &blocks[0];
         assert_eq!(block.command, Some("ls -la".to_string()));
         assert_eq!(block.exit_code, Some(0));
     }

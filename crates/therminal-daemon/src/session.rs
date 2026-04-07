@@ -21,6 +21,7 @@ use alacritty_terminal::vte::ansi;
 use portable_pty::MasterPty;
 use therminal_terminal::agent_registry::{AgentEntry, AgentRegistry, AgentStatus};
 use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
+use therminal_terminal::osc633::{CommandBlock, CommandTracker};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
 use therminal_terminal::region_index::RegionIndex;
 use therminal_terminal::state_inference::{
@@ -293,6 +294,10 @@ pub struct Pane {
     /// `DaemonPtyHandler` so PTY bytes feed it; daemon-side accessors
     /// snapshot it for MCP `terminal.agents.get_details`.
     inference: Arc<Mutex<AgentStateInference>>,
+    /// Shared OSC 633 command tracker. The reader thread's interceptor
+    /// holds the same `Arc` so PTY bytes feed it; daemon-side accessors
+    /// snapshot it for MCP `terminal.semantic.query_commands`.
+    command_tracker: Arc<Mutex<CommandTracker>>,
 }
 
 impl Pane {
@@ -307,7 +312,9 @@ impl Pane {
         let id = next_pane_id();
 
         let region_index = Arc::new(Mutex::new(RegionIndex::new()));
-        let (interceptor, interceptor_rx) = TherminalInterceptor::with_defaults();
+        let command_tracker = Arc::new(Mutex::new(CommandTracker::new()));
+        let (interceptor, interceptor_rx) =
+            TherminalInterceptor::with_defaults_and_tracker(Arc::clone(&command_tracker));
 
         // Initialize cwd from spawn options; OSC 7 events will update it later.
         let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
@@ -358,6 +365,7 @@ impl Pane {
             cwd,
             shell: spawn_options.shell.clone(),
             inference,
+            command_tracker,
         })
     }
 
@@ -378,7 +386,9 @@ impl Pane {
         let pty_master = Box::new(FdPtyMaster::new(raw_fd));
 
         let region_index = Arc::new(Mutex::new(RegionIndex::new()));
-        let (interceptor, interceptor_rx) = TherminalInterceptor::with_defaults();
+        let command_tracker = Arc::new(Mutex::new(CommandTracker::new()));
+        let (interceptor, interceptor_rx) =
+            TherminalInterceptor::with_defaults_and_tracker(Arc::clone(&command_tracker));
 
         // FD handoff panes don't have spawn options; cwd will be updated by OSC 7.
         let cwd = Arc::new(Mutex::new(String::new()));
@@ -451,6 +461,7 @@ impl Pane {
             cwd,
             shell: String::new(), // Unknown for handoff panes
             inference,
+            command_tracker,
         })
     }
 
@@ -463,6 +474,26 @@ impl Pane {
             .lock()
             .map(|inf| inf.snapshot())
             .unwrap_or_default()
+    }
+
+    /// Snapshot the per-pane OSC 633 `CommandTracker`. Returns a plain
+    /// `Vec<CommandBlock>` cloned under the lock so the daemon can serve
+    /// `terminal.semantic.query_commands` without holding the lock for the
+    /// duration of the request.
+    pub fn command_tracker_snapshot(&self) -> Vec<CommandBlock> {
+        self.command_tracker
+            .lock()
+            .map(|t| t.snapshot())
+            .unwrap_or_default()
+    }
+
+    /// Test-only handle to the shared `CommandTracker` Arc. Lets unit
+    /// tests inject OSC 633 marks (mirroring what the reader thread's
+    /// interceptor does in production) and then read back via the public
+    /// snapshot path.
+    #[cfg(test)]
+    pub fn command_tracker_arc(&self) -> Arc<Mutex<CommandTracker>> {
+        Arc::clone(&self.command_tracker)
     }
 
     /// Access the pane's semantic region index.
@@ -869,6 +900,33 @@ impl SessionManager {
             }
         }
         Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Test-only: get the shared command tracker `Arc` for a pane so
+    /// tests can inject OSC 633 marks bypassing the PTY reader thread.
+    #[cfg(test)]
+    pub fn pane_command_tracker_arc(&self, pane_id: PaneId) -> Option<Arc<Mutex<CommandTracker>>> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.command_tracker_arc());
+                }
+            }
+        }
+        None
+    }
+
+    /// Snapshot a pane's OSC 633 command tracker by pane ID. Returns
+    /// `None` if the pane does not exist.
+    pub fn pane_command_blocks(&self, pane_id: PaneId) -> Option<Vec<CommandBlock>> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.command_tracker_snapshot());
+                }
+            }
+        }
+        None
     }
 
     /// Snapshot a pane's agent inference state by pane ID. Returns `None`

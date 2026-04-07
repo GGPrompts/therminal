@@ -82,7 +82,7 @@ Tools exposed (18 tools):
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
 | `terminal.panes.wait_for_output` | Observer | Wait for output matching a pattern (string/regex) |
 | `terminal.semantic.query_history` | Observer | Query semantic region index (Prompt, Command, Output, Error) |
-| `terminal.semantic.query_commands` | Observer | Return recent shell commands with exit codes and durations from the OSC 633 `CommandTracker`. Supports `since_line` and `limit` (default 20). Currently a stub returning `commands: []` — the per-pane `CommandTracker` is not yet plumbed from the reader thread into the daemon-side `Pane`, tracked as a follow-up. |
+| `terminal.semantic.query_commands` | Observer | Return recent shell commands with exit codes and durations from the OSC 633 `CommandTracker`. Supports `since_line` and `limit` (default 20, capped at 20). Backed by a per-pane `Arc<Mutex<CommandTracker>>` shared between the reader thread's `TherminalInterceptor` and the daemon-side `Pane`; handlers take a cheap cloned snapshot under the lock. |
 | `terminal.semantic.get_hotspots` | Observer | Scan pane for file paths, URLs, git refs, issue refs |
 | `terminal.workspaces.list` | Observer | List workspace tabs with names, pane counts, active status |
 | `terminal.workspaces.get_layout` | Observer | Get binary layout tree + focused_pane for a workspace. Currently returns a degraded horizontal cascade until the real `LayoutNode` tree is plumbed into the daemon (tn-vs0u). |

@@ -1717,6 +1717,106 @@ pub(crate) mod tests {
         assert_eq!(v["commands"].as_array().unwrap().len(), 0);
     }
 
+    /// End-to-end check: create a real session, drive OSC 633 marks through
+    /// a `TherminalInterceptor` sharing the pane's command tracker `Arc`,
+    /// then assert `handle_query_commands` returns the expected blocks.
+    #[tokio::test]
+    async fn query_commands_returns_tracked_blocks() {
+        use alacritty_terminal::vte::SequenceInterceptor;
+        use therminal_terminal::interceptor::TherminalInterceptor;
+
+        let server = make_server(trusted_config());
+
+        // Create a real session + pane (spawns a real shell PTY).
+        let pane_id = {
+            let mut mgr = server.session_mgr.lock().await;
+            let session_id = mgr
+                .create_session(Some("test-session".to_string()))
+                .expect("create session");
+            // Find the pane id of the freshly created session.
+            mgr.iter_sessions()
+                .find(|(id, _)| **id == session_id)
+                .and_then(|(_, s)| s.windows.first())
+                .and_then(|w| w.panes.first())
+                .map(|p| p.id)
+                .expect("session has at least one pane")
+        };
+
+        // Grab the shared tracker Arc and drive OSC 633 marks through a
+        // standalone interceptor that holds the same Arc — this mirrors
+        // what the reader thread does in production.
+        let tracker_arc = {
+            let mgr = server.session_mgr.lock().await;
+            mgr.pane_command_tracker_arc(pane_id)
+                .expect("pane has tracker")
+        };
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults_and_tracker(tracker_arc);
+
+        // Two complete commands.
+        let sequences: &[&[&[u8]]] = &[
+            &[b"633", b"A"],
+            &[b"633", b"B"],
+            &[b"633", b"E", b"echo first"],
+            &[b"633", b"C"],
+            &[b"633", b"D", b"0"],
+            &[b"633", b"A"],
+            &[b"633", b"B"],
+            &[b"633", b"E", b"false"],
+            &[b"633", b"C"],
+            &[b"633", b"D", b"1"],
+        ];
+        for params in sequences {
+            interceptor.intercept_osc(params, true);
+        }
+
+        // Call the tool handler and assert the result.
+        let params = super::QueryCommandsParam {
+            pane_id,
+            since_line: None,
+            limit: None,
+        };
+        let result = server
+            .handle_query_commands(params)
+            .await
+            .expect("handler ok");
+        assert_ne!(result.is_error, Some(true), "expected success");
+
+        let json = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let cmds = parsed["commands"].as_array().expect("commands array");
+        assert_eq!(cmds.len(), 2, "expected two tracked commands");
+        assert_eq!(cmds[0]["command_text"], "echo first");
+        assert_eq!(cmds[0]["exit_code"], 0);
+        assert_eq!(cmds[1]["command_text"], "false");
+        assert_eq!(cmds[1]["exit_code"], 1);
+
+        // limit caps to most recent.
+        let params = super::QueryCommandsParam {
+            pane_id,
+            since_line: None,
+            limit: Some(1),
+        };
+        let result = server
+            .handle_query_commands(params)
+            .await
+            .expect("handler ok");
+        let json = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("content");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let cmds = parsed["commands"].as_array().expect("commands array");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0]["command_text"], "false");
+    }
+
     #[test]
     fn query_commands_tool_is_registered() {
         use std::collections::HashSet;

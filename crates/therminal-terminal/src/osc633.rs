@@ -72,6 +72,12 @@ pub struct CommandBlock {
     pub exit_code: Option<i32>,
     /// Current lifecycle state.
     pub state: CommandState,
+    /// Wall-clock instant the `C` (PreExec) mark was observed.
+    pub started_at: Option<std::time::SystemTime>,
+    /// Wall-clock instant the `D` (CommandFinished) mark was observed.
+    pub finished_at: Option<std::time::SystemTime>,
+    /// Duration between `C` and `D` marks.
+    pub duration: Option<std::time::Duration>,
 }
 
 /// Tracks the sequence of `CommandBlock`s produced by OSC 633 marks.
@@ -108,6 +114,9 @@ impl CommandTracker {
                     command: None,
                     exit_code: None,
                     state: CommandState::PromptStart,
+                    started_at: None,
+                    finished_at: None,
+                    duration: None,
                 });
             }
 
@@ -118,17 +127,24 @@ impl CommandTracker {
             }
 
             Osc633Mark::PreExec => {
+                let now = std::time::SystemTime::now();
                 if let Some(block) = self.current_block_mut() {
                     block.state = CommandState::Executing;
+                    block.started_at = Some(now);
                 }
             }
 
             Osc633Mark::CommandFinished { exit_code } => {
                 let line = self.current_line;
+                let now = std::time::SystemTime::now();
                 if let Some(block) = self.current_block_mut() {
                     block.state = CommandState::Finished;
                     block.end_line = Some(line);
                     block.exit_code = *exit_code;
+                    block.finished_at = Some(now);
+                    if let Some(start) = block.started_at {
+                        block.duration = now.duration_since(start).ok();
+                    }
                 }
             }
 
@@ -143,6 +159,14 @@ impl CommandTracker {
     /// Return a reference to the most recent (in-progress) block, if any.
     pub fn current_block(&self) -> Option<&CommandBlock> {
         self.blocks.last()
+    }
+
+    /// Cheap snapshot of all tracked command blocks (cloned `Vec`).
+    ///
+    /// Used by daemon-side MCP handlers that need to read the tracker
+    /// without holding the lock for the duration of a request.
+    pub fn snapshot(&self) -> Vec<CommandBlock> {
+        self.blocks.clone()
     }
 
     fn current_block_mut(&mut self) -> Option<&mut CommandBlock> {
