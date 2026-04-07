@@ -54,7 +54,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 **Pane PTY workers**: Both app and daemon use `PtyPaneCore` from `therminal-terminal/src/pty_runtime.rs` for shared PTY lifecycle (Term creation, PTY spawn, reader thread). The daemon implements `PtyReaderHandler` to broadcast `DaemonEvent::PaneOutput`.
 
-**Attach/detach protocol**: On attach, the daemon takes a `PaneSnapshot` from each pane's `Term` state -- grid content (chars + bold flags), cursor position, and dimensions. This is a state snapshot, not a byte replay. The client renders this snapshot to immediately show the current terminal state.
+**Attach/detach protocol**: `PaneSnapshot` (grid content + cursor + scrollback + dimensions) is the *planned* attach payload — see the type at `session.rs:65-81`. Today it is **not yet wired through `try_attach_existing_session`**: attached panes get a fresh empty local `Term` and rely on live `DaemonEvent::PaneOutput` going forward. Wiring snapshot replay through the reader_loop interceptor pipeline is tracked as tn-zamd (mouse-mode loss in TUIs on reattach is the canary). Until then, mode flags / cursor / scrollback set before attach are NOT visible to a freshly-attached client.
 
 **Session CRUD via IPC**: `CreateSession` spawns a real PTY and returns the session ID. `ListSessions`, `GetSession`, `DestroySession` operate on the session map. Session count is synced to the `Lifecycle` for idle-exit tracking.
 

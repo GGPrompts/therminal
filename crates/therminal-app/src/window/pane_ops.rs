@@ -230,8 +230,14 @@ impl App {
     }
 
     /// Best-effort `SelectPane` to keep daemon focus metadata in sync with
-    /// the GUI's focused pane. Fire-and-forget: failures are logged at
-    /// debug level. Only runs in daemon mode.
+    /// the GUI's focused pane. Fire-and-forget: spawns the RPC on the tokio
+    /// runtime so the winit event loop never blocks on it. Only runs in
+    /// daemon mode.
+    ///
+    /// This is called from `set_focused_pane`, which fires on every
+    /// click-to-focus, every split, and every close. Doing a synchronous
+    /// `block_on` here would freeze the UI for up to `DAEMON_OP_TIMEOUT`
+    /// (5s) per click if the daemon stalls — see code-review B2.
     pub(crate) fn select_pane_remote(&self, local_id: PaneId) {
         if !self.is_daemon_mode() {
             return;
@@ -239,10 +245,29 @@ impl App {
         let Some(daemon_id) = self.pane_id_map.daemon_for_local(local_id) else {
             return;
         };
-        match self.daemon_rpc_blocking(IpcRequest::SelectPane { pane_id: daemon_id }) {
-            Ok(_) => {}
-            Err(e) => debug!(error = %e, local_id, daemon_id, "select_pane_remote failed"),
-        }
+        let Some(client) = self.daemon_client.as_ref() else {
+            return;
+        };
+        let Some(handle) = self.daemon_runtime.as_ref() else {
+            return;
+        };
+        let client = Arc::clone(client);
+        // 2s is generous for an advisory metadata sync; if the daemon can't
+        // ack focus in 2s, the next click will retry anyway.
+        handle.spawn(async move {
+            let res = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.send_request(IpcRequest::SelectPane { pane_id: daemon_id }),
+            )
+            .await;
+            match res {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    debug!(error = %e, local_id, daemon_id, "select_pane_remote failed")
+                }
+                Err(_) => debug!(local_id, daemon_id, "select_pane_remote timed out"),
+            }
+        });
     }
 }
 
@@ -724,6 +749,20 @@ impl App {
     ///
     /// Includes a 100ms cooldown to prevent double-close from keyboard repeat.
     pub(crate) fn close_pane_by_id(&mut self, target_id: PaneId) {
+        // Code-review B4: capture the daemon id and drop the local↔daemon
+        // PaneId mapping BEFORE the debounce guard. Two daemon panes
+        // exiting <100ms apart used to leave the second as a zombie in the
+        // map; the next publish_workspace_state would then publish a stale
+        // daemon id and the next attach would hang trying to
+        // build_remote_pane_state for it. The map cleanup is idempotent
+        // and cheap — there is no reason to gate it on the debounce.
+        let daemon_id_for_kill = if self.is_daemon_mode() {
+            self.pane_id_map.daemon_for_local(target_id)
+        } else {
+            None
+        };
+        self.pane_id_map.remove_by_local(target_id);
+
         if let Some(last) = self.last_close_action
             && last.elapsed() < std::time::Duration::from_millis(100)
         {
@@ -736,14 +775,9 @@ impl App {
         // user-initiated closes tear down the remote child. Errors are
         // tolerated because `close_pane_by_id` is also called from the
         // `PaneExited` event path where the remote child is already gone.
-        if self.is_daemon_mode()
-            && let Some(daemon_id) = self.pane_id_map.daemon_for_local(target_id)
-        {
+        if let Some(daemon_id) = daemon_id_for_kill {
             let _ = self.daemon_rpc_blocking(IpcRequest::KillPane { pane_id: daemon_id });
         }
-        // tn-pgz6: drop any local↔daemon PaneId mapping for this pane.
-        // No-op for local-mode panes (never inserted).
-        self.pane_id_map.remove_by_local(target_id);
 
         // If zoomed, restore the full layout so tree removal works correctly.
         if self.zoomed_layout.is_some() {
