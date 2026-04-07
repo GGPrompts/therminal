@@ -61,7 +61,21 @@ enum UserEvent {
     /// A BEL character was received from a pane.
     Bell(crate::pane::PaneId),
     /// A desktop notification was requested (OSC 9 or agent event).
-    DesktopNotification { title: String, body: String },
+    DesktopNotification {
+        title: String,
+        body: String,
+        source: NotificationSource,
+    },
+}
+
+/// Origin of a desktop notification request, used to apply per-source
+/// config gating (`[notifications]` section).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationSource {
+    /// Triggered by an OSC 9 escape sequence from a pane.
+    Osc9,
+    /// Triggered by an agent state change (e.g. `AwaitingInput`).
+    Agent,
 }
 
 // ── GPU state ────────────────────────────────────────────────────────────
@@ -266,6 +280,7 @@ impl App {
                                 let _ = proxy.send_event(UserEvent::DesktopNotification {
                                     title: "Agent waiting".to_string(),
                                     body: format!("Agent in pane {pane_id} is awaiting input"),
+                                    source: NotificationSource::Agent,
                                 });
                             }
                         }
@@ -478,6 +493,7 @@ impl App {
                         let _ = p4.send_event(UserEvent::DesktopNotification {
                             title: "Therminal".to_string(),
                             body: text,
+                            source: NotificationSource::Osc9,
                         });
                     }),
                 }
@@ -1639,8 +1655,20 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Bell(pane_id) => {
                 self.handle_bell(pane_id);
             }
-            UserEvent::DesktopNotification { title, body } => {
-                self.send_desktop_notification(&title, &body);
+            UserEvent::DesktopNotification {
+                title,
+                body,
+                source,
+            } => {
+                // Gate OSC 9 notifications on `[notifications] osc9_enabled`.
+                // The `terminal.osc_9` toggle only controls whether the
+                // sequence is parsed; this field controls whether parsed
+                // events trigger a desktop notification.
+                if source == NotificationSource::Osc9 && !self.config.notifications.osc9_enabled {
+                    debug!("OSC 9 notification suppressed by config");
+                } else {
+                    self.send_desktop_notification(&title, &body);
+                }
             }
         }
     }

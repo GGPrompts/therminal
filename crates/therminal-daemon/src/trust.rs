@@ -227,6 +227,20 @@ pub fn check_tool_access(
         return TrustCheckResult::Denied(reason);
     }
 
+    // Per-agent tool allowlist: if set on the agent's config entry, the
+    // tool name must appear in the list. `None` means "no restriction".
+    if let Some(agent_cfg) = config.agents.get(&agent.name)
+        && let Some(allowed) = &agent_cfg.allowed_tools
+        && !allowed.iter().any(|t| t == tool_name)
+    {
+        let reason = format!(
+            "tool not in agent allowlist: agent {:?} attempted {:?}",
+            agent.name, tool_name,
+        );
+        audit_log_denied(agent, tool_name, &reason);
+        return TrustCheckResult::Denied(reason);
+    }
+
     // Rate-limit destructive operations.
     if category == ToolCategory::Admin
         && let Err(reason) = rate_limiter.check_and_record(&agent.name)
@@ -500,6 +514,79 @@ mod tests {
         assert!(matches!(
             check_resource_access("terminal://pane/1/content", &agent, &config),
             TrustCheckResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn allowlist_none_imposes_no_restriction() {
+        let mut config = TrustConfig {
+            default_tier: TrustTier::Trusted,
+            ..TrustConfig::default()
+        };
+        config.agents.insert(
+            "claude".to_string(),
+            AgentTrust {
+                tier: TrustTier::Trusted,
+                allowed_tools: None,
+            },
+        );
+        let agent = AgentIdentity {
+            name: "claude".to_string(),
+        };
+        let limiter = RateLimiter::new(5);
+        assert!(matches!(
+            check_tool_access("terminal.sessions.list", &agent, &config, &limiter),
+            TrustCheckResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn allowlist_empty_denies_all() {
+        let mut config = TrustConfig {
+            default_tier: TrustTier::Trusted,
+            ..TrustConfig::default()
+        };
+        config.agents.insert(
+            "claude".to_string(),
+            AgentTrust {
+                tier: TrustTier::Trusted,
+                allowed_tools: Some(vec![]),
+            },
+        );
+        let agent = AgentIdentity {
+            name: "claude".to_string(),
+        };
+        let limiter = RateLimiter::new(5);
+        assert!(matches!(
+            check_tool_access("terminal.sessions.list", &agent, &config, &limiter),
+            TrustCheckResult::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn allowlist_specific_tool_allows_listed_denies_others() {
+        let mut config = TrustConfig {
+            default_tier: TrustTier::Trusted,
+            ..TrustConfig::default()
+        };
+        config.agents.insert(
+            "claude".to_string(),
+            AgentTrust {
+                tier: TrustTier::Trusted,
+                allowed_tools: Some(vec!["terminal.sessions.list".to_string()]),
+            },
+        );
+        let agent = AgentIdentity {
+            name: "claude".to_string(),
+        };
+        let limiter = RateLimiter::new(5);
+        assert!(matches!(
+            check_tool_access("terminal.sessions.list", &agent, &config, &limiter),
+            TrustCheckResult::Allowed
+        ));
+        assert!(matches!(
+            check_tool_access("terminal.panes.list", &agent, &config, &limiter),
+            TrustCheckResult::Denied(_)
         ));
     }
 

@@ -11,9 +11,10 @@
 //! [`ClaudeJsonlRegistry`]: crate::claude_jsonl_tailer::ClaudeJsonlRegistry
 //! [`TaggedAgentEvent`]: crate::claude_jsonl_tailer::TaggedAgentEvent
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use tracing::{debug, warn};
 
 use crate::claude_jsonl_tailer::{ClaudeJsonlRegistry, TaggedAgentEvent};
@@ -33,7 +34,7 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// Returns `None` if the poller cannot be constructed (e.g. notify watcher
 /// init failure on a stripped-down container) — the daemon should log and
 /// continue running without the pipeline rather than aborting startup.
-pub fn spawn() -> Option<broadcast::Sender<TaggedAgentEvent>> {
+pub fn spawn(shutdown: Arc<Notify>) -> Option<broadcast::Sender<TaggedAgentEvent>> {
     let poller = match ClaudeStatePoller::new() {
         Ok(p) => p,
         Err(e) => {
@@ -45,6 +46,7 @@ pub fn spawn() -> Option<broadcast::Sender<TaggedAgentEvent>> {
         poller,
         ClaudeJsonlRegistry::new(),
         DEFAULT_POLL_INTERVAL,
+        shutdown,
     ))
 }
 
@@ -55,6 +57,7 @@ pub fn spawn_with(
     mut poller: ClaudeStatePoller,
     mut registry: ClaudeJsonlRegistry,
     interval: Duration,
+    shutdown: Arc<Notify>,
 ) -> broadcast::Sender<TaggedAgentEvent> {
     let updates_rx = poller
         .updates()
@@ -66,34 +69,42 @@ pub fn spawn_with(
     let (tx, _rx) = broadcast::channel::<TaggedAgentEvent>(BROADCAST_CAPACITY);
     let tx_for_task = tx.clone();
 
-    // TODO(code-review): no cancellation handle — task runs until process exit
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {
+                    // 1. Drive the file watcher: drain notify events + emit updates.
+                    let _snapshot = poller.poll();
 
-            // 1. Drive the file watcher: drain notify events + emit updates.
-            let _snapshot = poller.poll();
+                    // 2. Forward those updates into the registry, installing/dropping
+                    //    JSONL tailers as Claude sessions come and go.
+                    while let Ok(update) = updates_rx.try_recv() {
+                        registry.apply_update(&update, None);
+                    }
 
-            // 2. Forward those updates into the registry, installing/dropping
-            //    JSONL tailers as Claude sessions come and go.
-            while let Ok(update) = updates_rx.try_recv() {
-                registry.apply_update(&update, None);
-            }
+                    // 3. Tick every tailer once (top-level + subagent).
+                    registry.poll_all();
 
-            // 3. Tick every tailer once (top-level + subagent).
-            registry.poll_all();
-
-            // 4. Drain the registry's mpsc and re-broadcast to fan-out subscribers.
-            while let Ok(event) = events_rx.try_recv() {
-                if tx_for_task.send(event).is_err() {
-                    // No active subscribers — that's fine, events are dropped
-                    // until someone subscribes.
-                    debug!("claude_pipeline: no subscribers, dropping event");
+                    // 4. Drain the registry's mpsc and re-broadcast to fan-out subscribers.
+                    while let Ok(event) = events_rx.try_recv() {
+                        if tx_for_task.send(event).is_err() {
+                            // No active subscribers — that's fine, events are dropped
+                            // until someone subscribes.
+                            debug!("claude_pipeline: no subscribers, dropping event");
+                        }
+                    }
+                }
+                _ = shutdown.notified() => {
+                    debug!("claude_pipeline: shutdown signaled, exiting tick loop");
+                    break;
                 }
             }
         }
+        // Drop the broadcast sender explicitly so subscribers observe Closed
+        // promptly on daemon shutdown.
+        drop(tx_for_task);
     });
 
     tx
@@ -124,7 +135,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let poller = ClaudeStatePoller::with_dirs(vec![dir.path().to_path_buf()]).unwrap();
         let registry = ClaudeJsonlRegistry::new();
-        let tx = spawn_with(poller, registry, Duration::from_millis(20));
+        let tx = spawn_with(
+            poller,
+            registry,
+            Duration::from_millis(20),
+            Arc::new(Notify::new()),
+        );
 
         let mut sub = tx.subscribe();
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -146,7 +162,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let poller = ClaudeStatePoller::with_dirs(vec![dir.path().to_path_buf()]).unwrap();
         let registry = ClaudeJsonlRegistry::new();
-        let tx = spawn_with(poller, registry, Duration::from_millis(20));
+        let tx = spawn_with(
+            poller,
+            registry,
+            Duration::from_millis(20),
+            Arc::new(Notify::new()),
+        );
 
         let mut sub_a = tx.subscribe();
         let mut sub_b = tx.subscribe();

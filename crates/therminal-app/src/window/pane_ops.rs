@@ -15,7 +15,7 @@ use crate::pane::{
 use therminal_core::geometry::Rect;
 use therminal_terminal::interceptor::InterceptorConfig;
 
-use super::{App, EventLoopProxy, UserEvent};
+use super::{App, EventLoopProxy, NotificationSource, UserEvent};
 
 /// Build `PaneCallbacks` from an event-loop proxy.
 fn make_pane_callbacks(proxy: &EventLoopProxy<UserEvent>, pane_id: PaneId) -> PaneCallbacks {
@@ -37,6 +37,7 @@ fn make_pane_callbacks(proxy: &EventLoopProxy<UserEvent>, pane_id: PaneId) -> Pa
             let _ = p4.send_event(UserEvent::DesktopNotification {
                 title: "Therminal".to_string(),
                 body: text,
+                source: NotificationSource::Osc9,
             });
         }),
     }
@@ -651,7 +652,6 @@ impl App {
         }
     }
 
-    // TODO(code-review): validate path for $EDITOR spawn (consider whitelist / shell-escape)
     /// Open a file path in the user's `$EDITOR` or via `xdg-open` / `open`.
     ///
     /// The path may include `:line` or `:line:col` suffixes. If `$EDITOR` supports
@@ -669,6 +669,20 @@ impl App {
             }
             _ => (path_with_loc, "1"),
         };
+
+        // Validate hotspot is a real file before spawning editor — hotspot paths
+        // come from terminal screen content and may be attacker-controlled.
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => {
+                tracing::warn!("open_in_editor: {path} is not a regular file, skipping");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("open_in_editor: cannot stat {path}: {e}, skipping");
+                return;
+            }
+        }
 
         if let Ok(editor) = std::env::var("EDITOR") {
             // Many editors support +line syntax.

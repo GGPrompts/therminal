@@ -24,22 +24,44 @@ fn is_wsl2() -> bool {
     std::env::var_os("WSL_DISTRO_NAME").is_some()
 }
 
+/// Eagerly initialize the clipboard.
+///
+/// **Must be called from `main()` before any other threads are spawned**
+/// (before winit `EventLoop`, wgpu `Instance`, or tokio runtime creation).
+/// On WSL2 this temporarily unsets `WAYLAND_DISPLAY` while arboard probes
+/// backends so it picks X11 instead of the broken WSLg `wlr-data-control`
+/// path, then restores it. Because this runs single-threaded at startup,
+/// the env mutation is sound — no other thread can observe the gap.
+///
+/// Safe to call multiple times; subsequent calls are no-ops.
+pub fn init() {
+    let _ = get_clipboard();
+}
+
 /// Get or create the cached clipboard instance.
 ///
-/// On WSL2, temporarily unsets `WAYLAND_DISPLAY` so arboard initializes
-/// with the X11 backend directly (WSLg's Wayland compositor doesn't
-/// support `wlr-data-control`, but its XWayland server works fine).
+/// Prefer calling [`init`] from `main()` so this runs before threads exist.
+/// If it's first triggered lazily from the event loop on WSL2 the X11
+/// backend selection still works (arboard re-reads env on each `new()`),
+/// but the env mutation would then race other threads — which is why
+/// [`init`] exists.
 fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
     CLIPBOARD
         .get_or_init(|| {
             // On WSL2, force X11 backend by hiding WAYLAND_DISPLAY during init.
+            // WSLg ships a Wayland compositor that doesn't implement
+            // `wlr-data-control`, which arboard's Wayland backend requires;
+            // XWayland works fine, so we prefer it.
             let wayland_display = if is_wsl2() {
                 let val = std::env::var_os("WAYLAND_DISPLAY");
                 if val.is_some() {
                     debug!("WSL2 detected: forcing X11 clipboard backend");
-                    // SAFETY: This runs during static init (OnceLock), before any
-                    // other threads access WAYLAND_DISPLAY.
-                    // TODO(code-review): unsafe env mutation relies on single-threaded init assumption
+                    // SAFETY: `clipboard::init()` is called from `main()` before
+                    // any winit/wgpu/tokio threads are spawned, so no other
+                    // thread can observe this env mutation. If `get_clipboard`
+                    // is instead first hit lazily, the OnceLock still
+                    // serializes this block — but the ordering invariant
+                    // above is what makes the env write sound.
                     unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
                 }
                 val
@@ -51,8 +73,8 @@ fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
 
             // Restore WAYLAND_DISPLAY so other code (wgpu, winit) still sees it.
             if let Some(val) = wayland_display {
-                // SAFETY: Restoring the value we just removed; still in the same
-                // single-threaded init path.
+                // SAFETY: Same single-threaded-at-startup invariant as above;
+                // this merely restores the value we just removed.
                 unsafe { std::env::set_var("WAYLAND_DISPLAY", val) };
             }
 

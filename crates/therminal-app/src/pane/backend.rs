@@ -136,16 +136,6 @@ impl PaneBackendKind {
         }
     }
 
-    /// Returns a mutable reference to the PTY writer if this is a Terminal backend.
-    // TODO(code-review): unused — verify zero refs workspace-wide and remove
-    #[allow(dead_code)]
-    pub fn pty_writer_mut(&mut self) -> Option<&mut Box<dyn IoWrite + Send>> {
-        match self {
-            PaneBackendKind::Terminal { pty_writer, .. } => Some(pty_writer),
-            _ => None,
-        }
-    }
-
     /// Resize the backend to match new grid dimensions, with access to renderer
     /// metrics for the terminal case.
     pub fn resize_to_viewport(

@@ -232,7 +232,7 @@ async fn start_daemon(
     // broadcast). Returns None if the OS file watcher cannot be created, in
     // which case the MCP `therminal://claude/events` resource will simply
     // produce zero events.
-    let claude_events_tx = crate::claude_pipeline::spawn();
+    let claude_events_tx = crate::claude_pipeline::spawn(lifecycle.shutdown_notify());
 
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());

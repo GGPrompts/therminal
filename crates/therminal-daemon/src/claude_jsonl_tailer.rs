@@ -182,19 +182,30 @@ impl SessionJsonlTailer {
             return;
         }
 
-        let reader = BufReader::new(&file);
+        let mut reader = BufReader::new(&mut file);
         let mut events_sent = 0u32;
-        let mut bytes_consumed: u64 = 0;
+        let mut last_complete_offset: u64 = self.read_offset;
+        let mut bytes_read_so_far: u64 = 0;
+        let mut line_buf = String::new();
 
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
+        loop {
+            line_buf.clear();
+            let n = match reader.read_line(&mut line_buf) {
+                Ok(0) => break,
+                Ok(n) => n,
                 Err(_) => break,
             };
-            // TODO(code-review): assumes LF line endings; CRLF will under-count by 1 per line
-            bytes_consumed += line.len() as u64 + 1;
+            bytes_read_so_far += n as u64;
 
-            let trimmed = line.trim();
+            // Only treat a line as consumed if it ended with a newline.
+            // A partial tail (no trailing '\n') must be retried next poll.
+            let ends_with_newline = line_buf.ends_with('\n');
+            if !ends_with_newline {
+                break;
+            }
+            last_complete_offset = self.read_offset + bytes_read_so_far;
+
+            let trimmed = line_buf.trim();
             if trimmed.is_empty() {
                 continue;
             }
@@ -218,7 +229,9 @@ impl SessionJsonlTailer {
 
         // Advance only by fully-consumed lines so partial lines at EOF
         // are retried on the next poll instead of being silently dropped.
-        self.read_offset += bytes_consumed;
+        // Using the actual byte count from `read_line` handles both LF and
+        // CRLF line endings correctly (read_line includes the terminator).
+        self.read_offset = last_complete_offset;
 
         if events_sent > 0 {
             trace!(events_sent, "JSONL tailer: sent agent events");
@@ -734,6 +747,46 @@ mod tests {
         );
         assert_eq!(event.source, tag);
 
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn tailer_handles_crlf_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crlf.jsonl");
+
+        {
+            let mut f = File::create(&path).unwrap();
+            let line1 =
+                b"{\"type\":\"user\",\"content\":\"a\",\"timestamp\":\"2026-04-02T00:00:00Z\"}\r\n";
+            let line2 =
+                b"{\"type\":\"user\",\"content\":\"b\",\"timestamp\":\"2026-04-02T00:00:01Z\"}\r\n";
+            f.write_all(line1).unwrap();
+            f.write_all(line2).unwrap();
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut tailer = SessionJsonlTailer::new();
+        tailer.current_session_id = Some("test".into());
+        tailer.read_offset = 0;
+        tailer.current_path = Some(path.clone());
+
+        let tag = EventSource::TopLevel {
+            session_id: "test".into(),
+        };
+        tailer.read_new_lines(&path, &tx, &tag);
+
+        let _ = rx.try_recv().unwrap();
+        let _ = rx.try_recv().unwrap();
+        assert!(rx.try_recv().is_err());
+
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(
+            tailer.read_offset, file_len,
+            "CRLF offset must equal full file length"
+        );
+
+        tailer.read_new_lines(&path, &tx, &tag);
         assert!(rx.try_recv().is_err());
     }
 

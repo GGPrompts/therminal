@@ -48,6 +48,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // Initialize clipboard before any threads exist. On WSL2 this performs
+    // a transient WAYLAND_DISPLAY env mutation to force arboard onto the
+    // X11 backend; it is only sound while we are still single-threaded.
+    clipboard::init();
+
     let cli = Cli::parse();
 
     if cli.print_config {

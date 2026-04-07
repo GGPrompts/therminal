@@ -534,8 +534,10 @@ impl Default for TrustConfig {
 pub struct AgentTrust {
     /// Trust tier for this agent.
     pub tier: TrustTier,
-    /// Optional list of allowed MCP tool patterns.
-    // TODO(code-review): unwired config field — either wire or remove
+    /// Optional per-agent MCP tool allowlist. When `Some`, the tool name
+    /// must match one of the entries exactly (in addition to passing the
+    /// tier check). `None` means no per-tool restriction. Enforced in
+    /// `therminal-daemon/src/trust.rs::check_tool_access`.
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -624,8 +626,11 @@ pub struct NotificationConfig {
     /// Send a desktop notification when an agent transitions to
     /// `AwaitingInput` (i.e. the agent is waiting for the user).
     pub agent_waiting: bool,
-    /// Send desktop notifications for OSC 9 sequences.
-    // TODO(code-review): unwired config field — either wire or remove
+    /// Send desktop notifications for OSC 9 sequences. When `false`,
+    /// OSC 9 events are still parsed (subject to `terminal.osc_9`) but
+    /// do not trigger a desktop notification. Enforced in
+    /// `therminal-app/src/window/mod.rs` in the `UserEvent::DesktopNotification`
+    /// handler.
     pub osc9_enabled: bool,
 }
 
