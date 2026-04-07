@@ -19,6 +19,38 @@ use therminal_terminal::input::{self, MouseButton as InputMouseButton};
 use super::App;
 use super::chrome::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 
+// ── Window edge resize ─────────────────────────────────────────────────
+
+/// One of eight outer-edge resize regions for a CSD borderless window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResizeEdge {
+    N,
+    S,
+    E,
+    W,
+    NE,
+    NW,
+    SE,
+    SW,
+}
+
+impl ResizeEdge {
+    /// Convert to the matching winit `ResizeDirection` for `drag_resize_window`.
+    pub(crate) fn to_resize_direction(self) -> winit::window::ResizeDirection {
+        use winit::window::ResizeDirection;
+        match self {
+            ResizeEdge::N => ResizeDirection::North,
+            ResizeEdge::S => ResizeDirection::South,
+            ResizeEdge::E => ResizeDirection::East,
+            ResizeEdge::W => ResizeDirection::West,
+            ResizeEdge::NE => ResizeDirection::NorthEast,
+            ResizeEdge::NW => ResizeDirection::NorthWest,
+            ResizeEdge::SE => ResizeDirection::SouthEast,
+            ResizeEdge::SW => ResizeDirection::SouthWest,
+        }
+    }
+}
+
 // ── Header button actions ──────────────────────────────────────────────
 
 /// Action resulting from a click in a pane header.
@@ -381,6 +413,19 @@ impl App {
         // ── Separator hover detection (cursor icon) ──────────────────────
         if !self.mouse_left_held {
             self.update_separator_hover(px as f32, py as f32);
+            // ── Window edge resize hover (CSD borderless windows) ────────
+            // Runs as a fallback when no separator claims the point. Higher
+            // precedence UI elements (tab bar, status bar, etc.) sit inside
+            // the edge tolerance band only at the very top/bottom of the
+            // window — those clicks are still routed to their owners by the
+            // mouse-press dispatcher; the cursor affordance here is harmless.
+            if !self.separator_cursor_active && self.config.general.use_csd {
+                self.update_edge_hover(px as f32, py as f32);
+            } else if self.edge_cursor_active && self.separator_cursor_active {
+                // Separator took over; clear edge state without restamping
+                // the cursor (separator already set its own icon).
+                self.edge_cursor_active = false;
+            }
         }
 
         if self.mouse_left_held {
@@ -665,6 +710,9 @@ impl App {
     /// Hit-tolerance in pixels for separator detection.
     const SEPARATOR_HIT_TOLERANCE: f32 = 4.0;
 
+    /// Hit-tolerance in pixels for window edge resize detection (CSD only).
+    pub(crate) const EDGE_RESIZE_TOLERANCE: f32 = 6.0;
+
     /// Compute the layout area rect (window minus status bar and tab bar).
     fn layout_area_rect(&self) -> Option<therminal_core::geometry::Rect> {
         let gpu = self.gpu.as_ref()?;
@@ -801,6 +849,115 @@ impl App {
         }
     }
 
+    // ── Window edge resize (CSD borderless windows) ───────────────────
+
+    /// Geometry-only edge hit-test. Returns the edge if `(px, py)` lies within
+    /// `tolerance` pixels of an outer edge of a `width x height` surface.
+    /// Corner regions (a `tolerance x tolerance` square at each corner) take
+    /// precedence over straight edges.
+    pub(crate) fn edge_hit_test_geom(
+        px: f32,
+        py: f32,
+        width: f32,
+        height: f32,
+        tolerance: f32,
+    ) -> Option<ResizeEdge> {
+        if px < 0.0 || py < 0.0 || px >= width || py >= height {
+            return None;
+        }
+        let near_left = px < tolerance;
+        let near_right = px >= width - tolerance;
+        let near_top = py < tolerance;
+        let near_bottom = py >= height - tolerance;
+
+        match (near_top, near_bottom, near_left, near_right) {
+            (true, _, true, _) => Some(ResizeEdge::NW),
+            (true, _, _, true) => Some(ResizeEdge::NE),
+            (_, true, true, _) => Some(ResizeEdge::SW),
+            (_, true, _, true) => Some(ResizeEdge::SE),
+            (true, _, _, _) => Some(ResizeEdge::N),
+            (_, true, _, _) => Some(ResizeEdge::S),
+            (_, _, true, _) => Some(ResizeEdge::W),
+            (_, _, _, true) => Some(ResizeEdge::E),
+            _ => None,
+        }
+    }
+
+    /// Edge hit-test for the live window. Returns `None` when CSD is disabled
+    /// (the OS provides native resize edges in that case) or when the GPU
+    /// surface is unavailable.
+    pub(crate) fn edge_resize_hit(&self, px: f32, py: f32) -> Option<ResizeEdge> {
+        if !self.config.general.use_csd {
+            return None;
+        }
+        let gpu = self.gpu.as_ref()?;
+        Self::edge_hit_test_geom(
+            px,
+            py,
+            gpu.config.width as f32,
+            gpu.config.height as f32,
+            Self::EDGE_RESIZE_TOLERANCE,
+        )
+    }
+
+    /// Update the cursor icon for window edge resize hover. Mirrors the
+    /// `separator_cursor_active` pattern so the two systems don't stomp each
+    /// other. Should only be called when no higher-precedence hover target
+    /// (separator, hyperlink, etc.) is active.
+    pub(crate) fn update_edge_hover(&mut self, px: f32, py: f32) {
+        use winit::window::CursorIcon;
+
+        let hit = self.edge_resize_hit(px, py);
+        match hit {
+            Some(edge) => {
+                let icon = match edge {
+                    ResizeEdge::N => CursorIcon::NResize,
+                    ResizeEdge::S => CursorIcon::SResize,
+                    ResizeEdge::E => CursorIcon::EResize,
+                    ResizeEdge::W => CursorIcon::WResize,
+                    ResizeEdge::NE => CursorIcon::NeResize,
+                    ResizeEdge::NW => CursorIcon::NwResize,
+                    ResizeEdge::SE => CursorIcon::SeResize,
+                    ResizeEdge::SW => CursorIcon::SwResize,
+                };
+                if !self.edge_cursor_active {
+                    self.edge_cursor_active = true;
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.set_cursor(icon);
+                }
+            }
+            None => {
+                if self.edge_cursor_active {
+                    self.edge_cursor_active = false;
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_cursor(CursorIcon::Default);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Try to start a compositor-driven window edge drag-resize at `(px, py)`.
+    /// Returns `true` if winit accepted the request and the compositor took
+    /// over. Caller should early-return on `true`.
+    pub(crate) fn try_start_edge_resize(&mut self, px: f32, py: f32) -> bool {
+        let edge = match self.edge_resize_hit(px, py) {
+            Some(e) => e,
+            None => return false,
+        };
+        let direction = edge.to_resize_direction();
+        if let Some(w) = self.window.as_ref() {
+            if let Err(e) = w.drag_resize_window(direction) {
+                tracing::warn!("drag_resize_window failed: {e}");
+                return false;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Handle double-click on separator: reset to 50/50.
     pub(crate) fn try_separator_double_click(&mut self, px: f32, py: f32) -> bool {
         if let Some((path, _, _)) = self.separator_hit(px, py) {
@@ -812,5 +969,100 @@ impl App {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_resize_tests {
+    use super::*;
+
+    const TOL: f32 = App::EDGE_RESIZE_TOLERANCE;
+    const W: f32 = 800.0;
+    const H: f32 = 600.0;
+
+    fn hit(px: f32, py: f32) -> Option<ResizeEdge> {
+        App::edge_hit_test_geom(px, py, W, H, TOL)
+    }
+
+    #[test]
+    fn corner_nw() {
+        assert_eq!(hit(2.0, 2.0), Some(ResizeEdge::NW));
+        assert_eq!(hit(0.0, 0.0), Some(ResizeEdge::NW));
+    }
+
+    #[test]
+    fn corner_se() {
+        assert_eq!(hit(798.0, 598.0), Some(ResizeEdge::SE));
+        assert_eq!(hit(W - 1.0, H - 1.0), Some(ResizeEdge::SE));
+    }
+
+    #[test]
+    fn corner_ne() {
+        assert_eq!(hit(W - 1.0, 1.0), Some(ResizeEdge::NE));
+    }
+
+    #[test]
+    fn corner_sw() {
+        assert_eq!(hit(1.0, H - 1.0), Some(ResizeEdge::SW));
+    }
+
+    #[test]
+    fn edge_n() {
+        assert_eq!(hit(400.0, 2.0), Some(ResizeEdge::N));
+    }
+
+    #[test]
+    fn edge_s() {
+        assert_eq!(hit(400.0, H - 1.0), Some(ResizeEdge::S));
+    }
+
+    #[test]
+    fn edge_w() {
+        assert_eq!(hit(2.0, 300.0), Some(ResizeEdge::W));
+    }
+
+    #[test]
+    fn edge_e() {
+        assert_eq!(hit(W - 1.0, 300.0), Some(ResizeEdge::E));
+    }
+
+    #[test]
+    fn interior_none() {
+        assert_eq!(hit(400.0, 300.0), None);
+        assert_eq!(hit(TOL, TOL), None);
+        assert_eq!(hit(W - TOL - 1.0, H - TOL - 1.0), None);
+    }
+
+    #[test]
+    fn out_of_bounds_none() {
+        assert_eq!(hit(-1.0, 5.0), None);
+        assert_eq!(hit(5.0, -1.0), None);
+        assert_eq!(hit(W, 5.0), None);
+        assert_eq!(hit(5.0, H), None);
+    }
+
+    #[test]
+    fn edge_to_resize_direction_mapping() {
+        use winit::window::ResizeDirection;
+        assert_eq!(ResizeEdge::N.to_resize_direction(), ResizeDirection::North);
+        assert_eq!(ResizeEdge::S.to_resize_direction(), ResizeDirection::South);
+        assert_eq!(ResizeEdge::E.to_resize_direction(), ResizeDirection::East);
+        assert_eq!(ResizeEdge::W.to_resize_direction(), ResizeDirection::West);
+        assert_eq!(
+            ResizeEdge::NE.to_resize_direction(),
+            ResizeDirection::NorthEast
+        );
+        assert_eq!(
+            ResizeEdge::NW.to_resize_direction(),
+            ResizeDirection::NorthWest
+        );
+        assert_eq!(
+            ResizeEdge::SE.to_resize_direction(),
+            ResizeDirection::SouthEast
+        );
+        assert_eq!(
+            ResizeEdge::SW.to_resize_direction(),
+            ResizeDirection::SouthWest
+        );
     }
 }

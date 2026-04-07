@@ -148,6 +148,9 @@ pub struct App {
     /// Whether the cursor is currently showing a pointer icon (for hyperlink hover).
     hyperlink_cursor_active: bool,
 
+    /// Whether the cursor is currently showing a window edge resize icon (CSD only).
+    pub(crate) edge_cursor_active: bool,
+
     /// Timestamp of last separator click (for double-click detection).
     last_separator_click: Option<Instant>,
 
@@ -303,6 +306,7 @@ impl App {
             separator_drag: None,
             separator_cursor_active: false,
             hyperlink_cursor_active: false,
+            edge_cursor_active: false,
             last_separator_click: None,
             last_tab_bar_click: None,
             last_close_action: None,
@@ -1986,6 +1990,21 @@ impl ApplicationHandler<UserEvent> for App {
                             self.open_focused_agent_event_log_tail();
                         }
                     }
+                    return;
+                }
+
+                // ── Window edge resize (CSD borderless windows) ────────────
+                // Runs after tab bar / status bar / context menu handling so
+                // existing UI elements always win. Mouse-down on an outer
+                // window edge hands off to the compositor via winit's
+                // `drag_resize_window`.
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && self.config.general.use_csd
+                    && self.active_menu.is_none()
+                    && let Some((px, py)) = self.cursor_position
+                    && self.try_start_edge_resize(px as f32, py as f32)
+                {
                     return;
                 }
 
