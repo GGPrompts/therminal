@@ -66,7 +66,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (16 tools):
+Tools exposed (17 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -86,6 +86,7 @@ Tools exposed (16 tools):
 | `terminal.workspaces.list` | Observer | List workspace tabs with names, pane counts, active status |
 | `terminal.workspaces.get_layout` | Observer | Get binary layout tree + focused_pane for a workspace. Currently returns a degraded horizontal cascade until the real `LayoutNode` tree is plumbed into the daemon (tn-vs0u). |
 | `terminal.agents.list` | Observer | List detected AI agents with type, status, pane location |
+| `terminal.agents.get_details` | Observer | Get inference details for a pane's agent: `agent_type`, `model`, `context_percent`, `consecutive_failures`, `last_command`, `last_exit_code`, `last_command_duration_ms`. Currently a stub — only `agent_type` is populated (from `AgentRegistry`); the inference fields are `None` until `AgentStateInference` is plumbed into the daemon. |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 

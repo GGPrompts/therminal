@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "therminal": {
-      "command": "/home/marci/projects/therminal/target/release/therminal",
+      "command": "/mnt/c/Users/marci/Desktop/therminal.exe",
       "args": ["mcp"]
     }
   }

@@ -405,6 +405,42 @@ pub(super) struct ListAgentsResult {
     pub(super) agents: Vec<AgentInfoResult>,
 }
 
+/// Detailed inference data for the agent running in a specific pane.
+///
+/// All inference fields are optional because (a) the pane may not host an
+/// agent, and (b) the `AgentStateInference` engine is not yet plumbed into
+/// the daemon — see follow-up issue. The `agent_type` field is populated
+/// from `AgentRegistry` when an agent is currently registered on the pane.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct AgentDetailsResult {
+    /// Agent type (claude, codex, copilot, aider) if an agent is registered
+    /// on this pane. `None` if no agent is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) agent_type: Option<String>,
+    /// Model string detected from the pane (e.g. "claude-sonnet-4").
+    /// Currently always `None` until state inference is plumbed into the daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) model: Option<String>,
+    /// Context-window usage percentage (0.0 - 100.0).
+    /// Currently always `None` until state inference is plumbed into the daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) context_percent: Option<f32>,
+    /// Number of consecutive failed commands. Defaults to 0 when unknown.
+    pub(super) consecutive_failures: u32,
+    /// Most recent command string observed on the pane.
+    /// Currently always `None` until state inference is plumbed into the daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_command: Option<String>,
+    /// Exit code of the most recent command.
+    /// Currently always `None` until state inference is plumbed into the daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_exit_code: Option<i32>,
+    /// Duration in milliseconds of the most recent command.
+    /// Currently always `None` until state inference is plumbed into the daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_command_duration_ms: Option<u64>,
+}
+
 // Reserved for terminal.semantic.query_history (Phase 4).
 #[allow(dead_code)]
 #[derive(Debug, Serialize, JsonSchema)]
@@ -780,6 +816,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: ListAgentsParam = parse_args(args)?;
                 self.handle_list_agents(params).await
             }
+            "terminal.agents.get_details" => {
+                let params: PaneIdParam = parse_args(args)?;
+                self.handle_get_agent_details(params).await
+            }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -957,7 +997,7 @@ pub(crate) mod tests {
 
     // ── enforce_trust (Observer tools) ─────────────────────────────────
 
-    /// All 10 Observer tools must be accessible to a Sandboxed agent.
+    /// All Observer tools must be accessible to a Sandboxed agent.
     #[test]
     fn sandboxed_agent_can_call_all_observer_tools() {
         let server = make_server(sandboxed_config());
@@ -974,6 +1014,7 @@ pub(crate) mod tests {
             "terminal.workspaces.list",
             "terminal.workspaces.get_layout",
             "terminal.agents.list",
+            "terminal.agents.get_details",
         ];
         for tool in &observer_tools {
             assert!(
@@ -1065,15 +1106,15 @@ pub(crate) mod tests {
         }
     }
 
-    // ── enforce_trust (all 15 tools parameterized) ──────────────────────
+    // ── enforce_trust (all tools parameterized) ─────────────────────────
 
-    /// Exhaustive: every tool has a known category — Trusted can call all 15.
+    /// Exhaustive: every tool has a known category — Trusted can call all.
     #[test]
-    fn trusted_agent_can_call_all_15_tools() {
+    fn trusted_agent_can_call_all_tools() {
         let server = make_server(trusted_config());
         let agent = agent("trusted-bot");
         let all_tools = [
-            // Observer (10)
+            // Observer
             "terminal.sessions.list",
             "terminal.sessions.get",
             "terminal.panes.list",
@@ -1083,16 +1124,18 @@ pub(crate) mod tests {
             "terminal.semantic.query_history",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
+            "terminal.workspaces.get_layout",
             "terminal.agents.list",
-            // Writer (3)
+            "terminal.agents.get_details",
+            // Writer
             "terminal.sessions.create",
             "terminal.panes.write",
             "terminal.panes.create",
-            // Admin (2)
+            // Admin
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 15, "expected exactly 15 tools");
+        assert_eq!(all_tools.len(), 17, "expected exactly 17 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -1267,7 +1310,7 @@ pub(crate) mod tests {
     #[test]
     fn tool_definitions_returns_16_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 16, "expected exactly 16 tool definitions");
+        assert_eq!(tools.len(), 17, "expected exactly 17 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1293,6 +1336,7 @@ pub(crate) mod tests {
             "terminal.workspaces.list",
             "terminal.workspaces.get_layout",
             "terminal.agents.list",
+            "terminal.agents.get_details",
         ];
         for name in &expected {
             assert!(names.contains(name), "missing tool definition: {name}");
@@ -1443,6 +1487,60 @@ pub(crate) mod tests {
         let v = serde_json::to_value(&info).expect("serialize");
         assert_eq!(v["last_exit_code"], 127);
         assert!(v.get("agent_name").is_none());
+    }
+
+    // ── terminal.agents.get_details ─────────────────────────────────────
+
+    /// Calling `handle_get_agent_details` on a nonexistent pane must return
+    /// a tool error (not a transport error). This matches the convention
+    /// used by `handle_get_pane_geometry` and `handle_read_pane_content`.
+    #[tokio::test]
+    async fn get_agent_details_nonexistent_pane_returns_tool_error() {
+        let server = make_server(trusted_config());
+        let params = super::PaneIdParam { pane_id: 999_999 };
+        let result = server
+            .handle_get_agent_details(params)
+            .await
+            .expect("handler should not error at transport level");
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    /// `AgentDetailsResult` with no agent data must serialise to a shape
+    /// where only `consecutive_failures` is present (all `Option` fields
+    /// are skipped when `None`).
+    #[test]
+    fn agent_details_all_none_serializes_minimally() {
+        let details = super::AgentDetailsResult {
+            agent_type: None,
+            model: None,
+            context_percent: None,
+            consecutive_failures: 0,
+            last_command: None,
+            last_exit_code: None,
+            last_command_duration_ms: None,
+        };
+        let v = serde_json::to_value(&details).expect("serialize");
+        assert_eq!(v["consecutive_failures"], 0);
+        assert!(v.get("agent_type").is_none());
+        assert!(v.get("model").is_none());
+        assert!(v.get("context_percent").is_none());
+        assert!(v.get("last_command").is_none());
+        assert!(v.get("last_exit_code").is_none());
+        assert!(v.get("last_command_duration_ms").is_none());
+    }
+
+    /// Observer-tier enforcement for `terminal.agents.get_details`: a
+    /// Sandboxed agent must be allowed, matching the rest of the
+    /// `terminal.agents.*` surface.
+    #[test]
+    fn sandboxed_agent_can_call_get_agent_details() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.agents.get_details", &agent)
+                .is_ok()
+        );
     }
 
     /// With an empty session manager, the only resource should be claude/events.

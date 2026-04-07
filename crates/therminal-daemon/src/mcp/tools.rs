@@ -1,6 +1,6 @@
 //! MCP tool handler implementations and `tool_definitions()`.
 //!
-//! Each `handle_*` method implements one of the 15 tools advertised by the
+//! Each `handle_*` method implements one of the tools advertised by the
 //! Therminal MCP server. Trust enforcement and argument parsing happen in
 //! `mod.rs::call_tool`; these methods assume the call is already authorised.
 
@@ -10,11 +10,11 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use tracing::debug;
 
 use super::{
-    AgentInfoResult, CreateSessionParam, DestroyPaneResult, GetHotspotsParam, GetHotspotsResult,
-    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
-    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
-    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
-    PaneContentResult, PaneIdParam, PaneInfo, QuerySemanticHistoryParam,
+    AgentDetailsResult, AgentInfoResult, CreateSessionParam, DestroyPaneResult, GetHotspotsParam,
+    GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam,
+    GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult,
+    ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
+    MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, QuerySemanticHistoryParam,
     QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
     SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
     TherminalMcpServer, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult,
@@ -356,6 +356,45 @@ impl TherminalMcpServer {
             .collect();
 
         let result = ListAgentsResult { agents };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return detailed inference data for the agent running in a pane.
+    ///
+    /// The pane must exist. `agent_type` is populated from `AgentRegistry`
+    /// when an agent is currently registered on the pane; all other
+    /// inference fields (model, context_percent, last_command, etc.) are
+    /// currently always `None` because `AgentStateInference` is not yet
+    /// plumbed into the daemon — tracked as a follow-up issue.
+    pub(super) async fn handle_get_agent_details(
+        &self,
+        params: PaneIdParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        // Verify the pane exists — return a tool error if not, matching the
+        // convention of get_pane_geometry / read_pane_content.
+        if find_pane_info(&mgr, params.pane_id).is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "pane not found: {}",
+                params.pane_id
+            ))]));
+        }
+
+        let agent_type = mgr
+            .agent_registry()
+            .get(params.pane_id)
+            .map(|e| e.agent_type.as_str().to_string());
+
+        let result = AgentDetailsResult {
+            agent_type,
+            model: None,
+            context_percent: None,
+            consecutive_failures: 0,
+            last_command: None,
+            last_exit_code: None,
+            last_command_duration_ms: None,
+        };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -838,6 +877,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.agents.list",
             "List all detected AI agents across terminal panes with their type, status, and pane location. Optionally filter by status.",
             schema_for_type::<ListAgentsParam>(),
+        ),
+        Tool::new(
+            "terminal.agents.get_details",
+            "Get detailed inference data for the agent running in a pane: agent_type, model, context_percent, consecutive_failures, last_command, last_exit_code, last_command_duration_ms. All inference fields except consecutive_failures are currently None — the underlying state inference engine is not yet plumbed into the daemon (stub returning agent_type from AgentRegistry).",
+            schema_for_type::<PaneIdParam>(),
         ),
     ]
 }
