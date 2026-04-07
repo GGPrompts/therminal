@@ -192,24 +192,11 @@ impl App {
                 (vec![1], 1)
             };
 
-            let tab_labels: Vec<String> = workspace_ids
-                .iter()
-                .map(|&ws_id| {
-                    self.workspaces
-                        .as_ref()
-                        .and_then(|wm| wm.focused_pane_status(ws_id))
-                        .and_then(|status| {
-                            status.cwd.as_ref().map(|cwd| {
-                                let basename = std::path::Path::new(cwd)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or(cwd);
-                                format!("{ws_id}: {basename}")
-                            })
-                        })
-                        .unwrap_or_else(|| format!("{ws_id}"))
-                })
-                .collect();
+            let tab_labels = super::build_tab_labels(
+                &workspace_ids,
+                self.workspaces.as_ref(),
+                self.rename_state.as_ref(),
+            );
 
             let tab_info = chrome::TabBarInfo {
                 workspace_ids,

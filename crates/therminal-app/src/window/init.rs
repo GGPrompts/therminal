@@ -167,6 +167,8 @@ impl App {
             last_split_direction: crate::pane::SplitDirection::Horizontal,
             show_help_overlay: false,
             active_menu: None,
+            tab_menu_workspace_id: None,
+            rename_state: None,
             separator_drag: None,
             separator_cursor_active: false,
             hyperlink_cursor_active: false,

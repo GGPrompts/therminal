@@ -155,6 +155,13 @@ pub struct App {
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,
 
+    /// Workspace id whose tab the user right-clicked to open the active tab
+    /// context menu. Used so menu actions like Rename know which tab to act on.
+    pub(crate) tab_menu_workspace_id: Option<usize>,
+
+    /// In-progress inline workspace rename, if any.
+    pub(crate) rename_state: Option<RenameState>,
+
     /// Active separator drag state (path to split node, direction, parent rect).
     separator_drag: Option<SeparatorDrag>,
 
@@ -207,6 +214,90 @@ pub struct App {
     /// on-screen overlay toast.
     #[allow(dead_code)]
     region_jump_toast: Option<(String, Instant)>,
+}
+
+/// Compute the display labels for the workspace tab bar.
+///
+/// Free function (not a method) so callers that already hold a mutable
+/// borrow on `App.grid_renderer` can still build labels without conflict.
+///
+/// Precedence per workspace:
+/// 1. Inline rename in progress: show buffer + trailing cursor.
+/// 2. Custom name set via rename: show `"<id>: <name>"`.
+/// 3. Focused pane has a known cwd: show `"<id>: <basename>"`.
+/// 4. Otherwise: just `"<id>"`.
+pub(crate) fn build_tab_labels(
+    workspace_ids: &[usize],
+    workspaces: Option<&WorkspaceManager>,
+    rename_state: Option<&RenameState>,
+) -> Vec<String> {
+    workspace_ids
+        .iter()
+        .map(|&ws_id| {
+            if let Some(state) = rename_state
+                && state.workspace_id == ws_id
+            {
+                return format!("{}: {}_", ws_id, state.buffer);
+            }
+            if let Some(name) = workspaces.and_then(|wm| wm.name_for(ws_id))
+                && name != ws_id.to_string()
+            {
+                return format!("{ws_id}: {name}");
+            }
+            if let Some(status) = workspaces.and_then(|wm| wm.focused_pane_status(ws_id))
+                && let Some(cwd) = status.cwd.as_ref()
+            {
+                let basename = std::path::Path::new(cwd)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(cwd);
+                return format!("{ws_id}: {basename}");
+            }
+            format!("{ws_id}")
+        })
+        .collect()
+}
+
+/// State for an in-progress inline workspace tab rename.
+#[derive(Debug, Clone)]
+pub(crate) struct RenameState {
+    /// Workspace ID being renamed.
+    pub workspace_id: usize,
+    /// Current edit buffer.
+    pub buffer: String,
+    /// Cursor position as a byte offset into `buffer` (always at a char boundary).
+    pub cursor: usize,
+}
+
+impl RenameState {
+    pub fn new(workspace_id: usize, initial: String) -> Self {
+        let cursor = initial.len();
+        Self {
+            workspace_id,
+            buffer: initial,
+            cursor,
+        }
+    }
+
+    /// Insert a character at the cursor and advance the cursor.
+    pub fn insert_char(&mut self, c: char) {
+        self.buffer.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Delete the character before the cursor (backspace).
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        // Find prev char boundary.
+        let mut idx = self.cursor - 1;
+        while idx > 0 && !self.buffer.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        self.buffer.replace_range(idx..self.cursor, "");
+        self.cursor = idx;
+    }
 }
 
 /// State for an in-progress separator drag.
@@ -645,4 +736,49 @@ pub fn run() -> Result<()> {
     event_loop.run_app(&mut app)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod rename_state_tests {
+    use super::RenameState;
+
+    #[test]
+    fn new_seeds_buffer_and_cursor_at_end() {
+        let s = RenameState::new(2, "build".to_string());
+        assert_eq!(s.workspace_id, 2);
+        assert_eq!(s.buffer, "build");
+        assert_eq!(s.cursor, 5);
+    }
+
+    #[test]
+    fn insert_char_appends_at_cursor() {
+        let mut s = RenameState::new(1, "ab".to_string());
+        s.insert_char('c');
+        assert_eq!(s.buffer, "abc");
+        assert_eq!(s.cursor, 3);
+    }
+
+    #[test]
+    fn backspace_removes_prev_char() {
+        let mut s = RenameState::new(1, "abc".to_string());
+        s.backspace();
+        assert_eq!(s.buffer, "ab");
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_at_start_is_noop() {
+        let mut s = RenameState::new(1, String::new());
+        s.backspace();
+        assert_eq!(s.buffer, "");
+        assert_eq!(s.cursor, 0);
+    }
+
+    #[test]
+    fn backspace_handles_multibyte() {
+        let mut s = RenameState::new(1, "aé".to_string());
+        s.backspace();
+        assert_eq!(s.buffer, "a");
+        assert_eq!(s.cursor, 1);
+    }
 }

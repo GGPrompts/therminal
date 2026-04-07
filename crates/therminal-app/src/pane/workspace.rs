@@ -355,7 +355,6 @@ impl WorkspaceManager {
     }
 
     /// Rename the workspace with the given id. Returns true if it existed.
-    #[allow(dead_code)]
     pub fn rename(&mut self, workspace_id: usize, name: String) -> bool {
         if let Some(idx) = self.workspace_index(workspace_id) {
             self.workspaces[idx].name = name;
@@ -366,7 +365,6 @@ impl WorkspaceManager {
     }
 
     /// Get the human-readable name of a workspace by id.
-    #[allow(dead_code)]
     pub fn name_for(&self, workspace_id: usize) -> Option<&str> {
         self.workspaces
             .iter()
@@ -893,5 +891,22 @@ mod tests {
         wm.rename_active("build".to_string());
         let info = wm.workspace_info();
         assert_eq!(info[0].name, "build");
+    }
+
+    #[test]
+    fn rename_by_id_existing() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        wm.switch_to(3, || Some((test_leaf(30, default_rect()), 30)));
+        assert!(wm.rename(1, "main".to_string()));
+        assert!(wm.rename(3, "test".to_string()));
+        assert_eq!(wm.name_for(1), Some("main"));
+        assert_eq!(wm.name_for(3), Some("test"));
+    }
+
+    #[test]
+    fn rename_by_id_missing_returns_false() {
+        let mut wm = WorkspaceManager::new(test_leaf(1, default_rect()), Some(1));
+        assert!(!wm.rename(7, "ghost".to_string()));
+        assert_eq!(wm.name_for(7), None);
     }
 }

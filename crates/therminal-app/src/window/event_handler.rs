@@ -101,8 +101,9 @@ impl App {
                 self.create_new_workspace();
             }
             KeyAction::RenameWorkspace => {
-                // Rename is a placeholder until inline rename UI is implemented.
-                info!("rename workspace: not yet implemented");
+                if let Some(ws_id) = self.workspaces.as_ref().map(|wm| wm.active_id()) {
+                    self.start_rename_workspace(ws_id);
+                }
             }
             KeyAction::JumpRegionPrev => {
                 self.jump_to_region(JumpDirection::Prev, false);
@@ -290,7 +291,13 @@ impl App {
             }
             KeyAction::NewWorkspace => self.create_new_workspace(),
             KeyAction::RenameWorkspace => {
-                info!("rename workspace: not yet implemented");
+                let ws_id = self
+                    .tab_menu_workspace_id
+                    .take()
+                    .or_else(|| self.workspaces.as_ref().map(|wm| wm.active_id()));
+                if let Some(ws_id) = ws_id {
+                    self.start_rename_workspace(ws_id);
+                }
             }
             _ => {
                 info!("menu action {:?} not handled", action);
@@ -416,6 +423,12 @@ impl App {
         state: ElementState,
         button: MouseButton,
     ) {
+        // Any mouse press while inline rename is active commits the rename
+        // (click-outside semantics). The click then proceeds normally.
+        if self.rename_state.is_some() && state == ElementState::Pressed {
+            self.commit_rename();
+        }
+
         // Dismiss help overlay on any mouse click.
         if self.show_help_overlay && state == ElementState::Pressed && button == MouseButton::Left {
             self.show_help_overlay = false;
@@ -490,30 +503,18 @@ impl App {
                     .as_ref()
                     .map(|wm| wm.workspace_ids())
                     .unwrap_or_default();
-                let tab_labels: Vec<String> = workspace_ids
-                    .iter()
-                    .map(|&ws_id| {
-                        self.workspaces
-                            .as_ref()
-                            .and_then(|wm| wm.focused_pane_status(ws_id))
-                            .and_then(|status| {
-                                status.cwd.as_ref().map(|cwd| {
-                                    let basename = std::path::Path::new(cwd)
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or(cwd);
-                                    format!("{ws_id}: {basename}")
-                                })
-                            })
-                            .unwrap_or_else(|| format!("{ws_id}"))
-                    })
-                    .collect();
+                let tab_labels = super::build_tab_labels(
+                    &workspace_ids,
+                    self.workspaces.as_ref(),
+                    self.rename_state.as_ref(),
+                );
                 if let Some(ws_id) =
                     chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels)
                 {
                     let bindings = &self.config.keybindings.bindings;
                     let menu = crate::menu::build_tab_menu(ws_id, bindings, (px as f32, py as f32));
                     self.active_menu = Some(menu);
+                    self.tab_menu_workspace_id = Some(ws_id);
                 }
             } else {
                 self.open_context_menu(px as f32, py as f32);
@@ -569,24 +570,11 @@ impl App {
                         .as_ref()
                         .map(|wm| wm.workspace_ids())
                         .unwrap_or_default();
-                    let tab_labels: Vec<String> = workspace_ids
-                        .iter()
-                        .map(|&ws_id| {
-                            self.workspaces
-                                .as_ref()
-                                .and_then(|wm| wm.focused_pane_status(ws_id))
-                                .and_then(|status| {
-                                    status.cwd.as_ref().map(|cwd| {
-                                        let basename = std::path::Path::new(cwd)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or(cwd);
-                                        format!("{ws_id}: {basename}")
-                                    })
-                                })
-                                .unwrap_or_else(|| format!("{ws_id}"))
-                        })
-                        .collect();
+                    let tab_labels = super::build_tab_labels(
+                        &workspace_ids,
+                        self.workspaces.as_ref(),
+                        self.rename_state.as_ref(),
+                    );
                     if let Some(ws_id) =
                         chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels)
                     {
@@ -738,7 +726,88 @@ impl App {
         }
     }
 
+    /// Begin an inline rename of the given workspace tab.
+    pub(super) fn start_rename_workspace(&mut self, workspace_id: usize) {
+        let initial = self
+            .workspaces
+            .as_ref()
+            .and_then(|wm| wm.name_for(workspace_id))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| workspace_id.to_string());
+        self.rename_state = Some(super::RenameState::new(workspace_id, initial));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Commit the current rename buffer to the workspace manager and exit rename mode.
+    pub(super) fn commit_rename(&mut self) {
+        let Some(state) = self.rename_state.take() else {
+            return;
+        };
+        let trimmed = state.buffer.trim();
+        let new_name = if trimmed.is_empty() {
+            // Empty name resets to numeric default.
+            state.workspace_id.to_string()
+        } else {
+            trimmed.to_string()
+        };
+        if let Some(wm) = self.workspaces.as_mut() {
+            wm.rename(state.workspace_id, new_name);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Cancel the in-progress rename without applying changes.
+    pub(super) fn cancel_rename(&mut self) {
+        self.rename_state = None;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Handle a keyboard event while inline rename mode is active.
+    /// Esc cancels, Enter commits, Backspace deletes, character keys insert.
+    fn handle_rename_key(&mut self, key_event: &KeyEvent) {
+        match &key_event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.cancel_rename();
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.commit_rename();
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(state) = self.rename_state.as_mut() {
+                    state.backspace();
+                }
+            }
+            Key::Character(s) => {
+                if let Some(state) = self.rename_state.as_mut() {
+                    for c in s.chars() {
+                        if !c.is_control() {
+                            state.insert_char(c);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     pub(super) fn handle_keyboard_input_event(&mut self, key_event: &KeyEvent) {
+        // ── Inline workspace rename input ──────────────────────
+        if self.rename_state.is_some() {
+            self.handle_rename_key(key_event);
+            return;
+        }
+
         // ── Context menu keyboard navigation ───────────────────
         if self.active_menu.is_some() {
             match &key_event.logical_key {
