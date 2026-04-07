@@ -47,6 +47,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.get_content"
         | "terminal.panes.wait_for_output"
         | "terminal.semantic.query_history"
+        | "terminal.semantic.query_commands"
         | "terminal.semantic.get_hotspots"
         | "terminal.workspaces.list"
         | "terminal.workspaces.get_layout"
@@ -321,6 +322,10 @@ mod tests {
         );
         assert_eq!(
             tool_category("terminal.semantic.query_history"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            tool_category("terminal.semantic.query_commands"),
             Some(ToolCategory::Observer)
         );
         assert_eq!(

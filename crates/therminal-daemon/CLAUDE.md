@@ -66,7 +66,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (17 tools):
+Tools exposed (18 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -82,6 +82,7 @@ Tools exposed (17 tools):
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
 | `terminal.panes.wait_for_output` | Observer | Wait for output matching a pattern (string/regex) |
 | `terminal.semantic.query_history` | Observer | Query semantic region index (Prompt, Command, Output, Error) |
+| `terminal.semantic.query_commands` | Observer | Return recent shell commands with exit codes and durations from the OSC 633 `CommandTracker`. Supports `since_line` and `limit` (default 20). Currently a stub returning `commands: []` — the per-pane `CommandTracker` is not yet plumbed from the reader thread into the daemon-side `Pane`, tracked as a follow-up. |
 | `terminal.semantic.get_hotspots` | Observer | Scan pane for file paths, URLs, git refs, issue refs |
 | `terminal.workspaces.list` | Observer | List workspace tabs with names, pane counts, active status |
 | `terminal.workspaces.get_layout` | Observer | Get binary layout tree + focused_pane for a workspace. Currently returns a degraded horizontal cascade until the real `LayoutNode` tree is plumbed into the daemon (tn-vs0u). |

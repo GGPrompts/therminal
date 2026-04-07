@@ -10,16 +10,17 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use tracing::debug;
 
 use super::{
-    AgentDetailsResult, AgentInfoResult, CreateSessionParam, DestroyPaneResult, GetHotspotsParam,
-    GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam,
-    GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult,
-    ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
-    MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, QuerySemanticHistoryParam,
-    QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
-    SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
-    TherminalMcpServer, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult,
-    WriteToPaneParam, WriteToPaneResult, build_content_preview, find_first_pane_in_session,
-    find_pane_info, json_content,
+    AgentDetailsResult, AgentInfoResult, CommandInfo, CreateSessionParam, DestroyPaneResult,
+    GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
+    GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson,
+    ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult, ListWorkspacesParam,
+    ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo,
+    QueryCommandsParam, QueryCommandsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult,
+    SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult, SessionIdParam,
+    SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer,
+    WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
+    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
+    json_content,
 };
 
 impl TherminalMcpServer {
@@ -394,6 +395,42 @@ impl TherminalMcpServer {
             last_command: None,
             last_exit_code: None,
             last_command_duration_ms: None,
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return recent shell commands captured via OSC 633 `CommandTracker`.
+    ///
+    /// The pane must exist. The `commands` list is currently always empty
+    /// because the per-pane `CommandTracker` lives inside the reader thread's
+    /// `TherminalInterceptor` and is not yet accessible from the daemon-side
+    /// `Pane` struct — same plumbing gap as `terminal.agents.get_details`.
+    /// A follow-up issue tracks wiring the tracker through so this tool can
+    /// return real data.
+    pub(super) async fn handle_query_commands(
+        &self,
+        params: QueryCommandsParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        if find_pane_info(&mgr, params.pane_id).is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "pane not found: {}",
+                params.pane_id
+            ))]));
+        }
+
+        let limit = params.limit.unwrap_or(20);
+        let _since_line = params.since_line.unwrap_or(0);
+
+        // Stub: CommandTracker not yet plumbed into daemon Pane. Return
+        // an empty list while respecting `limit` as a no-op.
+        let commands: Vec<CommandInfo> = Vec::new();
+        let commands = commands.into_iter().take(limit).collect();
+
+        let result = QueryCommandsResult {
+            pane_id: params.pane_id,
+            commands,
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
@@ -877,6 +914,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.agents.list",
             "List all detected AI agents across terminal panes with their type, status, and pane location. Optionally filter by status.",
             schema_for_type::<ListAgentsParam>(),
+        ),
+        Tool::new(
+            "terminal.semantic.query_commands",
+            "Return recent shell commands with exit codes and durations from the OSC 633 CommandTracker. Supports `since_line` and `limit` (default 20). Stub: currently returns an empty list because the CommandTracker is not yet plumbed from the reader thread into the daemon-side Pane.",
+            schema_for_type::<QueryCommandsParam>(),
         ),
         Tool::new(
             "terminal.agents.get_details",

@@ -95,6 +95,17 @@ pub(super) struct QuerySemanticHistoryParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct QueryCommandsParam {
+    /// The numeric pane ID to query.
+    pub(super) pane_id: u64,
+    /// Only return command blocks whose `start_line` is at or after this
+    /// line number. If omitted, returns all tracked commands up to `limit`.
+    pub(super) since_line: Option<usize>,
+    /// Maximum number of command entries to return (default 20).
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct GetPaneGeometryParam {
     /// The numeric pane ID.
     pub(super) pane_id: u64,
@@ -465,6 +476,42 @@ pub(super) struct QuerySemanticHistoryResult {
     pub(super) regions: Vec<SemanticRegionInfo>,
 }
 
+/// A single shell command tracked via OSC 633 `CommandTracker`.
+///
+/// All non-positional fields are `Option` because OSC 633 marks may be
+/// partial: a command currently running has no `end_line`, `exit_code`,
+/// or `duration_ms`; a shell that doesn't emit `E` marks has no
+/// `command_text`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct CommandInfo {
+    /// The command text as reported by OSC 633 `E` mark, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) command_text: Option<String>,
+    /// Exit code from the OSC 633 `D` mark. `None` while running or not
+    /// reported by the shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) exit_code: Option<i32>,
+    /// Wall-clock duration between `C` and `D` marks, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) duration_ms: Option<u64>,
+    /// Grid line where the prompt started (from `A` mark).
+    pub(super) start_line: usize,
+    /// Grid line where execution finished (from `D` mark). `None` while
+    /// still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) end_line: Option<usize>,
+    /// Unix timestamp (seconds) when the command was observed, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) timestamp_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct QueryCommandsResult {
+    pub(super) pane_id: u64,
+    /// Command blocks, oldest first (newest-last transcript order).
+    pub(super) commands: Vec<CommandInfo>,
+}
+
 // ── Helper: serialize to JSON content ───────────────────────────────────
 
 pub(super) fn json_content<T: Serialize>(value: &T) -> Result<Content, ErrorData> {
@@ -796,6 +843,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: QuerySemanticHistoryParam = parse_args(args)?;
                 self.handle_query_semantic_history(params).await
             }
+            "terminal.semantic.query_commands" => {
+                let params: QueryCommandsParam = parse_args(args)?;
+                self.handle_query_commands(params).await
+            }
             "terminal.panes.wait_for_output" => {
                 let params: WaitForOutputParam = parse_args(args)?;
                 self.handle_wait_for_output(params).await
@@ -1010,6 +1061,7 @@ pub(crate) mod tests {
             "terminal.panes.get_content",
             "terminal.panes.wait_for_output",
             "terminal.semantic.query_history",
+            "terminal.semantic.query_commands",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
             "terminal.workspaces.get_layout",
@@ -1122,6 +1174,7 @@ pub(crate) mod tests {
             "terminal.panes.get_content",
             "terminal.panes.wait_for_output",
             "terminal.semantic.query_history",
+            "terminal.semantic.query_commands",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
             "terminal.workspaces.get_layout",
@@ -1135,7 +1188,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 17, "expected exactly 17 tools");
+        assert_eq!(all_tools.len(), 18, "expected exactly 18 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -1310,7 +1363,7 @@ pub(crate) mod tests {
     #[test]
     fn tool_definitions_returns_16_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 17, "expected exactly 17 tool definitions");
+        assert_eq!(tools.len(), 18, "expected exactly 18 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1331,6 +1384,7 @@ pub(crate) mod tests {
             "terminal.panes.get_geometry",
             "terminal.panes.get_content",
             "terminal.semantic.query_history",
+            "terminal.semantic.query_commands",
             "terminal.panes.wait_for_output",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
@@ -1541,6 +1595,53 @@ pub(crate) mod tests {
                 .enforce_trust("terminal.agents.get_details", &agent)
                 .is_ok()
         );
+    }
+
+    // ── terminal.semantic.query_commands ────────────────────────────────
+
+    #[test]
+    fn sandboxed_agent_can_call_query_commands() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.semantic.query_commands", &agent)
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn query_commands_nonexistent_pane_returns_tool_error() {
+        let server = make_server(trusted_config());
+        let params = super::QueryCommandsParam {
+            pane_id: 999_999,
+            since_line: None,
+            limit: None,
+        };
+        let result = server
+            .handle_query_commands(params)
+            .await
+            .expect("handler should not error at transport level");
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn query_commands_result_empty_serializes() {
+        let result = super::QueryCommandsResult {
+            pane_id: 1,
+            commands: Vec::new(),
+        };
+        let v = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(v["pane_id"], 1);
+        assert_eq!(v["commands"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn query_commands_tool_is_registered() {
+        use std::collections::HashSet;
+        let tools = tool_definitions();
+        let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains("terminal.semantic.query_commands"));
     }
 
     /// With an empty session manager, the only resource should be claude/events.
