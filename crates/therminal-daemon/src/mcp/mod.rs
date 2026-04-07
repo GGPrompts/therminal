@@ -201,6 +201,18 @@ pub(super) struct PaneInfo {
     pub(super) cols: u16,
     pub(super) rows: u16,
     pub(super) title: String,
+    /// Current working directory, from OSC 7 or initial spawn. `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cwd: Option<String>,
+    /// Exit code of the most recently finished command (from OSC 633 D marks
+    /// via the region index). `None` when no command has finished yet or the
+    /// shell integration isn't reporting exit codes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_exit_code: Option<i32>,
+    /// Name of the AI agent detected in this pane (from the daemon's
+    /// `AgentRegistry`). `None` when no agent is detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) agent_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1205,6 +1217,73 @@ pub(crate) mod tests {
             uris.contains(&super::CLAUDE_EVENTS_URI),
             "expected claude/events in resource list, got: {uris:?}"
         );
+    }
+
+    // ── PaneInfo serialization ──────────────────────────────────────────
+
+    #[test]
+    fn pane_info_serializes_all_optional_fields() {
+        let info = super::PaneInfo {
+            pane_id: 1,
+            session_id: 2,
+            cols: 80,
+            rows: 24,
+            title: String::new(),
+            cwd: Some("/home/user/proj".to_string()),
+            last_exit_code: Some(0),
+            agent_name: Some("claude-code".to_string()),
+        };
+        let v = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(v["pane_id"], 1);
+        assert_eq!(v["session_id"], 2);
+        assert_eq!(v["cols"], 80);
+        assert_eq!(v["rows"], 24);
+        assert_eq!(v["cwd"], "/home/user/proj");
+        assert_eq!(v["last_exit_code"], 0);
+        assert_eq!(v["agent_name"], "claude-code");
+    }
+
+    #[test]
+    fn pane_info_serializes_all_none_fields() {
+        let info = super::PaneInfo {
+            pane_id: 1,
+            session_id: 2,
+            cols: 80,
+            rows: 24,
+            title: String::new(),
+            cwd: None,
+            last_exit_code: None,
+            agent_name: None,
+        };
+        let v = serde_json::to_value(&info).expect("serialize");
+        // None fields are skipped entirely for backward compatibility.
+        assert!(v.get("cwd").is_none(), "cwd should be omitted when None");
+        assert!(
+            v.get("last_exit_code").is_none(),
+            "last_exit_code should be omitted when None"
+        );
+        assert!(
+            v.get("agent_name").is_none(),
+            "agent_name should be omitted when None"
+        );
+        assert_eq!(v["pane_id"], 1);
+    }
+
+    #[test]
+    fn pane_info_nonzero_exit_code_round_trips() {
+        let info = super::PaneInfo {
+            pane_id: 7,
+            session_id: 3,
+            cols: 120,
+            rows: 40,
+            title: String::new(),
+            cwd: Some("/tmp".to_string()),
+            last_exit_code: Some(127),
+            agent_name: None,
+        };
+        let v = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(v["last_exit_code"], 127);
+        assert!(v.get("agent_name").is_none());
     }
 
     /// With an empty session manager, the only resource should be claude/events.

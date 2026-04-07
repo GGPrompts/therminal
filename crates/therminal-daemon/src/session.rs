@@ -435,6 +435,26 @@ impl Pane {
         self.cwd.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
+    /// Exit code of the most recently finished command, derived from OSC 633
+    /// `D` marks captured in the region index. Returns `None` if no command
+    /// has finished yet (or the shell isn't emitting OSC 633).
+    ///
+    /// Scans the region index backwards for the most recent `Output` or
+    /// `Error` region that has an `exit_code` metadata entry.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        use therminal_terminal::region_index::RegionKind;
+        let idx = self.region_index.lock().ok()?;
+        for region in idx.regions().iter().rev() {
+            if matches!(region.kind, RegionKind::Output | RegionKind::Error)
+                && let Some(code) = region.metadata.get("exit_code")
+                && let Ok(n) = code.parse::<i32>()
+            {
+                return Some(n);
+            }
+        }
+        None
+    }
+
     /// Get the shell command used when this pane was spawned.
     pub fn shell(&self) -> &str {
         &self.shell

@@ -74,7 +74,7 @@ Tools exposed (15 tools):
 | `terminal.sessions.get` | Observer | Get session metadata (name, creation time) |
 | `terminal.sessions.create` | Writer | Spawn a new PTY session |
 | `terminal.sessions.destroy` | Admin | Destroy a session and all its panes |
-| `terminal.panes.list` | Observer | List all panes with dimensions, session membership, title |
+| `terminal.panes.list` | Observer | List all panes with dimensions, session membership, title, plus optional `cwd` (from OSC 7 / spawn), `last_exit_code` (from OSC 633 D), and `agent_name` (from `AgentRegistry`). Optional fields are omitted when unknown to preserve wire compatibility. |
 | `terminal.panes.create` | Writer | Create a pane (split from existing or add to session) |
 | `terminal.panes.destroy` | Admin | Destroy a pane and its PTY |
 | `terminal.panes.get_content` | Observer | Read visible grid snapshot with cursor position |

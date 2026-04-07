@@ -242,12 +242,21 @@ impl TherminalMcpServer {
             }
             for window in &session.windows {
                 for pane in &window.panes {
+                    let cwd = {
+                        let c = pane.cwd();
+                        if c.is_empty() { None } else { Some(c) }
+                    };
+                    let last_exit_code = pane.last_exit_code();
+                    let agent_name = mgr.agent_registry().get(pane.id).map(|e| e.name.clone());
                     panes.push(PaneInfo {
                         pane_id: pane.id,
                         session_id: *session_id,
                         cols: pane.cols(),
                         rows: pane.rows(),
                         title: String::new(),
+                        cwd,
+                        last_exit_code,
+                        agent_name,
                     });
                 }
             }
