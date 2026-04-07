@@ -535,6 +535,7 @@ pub struct AgentTrust {
     /// Trust tier for this agent.
     pub tier: TrustTier,
     /// Optional list of allowed MCP tool patterns.
+    // TODO(code-review): unwired config field — either wire or remove
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -624,6 +625,7 @@ pub struct NotificationConfig {
     /// `AwaitingInput` (i.e. the agent is waiting for the user).
     pub agent_waiting: bool,
     /// Send desktop notifications for OSC 9 sequences.
+    // TODO(code-review): unwired config field — either wire or remove
     pub osc9_enabled: bool,
 }
 

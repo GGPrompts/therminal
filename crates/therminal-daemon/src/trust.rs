@@ -63,7 +63,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
 /// All resource reads are Observer-tier (read-only). Returns `None` for
 /// URIs that don't match any known resource pattern.
 pub fn resource_category(uri: &str) -> Option<ToolCategory> {
-    if uri.starts_with("terminal://pane/") {
+    if uri.starts_with("terminal://pane/") || uri.starts_with("therminal://claude/") {
         Some(ToolCategory::Observer)
     } else {
         None
@@ -478,6 +478,14 @@ mod tests {
         );
         assert_eq!(resource_category("file:///tmp/foo"), None);
         assert_eq!(resource_category("unknown://something"), None);
+        assert_eq!(
+            resource_category("therminal://claude/events"),
+            Some(ToolCategory::Observer)
+        );
+        assert_eq!(
+            resource_category("therminal://claude/events/abc123"),
+            Some(ToolCategory::Observer)
+        );
     }
 
     #[test]

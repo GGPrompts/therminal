@@ -289,7 +289,9 @@ impl App {
             }
 
             // Restore the full layout.
-            let wm = self.workspaces.as_mut().unwrap();
+            let Some(wm) = self.workspaces.as_mut() else {
+                return;
+            };
             wm.set_layout(saved);
             wm.set_focused_pane(Some(pane_id));
             info!("Unzoomed pane {pane_id}");
@@ -327,7 +329,9 @@ impl App {
             self.zoomed_layout = Some(full_layout);
 
             // Set the workspace to just this pane.
-            let wm = self.workspaces.as_mut().unwrap();
+            let Some(wm) = self.workspaces.as_mut() else {
+                return;
+            };
             wm.set_layout(LayoutNode::Leaf(pane));
             wm.set_focused_pane(Some(focused));
             info!("Zoomed pane {focused}");
@@ -636,15 +640,18 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        if bracketed {
-            let _ = pane.write_input(b"\x1b[200~");
+        if bracketed && let Err(e) = pane.write_input(b"\x1b[200~") {
+            tracing::warn!("paste write failed: {e}");
         }
-        let _ = pane.write_input(text.as_bytes());
-        if bracketed {
-            let _ = pane.write_input(b"\x1b[201~");
+        if let Err(e) = pane.write_input(text.as_bytes()) {
+            tracing::warn!("paste write failed: {e}");
+        }
+        if bracketed && let Err(e) = pane.write_input(b"\x1b[201~") {
+            tracing::warn!("paste write failed: {e}");
         }
     }
 
+    // TODO(code-review): validate path for $EDITOR spawn (consider whitelist / shell-escape)
     /// Open a file path in the user's `$EDITOR` or via `xdg-open` / `open`.
     ///
     /// The path may include `:line` or `:line:col` suffixes. If `$EDITOR` supports

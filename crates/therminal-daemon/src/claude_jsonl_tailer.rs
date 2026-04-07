@@ -191,6 +191,7 @@ impl SessionJsonlTailer {
                 Ok(l) => l,
                 Err(_) => break,
             };
+            // TODO(code-review): assumes LF line endings; CRLF will under-count by 1 per line
             bytes_consumed += line.len() as u64 + 1;
 
             let trimmed = line.trim();
@@ -270,6 +271,9 @@ fn session_event_to_agent_event(se: &claude_session_log::SessionEvent) -> Option
 /// Claude Code stores session transcripts at:
 /// `~/.claude/projects/{project-hash}/{session-uuid}.jsonl`
 fn resolve_session_jsonl(session_id: &str) -> Option<PathBuf> {
+    if !is_valid_session_id(session_id) {
+        return None;
+    }
     let projects_dir = home_dir().join(".claude").join("projects");
     if !projects_dir.exists() {
         return None;
@@ -291,6 +295,15 @@ fn resolve_session_jsonl(session_id: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Validate a Claude session id before using it in path construction.
+/// Prevents path traversal via untrusted state files.
+fn is_valid_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn home_dir() -> PathBuf {
@@ -412,7 +425,8 @@ impl ClaudeJsonlRegistry {
             );
             return;
         }
-        if state.session_id.is_empty() {
+        if !is_valid_session_id(&state.session_id) {
+            warn!(session_id = %state.session_id, "JSONL registry: rejecting invalid session_id");
             return;
         }
 
@@ -540,6 +554,10 @@ impl ClaudeJsonlRegistry {
     fn subagent_dirs_for_parent(&self, parent_sid: &str) -> Vec<PathBuf> {
         if let Some(dir) = self.subagent_dir_overrides.get(parent_sid) {
             return vec![dir.clone()];
+        }
+        if !is_valid_session_id(parent_sid) {
+            warn!(parent_sid = %parent_sid, "JSONL registry: rejecting invalid parent_sid for subagent dir lookup");
+            return Vec::new();
         }
 
         let projects_dir = home_dir().join(".claude").join("projects");

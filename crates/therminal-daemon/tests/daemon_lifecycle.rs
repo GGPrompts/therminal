@@ -345,18 +345,13 @@ async fn check_daemon_incompatible_when_garbage_response() {
 
         // Accept connections in a loop so both the probe connect and the
         // ping connect succeed.
-        loop {
-            match listener.accept().await {
-                Ok((mut stream, _)) => {
-                    // Send garbage: a valid length prefix followed by random bytes.
-                    let garbage = b"\x00\x00\x00\x04JUNK";
-                    let _ = stream.write_all(garbage).await;
-                    let _ = stream.flush().await;
-                    // Keep the stream alive briefly so the client can read.
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                Err(_) => break,
-            }
+        while let Ok((mut stream, _)) = listener.accept().await {
+            // Send garbage: a valid length prefix followed by random bytes.
+            let garbage = b"\x00\x00\x00\x04JUNK";
+            let _ = stream.write_all(garbage).await;
+            let _ = stream.flush().await;
+            // Keep the stream alive briefly so the client can read.
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
 
@@ -379,15 +374,10 @@ async fn check_daemon_incompatible_when_immediate_close() {
 
     let listener = UnixListener::bind(&socket_path).expect("bind socket");
     tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    // Accept and immediately drop — simulates a server that
-                    // doesn't speak our protocol at all.
-                    drop(stream);
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            // Accept and immediately drop — simulates a server that
+            // doesn't speak our protocol at all.
+            drop(stream);
         }
     });
 

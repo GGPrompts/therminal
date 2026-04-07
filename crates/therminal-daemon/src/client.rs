@@ -65,7 +65,7 @@ pub async fn send_request_with_timeout(
             .write_all(&req_bytes)
             .await
             .context("failed to send request")?;
-        stream.flush().await.ok();
+        stream.flush().await.context("failed to flush request")?;
 
         // Read one response frame
         let mut len_buf = [0u8; 4];

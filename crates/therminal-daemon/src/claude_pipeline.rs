@@ -66,6 +66,7 @@ pub fn spawn_with(
     let (tx, _rx) = broadcast::channel::<TaggedAgentEvent>(BROADCAST_CAPACITY);
     let tx_for_task = tx.clone();
 
+    // TODO(code-review): no cancellation handle — task runs until process exit
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -489,6 +489,7 @@ impl Pane {
             scrollback,
             grid: visible,
             cursor_col: cursor_point.column.0,
+            // TODO(code-review): signed-cast may wrap for scrollback (line.0 can be negative)
             cursor_line: cursor_point.line.0 as usize,
             cols,
             rows,

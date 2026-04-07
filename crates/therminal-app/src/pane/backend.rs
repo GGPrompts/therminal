@@ -137,6 +137,7 @@ impl PaneBackendKind {
     }
 
     /// Returns a mutable reference to the PTY writer if this is a Terminal backend.
+    // TODO(code-review): unused — verify zero refs workspace-wide and remove
     #[allow(dead_code)]
     pub fn pty_writer_mut(&mut self) -> Option<&mut Box<dyn IoWrite + Send>> {
         match self {

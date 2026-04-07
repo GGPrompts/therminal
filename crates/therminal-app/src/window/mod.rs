@@ -1727,9 +1727,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 // Update cursor position for menu hover tracking.
                 self.cursor_position = Some((position.x, position.y));
-                if self.active_menu.is_some() {
+                if let Some(menu) = self.active_menu.as_mut() {
                     if let Some(gpu) = self.gpu.as_ref() {
-                        let menu = self.active_menu.as_mut().unwrap();
                         let geo = menu.geometry(gpu.config.width as f32, gpu.config.height as f32);
                         let hovered = menu.item_at_position(
                             position.x as f32,
@@ -1776,14 +1775,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // ── Context menu interception ──────────────────────────────
                 if self.active_menu.is_some() && state == ElementState::Pressed {
                     if button == MouseButton::Left {
-                        if let Some((px, py)) = self.cursor_position {
-                            let menu = self.active_menu.as_ref().unwrap();
-                            let gpu = self.gpu.as_ref().unwrap();
+                        if let (Some((px, py)), Some(menu), Some(gpu)) = (
+                            self.cursor_position,
+                            self.active_menu.as_ref(),
+                            self.gpu.as_ref(),
+                        ) {
                             let geo =
                                 menu.geometry(gpu.config.width as f32, gpu.config.height as f32);
-                            if menu.contains_point(px as f32, py as f32, geo.width, geo.height) {
-                                // Click inside menu -- select and execute.
-                                if let Some(idx) = menu.item_at_position(
+                            let inside =
+                                menu.contains_point(px as f32, py as f32, geo.width, geo.height);
+                            let idx = if inside {
+                                menu.item_at_position(
                                     px as f32,
                                     py as f32,
                                     geo.x,
@@ -1791,8 +1793,15 @@ impl ApplicationHandler<UserEvent> for App {
                                     geo.width,
                                     geo.item_height,
                                     geo.section_gap,
-                                ) {
-                                    self.active_menu.as_mut().unwrap().selected_index = Some(idx);
+                                )
+                            } else {
+                                None
+                            };
+                            if inside {
+                                if let Some(idx) = idx {
+                                    if let Some(m) = self.active_menu.as_mut() {
+                                        m.selected_index = Some(idx);
+                                    }
                                     self.execute_menu_action();
                                 }
                             } else {
@@ -2102,10 +2111,14 @@ impl ApplicationHandler<UserEvent> for App {
                             self.active_menu = None;
                         }
                         Key::Named(NamedKey::ArrowUp) => {
-                            self.active_menu.as_mut().unwrap().move_up();
+                            if let Some(m) = self.active_menu.as_mut() {
+                                m.move_up();
+                            }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
-                            self.active_menu.as_mut().unwrap().move_down();
+                            if let Some(m) = self.active_menu.as_mut() {
+                                m.move_down();
+                            }
                         }
                         Key::Named(NamedKey::Enter) => {
                             self.execute_menu_action();

@@ -66,13 +66,8 @@ pub(crate) fn classify_output_cadence(stats: &VecDeque<ByteChunkStats>) -> Outpu
     };
 
     // Compute total window duration.
-    let window_duration_secs = if stats.len() >= 2 {
-        stats
-            .back()
-            .unwrap()
-            .timestamp
-            .duration_since(stats.front().unwrap().timestamp)
-            .as_secs_f64()
+    let window_duration_secs = if let (Some(front), Some(back)) = (stats.front(), stats.back()) {
+        back.timestamp.duration_since(front.timestamp).as_secs_f64()
     } else {
         0.0
     };
@@ -156,13 +151,8 @@ pub(crate) fn is_streaming_cadence(stats: &VecDeque<ByteChunkStats>) -> bool {
         return false;
     }
 
-    let window_duration_secs = if stats.len() >= 2 {
-        stats
-            .back()
-            .unwrap()
-            .timestamp
-            .duration_since(stats.front().unwrap().timestamp)
-            .as_secs_f64()
+    let window_duration_secs = if let (Some(front), Some(back)) = (stats.front(), stats.back()) {
+        back.timestamp.duration_since(front.timestamp).as_secs_f64()
     } else {
         return false;
     };

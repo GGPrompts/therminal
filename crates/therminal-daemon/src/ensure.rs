@@ -117,8 +117,10 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
                         error = %e,
                         "failed to send shutdown to incompatible daemon, force-removing socket"
                     );
-                    if socket_path.exists() {
-                        std::fs::remove_file(&socket_path).ok();
+                    match std::fs::remove_file(&socket_path) {
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => warn!(error = %e, "failed to remove stale socket"),
                     }
                 }
             }

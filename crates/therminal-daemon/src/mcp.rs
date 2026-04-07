@@ -1838,7 +1838,9 @@ async fn start_mcp_server_unix(
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(socket_path, perms).ok();
+        if let Err(e) = std::fs::set_permissions(socket_path, perms) {
+            tracing::warn!(error = %e, "failed to set MCP socket permissions — socket may be world-accessible");
+        }
     }
 
     info!(path = %socket_path.display(), "MCP server listening");

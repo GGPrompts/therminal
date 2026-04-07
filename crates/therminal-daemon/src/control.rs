@@ -578,8 +578,8 @@ async fn dispatch_control_command(
         }
         ControlCommand::Help => Ok(help_text()),
         ControlCommand::Exit => {
-            // Handled in the main loop before dispatching
-            unreachable!()
+            // Handled in the main loop before dispatching; reaching here is a bug.
+            Err("exit must be handled before dispatch".to_string())
         }
     }
 }

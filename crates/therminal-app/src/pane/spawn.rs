@@ -108,7 +108,9 @@ impl PtyReaderHandler for AppPtyHandler {
         data: &[u8],
     ) {
         self.ensure_init();
-        let state = self.reader_state.as_mut().unwrap();
+        let Some(state) = self.reader_state.as_mut() else {
+            return;
+        };
 
         let current_line = {
             let mut term_guard = term.lock();

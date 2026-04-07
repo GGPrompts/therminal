@@ -123,7 +123,7 @@ fn read_pty_output(reader: &mut dyn Read, timeout: Duration) -> String {
             Err(_) => break,
         }
         // Give the shell a moment to produce output after first read.
-        if output.len() > 0 && start.elapsed() >= Duration::from_millis(500) {
+        if !output.is_empty() && start.elapsed() >= Duration::from_millis(500) {
             break;
         }
     }

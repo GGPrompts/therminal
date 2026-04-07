@@ -39,6 +39,7 @@ fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
                     debug!("WSL2 detected: forcing X11 clipboard backend");
                     // SAFETY: This runs during static init (OnceLock), before any
                     // other threads access WAYLAND_DISPLAY.
+                    // TODO(code-review): unsafe env mutation relies on single-threaded init assumption
                     unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
                 }
                 val

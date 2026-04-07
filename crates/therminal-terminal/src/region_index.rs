@@ -63,10 +63,23 @@ pub struct RegionIndex {
     current_line: usize,
 }
 
+/// Cap on retained semantic regions. Prevents unbounded growth on
+/// long-lived sessions; oldest 10% are dropped when the cap is hit.
+const MAX_REGIONS: usize = 5000;
+
 impl RegionIndex {
     /// Create a new, empty region index.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Push a region while enforcing [`MAX_REGIONS`].
+    fn push_region(&mut self, r: Region) {
+        if self.regions.len() >= MAX_REGIONS {
+            // Drain the oldest 10% to amortise the cost.
+            self.regions.drain(0..MAX_REGIONS / 10);
+        }
+        self.regions.push(r);
     }
 
     /// Update the current line position. Call this before `push_event` when
@@ -84,7 +97,7 @@ impl RegionIndex {
             InterceptedEvent::CurrentDirectory(path) => {
                 let mut metadata = HashMap::new();
                 metadata.insert("cwd".to_string(), path.clone());
-                self.regions.push(Region {
+                self.push_region(Region {
                     kind: RegionKind::Annotation,
                     start_line: self.current_line,
                     end_line: Some(self.current_line),
@@ -96,7 +109,7 @@ impl RegionIndex {
                 let mut metadata = HashMap::new();
                 metadata.insert("key".to_string(), key.clone());
                 metadata.insert("value".to_string(), value.clone());
-                self.regions.push(Region {
+                self.push_region(Region {
                     kind: RegionKind::Annotation,
                     start_line: self.current_line,
                     end_line: Some(self.current_line),
@@ -125,7 +138,7 @@ impl RegionIndex {
                 if let Some(m) = model {
                     metadata.insert("model".to_string(), m.clone());
                 }
-                self.regions.push(Region {
+                self.push_region(Region {
                     kind: RegionKind::Annotation,
                     start_line: self.current_line,
                     end_line: Some(self.current_line),
@@ -144,7 +157,7 @@ impl RegionIndex {
         match mark {
             Osc633Mark::PromptStart => {
                 // A: open a Prompt region.
-                self.regions.push(Region {
+                self.push_region(Region {
                     kind: RegionKind::Prompt,
                     start_line: self.current_line,
                     end_line: None,
@@ -155,7 +168,7 @@ impl RegionIndex {
             Osc633Mark::PromptEnd => {
                 // B: close the Prompt region, open a Command region.
                 self.close_current(RegionKind::Prompt);
-                self.regions.push(Region {
+                self.push_region(Region {
                     kind: RegionKind::Command,
                     start_line: self.current_line,
                     end_line: None,
@@ -166,7 +179,7 @@ impl RegionIndex {
             Osc633Mark::PreExec => {
                 // C: close the Command region, open an Output region.
                 self.close_current(RegionKind::Command);
-                self.regions.push(Region {
+                self.push_region(Region {
                     kind: RegionKind::Output,
                     start_line: self.current_line,
                     end_line: None,
