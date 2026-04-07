@@ -243,7 +243,7 @@ impl App {
             false
         };
 
-        let menu = if has_selection {
+        let mut menu = if has_selection {
             let text = self
                 .get_layout()
                 .and_then(|l| l.find_pane(pane_id))
@@ -254,6 +254,22 @@ impl App {
         } else {
             crate::menu::build_pane_menu(pane_id, bindings, (px, py))
         };
+
+        // If a hotspot sits under the cursor, prepend hotspot-specific
+        // action sections so both the hotspot actions and the generic pane
+        // actions are available in a single merged menu.
+        if !has_selection
+            && let Some((col, row)) = self.pixel_to_grid_for_pane(px as f64, py as f64, pane_id)
+            && let Some((kind, text)) = self
+                .grid_renderer
+                .as_ref()
+                .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
+        {
+            let hotspot_menu = crate::menu::build_hotspot_palette(kind, text.to_string(), (px, py));
+            let mut merged = hotspot_menu.sections;
+            merged.append(&mut menu.sections);
+            menu.sections = merged;
+        }
 
         self.active_menu = Some(menu);
     }

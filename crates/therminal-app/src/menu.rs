@@ -865,6 +865,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merged_hotspot_and_pane_menu_prepends_hotspot_sections() {
+        use therminal_terminal::hotspot_detection::HotspotKind;
+
+        let pane_menu = build_pane_menu(3, &[], (0.0, 0.0));
+        let pane_section_count = pane_menu.sections.len();
+        let pane_item_count = pane_menu.item_count();
+
+        let hotspot = build_hotspot_palette(
+            HotspotKind::FilePath,
+            "src/main.rs:42".to_string(),
+            (0.0, 0.0),
+        );
+        let hotspot_section_count = hotspot.sections.len();
+        let hotspot_item_count = hotspot.item_count();
+
+        // Simulate the merge done in the right-click handler.
+        let mut merged = pane_menu;
+        let mut new_sections = hotspot.sections;
+        new_sections.extend(merged.sections.drain(..));
+        merged.sections = new_sections;
+
+        assert_eq!(
+            merged.sections.len(),
+            hotspot_section_count + pane_section_count
+        );
+        assert_eq!(merged.item_count(), hotspot_item_count + pane_item_count);
+        // First item should be the hotspot "Open in editor" action.
+        assert_eq!(merged.flat_items()[0].label, "Open in editor");
+        // Pane actions should still be present after the hotspot ones.
+        assert!(
+            merged
+                .flat_items()
+                .iter()
+                .any(|i| i.label == "Split Horizontal")
+        );
+    }
+
+    #[test]
+    fn pane_menu_alone_has_no_hotspot_actions() {
+        let menu = build_pane_menu(1, &[], (0.0, 0.0));
+        assert!(
+            !menu
+                .flat_items()
+                .iter()
+                .any(|i| i.label == "Open in editor")
+        );
+    }
+
+    #[test]
     fn pane_menu_has_copy_pane_id_with_numeric_payload() {
         let menu = build_pane_menu(7, &[], (0.0, 0.0));
         let item = menu

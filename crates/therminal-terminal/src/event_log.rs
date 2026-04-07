@@ -9,16 +9,18 @@
 //! restarts from the beginning.
 
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 /// Default maximum entries before truncate-rotation.
 pub const DEFAULT_MAX_ENTRIES: usize = 5000;
 
 /// Semantic events in a session's lifecycle.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SessionEvent {
     Spawn {
@@ -55,12 +57,33 @@ struct LogEntry<'a> {
     event: &'a SessionEvent,
 }
 
+/// A timestamped, in-memory copy of a [`SessionEvent`].
+///
+/// Returned by [`EventLog::snapshot`] for read-only consumers (MCP tool
+/// `terminal.panes.query_events`). The `timestamp_secs` is recorded at the
+/// moment [`EventLog::log`] was called and matches (truncated to seconds)
+/// the `ts` field of the JSONL line.
+#[derive(Debug, Clone)]
+pub struct StoredEvent {
+    pub timestamp_secs: u64,
+    pub event: SessionEvent,
+}
+
 /// Append-only JSONL writer with truncate-on-overflow rotation.
+///
+/// Also keeps a bounded in-memory ring buffer of recent events
+/// (capped at `max_entries`, same cap as the file rotation) so callers
+/// can fetch a structured snapshot without reading the JSONL file. The
+/// in-memory buffer is the data source for the
+/// `terminal.panes.query_events` MCP tool.
 pub struct EventLog {
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
     count: usize,
     max_entries: usize,
     path: PathBuf,
+    /// Bounded in-memory ring of recent events. Newest entries pushed at
+    /// the back; oldest evicted from the front when `max_entries` is hit.
+    buffer: VecDeque<StoredEvent>,
 }
 
 impl EventLog {
@@ -86,11 +109,28 @@ impl EventLog {
             .unwrap_or(0);
         debug!(path = %path.display(), existing_estimate = existing, "Opened event log");
         Ok(Self {
-            writer: BufWriter::new(file),
+            writer: Some(BufWriter::new(file)),
             count: existing,
             max_entries,
             path,
+            buffer: VecDeque::with_capacity(max_entries.min(1024)),
         })
+    }
+
+    /// Create an in-memory-only event log with no file backing.
+    ///
+    /// Used by consumers (e.g. the daemon `Pane`) that only need the
+    /// structured snapshot accessor and do not want JSONL file output.
+    /// `log()` populates the bounded in-memory ring; the file path is
+    /// recorded as empty and never opened.
+    pub fn in_memory(max_entries: usize) -> Self {
+        Self {
+            writer: None,
+            count: 0,
+            max_entries,
+            path: PathBuf::new(),
+            buffer: VecDeque::with_capacity(max_entries.min(1024)),
+        }
     }
 
     /// Create an event log in the standard session directory.
