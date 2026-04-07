@@ -285,6 +285,47 @@ pub struct HandoffPayload {
 
 // ── Workspace topology ──────────────────────────────────────────────────
 
+/// Split direction for a `LayoutSnapshot::Split` node.
+///
+/// Mirrors `therminal-app`'s `SplitDirection` so the binary tree topology
+/// can cross the IPC boundary without the app pulling protocol-internal
+/// types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutSplitDirection {
+    /// Children arranged side-by-side (left/right).
+    Horizontal,
+    /// Children stacked (top/bottom).
+    Vertical,
+}
+
+/// Serializable snapshot of `therminal-app`'s `LayoutNode` binary tree.
+///
+/// The app keeps the live tree (with `PaneState` payloads, viewport rects,
+/// etc.) private; only this lightweight projection — direction, ratio, and
+/// leaf pane IDs — crosses crate boundaries so the daemon can answer
+/// `terminal.workspaces.get_layout` without a degraded shim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum LayoutSnapshot {
+    /// A terminal pane leaf.
+    Leaf {
+        /// The pane ID for this leaf.
+        pane_id: PaneId,
+    },
+    /// A split node containing two children.
+    Split {
+        /// Direction of the split.
+        direction: LayoutSplitDirection,
+        /// First child's share of the parent extent (0.0..1.0).
+        ratio: f32,
+        /// First child (left or top).
+        first: Box<LayoutSnapshot>,
+        /// Second child (right or bottom).
+        second: Box<LayoutSnapshot>,
+    },
+}
+
 /// Metadata for a single workspace (tab) within a session.
 ///
 /// The daemon stores this so MCP tools can query workspace topology
@@ -301,6 +342,10 @@ pub struct WorkspaceInfo {
     pub pane_ids: Vec<PaneId>,
     /// The focused pane within this workspace, if any.
     pub focused_pane: Option<PaneId>,
+    /// Real binary layout tree (directions + ratios). `None` for legacy
+    /// callers; consumers fall back to a degraded cascade in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutSnapshot>,
 }
 
 // ── Persisted state (session/layout persistence across daemon restarts) ──
@@ -509,6 +554,7 @@ mod tests {
                         order: 0,
                         pane_ids: vec![10, 11],
                         focused_pane: Some(10),
+                        layout: None,
                     },
                     WorkspaceInfo {
                         id: 3,
@@ -516,6 +562,7 @@ mod tests {
                         order: 1,
                         pane_ids: vec![20],
                         focused_pane: Some(20),
+                        layout: None,
                     },
                 ],
                 active_workspace: 1,
@@ -549,6 +596,7 @@ mod tests {
                     order: 0,
                     pane_ids: vec![5],
                     focused_pane: Some(5),
+                    layout: None,
                 }],
                 active_workspace: 1,
             },
@@ -588,6 +636,7 @@ mod tests {
             order: 1,
             pane_ids: vec![100, 200],
             focused_pane: Some(100),
+            layout: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: WorkspaceInfo = serde_json::from_str(&json).unwrap();
@@ -614,6 +663,7 @@ mod tests {
                 order: 0,
                 pane_ids: vec![1],
                 focused_pane: Some(1),
+                layout: None,
             }],
             active_workspace: 1,
         };
@@ -622,5 +672,71 @@ mod tests {
         assert_eq!(parsed.workspaces.len(), 1);
         assert_eq!(parsed.active_workspace, 1);
         assert_eq!(parsed.workspaces[0].name, "main");
+    }
+
+    // ── LayoutSnapshot ──────────────────────────────────────────────────
+
+    fn fixture_snapshot() -> LayoutSnapshot {
+        LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.6,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.25,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+            }),
+        }
+    }
+
+    #[test]
+    fn layout_snapshot_json_round_trip() {
+        let snap = fixture_snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: LayoutSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, parsed);
+    }
+
+    #[test]
+    fn layout_snapshot_msgpack_round_trip() {
+        let snap = fixture_snapshot();
+        let bytes = rmp_serde::to_vec(&snap).unwrap();
+        let parsed: LayoutSnapshot = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(snap, parsed);
+    }
+
+    #[test]
+    fn layout_snapshot_ratios_within_bounds() {
+        fn walk(node: &LayoutSnapshot) {
+            if let LayoutSnapshot::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } = node
+            {
+                assert!((0.0..=1.0).contains(ratio), "ratio out of bounds: {ratio}");
+                walk(first);
+                walk(second);
+            }
+        }
+        walk(&fixture_snapshot());
+    }
+
+    #[test]
+    fn workspace_info_with_layout_round_trip() {
+        let info = WorkspaceInfo {
+            id: 1,
+            name: "main".into(),
+            order: 0,
+            pane_ids: vec![1, 2, 3],
+            focused_pane: Some(2),
+            layout: Some(fixture_snapshot()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: WorkspaceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, parsed);
+        assert!(parsed.layout.is_some());
     }
 }

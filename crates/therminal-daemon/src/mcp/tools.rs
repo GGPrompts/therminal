@@ -315,13 +315,16 @@ impl TherminalMcpServer {
                 .iter()
                 .find(|w| w.id == params.workspace_id)
             {
-                let layout = LayoutNodeJson::from_flat_pane_ids(&ws.pane_ids);
+                let (layout, degraded) = match &ws.layout {
+                    Some(snap) => (LayoutNodeJson::from_snapshot(snap), false),
+                    None => (LayoutNodeJson::from_flat_pane_ids(&ws.pane_ids), true),
+                };
                 let result = GetWorkspaceLayoutResult {
                     workspace_id: ws.id,
                     session_id: *session_id,
                     layout,
                     focused_pane: ws.focused_pane,
-                    degraded: true,
+                    degraded,
                 };
                 return Ok(CallToolResult::success(vec![json_content(&result)?]));
             }

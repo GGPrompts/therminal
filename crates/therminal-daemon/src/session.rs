@@ -1448,6 +1448,7 @@ mod tests {
                 order: 0,
                 pane_ids: vec![10],
                 focused_pane: Some(10),
+                layout: None,
             },
             WorkspaceInfo {
                 id: 3,
@@ -1455,6 +1456,7 @@ mod tests {
                 order: 1,
                 pane_ids: vec![20, 21],
                 focused_pane: Some(20),
+                layout: None,
             },
         ];
 

@@ -373,6 +373,30 @@ impl LayoutNodeJson {
             },
         }
     }
+
+    /// Build a faithful layout tree from a `LayoutSnapshot` provided by the
+    /// app. Unlike `from_flat_pane_ids`, this preserves real split directions
+    /// and ratios.
+    pub fn from_snapshot(snap: &therminal_protocol::daemon::LayoutSnapshot) -> Self {
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        match snap {
+            LayoutSnapshot::Leaf { pane_id } => LayoutNodeJson::Leaf { pane_id: *pane_id },
+            LayoutSnapshot::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => LayoutNodeJson::Split {
+                direction: match direction {
+                    LayoutSplitDirection::Horizontal => "horizontal".to_string(),
+                    LayoutSplitDirection::Vertical => "vertical".to_string(),
+                },
+                ratio: *ratio,
+                left: Box::new(Self::from_snapshot(first)),
+                right: Box::new(Self::from_snapshot(second)),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1462,6 +1486,63 @@ pub(crate) mod tests {
         let mut ids = Vec::new();
         collect(&tree, &mut ids);
         assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn layout_node_json_from_snapshot_preserves_directions_and_ratios() {
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        // Horizontal root: leaf(1) | (vertical leaf(2) / leaf(3)).
+        let snap = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.6,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.25,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+            }),
+        };
+        let tree = super::LayoutNodeJson::from_snapshot(&snap);
+        match &tree {
+            super::LayoutNodeJson::Split {
+                direction,
+                ratio,
+                left,
+                right,
+            } => {
+                assert_eq!(direction, "horizontal");
+                assert!((ratio - 0.6).abs() < f32::EPSILON);
+                assert!(matches!(
+                    left.as_ref(),
+                    super::LayoutNodeJson::Leaf { pane_id: 1 }
+                ));
+                match right.as_ref() {
+                    super::LayoutNodeJson::Split {
+                        direction,
+                        ratio,
+                        left,
+                        right,
+                    } => {
+                        assert_eq!(direction, "vertical");
+                        assert!((ratio - 0.25).abs() < f32::EPSILON);
+                        assert!(matches!(
+                            left.as_ref(),
+                            super::LayoutNodeJson::Leaf { pane_id: 2 }
+                        ));
+                        assert!(matches!(
+                            right.as_ref(),
+                            super::LayoutNodeJson::Leaf { pane_id: 3 }
+                        ));
+                    }
+                    _ => panic!("expected nested vertical split"),
+                }
+            }
+            _ => panic!("expected horizontal split"),
+        }
+        let json = serde_json::to_string(&tree).unwrap();
+        let parsed: super::LayoutNodeJson = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tree);
     }
 
     #[test]

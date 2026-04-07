@@ -76,6 +76,36 @@ impl LayoutNode {
         }
     }
 
+    /// Project the live layout tree into a serializable `LayoutSnapshot`
+    /// suitable for crossing the IPC boundary into the daemon.
+    ///
+    /// Only direction, ratio, and leaf pane IDs are included; PTY state and
+    /// viewport rects are intentionally stripped. `LayoutNode::Empty` is
+    /// represented as a leaf with `pane_id = 0` since the empty placeholder
+    /// is transient and should not normally appear in a synced tree.
+    pub fn to_snapshot(&self) -> therminal_protocol::daemon::LayoutSnapshot {
+        use crate::pane::SplitDirection;
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        match self {
+            LayoutNode::Leaf(pane) => LayoutSnapshot::Leaf { pane_id: pane.id },
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => LayoutSnapshot::Split {
+                direction: match direction {
+                    SplitDirection::Horizontal => LayoutSplitDirection::Horizontal,
+                    SplitDirection::Vertical => LayoutSplitDirection::Vertical,
+                },
+                ratio: *ratio,
+                first: Box::new(first.to_snapshot()),
+                second: Box::new(second.to_snapshot()),
+            },
+            LayoutNode::Empty => LayoutSnapshot::Leaf { pane_id: 0 },
+        }
+    }
+
     /// Collect all pane IDs in order (left-to-right / top-to-bottom).
     pub fn pane_ids(&self) -> Vec<crate::pane::PaneId> {
         let mut ids = Vec::new();

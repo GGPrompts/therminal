@@ -343,6 +343,7 @@ impl WorkspaceManager {
                 order: order as u32,
                 pane_ids: ws.layout.pane_ids(),
                 focused_pane: ws.focused_pane,
+                layout: Some(ws.layout.to_snapshot()),
             })
             .collect()
     }
@@ -351,6 +352,26 @@ impl WorkspaceManager {
     #[allow(dead_code)]
     pub fn rename_active(&mut self, name: String) {
         self.workspaces[self.active_idx].name = name;
+    }
+
+    /// Rename the workspace with the given id. Returns true if it existed.
+    #[allow(dead_code)]
+    pub fn rename(&mut self, workspace_id: usize, name: String) -> bool {
+        if let Some(idx) = self.workspace_index(workspace_id) {
+            self.workspaces[idx].name = name;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the human-readable name of a workspace by id.
+    #[allow(dead_code)]
+    pub fn name_for(&self, workspace_id: usize) -> Option<&str> {
+        self.workspaces
+            .iter()
+            .find(|ws| ws.id == workspace_id)
+            .map(|ws| ws.name.as_str())
     }
 
     /// Total pane count across all workspaces.
