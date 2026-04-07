@@ -3,7 +3,7 @@
 //!
 //! Rendered as a final pass on top of all pane content, status bar, and chrome.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use wgpu::util::DeviceExt;
 
@@ -72,8 +72,13 @@ pub(crate) fn draw_help_overlay(
     let padding_v = 20.0_f32;
     let padding_h = 24.0_f32;
 
-    // Group bindings by section.
+    // Group bindings by section, then collapse contiguous numeric families
+    // (e.g. Alt+1..Alt+9 for SwitchWorkspace) into a single placeholder row.
     let mut sections: BTreeMap<u8, (String, Vec<(String, String)>)> = BTreeMap::new();
+    // Track, per section, the group signature of the last-pushed row so we
+    // can fold subsequent bindings of the same group into it.
+    // Signature: (modifier_prefix, action_family).
+    let mut seen_groups: HashSet<(u8, String, String)> = HashSet::new();
     for binding in &keybindings.bindings {
         let section_name = binding.action.section().to_string();
         let order = section_order(&section_name);
@@ -82,7 +87,21 @@ pub(crate) fn draw_help_overlay(
             .or_insert_with(|| (section_name, Vec::new()));
         let shortcut = format_shortcut(&binding.key);
         let description = binding.action.description().to_string();
-        entry.1.push((shortcut, description));
+
+        // Determine whether this binding is part of a numeric family — i.e.
+        // shortcut ends in a single digit AND the action's Debug repr has a
+        // trailing numeric component (e.g. SwitchWorkspace(3)).
+        if let Some(sig) = numeric_group_signature(&shortcut, &binding.action) {
+            let key = (order, sig.0.clone(), sig.1);
+            if !seen_groups.insert(key) {
+                // Already represented by a single placeholder row — skip.
+                continue;
+            }
+            let placeholder_shortcut = format!("{}(1-9)", sig.0);
+            entry.1.push((placeholder_shortcut, description));
+        } else {
+            entry.1.push((shortcut, description));
+        }
     }
 
     // Calculate panel height.
@@ -347,6 +366,67 @@ pub(crate) fn draw_help_overlay(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/// If this binding belongs to a numeric key family (shortcut ends in a
+/// single digit, action Debug repr has a trailing digit component), return
+/// `(modifier_prefix, action_family)` where:
+///
+/// - `modifier_prefix` is the formatted shortcut up to and including the
+///   final `+`, e.g. `"Alt+"` for `Alt+3`, or `""` for `3`.
+/// - `action_family` is the action's `Debug` representation with the
+///   trailing digit group stripped, e.g. `"SwitchWorkspace"` for
+///   `SwitchWorkspace(3)` or `"Tab"` for `Tab7`.
+///
+/// This is general enough that future `Ctrl+Tab1..9` style groups collapse
+/// automatically without extra code.
+fn numeric_group_signature(
+    shortcut: &str,
+    action: &therminal_core::config::KeyAction,
+) -> Option<(String, String)> {
+    // Shortcut must end in a single decimal digit.
+    let last = shortcut.chars().next_back()?;
+    if !last.is_ascii_digit() {
+        return None;
+    }
+    // The character before the digit must be a `+` (i.e. the digit is a
+    // standalone key token) or the digit must be the entire shortcut.
+    let prefix_len = shortcut.len() - last.len_utf8();
+    let prefix = &shortcut[..prefix_len];
+    if !prefix.is_empty() && !prefix.ends_with('+') {
+        return None;
+    }
+
+    // Action Debug repr must have a trailing digit group. Covers both
+    // tuple-style `SwitchWorkspace(3)` and suffix-style `Tab7`.
+    let dbg = format!("{action:?}");
+    let family = strip_trailing_digit_group(&dbg)?;
+
+    Some((prefix.to_string(), family))
+}
+
+/// Strip a trailing digit group from a Debug repr.
+///
+/// - `SwitchWorkspace(3)` → `Some("SwitchWorkspace")`
+/// - `SendToWorkspace(9)` → `Some("SendToWorkspace")`
+/// - `Tab7` → `Some("Tab")`
+/// - `FocusNext` → `None`
+fn strip_trailing_digit_group(dbg: &str) -> Option<String> {
+    // Tuple form: `Name(<digits>)`.
+    if let Some(open) = dbg.rfind('(')
+        && dbg.ends_with(')')
+    {
+        let inner = &dbg[open + 1..dbg.len() - 1];
+        if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+            return Some(dbg[..open].to_string());
+        }
+    }
+    // Suffix form: trailing digits directly on the variant name.
+    let trimmed = dbg.trim_end_matches(|c: char| c.is_ascii_digit());
+    if trimmed.len() < dbg.len() && !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    None
+}
 
 /// Format a binding key string for display (e.g. "ctrl+shift+h" -> "Ctrl+Shift+H").
 fn format_shortcut(key: &str) -> String {
