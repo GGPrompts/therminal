@@ -754,12 +754,16 @@ impl App {
 
     /// Begin an inline rename of the given workspace tab.
     pub(super) fn start_rename_workspace(&mut self, workspace_id: usize) {
+        // Seed the edit buffer with the custom name only. The tab number
+        // prefix is always rendered by build_tab_labels, so starting with
+        // the id preloaded would force the user to delete it before typing.
         let initial = self
             .workspaces
             .as_ref()
             .and_then(|wm| wm.name_for(workspace_id))
             .map(|s| s.to_string())
-            .unwrap_or_else(|| workspace_id.to_string());
+            .filter(|s| s != &workspace_id.to_string())
+            .unwrap_or_default();
         self.rename_state = Some(super::RenameState::new(workspace_id, initial));
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
