@@ -16,3 +16,4 @@ logs/
 .beads/metadata.json
 .perles/
 .claude/settings.json
+.claude/settings.local.json
