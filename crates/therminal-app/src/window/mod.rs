@@ -64,6 +64,10 @@ enum UserEvent {
         body: String,
         source: NotificationSource,
     },
+    /// The swarm watcher bridge has new events queued in the
+    /// `SwarmDebouncer`. Triggers a `poll_swarm_watcher` pass on the main
+    /// thread; actual spawn/reclaim happens once the debounce window expires.
+    SwarmWatcherTick,
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -175,6 +179,15 @@ pub struct App {
 
     /// Auto-tile debouncer for agent spawn/exit events.
     auto_tile_debouncer: Option<AutoTileDebouncer>,
+
+    /// Debouncer for swarm watcher events. A spawn followed by a reclaim
+    /// within the debounce window cancels both, so subagents that finish
+    /// quickly don't briefly flash a pane onto the screen.
+    pub(crate) swarm_debouncer: Option<crate::pane::auto_tile::SwarmDebouncer>,
+
+    /// Map of subagent agent_id -> pane_id for panes spawned by the swarm
+    /// watcher, so reclaim events can find the right pane to close.
+    pub(crate) swarm_panes: HashMap<String, PaneId>,
 
     /// Timestamp when a visual bell flash started (for timed invert effect).
     visual_bell_start: Option<Instant>,
@@ -535,6 +548,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Bell(pane_id) => {
                 self.handle_bell(pane_id);
+            }
+            UserEvent::SwarmWatcherTick => {
+                // New raw events arrived from the swarm watcher bridge.
+                // Drain the debouncer; expired events are dispatched to
+                // spawn/reclaim. If anything is still pending, ask for a
+                // redraw so the next poll happens after the debounce window.
+                self.poll_swarm_watcher();
+                if let Some(ref d) = self.swarm_debouncer
+                    && d.has_pending()
+                    && let Some(w) = self.window.as_ref()
+                {
+                    w.request_redraw();
+                }
             }
             UserEvent::DesktopNotification {
                 title,

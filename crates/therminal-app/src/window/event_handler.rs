@@ -353,13 +353,22 @@ impl App {
 
         // Poll auto-tile debouncer for agent spawn/exit actions.
         self.poll_auto_tile();
+        // Poll swarm-watcher debouncer for subagent spawn/reclaim actions.
+        self.poll_swarm_watcher();
 
         self.render();
 
-        // If the debouncer has pending events, schedule another redraw
+        // If either debouncer has pending events, schedule another redraw
         // so we can check again after the debounce interval expires.
-        if let Some(ref debouncer) = self.auto_tile_debouncer
-            && debouncer.has_pending()
+        let auto_pending = self
+            .auto_tile_debouncer
+            .as_ref()
+            .is_some_and(|d| d.has_pending());
+        let swarm_pending = self
+            .swarm_debouncer
+            .as_ref()
+            .is_some_and(|d| d.has_pending());
+        if (auto_pending || swarm_pending)
             && let Some(w) = self.window.as_ref()
         {
             w.request_redraw();

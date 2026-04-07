@@ -362,11 +362,11 @@ impl TherminalMcpServer {
 
     /// Return detailed inference data for the agent running in a pane.
     ///
-    /// The pane must exist. `agent_type` is populated from `AgentRegistry`
-    /// when an agent is currently registered on the pane; all other
-    /// inference fields (model, context_percent, last_command, etc.) are
-    /// currently always `None` because `AgentStateInference` is not yet
-    /// plumbed into the daemon — tracked as a follow-up issue.
+    /// The pane must exist. `agent_type` is taken from the `AgentRegistry`
+    /// when an agent is currently registered on the pane; if no registry
+    /// entry exists, the inference engine's own detected type is used as a
+    /// fallback. All other fields (model, context_percent, last_command,
+    /// etc.) are taken from the per-pane `AgentStateInference` snapshot.
     pub(super) async fn handle_get_agent_details(
         &self,
         params: PaneIdParam,
@@ -375,26 +375,28 @@ impl TherminalMcpServer {
 
         // Verify the pane exists — return a tool error if not, matching the
         // convention of get_pane_geometry / read_pane_content.
-        if find_pane_info(&mgr, params.pane_id).is_none() {
+        let Some(snapshot) = mgr.pane_agent_details(params.pane_id) else {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "pane not found: {}",
                 params.pane_id
             ))]));
-        }
+        };
 
-        let agent_type = mgr
+        let registry_agent_type = mgr
             .agent_registry()
             .get(params.pane_id)
             .map(|e| e.agent_type.as_str().to_string());
 
         let result = AgentDetailsResult {
-            agent_type,
-            model: None,
-            context_percent: None,
-            consecutive_failures: 0,
-            last_command: None,
-            last_exit_code: None,
-            last_command_duration_ms: None,
+            agent_type: registry_agent_type.or(snapshot.agent_type),
+            model: snapshot.model,
+            context_percent: snapshot.context_percent,
+            consecutive_failures: snapshot.consecutive_failures.max(0) as u32,
+            last_command: snapshot.last_command,
+            last_exit_code: snapshot.last_exit_code,
+            last_command_duration_ms: snapshot
+                .last_command_duration_ms
+                .and_then(|d| if d < 0 { None } else { Some(d as u64) }),
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }

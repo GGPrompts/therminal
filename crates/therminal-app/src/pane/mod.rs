@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod layout;
 pub mod spawn;
 pub mod state;
+pub mod swarm_watcher;
 pub mod workspace;
 
 use std::sync::Arc;

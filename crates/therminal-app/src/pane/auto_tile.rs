@@ -153,6 +153,105 @@ impl AutoTileDebouncer {
     }
 }
 
+// ── SwarmDebouncer ────────────────────────────────────────────────────
+//
+// A sibling of `AutoTileDebouncer` that applies the same spawn/exit
+// cancellation pattern to `SwarmWatcherEvent`s. We kept this as a sibling
+// (rather than generalizing `AutoTileDebouncer`) because the event types
+// diverge meaningfully: auto-tile keys on `PaneId` and carries `AgentType`,
+// while swarm events key on a `String` agent_id and carry a `PathBuf`
+// payload. Unifying them would force a wrapper enum that obscures both
+// paths. The cancellation logic — "spawn queued; a matching reclaim within
+// the debounce window cancels both" — is the only shared shape, and it's
+// small enough to duplicate without meaningful upkeep cost.
+
+use crate::pane::swarm_watcher::SwarmWatcherEvent;
+
+/// Pending swarm event awaiting debounce expiry.
+struct PendingSwarmEvent {
+    event: SwarmWatcherEvent,
+    queued_at: Instant,
+}
+
+/// Debounces `SwarmWatcherEvent`s so a rapid Spawn → Reclaim cycle cancels
+/// cleanly instead of briefly flashing a pane onto the screen.
+///
+/// Call `poll()` on every redraw (same cadence as `AutoTileDebouncer`) to
+/// drain the underlying channel, apply cancellation, and yield ready events.
+pub struct SwarmDebouncer {
+    event_rx: mpsc::Receiver<SwarmWatcherEvent>,
+    debounce: Duration,
+    pending: HashMap<String, PendingSwarmEvent>,
+}
+
+impl SwarmDebouncer {
+    pub fn new(event_rx: mpsc::Receiver<SwarmWatcherEvent>, debounce_ms: u64) -> Self {
+        Self {
+            event_rx,
+            debounce: Duration::from_millis(debounce_ms),
+            pending: HashMap::new(),
+        }
+    }
+
+    /// Drain the receiver and return events whose debounce has expired.
+    pub fn poll(&mut self) -> Vec<SwarmWatcherEvent> {
+        let now = Instant::now();
+
+        while let Ok(event) = self.event_rx.try_recv() {
+            match &event {
+                SwarmWatcherEvent::SpawnSubagent { agent_id, .. } => {
+                    // Queue the spawn. If a pending reclaim somehow exists
+                    // for this agent_id (respawn with same id), drop it.
+                    self.pending.insert(
+                        agent_id.clone(),
+                        PendingSwarmEvent {
+                            event: event.clone(),
+                            queued_at: now,
+                        },
+                    );
+                }
+                SwarmWatcherEvent::ReclaimSubagent { agent_id } => {
+                    // If a spawn is pending (not yet flushed), cancel both.
+                    if let Some(p) = self.pending.get(agent_id)
+                        && matches!(p.event, SwarmWatcherEvent::SpawnSubagent { .. })
+                    {
+                        self.pending.remove(agent_id);
+                        continue;
+                    }
+                    // Otherwise queue the reclaim so it too passes through
+                    // the debounce window before being acted on.
+                    self.pending.insert(
+                        agent_id.clone(),
+                        PendingSwarmEvent {
+                            event: event.clone(),
+                            queued_at: now,
+                        },
+                    );
+                }
+            }
+        }
+
+        let expired: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| now.duration_since(p.queued_at) >= self.debounce)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let mut ready = Vec::with_capacity(expired.len());
+        for k in expired {
+            if let Some(p) = self.pending.remove(&k) {
+                ready.push(p.event);
+            }
+        }
+        ready
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +308,68 @@ mod tests {
         let actions = debouncer.poll();
         // Both events should have cancelled each other.
         assert!(actions.is_empty());
+    }
+
+    // ── SwarmDebouncer tests ──────────────────────────────────────────
+
+    fn spawn_ev(id: &str) -> SwarmWatcherEvent {
+        SwarmWatcherEvent::SpawnSubagent {
+            agent_id: id.to_string(),
+            jsonl_path: std::path::PathBuf::from(format!("/tmp/agent-{id}.jsonl")),
+        }
+    }
+
+    fn reclaim_ev(id: &str) -> SwarmWatcherEvent {
+        SwarmWatcherEvent::ReclaimSubagent {
+            agent_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn swarm_spawn_then_reclaim_within_window_cancels() {
+        let (tx, rx) = mpsc::channel();
+        let mut d = SwarmDebouncer::new(rx, 200);
+        tx.send(spawn_ev("a1")).unwrap();
+        tx.send(reclaim_ev("a1")).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        let events = d.poll();
+        assert!(events.is_empty(), "spawn+reclaim should cancel");
+        assert!(!d.has_pending());
+    }
+
+    #[test]
+    fn swarm_spawn_alone_yields_spawn() {
+        let (tx, rx) = mpsc::channel();
+        let mut d = SwarmDebouncer::new(rx, 50);
+        tx.send(spawn_ev("a2")).unwrap();
+        // Immediate poll: queued, not yet ready.
+        assert!(d.poll().is_empty());
+        assert!(d.has_pending());
+        std::thread::sleep(Duration::from_millis(70));
+        let events = d.poll();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SwarmWatcherEvent::SpawnSubagent { agent_id, .. } if agent_id == "a2"
+        ));
+    }
+
+    #[test]
+    fn swarm_reclaim_alone_yields_reclaim() {
+        let (tx, rx) = mpsc::channel();
+        let mut d = SwarmDebouncer::new(rx, 50);
+        // No prior spawn queued — a standalone reclaim (pane was created on
+        // a previous run / before the debouncer was wired) should still be
+        // delivered after the debounce window.
+        tx.send(reclaim_ev("a3")).unwrap();
+        assert!(d.poll().is_empty());
+        std::thread::sleep(Duration::from_millis(70));
+        let events = d.poll();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SwarmWatcherEvent::ReclaimSubagent { agent_id } if agent_id == "a3"
+        ));
     }
 
     #[test]

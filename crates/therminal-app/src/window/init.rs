@@ -13,6 +13,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
+use crate::pane::auto_tile::SwarmDebouncer;
 use crate::pane::{AutoTileDebouncer, LayoutNode, WorkspaceManager};
 use therminal_core::config::TherminalConfig;
 use therminal_core::config_watcher::ConfigWatcher;
@@ -102,6 +103,46 @@ impl App {
 
         let agent_registry = Arc::new(std::sync::Mutex::new(agent_registry));
 
+        // Start the swarm watcher: a background thread that polls
+        // ~/.claude/projects/*/*/subagents/agent-*.jsonl and emits spawn/reclaim
+        // events when Claude subagents start and finish. Gated on the same
+        // `auto_tile` flag as process-tree auto-tiling.
+        // Start the swarm watcher: a background thread that polls
+        // ~/.claude/projects/*/*/subagents/agent-*.jsonl and emits spawn/reclaim
+        // events when Claude subagents start and finish. Gated on the same
+        // `auto_tile` flag as process-tree auto-tiling.
+        //
+        // Events flow: swarm_watcher thread -> bridge thread -> SwarmDebouncer
+        // channel. The bridge also sends a tiny wake `UserEvent` so the winit
+        // loop polls the debouncer; the debouncer applies a 1.5s window so
+        // spawn-then-reclaim cycles cancel before any pane is created.
+        let swarm_debouncer = if config.general.auto_tile {
+            let raw_rx = crate::pane::swarm_watcher::spawn();
+            let (deb_tx, deb_rx) =
+                std::sync::mpsc::channel::<crate::pane::swarm_watcher::SwarmWatcherEvent>();
+            let proxy = event_proxy.clone();
+            thread::Builder::new()
+                .name("swarm-watcher-bridge".into())
+                .spawn(move || {
+                    while let Ok(event) = raw_rx.recv() {
+                        if deb_tx.send(event).is_err() {
+                            break;
+                        }
+                        // Wake the event loop so it polls the debouncer.
+                        if proxy
+                            .send_event(super::UserEvent::SwarmWatcherTick)
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .expect("failed to spawn swarm watcher bridge");
+            Some(SwarmDebouncer::new(deb_rx, 1500))
+        } else {
+            None
+        };
+
         Self {
             window: None,
             gpu: None,
@@ -134,6 +175,8 @@ impl App {
             last_tab_bar_click: None,
             last_close_action: None,
             auto_tile_debouncer,
+            swarm_debouncer,
+            swarm_panes: std::collections::HashMap::new(),
             visual_bell_start: None,
             zoomed_layout: None,
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),

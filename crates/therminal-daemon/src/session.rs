@@ -23,6 +23,9 @@ use therminal_terminal::agent_registry::{AgentEntry, AgentRegistry, AgentStatus}
 use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
 use therminal_terminal::region_index::RegionIndex;
+use therminal_terminal::state_inference::{
+    AgentDetailsSnapshot, AgentStateInference, InferenceConfig,
+};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -115,6 +118,9 @@ struct DaemonPtyHandler {
     region_index: Arc<Mutex<RegionIndex>>,
     /// Shared cwd updated from OSC 7 events.
     cwd: Arc<Mutex<String>>,
+    /// Shared agent state inference engine. Reader thread feeds bytes;
+    /// MCP handlers snapshot state on demand.
+    inference: Arc<Mutex<AgentStateInference>>,
 }
 
 impl PtyReaderHandler for DaemonPtyHandler {
@@ -131,6 +137,13 @@ impl PtyReaderHandler for DaemonPtyHandler {
         {
             let mut term_guard = term.lock();
             processor.advance_with_interceptor(&mut *term_guard, &mut self.interceptor, data);
+        }
+
+        // Feed the same bytes into the agent state inference engine. The
+        // lock is held only for the duration of `feed_bytes`, which is
+        // cheap (line buffer + ANSI strip + pattern match on recent lines).
+        if let Ok(mut inf) = self.inference.lock() {
+            inf.feed_bytes(data);
         }
 
         // Drain intercepted events into the region index and update cwd.
@@ -276,6 +289,10 @@ pub struct Pane {
     cwd: Arc<Mutex<String>>,
     /// Shell command used when this pane was spawned.
     shell: String,
+    /// Shared agent state inference engine. Cloned into the reader thread's
+    /// `DaemonPtyHandler` so PTY bytes feed it; daemon-side accessors
+    /// snapshot it for MCP `terminal.agents.get_details`.
+    inference: Arc<Mutex<AgentStateInference>>,
 }
 
 impl Pane {
@@ -295,6 +312,17 @@ impl Pane {
         // Initialize cwd from spawn options; OSC 7 events will update it later.
         let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
 
+        let inference = Arc::new(Mutex::new(AgentStateInference::new(InferenceConfig {
+            session_id: format!("daemon-pane-{id}"),
+            child_pid: 0,
+            agent_type: None,
+            working_dir: if spawn_options.cwd.is_empty() {
+                None
+            } else {
+                Some(spawn_options.cwd.clone())
+            },
+        })));
+
         let handler = DaemonPtyHandler {
             event_tx,
             session_id,
@@ -303,6 +331,7 @@ impl Pane {
             interceptor_rx,
             region_index: Arc::clone(&region_index),
             cwd: Arc::clone(&cwd),
+            inference: Arc::clone(&inference),
         };
 
         let mut core = PtyPaneCore::spawn(
@@ -328,6 +357,7 @@ impl Pane {
             rows,
             cwd,
             shell: spawn_options.shell.clone(),
+            inference,
         })
     }
 
@@ -353,6 +383,13 @@ impl Pane {
         // FD handoff panes don't have spawn options; cwd will be updated by OSC 7.
         let cwd = Arc::new(Mutex::new(String::new()));
 
+        let inference = Arc::new(Mutex::new(AgentStateInference::new(InferenceConfig {
+            session_id: format!("daemon-pane-{pane_id}"),
+            child_pid: 0,
+            agent_type: None,
+            working_dir: None,
+        })));
+
         let handler = DaemonPtyHandler {
             event_tx: event_tx.clone(),
             session_id,
@@ -361,6 +398,7 @@ impl Pane {
             interceptor_rx,
             region_index: Arc::clone(&region_index),
             cwd: Arc::clone(&cwd),
+            inference: Arc::clone(&inference),
         };
 
         // Create headless Term.
@@ -412,7 +450,19 @@ impl Pane {
             rows,
             cwd,
             shell: String::new(), // Unknown for handoff panes
+            inference,
         })
+    }
+
+    /// Snapshot the per-pane agent inference engine. Returns a plain DTO
+    /// suitable for serialising into the MCP `terminal.agents.get_details`
+    /// response. Holds the inference lock only for the duration of the
+    /// snapshot clone.
+    pub fn agent_details_snapshot(&self) -> AgentDetailsSnapshot {
+        self.inference
+            .lock()
+            .map(|inf| inf.snapshot())
+            .unwrap_or_default()
     }
 
     /// Access the pane's semantic region index.
@@ -819,6 +869,19 @@ impl SessionManager {
             }
         }
         Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Snapshot a pane's agent inference state by pane ID. Returns `None`
+    /// if the pane does not exist.
+    pub fn pane_agent_details(&self, pane_id: PaneId) -> Option<AgentDetailsSnapshot> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.agent_details_snapshot());
+                }
+            }
+        }
+        None
     }
 
     /// Access a pane's region index by pane ID (searches all sessions).

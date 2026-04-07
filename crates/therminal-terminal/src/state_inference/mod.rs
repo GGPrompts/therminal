@@ -36,6 +36,32 @@ use state_machine::{days_to_ymd, now_rfc3339};
 pub use cadence::{ByteChunkStats, OutputCadence};
 pub use types::{AgentType, InferenceConfig, InferredStatus, StateChangeNotification};
 
+/// Plain-data snapshot of the inference engine's externally-observable state.
+///
+/// Returned by [`AgentStateInference::snapshot`] so consumers (e.g. the
+/// daemon's MCP `terminal.agents.get_details` handler) can read engine state
+/// under a short lock and then drop it before serialising. Contains only
+/// owned plain types -- no references or internal handles -- so it can cross
+/// thread boundaries freely.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentDetailsSnapshot {
+    /// Detected/configured agent type as a lowercase string ("claude",
+    /// "codex", "copilot", "aider"). `None` if no agent has been identified.
+    pub agent_type: Option<String>,
+    /// Detected model name from output (e.g. "claude-sonnet-4-20250514").
+    pub model: Option<String>,
+    /// Context-window usage percentage (0.0..100.0) if detected.
+    pub context_percent: Option<f32>,
+    /// Count of consecutive non-zero exit codes.
+    pub consecutive_failures: i64,
+    /// Most recent command line captured via OSC 633 ;E.
+    pub last_command: Option<String>,
+    /// Exit code of the most recent finished command (OSC 633 ;D).
+    pub last_exit_code: Option<i32>,
+    /// Duration in milliseconds of the most recent finished command.
+    pub last_command_duration_ms: Option<i64>,
+}
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
@@ -263,6 +289,23 @@ impl AgentStateInference {
     /// Read-only access to the chunk stats window (for external analysis).
     pub fn chunk_stats(&self) -> &VecDeque<ByteChunkStats> {
         &self.chunk_stats
+    }
+
+    /// Build a plain-data snapshot of the inference engine's externally-
+    /// observable state. Cheap (clones a few small `Option<String>`s) and
+    /// intended to be called under a short lock from the daemon.
+    pub fn snapshot(&self) -> AgentDetailsSnapshot {
+        AgentDetailsSnapshot {
+            agent_type: self
+                .effective_agent_type()
+                .map(|at| at.as_str().to_string()),
+            model: self.detected_model.clone(),
+            context_percent: self.context_percent,
+            consecutive_failures: self.consecutive_failures,
+            last_command: self.last_command.clone(),
+            last_exit_code: self.last_exit_code,
+            last_command_duration_ms: self.last_command_duration_ms,
+        }
     }
 
     /// Get the effective agent type (config override > detected > None).
@@ -587,6 +630,42 @@ mod tests {
         engine.infer_and_write();
         assert_eq!(engine.context_percent, Some(58.0));
         assert!(!engine.dirty);
+    }
+
+    #[test]
+    fn snapshot_reflects_engine_state_after_feed_bytes() {
+        // End-to-end shape test: feed Claude-Code-style output through the
+        // engine and assert that `snapshot()` returns the externally-
+        // observable fields. This is the same call path the daemon uses
+        // from `Pane::agent_details_snapshot()` for the MCP
+        // `terminal.agents.get_details` tool.
+        let mut engine = make_engine(Some(AgentType::Claude));
+
+        // Model line — picked up by the patterns module.
+        engine.feed_bytes(b"using: claude-sonnet-4-20250514\n");
+        // Context-percent line.
+        engine.push_line("37% context used".to_string());
+        engine.infer_and_write();
+
+        let snap = engine.snapshot();
+        assert_eq!(snap.agent_type.as_deref(), Some("claude"));
+        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(snap.context_percent, Some(37.0));
+        assert_eq!(snap.consecutive_failures, 0);
+        // No OSC 633 ;E/;D fed, so command fields are None.
+        assert_eq!(snap.last_command, None);
+        assert_eq!(snap.last_exit_code, None);
+        assert_eq!(snap.last_command_duration_ms, None);
+    }
+
+    #[test]
+    fn snapshot_default_for_fresh_engine() {
+        // A brand-new engine with no agent type configured and no bytes
+        // fed should snapshot to all-None / zero — the same fallback the
+        // daemon uses when locking fails.
+        let engine = make_engine(None);
+        let snap = engine.snapshot();
+        assert_eq!(snap, AgentDetailsSnapshot::default());
     }
 
     #[test]
