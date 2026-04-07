@@ -19,6 +19,29 @@ use therminal_terminal::input::{self, MouseButton as InputMouseButton};
 use super::App;
 use super::chrome::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 
+// ── Hover cursor (hyperlink / hotspot) state machine ──────────────────
+
+/// Pure decision for the hyperlink/hotspot hover cursor state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HoverCursorTransition {
+    Activate,
+    Deactivate,
+    NoChange,
+}
+
+pub(crate) fn hover_cursor_transition(
+    currently_active: bool,
+    on_link: bool,
+    on_hotspot: bool,
+) -> HoverCursorTransition {
+    let want_pointer = on_link || on_hotspot;
+    match (currently_active, want_pointer) {
+        (false, true) => HoverCursorTransition::Activate,
+        (true, false) => HoverCursorTransition::Deactivate,
+        _ => HoverCursorTransition::NoChange,
+    }
+}
+
 // ── Window edge resize ─────────────────────────────────────────────────
 
 /// One of eight outer-edge resize regions for a CSD borderless window.
@@ -469,9 +492,17 @@ impl App {
                 None => return,
             };
 
-            // Hyperlink hover: show pointer cursor when over a hyperlinked cell.
-            if !self.separator_cursor_active {
+            // Hyperlink/hotspot hover: show pointer cursor when over a
+            // hyperlinked or hotspot cell. Sits below separator + edge resize
+            // in the cursor precedence chain so those win on actual edges /
+            // separators, while hotspots win inside the content area.
+            if !self.separator_cursor_active && !self.edge_cursor_active {
                 self.update_hyperlink_hover(target, row, col);
+            } else if self.hyperlink_cursor_active {
+                // A higher-precedence cursor took over; clear our state so
+                // the next hover transition restamps correctly. The other
+                // system owns set_cursor right now, so don't touch the icon.
+                self.hyperlink_cursor_active = false;
             }
 
             let mode = self.pane_term_mode(target);
@@ -650,17 +681,20 @@ impl App {
 
         let on_link = self.has_hyperlink(pane_id, row, col);
         let on_hotspot = self.has_hotspot(pane_id, row, col);
-        let want_pointer = on_link || on_hotspot;
-        if want_pointer && !self.hyperlink_cursor_active {
-            self.hyperlink_cursor_active = true;
-            if let Some(w) = self.window.as_ref() {
-                w.set_cursor(CursorIcon::Pointer);
+        match hover_cursor_transition(self.hyperlink_cursor_active, on_link, on_hotspot) {
+            HoverCursorTransition::Activate => {
+                self.hyperlink_cursor_active = true;
+                if let Some(w) = self.window.as_ref() {
+                    w.set_cursor(CursorIcon::Pointer);
+                }
             }
-        } else if !want_pointer && self.hyperlink_cursor_active {
-            self.hyperlink_cursor_active = false;
-            if let Some(w) = self.window.as_ref() {
-                w.set_cursor(CursorIcon::Default);
+            HoverCursorTransition::Deactivate => {
+                self.hyperlink_cursor_active = false;
+                if let Some(w) = self.window.as_ref() {
+                    w.set_cursor(CursorIcon::Default);
+                }
             }
+            HoverCursorTransition::NoChange => {}
         }
     }
 
@@ -1063,6 +1097,126 @@ mod edge_resize_tests {
         assert_eq!(
             ResizeEdge::SW.to_resize_direction(),
             ResizeDirection::SouthWest
+        );
+    }
+}
+
+#[cfg(test)]
+mod hover_cursor_tests {
+    //! State-machine tests for the hyperlink/hotspot hover cursor. Drives the
+    //! pure `hover_cursor_transition` decision function with a synthetic
+    //! `(row, col) -> (on_link, on_hotspot)` fixture, simulating the active
+    //! flag the way the real handler does.
+    use super::*;
+    use std::collections::HashMap;
+
+    type Cell = (usize, usize); // (row, col)
+
+    fn step(
+        active: &mut bool,
+        map: &HashMap<Cell, (bool, bool)>,
+        row: usize,
+        col: usize,
+    ) -> HoverCursorTransition {
+        let (link, hot) = map.get(&(row, col)).copied().unwrap_or((false, false));
+        let t = hover_cursor_transition(*active, link, hot);
+        match t {
+            HoverCursorTransition::Activate => *active = true,
+            HoverCursorTransition::Deactivate => *active = false,
+            HoverCursorTransition::NoChange => {}
+        }
+        t
+    }
+
+    #[test]
+    fn plain_to_hotspot_activates() {
+        let mut map: HashMap<Cell, (bool, bool)> = HashMap::new();
+        map.insert((1, 5), (false, true));
+        let mut active = false;
+        assert_eq!(
+            step(&mut active, &map, 0, 0),
+            HoverCursorTransition::NoChange
+        );
+        assert_eq!(
+            step(&mut active, &map, 1, 5),
+            HoverCursorTransition::Activate
+        );
+        assert!(active);
+    }
+
+    #[test]
+    fn hotspot_to_hotspot_no_thrash() {
+        let mut map: HashMap<Cell, (bool, bool)> = HashMap::new();
+        map.insert((1, 5), (false, true));
+        map.insert((1, 6), (false, true));
+        let mut active = false;
+        step(&mut active, &map, 1, 5);
+        assert_eq!(
+            step(&mut active, &map, 1, 6),
+            HoverCursorTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn hotspot_to_plain_deactivates() {
+        let mut map: HashMap<Cell, (bool, bool)> = HashMap::new();
+        map.insert((1, 5), (false, true));
+        let mut active = false;
+        step(&mut active, &map, 1, 5);
+        assert_eq!(
+            step(&mut active, &map, 2, 0),
+            HoverCursorTransition::Deactivate
+        );
+        assert!(!active);
+    }
+
+    #[test]
+    fn hyperlink_alone_activates() {
+        let mut map: HashMap<Cell, (bool, bool)> = HashMap::new();
+        map.insert((3, 3), (true, false));
+        let mut active = false;
+        assert_eq!(
+            step(&mut active, &map, 3, 3),
+            HoverCursorTransition::Activate
+        );
+    }
+
+    #[test]
+    fn hyperlink_to_hotspot_no_thrash() {
+        let mut map: HashMap<Cell, (bool, bool)> = HashMap::new();
+        map.insert((0, 0), (true, false));
+        map.insert((0, 1), (false, true));
+        let mut active = false;
+        step(&mut active, &map, 0, 0);
+        assert_eq!(
+            step(&mut active, &map, 0, 1),
+            HoverCursorTransition::NoChange
+        );
+        assert!(active);
+    }
+
+    #[test]
+    fn full_walk_sequence() {
+        // plain -> hotspot -> hotspot -> plain -> hyperlink -> plain
+        let mut map: HashMap<Cell, (bool, bool)> = HashMap::new();
+        map.insert((0, 1), (false, true));
+        map.insert((0, 2), (false, true));
+        map.insert((1, 0), (true, false));
+        let mut active = false;
+        let trail: Vec<HoverCursorTransition> = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)]
+            .iter()
+            .map(|(r, c)| step(&mut active, &map, *r, *c))
+            .collect();
+        assert_eq!(
+            trail,
+            vec![
+                HoverCursorTransition::NoChange,
+                HoverCursorTransition::Activate,
+                HoverCursorTransition::NoChange,
+                HoverCursorTransition::Deactivate,
+                HoverCursorTransition::Activate,
+                HoverCursorTransition::Deactivate,
+            ]
         );
     }
 }
