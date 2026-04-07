@@ -9,7 +9,7 @@ pub(crate) const FOCUS_BORDER_COLOR: [f32; 4] = {
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
         c.b as f32 / 255.0,
-        0.8,
+        0.92,
     ]
 };
 
@@ -20,7 +20,7 @@ pub(super) const SEPARATOR_COLOR: [f32; 4] = {
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
         c.b as f32 / 255.0,
-        1.0,
+        0.9,
     ]
 };
 
@@ -31,13 +31,13 @@ pub(super) const SEPARATOR_FOCUS_COLOR: [f32; 4] = {
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
         c.b as f32 / 255.0,
-        0.6,
+        0.82,
     ]
 };
 
-/// Pane header background color (PLATE from palette).
+/// Pane header background color for the focused pane.
 pub(crate) const HEADER_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::PLATE;
+    let c = PaletteColor::VOID_1;
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
@@ -48,12 +48,12 @@ pub(crate) const HEADER_BG_COLOR: [f32; 4] = {
 
 /// Dimmed pane header background for unfocused panes.
 pub(crate) const HEADER_BG_DIM_COLOR: [f32; 4] = {
-    let c = PaletteColor::PLATE;
+    let c = PaletteColor::VOID_0;
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
         c.b as f32 / 255.0,
-        0.6,
+        0.92,
     ]
 };
 
@@ -63,9 +63,9 @@ pub(crate) const HEADER_BUTTON_WIDTH: f32 = 24.0;
 /// Right-side margin for header buttons.
 pub(crate) const HEADER_BUTTON_MARGIN: f32 = 4.0;
 
-/// Status bar background color (VOID_2 from palette).
+/// Status bar background color.
 pub(super) const STATUS_BAR_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::VOID_2;
+    let c = PaletteColor::VOID_1;
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,

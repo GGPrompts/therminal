@@ -190,11 +190,18 @@ pub(crate) fn draw_tab_bar(
         let slot = format!("tab_{ws_id}");
         let key = format!("{label}|{active_tag}");
 
+        // Pass the full surface width as the shaping constraint rather than
+        // `tab_w`. With a tight per-tab width, glyphon wraps long labels onto
+        // a second line and `layout_runs().next()` then only yields the first
+        // visual line — which is exactly the rename bug (user sees the leading
+        // workspace id but not the typed buffer or trailing cursor). Centering
+        // is computed post-shape from the real text width, so a generous
+        // shaping width is safe.
         ensure_shaped(
             &slot,
             &key,
             metrics,
-            tab_w,
+            sw,
             bar_h,
             label,
             Attrs::new().family(Family::Name(&family)).color(color),

@@ -790,6 +790,22 @@ mod rename_state_tests {
     }
 
     #[test]
+    fn build_tab_labels_rename_branch_includes_buffer_and_cursor() {
+        use super::{RenameState, build_tab_labels};
+        let mut state = RenameState::new(1, "1".to_string());
+        // Initial: label is "1: 1_"
+        let labels = build_tab_labels(&[1, 2], None, Some(&state));
+        assert_eq!(labels[0], "1: 1_");
+        assert_eq!(labels[1], "2");
+        // After typing 'a','b','c': label is "1: 1abc_"
+        for c in ['a', 'b', 'c'] {
+            state.insert_char(c);
+        }
+        let labels = build_tab_labels(&[1, 2], None, Some(&state));
+        assert_eq!(labels[0], "1: 1abc_");
+    }
+
+    #[test]
     fn backspace_handles_multibyte() {
         let mut s = RenameState::new(1, "aé".to_string());
         s.backspace();
