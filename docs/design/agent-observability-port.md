@@ -1,5 +1,24 @@
 # Agent Observability Port (from thermal-desktop)
 
+## Status (2026-04-06)
+
+**Layer 1 shipped + extended with JSONL tailing.** Epic `tn-ygcr` landed in commits `ade0af2..08fa82f`:
+
+- `crates/therminal-daemon/src/claude_state.rs` — `/tmp/claude-code-state/` notify watcher, `ClaudeSessionState` with `parent_session_id` (tn-td1l)
+- `crates/therminal-daemon/src/agent_events.rs` — `AgentEvent` enum (tn-6y1j)
+- `crates/therminal-daemon/src/claude_session_log.rs` — nested JSONL envelope parser, 19 tests (tn-6y1j)
+- `crates/therminal-daemon/src/claude_jsonl_tailer.rs` — `ClaudeJsonlRegistry` with top-level + subagent tailers, `TaggedAgentEvent { event, source }` envelope where `EventSource::{TopLevel, Subagent}` discriminates the session tree (tn-4bex, tn-xvwv)
+- `crates/therminal-daemon/src/claude_pipeline.rs` — 150ms tick driver, `tokio::sync::broadcast` fan-out (tn-lzvv)
+- MCP resource `therminal://claude/events` with subscription + trust-gated reads in `mcp.rs` (tn-lzvv)
+
+This goes further than the original Layer 1 plan: not only does the daemon know *which* session is active, it streams every `UserMessage`, `AssistantMessage`, `ToolUse`, `ToolResult`, `Thinking`, and `Progress` event from parent sessions and their Task-tool subagents over MCP. Consumers reconstruct the session tree from `EventSource`.
+
+**Still open:**
+- Layer 2 (timeline overlay widget) — tracked in a follow-up issue; blocked only on Phase 6 overlay infrastructure. Consumer reads `therminal://claude/events`.
+- Layer 3 (JSONL tail pane backend) — unchanged from original plan.
+- Layer 4 MCP tools — partially done: the events *resource* exists. `terminal.agents.get_state`, `terminal.widgets.timeline.toggle`, `terminal.panes.create_tail` are still TODO.
+- Settings/UI surface for the feature (enable/disable, trust tier, which sessions to observe) — tracked separately.
+
 ## Background
 
 thermal-desktop already has working subagent observability that we want in therminal:
