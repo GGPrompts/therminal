@@ -11,12 +11,12 @@ use tracing::debug;
 
 use super::{
     AgentDetailsResult, AgentInfoResult, CommandInfo, CreateSessionParam, DestroyPaneResult,
-    EventInfo, GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
-    GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson,
-    ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult, ListWorkspacesParam,
-    ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo,
-    QueryCommandsParam, QueryCommandsResult, QueryEventsParam, QueryEventsResult,
-    QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
+    EmptyParams, EventInfo, GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam,
+    GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo,
+    LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult,
+    ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult,
+    PaneIdParam, PaneInfo, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
+    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
     SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
     SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer, WaitForOutputParam,
     WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
@@ -917,7 +917,7 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         Tool::new(
             "terminal.sessions.list",
             "List all active terminal session IDs",
-            schema_for_type::<()>(),
+            schema_for_type::<EmptyParams>(),
         ),
         Tool::new(
             "terminal.sessions.get",

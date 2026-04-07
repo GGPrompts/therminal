@@ -25,10 +25,14 @@ MCP IPC endpoint and forwards JSON-RPC bidirectionally over stdin/stdout.
    - `resources/` to `%APPDATA%\therminal\resources` (shell integration scripts)
    See the [Windows Native Build section in the top-level CLAUDE.md](../../CLAUDE.md).
 
-2. **Running daemon** — launch `therminal.exe` on Windows (double-click the
-   Desktop shortcut or `explorer.exe therminal.exe` from WSL). The daemon
-   is embedded in the main binary and listens on a Windows named pipe:
-   `\\.\pipe\therminal-mcp` by default.
+2. **Running daemon** — you must launch `therminal-daemon.exe` on Windows
+   *before* the bridge or the GUI can connect. The daemon is a separate
+   binary from `therminal.exe` (auto-spawn from the GUI is tracked as
+   tn-6q3v). It listens on a Windows named pipe: `\\.\pipe\therminal-mcp`
+   by default. Typical launch:
+   ```powershell
+   Start-Process "$env:USERPROFILE\Desktop\therminal-daemon.exe"
+   ```
 
 3. **binfmt_misc** — standard on WSL2. Confirm with `file /mnt/c/Windows/System32/notepad.exe`;
    if it's recognised and executable, you're set. This is what lets WSL
@@ -108,9 +112,10 @@ routing — happens inside the Windows daemon.
   arguments if the tool is reading files. Windows-style `C:\Users\...`
   paths only work if the tool is invoking Windows APIs directly.
 - **Daemon not running**: Every tool call will fail fast with
-  `failed to connect to daemon MCP named pipe`. Launch `therminal.exe`
-  first. The daemon is embedded in the main binary, so starting the GUI
-  also starts the daemon.
+  `failed to connect to daemon MCP named pipe`. Launch
+  `therminal-daemon.exe` first — it is a separate process from
+  `therminal.exe` and neither the GUI nor the stdio bridge will start it
+  for you (auto-spawn is tracked as tn-6q3v).
 - **Trust tier defaults**: New MCP clients are assigned the default trust
   tier from `[trust]` in `therminal.toml`. Until you bump Claude Code's
   tier, write-level tools (input injection, pane spawn) may be denied.

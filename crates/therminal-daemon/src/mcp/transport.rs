@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use rmcp::ServiceExt;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tracing::{debug, error, info};
 #[cfg(unix)]
 use tracing::warn;
+use tracing::{debug, error, info};
 
 use therminal_core::config::TrustConfig;
 

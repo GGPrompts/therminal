@@ -49,6 +49,19 @@ pub use transport::start_mcp_server;
 
 // ── Tool parameter types ────────────────────────────────────────────────
 
+/// Empty parameter type for tools that take no arguments.
+///
+/// We use this instead of `schema_for_type::<()>()` because schemars emits
+/// `{"type":"null"}` for the unit type, but the MCP spec requires every
+/// tool's `inputSchema` to be `{"type":"object", ...}`. Claude Code
+/// strict-validates tool schemas and silently drops the entire tools/list
+/// response if any tool has a non-object schema — the symptom is that
+/// `claude mcp list` reports "connected" but no `mcp__therminal__*` tools
+/// register in-conversation (resources, which use a separate listing path,
+/// still work). See tn-q882.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct EmptyParams {}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct SessionIdParam {
     /// The numeric session ID.
