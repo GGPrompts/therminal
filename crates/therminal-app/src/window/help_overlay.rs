@@ -2,6 +2,14 @@
 //! configured keybindings grouped by section.
 //!
 //! Rendered as a final pass on top of all pane content, status bar, and chrome.
+//!
+//! Layout strategy:
+//!   1. Auto-size the panel to fit content height, capped at ~80% of window height.
+//!   2. If content exceeds the cap, switch to a two-column layout with the split
+//!      placed at a category boundary (categories are never broken).
+//!   3. If even two columns at 80% height overflow, the inner panel acts as a
+//!      scissor (via glyphon `TextBounds`) so nothing bleeds outside the box,
+//!      and a "more bindings hidden" hint is drawn at the bottom.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -39,6 +47,70 @@ fn section_order(name: &str) -> u8 {
     }
 }
 
+// ── Layout planner (pure, testable) ───────────────────────────────────
+
+/// Result of laying out the help overlay's category list.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HelpLayoutPlan {
+    /// All categories fit in a single column. `content_h` is the actual
+    /// height needed (not the cap).
+    SingleColumn { content_h: f32 },
+    /// Categories were split across two columns. `split_index` is the index
+    /// of the first category that goes into column 1 (so column 0 has
+    /// `[0..split_index)`). `content_h` is the height of the taller column.
+    /// `clipped` is true when even the two-column layout overflows the cap.
+    TwoColumn {
+        split_index: usize,
+        content_h: f32,
+        clipped: bool,
+    },
+}
+
+/// Decide single- vs two-column layout for the help overlay given each
+/// category's height (header + binding rows) and the maximum allowed
+/// inner content height.
+///
+/// The split is chosen to minimise the taller of the two columns while
+/// respecting category boundaries. If `cap` is non-positive, returns a
+/// clipped two-column layout with `split_index` at the midpoint.
+pub(crate) fn plan_help_layout(cat_heights: &[f32], cap: f32) -> HelpLayoutPlan {
+    let total: f32 = cat_heights.iter().sum();
+    if cap <= 0.0 {
+        // No room at all — return a clipped two-column plan as a sentinel.
+        let mid = cat_heights.len() / 2;
+        return HelpLayoutPlan::TwoColumn {
+            split_index: mid,
+            content_h: total,
+            clipped: true,
+        };
+    }
+    if total <= cap || cat_heights.len() < 2 {
+        return HelpLayoutPlan::SingleColumn { content_h: total };
+    }
+
+    // Find the split that minimises max(col0, col1).
+    let mut best_split = 1usize;
+    let mut best_max = f32::INFINITY;
+    let mut prefix = 0.0_f32;
+    for i in 1..cat_heights.len() {
+        prefix += cat_heights[i - 1];
+        let col0 = prefix;
+        let col1 = total - prefix;
+        let m = col0.max(col1);
+        if m < best_max {
+            best_max = m;
+            best_split = i;
+        }
+    }
+
+    let clipped = best_max > cap;
+    HelpLayoutPlan::TwoColumn {
+        split_index: best_split,
+        content_h: best_max,
+        clipped,
+    }
+}
+
 // ── Draw the help overlay ─────────────────────────────────────────────
 
 /// Draw the keybinding help overlay centered in the window.
@@ -65,19 +137,18 @@ pub(crate) fn draw_help_overlay(
     // ── Full-screen scrim ───────────────────────────────────────────────
     let scrim_verts = pixel_rect_to_ndc(0.0, 0.0, sw, sh, sw, sh, SCRIM_COLOR);
 
-    // ── Panel dimensions ────────────────────────────────────────────────
-    let panel_w = (sw * 0.55).clamp(340.0, 600.0);
+    // ── Layout constants ────────────────────────────────────────────────
     let row_h = 24.0_f32;
     let header_row_h = 32.0_f32;
     let padding_v = 20.0_f32;
     let padding_h = 24.0_f32;
+    let title_h = row_h + 4.0 + 8.0; // title metric line + spacing below
+    let column_gap = 32.0_f32;
+    let hint_h = row_h;
 
     // Group bindings by section, then collapse contiguous numeric families
     // (e.g. Alt+1..Alt+9 for SwitchWorkspace) into a single placeholder row.
     let mut sections: BTreeMap<u8, (String, Vec<(String, String)>)> = BTreeMap::new();
-    // Track, per section, the group signature of the last-pushed row so we
-    // can fold subsequent bindings of the same group into it.
-    // Signature: (modifier_prefix, action_family).
     let mut seen_groups: HashSet<(u8, String, String)> = HashSet::new();
     for binding in &keybindings.bindings {
         let section_name = binding.action.section().to_string();
@@ -88,13 +159,9 @@ pub(crate) fn draw_help_overlay(
         let shortcut = format_shortcut(&binding.key);
         let description = binding.action.description().to_string();
 
-        // Determine whether this binding is part of a numeric family — i.e.
-        // shortcut ends in a single digit AND the action's Debug repr has a
-        // trailing numeric component (e.g. SwitchWorkspace(3)).
         if let Some(sig) = numeric_group_signature(&shortcut, &binding.action) {
             let key = (order, sig.0.clone(), sig.1);
             if !seen_groups.insert(key) {
-                // Already represented by a single placeholder row — skip.
                 continue;
             }
             let placeholder_shortcut = format!("{}(1-9)", sig.0);
@@ -104,11 +171,33 @@ pub(crate) fn draw_help_overlay(
         }
     }
 
-    // Calculate panel height.
-    let section_count = sections.len();
-    let binding_count: usize = sections.values().map(|(_, v)| v.len()).sum();
-    let content_h = (section_count as f32 * header_row_h) + (binding_count as f32 * row_h) + row_h; // title row
-    let panel_h = (content_h + padding_v * 2.0).min(sh * 0.85);
+    // Categories as an ordered Vec for layout planning.
+    let categories: Vec<(String, Vec<(String, String)>)> = sections.values().cloned().collect();
+    let cat_heights: Vec<f32> = categories
+        .iter()
+        .map(|(_, b)| header_row_h + b.len() as f32 * row_h)
+        .collect();
+
+    // ── Layout planning ─────────────────────────────────────────────────
+    let panel_w_one = (sw * 0.55).clamp(340.0, 600.0).min(sw - 20.0);
+    let panel_w_two = (sw * 0.85).clamp(680.0, 1100.0).min(sw - 20.0);
+    let max_panel_h = sh * 0.80;
+    let inner_max_h = (max_panel_h - padding_v * 2.0 - title_h - hint_h).max(0.0);
+
+    let plan = plan_help_layout(&cat_heights, inner_max_h);
+    let (panel_w, columns_count, content_inner_h, clipped, split_index) = match &plan {
+        HelpLayoutPlan::SingleColumn { content_h } => {
+            (panel_w_one, 1usize, *content_h, false, categories.len())
+        }
+        HelpLayoutPlan::TwoColumn {
+            content_h,
+            clipped,
+            split_index,
+        } => (panel_w_two, 2usize, *content_h, *clipped, *split_index),
+    };
+
+    let extra_h = if clipped { hint_h } else { 0.0 };
+    let panel_h = (title_h + content_inner_h + extra_h + padding_v * 2.0).min(max_panel_h);
 
     let panel_x = (sw - panel_w) / 2.0;
     let panel_y = (sh - panel_h) / 2.0;
@@ -173,26 +262,38 @@ pub(crate) fn draw_help_overlay(
         255,
     );
 
+    // Inner panel rect doubles as glyphon scissor so any overflow rows are
+    // clipped to the box (last-resort safety net for tiny windows).
+    let inner_left = panel_x + padding_h;
+    let inner_top = panel_y + padding_v;
+    let inner_right = panel_x + panel_w - padding_h;
+    let inner_bottom = panel_y + panel_h - padding_v;
     let bounds = TextBounds {
-        left: 0,
-        top: 0,
-        right: surface_width as i32,
-        bottom: surface_height as i32,
+        left: inner_left as i32,
+        top: inner_top as i32,
+        right: inner_right as i32,
+        bottom: inner_bottom as i32,
     };
 
-    let content_x = panel_x + padding_h;
-    let mut current_y = panel_y + padding_v;
-    let col2_x = content_x + panel_w * 0.45; // description column
+    let content_x = inner_left;
+    let mut current_y = inner_top;
+
+    let col_inner_w = if columns_count == 2 {
+        ((panel_w - padding_h * 2.0 - column_gap) / 2.0).max(0.0)
+    } else {
+        panel_w - padding_h * 2.0
+    };
+    let col2_x_offset = col_inner_w * 0.45; // shortcut→description split inside a column
 
     let mut text_areas: Vec<TextArea<'_>> = Vec::new();
-    // We need to keep all buffers alive until after prepare() + render().
     let mut buffers: Vec<Buffer> = Vec::new();
 
-    // Title
+    // Title (spans full panel width)
+    let title_inner_w = panel_w - padding_h * 2.0;
     let mut title_buf = Buffer::new(&mut renderer.font_system, title_metrics);
     title_buf.set_size(
         &mut renderer.font_system,
-        Some(panel_w - padding_h * 2.0),
+        Some(title_inner_w),
         Some(row_h + 4.0),
     );
     title_buf.set_text(
@@ -207,9 +308,6 @@ pub(crate) fn draw_help_overlay(
     );
     title_buf.shape_until_scroll(&mut renderer.font_system, false);
     buffers.push(title_buf);
-    // Record position for this buffer: (buffer_index, x, y, color)
-    let title_idx = buffers.len() - 1;
-    let _ = (title_idx, content_x, current_y);
     current_y += row_h + 8.0;
 
     // Build all section + binding buffers.
@@ -221,7 +319,6 @@ pub(crate) fn draw_help_overlay(
     }
     let mut rows: Vec<RowInfo> = Vec::new();
 
-    // Title row info
     rows.push(RowInfo {
         buf_idx: 0,
         x: content_x,
@@ -229,12 +326,27 @@ pub(crate) fn draw_help_overlay(
         color: text_color,
     });
 
-    for (section_name, bindings) in sections.values() {
+    let title_baseline_y = current_y;
+    let col0_x = content_x;
+    let col1_x = content_x + col_inner_w + column_gap;
+
+    for (cat_idx, (section_name, bindings)) in categories.iter().enumerate() {
+        // Switch to the second column at the planned split boundary.
+        if columns_count == 2 && cat_idx == split_index {
+            current_y = title_baseline_y;
+        }
+        let col_x = if columns_count == 2 && cat_idx >= split_index {
+            col1_x
+        } else {
+            col0_x
+        };
+        let col_x_desc = col_x + col2_x_offset;
+
         // Section header
         let mut hdr_buf = Buffer::new(&mut renderer.font_system, header_metrics);
         hdr_buf.set_size(
             &mut renderer.font_system,
-            Some(panel_w - padding_h * 2.0),
+            Some(col_inner_w),
             Some(header_row_h),
         );
         hdr_buf.set_text(
@@ -251,16 +363,20 @@ pub(crate) fn draw_help_overlay(
         buffers.push(hdr_buf);
         rows.push(RowInfo {
             buf_idx: buffers.len() - 1,
-            x: content_x,
+            x: col_x,
             y: current_y,
             color: accent_color,
         });
         current_y += header_row_h;
 
         for (shortcut, description) in bindings {
-            // Shortcut (left column)
+            // Shortcut (left within column)
             let mut key_buf = Buffer::new(&mut renderer.font_system, metrics);
-            key_buf.set_size(&mut renderer.font_system, Some(panel_w * 0.42), Some(row_h));
+            key_buf.set_size(
+                &mut renderer.font_system,
+                Some(col_inner_w * 0.42),
+                Some(row_h),
+            );
             key_buf.set_text(
                 &mut renderer.font_system,
                 shortcut,
@@ -274,14 +390,18 @@ pub(crate) fn draw_help_overlay(
             buffers.push(key_buf);
             rows.push(RowInfo {
                 buf_idx: buffers.len() - 1,
-                x: content_x,
+                x: col_x,
                 y: current_y,
                 color: text_color,
             });
 
-            // Description (right column)
+            // Description (right within column)
             let mut desc_buf = Buffer::new(&mut renderer.font_system, metrics);
-            desc_buf.set_size(&mut renderer.font_system, Some(panel_w * 0.5), Some(row_h));
+            desc_buf.set_size(
+                &mut renderer.font_system,
+                Some(col_inner_w * 0.55),
+                Some(row_h),
+            );
             desc_buf.set_text(
                 &mut renderer.font_system,
                 description,
@@ -295,13 +415,40 @@ pub(crate) fn draw_help_overlay(
             buffers.push(desc_buf);
             rows.push(RowInfo {
                 buf_idx: buffers.len() - 1,
-                x: col2_x,
+                x: col_x_desc,
                 y: current_y,
                 color: muted_color,
             });
 
             current_y += row_h;
         }
+    }
+
+    if clipped {
+        let hint_y = panel_y + panel_h - padding_v - hint_h;
+        let mut hint_buf = Buffer::new(&mut renderer.font_system, metrics);
+        hint_buf.set_size(
+            &mut renderer.font_system,
+            Some(panel_w - padding_h * 2.0),
+            Some(row_h),
+        );
+        hint_buf.set_text(
+            &mut renderer.font_system,
+            "more bindings hidden — resize window",
+            &Attrs::new()
+                .family(Family::Name(&renderer.font_config.family))
+                .color(muted_color),
+            Shaping::Basic,
+            None,
+        );
+        hint_buf.shape_until_scroll(&mut renderer.font_system, false);
+        buffers.push(hint_buf);
+        rows.push(RowInfo {
+            buf_idx: buffers.len() - 1,
+            x: content_x,
+            y: hint_y,
+            color: muted_color,
+        });
     }
 
     // Build TextArea references from the stored buffers and positions.
@@ -383,21 +530,16 @@ fn numeric_group_signature(
     shortcut: &str,
     action: &therminal_core::config::KeyAction,
 ) -> Option<(String, String)> {
-    // Shortcut must end in a single decimal digit.
     let last = shortcut.chars().next_back()?;
     if !last.is_ascii_digit() {
         return None;
     }
-    // The character before the digit must be a `+` (i.e. the digit is a
-    // standalone key token) or the digit must be the entire shortcut.
     let prefix_len = shortcut.len() - last.len_utf8();
     let prefix = &shortcut[..prefix_len];
     if !prefix.is_empty() && !prefix.ends_with('+') {
         return None;
     }
 
-    // Action Debug repr must have a trailing digit group. Covers both
-    // tuple-style `SwitchWorkspace(3)` and suffix-style `Tab7`.
     let dbg = format!("{action:?}");
     let family = strip_trailing_digit_group(&dbg)?;
 
@@ -405,13 +547,7 @@ fn numeric_group_signature(
 }
 
 /// Strip a trailing digit group from a Debug repr.
-///
-/// - `SwitchWorkspace(3)` → `Some("SwitchWorkspace")`
-/// - `SendToWorkspace(9)` → `Some("SendToWorkspace")`
-/// - `Tab7` → `Some("Tab")`
-/// - `FocusNext` → `None`
 fn strip_trailing_digit_group(dbg: &str) -> Option<String> {
-    // Tuple form: `Name(<digits>)`.
     if let Some(open) = dbg.rfind('(')
         && dbg.ends_with(')')
     {
@@ -420,7 +556,6 @@ fn strip_trailing_digit_group(dbg: &str) -> Option<String> {
             return Some(dbg[..open].to_string());
         }
     }
-    // Suffix form: trailing digits directly on the variant name.
     let trimmed = dbg.trim_end_matches(|c: char| c.is_ascii_digit());
     if trimmed.len() < dbg.len() && !trimmed.is_empty() {
         return Some(trimmed.to_string());
@@ -459,4 +594,110 @@ fn format_shortcut(key: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("+")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cats(sizes: &[usize]) -> Vec<f32> {
+        // Match production formula: header_row_h (32) + N * row_h (24)
+        sizes.iter().map(|n| 32.0 + *n as f32 * 24.0).collect()
+    }
+
+    #[test]
+    fn small_content_tall_window_single_column() {
+        // Three small categories, plenty of vertical room.
+        let heights = cats(&[3, 4, 2]);
+        let plan = plan_help_layout(&heights, 1000.0);
+        match plan {
+            HelpLayoutPlan::SingleColumn { content_h } => {
+                let total: f32 = heights.iter().sum();
+                assert!((content_h - total).abs() < 1e-3);
+            }
+            other => panic!("expected SingleColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn large_content_tall_window_single_column_at_content_height() {
+        // Total just barely fits.
+        let heights = cats(&[10, 10, 10]);
+        let total: f32 = heights.iter().sum();
+        let plan = plan_help_layout(&heights, total + 1.0);
+        match plan {
+            HelpLayoutPlan::SingleColumn { content_h } => {
+                assert!((content_h - total).abs() < 1e-3);
+            }
+            other => panic!("expected SingleColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn large_content_short_window_switches_to_two_columns() {
+        let heights = cats(&[8, 8, 8, 8]);
+        let total: f32 = heights.iter().sum();
+        // Cap below total but big enough that the best split fits.
+        let plan = plan_help_layout(&heights, total / 2.0 + 50.0);
+        match plan {
+            HelpLayoutPlan::TwoColumn {
+                split_index,
+                content_h,
+                clipped,
+            } => {
+                assert!(!clipped, "should fit in two columns without clipping");
+                assert!(split_index >= 1 && split_index < heights.len());
+                // Column heights are at most ~half + some.
+                assert!(content_h <= total / 2.0 + 50.0 + 1.0);
+                // The best split for [8,8,8,8] equal cats is at index 2.
+                assert_eq!(split_index, 2);
+            }
+            other => panic!("expected TwoColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_respects_category_boundaries() {
+        // Uneven categories: [big, small, small, small]. Best split should
+        // place the big one alone in column 0.
+        let heights = cats(&[20, 2, 2, 2]);
+        let plan = plan_help_layout(&heights, 100.0);
+        match plan {
+            HelpLayoutPlan::TwoColumn { split_index, .. } => {
+                assert_eq!(split_index, 1);
+            }
+            other => panic!("expected TwoColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn huge_content_tiny_window_clipped() {
+        let heights = cats(&[20, 20, 20, 20, 20]);
+        // Cap way too small for even two columns.
+        let plan = plan_help_layout(&heights, 100.0);
+        match plan {
+            HelpLayoutPlan::TwoColumn { clipped, .. } => {
+                assert!(clipped, "expected clipped two-column layout");
+            }
+            other => panic!("expected TwoColumn(clipped), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_or_negative_cap_returns_clipped() {
+        let heights = cats(&[3, 3]);
+        let plan = plan_help_layout(&heights, 0.0);
+        assert!(matches!(
+            plan,
+            HelpLayoutPlan::TwoColumn { clipped: true, .. }
+        ));
+    }
+
+    #[test]
+    fn single_category_never_splits() {
+        let heights = cats(&[50]);
+        // Even with a tiny cap, we can't split a single category.
+        let plan = plan_help_layout(&heights, 10.0);
+        assert!(matches!(plan, HelpLayoutPlan::SingleColumn { .. }));
+    }
 }
