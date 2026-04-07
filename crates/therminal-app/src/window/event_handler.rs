@@ -788,6 +788,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+        self.publish_workspace_state();
     }
 
     /// Cancel the in-progress rename without applying changes.

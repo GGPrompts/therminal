@@ -23,7 +23,6 @@ pub struct Workspace {
     pub id: usize,
     /// Human-readable workspace name (default: the slot number as a string).
     /// Used by `workspace_info()` for daemon sync.
-    #[allow(dead_code)]
     pub name: String,
     /// Root of this workspace's layout tree.
     pub layout: LayoutNode,
@@ -349,7 +348,6 @@ impl WorkspaceManager {
     ///
     /// This captures the current workspace topology (IDs, names, pane assignments,
     /// focus) so the daemon can store it for MCP tools and reattach.
-    #[allow(dead_code)]
     pub fn workspace_info(&self) -> Vec<WorkspaceInfo> {
         self.workspaces
             .iter()
