@@ -290,6 +290,37 @@ pub struct App {
     pub(crate) daemon_session_id: Option<therminal_protocol::SessionId>,
 }
 
+/// Rewrite a `LayoutSnapshot` tree, translating every leaf pane id from
+/// the GUI's local id space into the daemon's id space via `map`.
+/// Returns `None` if any leaf has no mapping (caller should drop the
+/// layout and fall back to a flat cascade on attach).
+fn translate_layout_snapshot(
+    snap: &therminal_protocol::daemon::LayoutSnapshot,
+    map: &PaneIdMap,
+) -> Option<therminal_protocol::daemon::LayoutSnapshot> {
+    use therminal_protocol::daemon::LayoutSnapshot;
+    match snap {
+        LayoutSnapshot::Leaf { pane_id } => {
+            // The snapshot's "pane_id" here is a local GUI PaneId that
+            // workspace_info() copied verbatim from the layout tree.
+            let local = *pane_id as crate::pane::PaneId;
+            let daemon = map.daemon_for_local(local)?;
+            Some(LayoutSnapshot::Leaf { pane_id: daemon })
+        }
+        LayoutSnapshot::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => Some(LayoutSnapshot::Split {
+            direction: *direction,
+            ratio: *ratio,
+            first: Box::new(translate_layout_snapshot(first, map)?),
+            second: Box::new(translate_layout_snapshot(second, map)?),
+        }),
+    }
+}
+
 impl App {
     /// Show a toast notification in the lower-right corner. Replaces any
     /// existing toast and schedules a redraw so it becomes visible
@@ -638,16 +669,55 @@ impl App {
         };
 
         // Translate local pane ids → daemon pane ids in the snapshot.
+        //
+        // Guard: if ANY local id in any workspace can't be translated, the
+        // GUI is in a mixed state (some panes came from the daemon via
+        // attach/remote_spawn, others were created by local-mode split/close
+        // paths that haven't been cut over to daemon IPC yet — that's
+        // tn-beez / Phase B). Publishing a partial layout would corrupt the
+        // daemon's stored workspace_state and cause the next attach to
+        // reconstruct garbage. In that case, skip the publish entirely and
+        // log a debug line. This is a defensive no-op once Phase B lands
+        // and every pane has a daemon id.
+        //
+        // Also: workspace_info() builds `layout: Some(LayoutSnapshot)` from
+        // the local layout tree, so leaves contain LOCAL pane ids. We have
+        // to walk the snapshot and rewrite each leaf's pane_id through the
+        // map as well — or drop the layout if any leaf doesn't translate.
         let mut workspaces_info = wm.workspace_info();
+        let mut translation_failed = false;
         for ws in workspaces_info.iter_mut() {
-            ws.pane_ids = ws
+            let translated: Vec<_> = ws
                 .pane_ids
                 .iter()
-                .filter_map(|local| self.pane_id_map.daemon_for_local(*local))
+                .map(|local| self.pane_id_map.daemon_for_local(*local))
                 .collect();
+            if translated.iter().any(|t| t.is_none()) {
+                translation_failed = true;
+                break;
+            }
+            ws.pane_ids = translated.into_iter().flatten().collect();
             ws.focused_pane = ws
                 .focused_pane
                 .and_then(|local| self.pane_id_map.daemon_for_local(local));
+            // Rewrite layout snapshot leaves from local → daemon ids.
+            // If any leaf fails, drop the layout entirely (attach path
+            // falls back to flat cascade via from_flat_pane_ids).
+            if let Some(layout) = ws.layout.as_ref() {
+                match translate_layout_snapshot(layout, &self.pane_id_map) {
+                    Some(translated) => ws.layout = Some(translated),
+                    None => {
+                        translation_failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if translation_failed {
+            debug!(
+                "publish_workspace_state: mixed local/remote pane ids (Phase B not landed); skipping publish to avoid corrupting daemon state"
+            );
+            return;
         }
         let active_workspace = wm.active_id() as therminal_protocol::WorkspaceId;
 
