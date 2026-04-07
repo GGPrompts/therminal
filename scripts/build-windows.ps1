@@ -80,7 +80,7 @@ try {
 Set-Location $repoRoot
 
 $profile = if ($Debug) { "debug" } else { "release" }
-$buildArgs = @("build", "-p", "therminal-app", "--bin", "therminal")
+$buildArgs = @("build", "-p", "therminal-app", "--bin", "therminal", "-p", "therminal-daemon", "--bin", "therminal-daemon")
 if (-not $Debug) {
     $buildArgs += "--release"
 }
@@ -144,6 +144,20 @@ if (-not $NoCopy) {
 
     Copy-Item -Force $exePath $Destination
     Write-Host "Copied to: $Destination"
+
+    # --- Also deploy therminal-daemon.exe alongside therminal.exe ---
+    # The MCP stdio bridge (therminal mcp) requires a running daemon to
+    # bind the named pipe. The GUI does not embed the daemon, so we ship
+    # the daemon binary as a sibling and the user starts it manually.
+    # See docs/integrations/wsl2.md.
+    $daemonExe = Join-Path $repoRoot "target\$profile\therminal-daemon.exe"
+    if (Test-Path $daemonExe) {
+        $daemonDest = Join-Path (Split-Path -Parent $Destination) "therminal-daemon.exe"
+        Copy-Item -Force $daemonExe $daemonDest
+        Write-Host "Copied daemon to: $daemonDest"
+    } else {
+        Write-Host "WARNING: therminal-daemon.exe not found at $daemonExe - MCP bridge will not work"
+    }
 
     # --- Copy resources alongside the executable ---
     # The app looks for <exe_dir>/../resources or <data_dir>/resources.

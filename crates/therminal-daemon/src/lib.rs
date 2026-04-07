@@ -33,6 +33,7 @@ pub mod ensure;
 pub mod fd_passing;
 pub mod framing;
 pub mod handoff;
+pub mod ipc_transport;
 pub mod lifecycle;
 pub mod mcp;
 pub mod persistence;

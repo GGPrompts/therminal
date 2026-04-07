@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -23,6 +22,7 @@ use therminal_protocol::daemon::{
 };
 
 use crate::framing::read_frame;
+use crate::ipc_transport::{IpcClientStream, connect_client};
 
 /// Default timeout for daemon communication.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -48,7 +48,7 @@ pub async fn send_request_with_timeout(
     timeout: Duration,
 ) -> Result<IpcResponse> {
     let result = tokio::time::timeout(timeout, async {
-        let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
+        let mut stream = connect_client(socket_path).await.with_context(|| {
             format!(
                 "failed to connect to daemon socket: {}",
                 socket_path.display()
@@ -168,7 +168,7 @@ impl DaemonClient {
         timeout: Duration,
     ) -> Result<Self> {
         let socket_path = socket_path.as_ref().to_path_buf();
-        let stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        let stream = connect_client(&socket_path).await.with_context(|| {
             format!(
                 "failed to connect to daemon socket: {}",
                 socket_path.display()
@@ -276,11 +276,15 @@ impl DaemonClient {
 
 /// The I/O task that owns the socket and multiplexes reads/writes.
 async fn connection_task(
-    stream: UnixStream,
+    stream: IpcClientStream,
     mut cmd_rx: mpsc::Receiver<WriterCmd>,
     event_tx: mpsc::Sender<DaemonEvent>,
 ) {
-    let (read_half, write_half) = stream.into_split();
+    // Use tokio::io::split for cross-platform support — UnixStream::into_split
+    // returns Unix-specific owned halves; named pipes need io::split. The
+    // performance difference is negligible for the daemon control channel
+    // (request/response and event broadcasts, not bulk PTY data).
+    let (read_half, write_half) = tokio::io::split(stream);
     let read_half = Arc::new(Mutex::new(read_half));
     let write_half = Arc::new(Mutex::new(write_half));
 
@@ -384,7 +388,7 @@ async fn connection_task(
     reader_handle.abort();
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::net::UnixListener;

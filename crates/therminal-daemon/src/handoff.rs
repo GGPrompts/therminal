@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{info, warn};
 
 use crate::client;
@@ -81,7 +81,10 @@ impl Drop for ReceivedHandoff {
 /// - Returns `StartFresh` if no daemon is reachable.
 pub async fn check_daemon(socket_path: &Path, our_protocol_version: u32) -> DaemonCheck {
     // First, check if anything is listening on the socket at all.
-    let can_connect = tokio::net::UnixStream::connect(socket_path).await.is_ok();
+    // Uses the cross-platform IPC transport (Unix socket / Windows named pipe).
+    let can_connect = crate::ipc_transport::connect_client(socket_path)
+        .await
+        .is_ok();
 
     match client::ping(socket_path).await {
         Ok(therminal_protocol::IpcResponse::Pong {
@@ -254,15 +257,30 @@ async fn perform_graceful_restart(socket_path: &Path) -> Result<()> {
 }
 
 /// Wait for the daemon socket to be removed (up to `HANDOFF_TIMEOUT`).
+///
+/// On Unix, polls the filesystem for socket removal. On Windows, the named
+/// pipe has no filesystem entry — instead, polls `ping` until the old daemon
+/// stops responding (which means the pipe is gone).
 async fn wait_for_socket_removal(socket_path: &Path) -> Result<()> {
+    use crate::ipc_transport::socket_exists;
+
     let deadline = tokio::time::Instant::now() + HANDOFF_TIMEOUT;
     loop {
-        if !socket_path.exists() {
-            info!("old daemon socket removed, handoff successful");
+        // Unix: filesystem check. Windows: socket_exists() always returns
+        // false, so fall through to the ping probe below.
+        let still_present = if cfg!(unix) {
+            socket_exists(socket_path)
+        } else {
+            client::ping(socket_path).await.is_ok()
+        };
+
+        if !still_present {
+            info!("old daemon released, handoff successful");
             return Ok(());
         }
+
         if tokio::time::Instant::now() >= deadline {
-            // Ping one more time before force-removing.
+            // Ping one more time before declaring failure.
             if client::ping(socket_path).await.is_ok() {
                 anyhow::bail!(
                     "handoff timeout but old daemon is still responding on {}",
@@ -270,12 +288,7 @@ async fn wait_for_socket_removal(socket_path: &Path) -> Result<()> {
                 );
             }
             warn!("handoff timeout -- forcibly removing old socket");
-            std::fs::remove_file(socket_path).with_context(|| {
-                format!(
-                    "failed to remove stale socket during handoff: {}",
-                    socket_path.display()
-                )
-            })?;
+            crate::ipc_transport::cleanup_socket(socket_path);
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

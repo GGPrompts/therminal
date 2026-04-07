@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tracing::info;
 
+use therminal_daemon::ipc_transport::connect_client;
 use therminal_daemon::lifecycle::LifecycleConfig;
 use therminal_daemon::{BUILD_HASH, EnsureResult, VERSION, ensure_daemon};
 
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
 async fn run_control_mode() -> Result<()> {
     let socket_path = therminal_runtime::paths::socket_path("daemon");
 
-    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+    let mut stream = connect_client(&socket_path).await.with_context(|| {
         format!(
             "failed to connect to daemon at {}. Is the daemon running?",
             socket_path.display()
@@ -103,8 +103,9 @@ async fn run_control_mode() -> Result<()> {
         .context("failed to send control-mode handshake")?;
     stream.flush().await?;
 
-    // Bridge stdin -> socket and socket -> stdout
-    let (reader, writer) = stream.into_split();
+    // Bridge stdin -> socket and socket -> stdout. tokio::io::split for
+    // cross-platform support (UnixStream::into_split is Unix-only).
+    let (reader, writer) = tokio::io::split(stream);
 
     let stdout_task = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();

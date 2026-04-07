@@ -1,6 +1,7 @@
 //! Daemon IPC server.
 //!
-//! Listens on a Unix domain socket for IPC messages (request/response multiplexing,
+//! Listens on the platform-appropriate IPC endpoint (Unix socket on Unix,
+//! named pipe on Windows) for IPC messages (request/response multiplexing,
 //! event subscriptions) using the `IpcMessage` envelope protocol.
 
 use std::collections::HashSet;
@@ -10,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use tokio::io::AsyncReadExt;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
+
+use crate::ipc_transport::{IpcListener, IpcServerStream, cleanup_socket, socket_exists};
 
 use crate::framing::{read_frame, write_frame};
 use tracing::{debug, error, info, warn};
@@ -32,7 +34,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// Accepts connections on the control socket and dispatches IPC messages.
 /// Each connection can send requests and optionally subscribe to events.
 pub struct IpcServer {
-    listener: UnixListener,
+    listener: IpcListener,
     socket_path: PathBuf,
     lifecycle: Arc<Lifecycle>,
     build_hash: String,
@@ -56,28 +58,10 @@ impl IpcServer {
         build_hash: String,
         version: String,
     ) -> Result<Self> {
-        // Clean stale socket unconditionally — avoids TOCTOU race between exists() and remove().
-        match std::fs::remove_file(&socket_path) {
-            Ok(()) => debug!(path = %socket_path.display(), "removed stale socket"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "failed to remove stale socket {}: {e}",
-                    socket_path.display()
-                ));
-            }
-        }
-
-        let listener = UnixListener::bind(&socket_path)
+        // IpcListener::bind handles stale-socket cleanup on Unix and uses
+        // first_pipe_instance(true) on Windows for the equivalent lock.
+        let listener = IpcListener::bind(&socket_path)
             .with_context(|| format!("failed to bind daemon socket: {}", socket_path.display()))?;
-
-        // Set socket permissions on Unix (owner-only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&socket_path, perms).ok();
-        }
 
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
@@ -109,7 +93,7 @@ impl IpcServer {
     }
 
     /// Run the server accept loop until the lifecycle transitions to Stopped.
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         let shutdown = self.lifecycle.shutdown_notify();
         let lifecycle = Arc::clone(&self.lifecycle);
         let build_hash = self.build_hash.clone();
@@ -121,7 +105,7 @@ impl IpcServer {
             tokio::select! {
                 accept_result = self.listener.accept() => {
                     match accept_result {
-                        Ok((stream, _addr)) => {
+                        Ok(stream) => {
                             let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
                             let lc = Arc::clone(&lifecycle);
                             let bh = build_hash.clone();
@@ -163,14 +147,12 @@ impl IpcServer {
         &self.socket_path
     }
 
-    /// Clean up the socket file.
+    /// Clean up the socket file (no-op on Windows where named pipes have
+    /// no filesystem representation).
     fn cleanup(&self) {
-        if self.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.socket_path) {
-                warn!(error = %e, path = %self.socket_path.display(), "failed to remove socket on cleanup");
-            } else {
-                debug!(path = %self.socket_path.display(), "socket cleaned up");
-            }
+        if socket_exists(&self.socket_path) {
+            cleanup_socket(&self.socket_path);
+            debug!(path = %self.socket_path.display(), "socket cleaned up");
         }
     }
 }
@@ -193,7 +175,7 @@ impl Drop for IpcServer {
 ///
 /// Mode is detected by peeking at the first bytes on the connection.
 async fn handle_connection(
-    mut stream: UnixStream,
+    mut stream: IpcServerStream,
     lifecycle: Arc<Lifecycle>,
     build_hash: String,
     version: String,
@@ -272,7 +254,7 @@ async fn handle_connection(
 /// Handle a full IPC connection (multiple frames, event streaming).
 #[allow(clippy::too_many_arguments)]
 async fn handle_ipc_connection(
-    stream: &mut UnixStream,
+    stream: &mut IpcServerStream,
     lifecycle: Arc<Lifecycle>,
     build_hash: String,
     version: String,
@@ -365,7 +347,7 @@ async fn handle_ipc_connection(
 /// Process a single IPC message and send the response (if any).
 #[allow(clippy::too_many_arguments)]
 async fn process_ipc_message(
-    stream: &mut UnixStream,
+    stream: &mut IpcServerStream,
     msg: &IpcMessage,
     lifecycle: &Arc<Lifecycle>,
     build_hash: &str,

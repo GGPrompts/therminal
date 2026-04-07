@@ -33,13 +33,13 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use therminal_protocol::daemon::DaemonEvent;
 use therminal_protocol::{PaneId, SessionId};
 
+use crate::ipc_transport::IpcServerStream;
 use crate::lifecycle::Lifecycle;
 use crate::session::SessionManager;
 
@@ -372,14 +372,17 @@ pub fn format_notification(event: &DaemonEvent) -> String {
 /// to the session manager, and writes back `%begin`/`%end` response blocks.
 /// Async events are forwarded as `%`-prefixed notifications.
 pub async fn handle_control_connection(
-    stream: UnixStream,
+    stream: IpcServerStream,
     lifecycle: Arc<Lifecycle>,
     event_tx: broadcast::Sender<DaemonEvent>,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     build_hash: String,
     version: String,
 ) {
-    let (reader, mut writer) = stream.into_split();
+    // tokio::io::split for cross-platform support (UnixStream::into_split is
+    // Unix-specific). The control channel is line-oriented text — perf delta
+    // is irrelevant.
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
     let mut event_rx = event_tx.subscribe();
     let mut request_id: u64 = 0;

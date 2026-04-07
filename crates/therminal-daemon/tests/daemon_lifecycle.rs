@@ -1,4 +1,6 @@
+#![cfg(unix)]
 //! Integration tests for daemon handoff and lifecycle management.
+//! Unix-only because they use raw `UnixListener` to stub a daemon.
 //!
 //! These tests exercise `handoff::check_daemon`, `handoff::perform_handoff`,
 //! and the full server bind / ping cycle — the highest-risk code paths that

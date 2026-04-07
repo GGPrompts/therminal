@@ -17,6 +17,7 @@ use therminal_protocol::DaemonState;
 
 use crate::client;
 use crate::handoff::{self, DaemonCheck};
+use crate::ipc_transport::{cleanup_socket, socket_exists};
 use crate::lifecycle::{Lifecycle, LifecycleConfig};
 use crate::mcp;
 use crate::server::DaemonServer;
@@ -99,14 +100,14 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
                     info!("incompatible daemon acknowledged shutdown, waiting for socket removal");
                     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
                     loop {
-                        if !socket_path.exists() {
+                        if !socket_exists(&socket_path) {
                             break;
                         }
                         if tokio::time::Instant::now() >= deadline {
                             warn!(
                                 "incompatible daemon did not release socket in time, force-removing"
                             );
-                            std::fs::remove_file(&socket_path).ok();
+                            cleanup_socket(&socket_path);
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -117,19 +118,16 @@ pub async fn ensure_daemon(config: LifecycleConfig) -> Result<EnsureResult> {
                         error = %e,
                         "failed to send shutdown to incompatible daemon, force-removing socket"
                     );
-                    match std::fs::remove_file(&socket_path) {
-                        Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => warn!(error = %e, "failed to remove stale socket"),
-                    }
+                    cleanup_socket(&socket_path);
                 }
             }
         }
         DaemonCheck::StartFresh => {
-            // Clean any stale socket
-            if socket_path.exists() {
+            // Clean any stale socket (Unix; no-op on Windows where pipes
+            // are not filesystem entries)
+            if socket_exists(&socket_path) {
                 warn!(path = %socket_path.display(), "removing stale socket");
-                std::fs::remove_file(&socket_path).ok();
+                cleanup_socket(&socket_path);
             }
         }
     }
