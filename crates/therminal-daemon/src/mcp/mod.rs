@@ -39,6 +39,7 @@ use crate::session::SessionManager;
 use crate::trust::{
     AgentIdentity, RateLimiter, TrustCheckResult, check_resource_access, check_tool_access,
 };
+use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
 
 pub mod resources;
 pub mod tools;
@@ -595,12 +596,24 @@ pub struct TherminalMcpServer {
     /// every `notifications/resources/updated`.
     pub(super) claude_event_buffer:
         Arc<std::sync::Mutex<std::collections::VecDeque<TaggedAgentEvent>>>,
+    /// Optional broadcast sender for agent lifecycle events from the
+    /// `AgentRegistry`. Cloned per `subscribe(therminal://agents/events)` so
+    /// each MCP client gets its own broadcast::Receiver.
+    pub(super) agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+    /// Per-connection ring buffer of recent agent lifecycle events. Filled by
+    /// the subscription forwarder; drained by `read_resource` against
+    /// `therminal://agents/events`.
+    pub(super) agent_event_buffer:
+        Arc<std::sync::Mutex<std::collections::VecDeque<TaggedAgentLifecycleEvent>>>,
 }
 
 pub(super) const CLAUDE_EVENT_BUFFER_CAP: usize = 256;
+pub(super) const AGENT_EVENT_BUFFER_CAP: usize = 256;
 
 /// URI for the global Claude agent-event stream.
 pub(super) const CLAUDE_EVENTS_URI: &str = "therminal://claude/events";
+/// URI for the global agent lifecycle event stream backed by `AgentRegistry`.
+pub(super) const AGENT_EVENTS_URI: &str = "therminal://agents/events";
 
 impl TherminalMcpServer {
     /// Create a new MCP server backed by the given session manager and trust config.
@@ -609,6 +622,7 @@ impl TherminalMcpServer {
         trust_config: Arc<TrustConfig>,
         rate_limiter: Arc<RateLimiter>,
         claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
+        agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     ) -> Self {
         Self {
             session_mgr,
@@ -618,6 +632,10 @@ impl TherminalMcpServer {
             subscriptions: std::sync::Mutex::new(HashMap::new()),
             claude_event_buffer: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::with_capacity(CLAUDE_EVENT_BUFFER_CAP),
+            )),
+            agent_events,
+            agent_event_buffer: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(AGENT_EVENT_BUFFER_CAP),
             )),
         }
     }
@@ -929,7 +947,7 @@ pub(crate) mod tests {
         let session_mgr = Arc::new(tokio::sync::Mutex::new(SessionManager::new(event_tx)));
         let trust_config = Arc::new(trust_config);
         let rate_limiter = Arc::new(RateLimiter::new(100));
-        TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None)
+        TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None)
     }
 
     /// Build an `AgentIdentity` with the given name.
@@ -1297,7 +1315,7 @@ pub(crate) mod tests {
         let trust_config = Arc::new(trusted_config());
         // Allow only 1 destructive call per minute.
         let rate_limiter = Arc::new(RateLimiter::new(1));
-        let server = TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None);
+        let server = TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None);
         let agent = agent("trusted-bot");
 
         // First call allowed.
@@ -1434,6 +1452,96 @@ pub(crate) mod tests {
             uris.contains(&super::CLAUDE_EVENTS_URI),
             "expected claude/events in resource list, got: {uris:?}"
         );
+    }
+
+    /// `build_resource_list` must always include the agent lifecycle events
+    /// URI even when there are no active panes.
+    #[tokio::test]
+    async fn build_resource_list_always_includes_agent_events() {
+        let server = make_server(trusted_config());
+        let resources = server.build_resource_list().await;
+        let uris: Vec<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
+        assert!(
+            uris.contains(&super::AGENT_EVENTS_URI),
+            "expected agents/events in resource list, got: {uris:?}"
+        );
+    }
+
+    /// Sandboxed agents must be allowed to access the agent lifecycle event
+    /// resource (Observer tier).
+    #[test]
+    fn sandboxed_agent_can_read_agent_events_resource() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_resource_trust(super::AGENT_EVENTS_URI, &agent)
+                .is_ok(),
+            "sandboxed agent should be allowed to read agents/events"
+        );
+    }
+
+    /// The agent-lifecycle subscription forwarder must populate the
+    /// per-connection ring buffer when events are broadcast, without
+    /// deadlocking the buffer mutex.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_event_forwarder_buffers_events_without_deadlock() {
+        use therminal_terminal::agent_registry::{AgentEvent, TaggedAgentEvent};
+        use therminal_terminal::state_inference::AgentType;
+
+        let server = make_server(trusted_config());
+        // Replace agent_events with a fresh broadcast channel we control.
+        let (tx, _) = tokio::sync::broadcast::channel::<TaggedAgentEvent>(16);
+        // SAFETY: tests construct a fresh server above; we need to reach into
+        // it. We rebuild via `new` instead.
+        let session_mgr = server.session_mgr.clone();
+        let trust_config = server.trust_config.clone();
+        let rate_limiter = server.rate_limiter.clone();
+        let server = TherminalMcpServer::new(
+            session_mgr,
+            trust_config,
+            rate_limiter,
+            None,
+            Some(tx.clone()),
+        );
+
+        // Manually drive the same buffer-fill loop the subscribe handler uses,
+        // by spawning a stripped-down forwarder that only updates the buffer.
+        let buffer = std::sync::Arc::clone(&server.agent_event_buffer);
+        let mut rx = tx.subscribe();
+        let task = tokio::spawn(async move {
+            for _ in 0..3 {
+                if let Ok(evt) = rx.recv().await {
+                    let mut buf = buffer.lock().unwrap();
+                    if buf.len() == super::AGENT_EVENT_BUFFER_CAP {
+                        buf.pop_front();
+                    }
+                    buf.push_back(evt);
+                }
+            }
+        });
+
+        // Send three events.
+        for i in 0..3u64 {
+            let _ = tx.send(TaggedAgentEvent {
+                event: AgentEvent::Registered {
+                    pane_id: i,
+                    agent_type: AgentType::Claude,
+                    name: format!("a{i}"),
+                },
+                pane_id: i,
+                timestamp_secs: 0,
+            });
+        }
+
+        // Wait for the forwarder to drain.
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("forwarder did not finish in time")
+            .expect("forwarder task panicked");
+
+        let buf = server.agent_event_buffer.lock().unwrap();
+        assert_eq!(buf.len(), 3);
     }
 
     // ── LayoutNodeJson ──────────────────────────────────────────────────
@@ -1825,15 +1933,16 @@ pub(crate) mod tests {
         assert!(names.contains("terminal.semantic.query_commands"));
     }
 
-    /// With an empty session manager, the only resource should be claude/events.
+    /// With an empty session manager, the only resources should be the
+    /// global event streams (claude/events and agents/events).
     #[tokio::test]
     async fn build_resource_list_no_panes_only_claude_events() {
         let server = make_server(trusted_config());
         let resources = server.build_resource_list().await;
         assert_eq!(
             resources.len(),
-            1,
-            "expected only claude/events resource with no panes"
+            2,
+            "expected only the global event-stream resources with no panes"
         );
     }
 }

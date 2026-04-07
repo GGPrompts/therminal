@@ -20,9 +20,11 @@ use rmcp::service::{RequestContext, RoleServer};
 use tracing::{debug, info};
 
 use crate::claude_jsonl_tailer::TaggedAgentEvent;
+use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
 
 use super::{
-    CLAUDE_EVENT_BUFFER_CAP, CLAUDE_EVENTS_URI, TherminalMcpServer, extract_agent_identity,
+    AGENT_EVENT_BUFFER_CAP, AGENT_EVENTS_URI, CLAUDE_EVENT_BUFFER_CAP, CLAUDE_EVENTS_URI,
+    TherminalMcpServer, extract_agent_identity,
 };
 
 impl TherminalMcpServer {
@@ -85,6 +87,21 @@ impl TherminalMcpServer {
             None,
         ));
 
+        // Global agent lifecycle event stream from `AgentRegistry`
+        // (Registered / Unregistered / StatusChanged across all panes).
+        resources.push(Annotated::new(
+            RawResource::new(AGENT_EVENTS_URI, "Agent lifecycle events".to_string())
+                .with_description(
+                    "Live structured event stream from the AgentRegistry: agents registered, \
+                     unregistered, or transitioning status across all panes. Subscribe for \
+                     real-time TaggedAgentEvent notifications. read_resource drains the \
+                     per-connection ring buffer; subscribe first to populate it."
+                        .to_string(),
+                )
+                .with_mime_type("application/json"),
+            None,
+        ));
+
         resources
     }
 
@@ -127,6 +144,16 @@ impl TherminalMcpServer {
                 .with_mime_type("text/plain"),
                 None,
             ),
+            Annotated::new(
+                RawResourceTemplate::new(AGENT_EVENTS_URI, "Agent lifecycle events")
+                    .with_description(
+                        "Live agent lifecycle event stream (Registered / Unregistered / \
+                         StatusChanged) from the AgentRegistry. Subscribe for notifications; \
+                         read_resource drains the per-connection ring buffer.",
+                    )
+                    .with_mime_type("application/json"),
+                None,
+            ),
         ];
         Ok(ListResourceTemplatesResult::with_all_items(templates))
     }
@@ -156,6 +183,28 @@ impl TherminalMcpServer {
                 ErrorData::new(
                     ErrorCode::INTERNAL_ERROR,
                     format!("failed to serialize claude events: {e}"),
+                    None,
+                )
+            })?;
+            return Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(json, uri.to_string()).with_mime_type("application/json"),
+            ]));
+        }
+
+        // Global agent lifecycle event stream: drain the per-connection ring
+        // buffer populated by the active subscription forwarder.
+        if uri == AGENT_EVENTS_URI {
+            let drained: Vec<TaggedAgentLifecycleEvent> = {
+                let mut buf = self
+                    .agent_event_buffer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                buf.drain(..).collect()
+            };
+            let json = serde_json::to_string(&drained).map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("failed to serialize agent events: {e}"),
                     None,
                 )
             })?;
@@ -299,6 +348,58 @@ impl TherminalMcpServer {
                 old.abort();
             }
             info!(uri = %uri, "claude agent-event subscription active");
+            return Ok(());
+        }
+
+        // Global agent lifecycle event stream subscription.
+        if uri == AGENT_EVENTS_URI {
+            let Some(tx) = self.agent_events.as_ref() else {
+                return Err(ErrorData::new(
+                    ErrorCode(-32002),
+                    "agent lifecycle event broadcaster is not running on this daemon".to_string(),
+                    None,
+                ));
+            };
+            let mut event_rx = tx.subscribe();
+            let peer = context.peer.clone();
+            let uri_owned = uri.to_string();
+            let buffer = Arc::clone(&self.agent_event_buffer);
+            let handle = tokio::spawn(async move {
+                loop {
+                    match event_rx.recv().await {
+                        Ok(event) => {
+                            {
+                                let mut buf = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                                if buf.len() == AGENT_EVENT_BUFFER_CAP {
+                                    buf.pop_front();
+                                }
+                                buf.push_back(event);
+                            }
+                            let params = ResourceUpdatedNotificationParam::new(&uri_owned);
+                            if let Err(e) = peer.notify_resource_updated(params).await {
+                                debug!(
+                                    error = %e,
+                                    uri = %uri_owned,
+                                    "failed to send agent resource-updated notification, stopping subscription"
+                                );
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            debug!(uri = %uri_owned, "agent event channel closed");
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            debug!(uri = %uri_owned, lagged = n, "agent subscription lagged");
+                        }
+                    }
+                }
+            });
+            let mut subs = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = subs.insert(uri.to_string(), handle) {
+                old.abort();
+            }
+            info!(uri = %uri, "agent lifecycle subscription active");
             return Ok(());
         }
 

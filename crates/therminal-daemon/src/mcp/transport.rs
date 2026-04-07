@@ -20,6 +20,7 @@ use therminal_core::config::TrustConfig;
 use crate::claude_jsonl_tailer::TaggedAgentEvent;
 use crate::session::SessionManager;
 use crate::trust::RateLimiter;
+use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
 
 use super::TherminalMcpServer;
 
@@ -38,6 +39,7 @@ pub async fn start_mcp_server(
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
+    agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if !config.enabled {
@@ -55,6 +57,7 @@ pub async fn start_mcp_server(
             trust_config,
             rate_limiter,
             claude_events,
+            agent_events,
             shutdown,
         )
         .await?;
@@ -68,6 +71,7 @@ pub async fn start_mcp_server(
             trust_config,
             rate_limiter,
             claude_events,
+            agent_events,
             shutdown,
         )
         .await?;
@@ -87,13 +91,19 @@ fn spawn_mcp_connection<R, W>(
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
+    agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
 ) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     tokio::spawn(async move {
-        let server =
-            TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, claude_events);
+        let server = TherminalMcpServer::new(
+            session_mgr,
+            trust_config,
+            rate_limiter,
+            claude_events,
+            agent_events,
+        );
         match server.serve((reader, writer)).await {
             Ok(running) => {
                 if let Err(e) = running.waiting().await {
@@ -115,6 +125,7 @@ async fn start_mcp_server_unix(
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
+    agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     // Clean stale socket
@@ -156,6 +167,7 @@ async fn start_mcp_server_unix(
                             Arc::clone(&trust_config),
                             Arc::clone(&rate_limiter),
                             claude_events.clone(),
+                            agent_events.clone(),
                         );
                     }
                     Err(e) => {
@@ -192,6 +204,7 @@ async fn start_mcp_server_windows(
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
+    agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -220,6 +233,7 @@ async fn start_mcp_server_windows(
                             Arc::clone(&trust_config),
                             Arc::clone(&rate_limiter),
                             claude_events.clone(),
+                            agent_events.clone(),
                         );
 
                         // Create a new pipe instance for the next client.

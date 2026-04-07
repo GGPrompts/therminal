@@ -38,7 +38,8 @@ pub enum StateChangeNotification {
 // -- Agent types -------------------------------------------------------------
 
 /// The type of agent running in this terminal session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentType {
     Claude,
     Codex,

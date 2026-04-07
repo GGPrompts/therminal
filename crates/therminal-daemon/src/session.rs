@@ -1116,6 +1116,16 @@ impl SessionManager {
         &self.agent_registry
     }
 
+    /// Install a broadcaster on the agent registry. Used by `ensure.rs` to
+    /// forward lifecycle events into the MCP `therminal://agents/events`
+    /// resource pipeline.
+    pub fn set_agent_event_broadcaster(
+        &mut self,
+        broadcaster: therminal_terminal::agent_registry::AgentEventBroadcaster,
+    ) {
+        self.agent_registry.set_broadcaster(broadcaster);
+    }
+
     /// Register an agent for a pane in the central registry.
     pub fn register_agent(
         &mut self,

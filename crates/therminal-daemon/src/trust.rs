@@ -66,7 +66,10 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
 /// All resource reads are Observer-tier (read-only). Returns `None` for
 /// URIs that don't match any known resource pattern.
 pub fn resource_category(uri: &str) -> Option<ToolCategory> {
-    if uri.starts_with("terminal://pane/") || uri.starts_with("therminal://claude/") {
+    if uri.starts_with("terminal://pane/")
+        || uri.starts_with("therminal://claude/")
+        || uri.starts_with("therminal://agents/")
+    {
         Some(ToolCategory::Observer)
     } else {
         None

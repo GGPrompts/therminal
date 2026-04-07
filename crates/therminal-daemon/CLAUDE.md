@@ -100,6 +100,8 @@ The server also exposes MCP Resources for pane content access:
 | `terminal://pane/{id}/content` | Observer | Current visible grid snapshot (plain text) |
 | `terminal://pane/{id}/output` | Observer | Live PTY output stream (subscribe for updates) |
 | `terminal://pane/{id}/scrollback` | Observer | Historical scrollback above the visible grid (plain text, oldest first, capped at 10,000 lines, no subscriptions) |
+| `therminal://claude/events` | Observer | Live Claude Code session events (subscribe-only, JSON `TaggedAgentEvent`s, per-connection ring buffer drained by `read_resource`) |
+| `therminal://agents/events` | Observer | Live agent lifecycle events from `AgentRegistry` — `Registered` / `Unregistered` / `StatusChanged` across all panes (subscribe-only, JSON `TaggedAgentEvent { event, pane_id, timestamp_secs }`, per-connection ring buffer) |
 
 **Resource listing**: `list_resources` returns concrete resources for each active pane. `list_resource_templates` returns URI templates for both content and output patterns.
 

@@ -6,15 +6,18 @@
 //! agents appear, disappear, or change status.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use therminal_protocol::PaneId;
 
 use crate::state_inference::{AgentType, InferredStatus};
 
 /// Status of an agent in the registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentStatus {
     /// Agent process detected but no detailed status yet.
     Active,
@@ -77,7 +80,8 @@ pub struct AgentEntry {
 }
 
 /// Events emitted by the agent registry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     Registered {
         pane_id: PaneId,
@@ -95,6 +99,31 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    /// Pane this event refers to.
+    pub fn pane_id(&self) -> PaneId {
+        match self {
+            AgentEvent::Registered { pane_id, .. }
+            | AgentEvent::Unregistered { pane_id, .. }
+            | AgentEvent::StatusChanged { pane_id, .. } => *pane_id,
+        }
+    }
+}
+
+/// An [`AgentEvent`] tagged with the originating pane id and a wall-clock
+/// timestamp, suitable for broadcasting to MCP subscribers.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaggedAgentEvent {
+    pub event: AgentEvent,
+    pub pane_id: PaneId,
+    pub timestamp_secs: u64,
+}
+
+/// Type-erased broadcaster for [`TaggedAgentEvent`]s. Lets the daemon install
+/// a forwarder into its tokio broadcast channel without taking a tokio
+/// dependency in this crate.
+pub type AgentEventBroadcaster = Arc<dyn Fn(TaggedAgentEvent) + Send + Sync>;
+
 /// Central registry of all detected agents across all panes.
 pub struct AgentRegistry {
     agents: HashMap<PaneId, AgentEntry>,
@@ -104,6 +133,9 @@ pub struct AgentRegistry {
     #[allow(dead_code)]
     notification_tx: mpsc::Sender<AgentEvent>,
     notification_rx: Option<mpsc::Receiver<AgentEvent>>,
+    /// Optional broadcaster for tagged lifecycle events (used by the MCP
+    /// `therminal://agents/events` resource).
+    broadcaster: Option<AgentEventBroadcaster>,
 }
 
 impl AgentRegistry {
@@ -116,7 +148,14 @@ impl AgentRegistry {
             event_rx: Some(event_rx),
             notification_tx,
             notification_rx: Some(notification_rx),
+            broadcaster: None,
         }
+    }
+
+    /// Install a broadcaster that receives every emitted event tagged with
+    /// its pane id and a wall-clock timestamp. Replaces any prior broadcaster.
+    pub fn set_broadcaster(&mut self, broadcaster: AgentEventBroadcaster) {
+        self.broadcaster = Some(broadcaster);
     }
 
     pub fn take_event_rx(&mut self) -> Option<mpsc::Receiver<AgentEvent>> {
@@ -129,10 +168,23 @@ impl AgentRegistry {
         self.notification_rx.take()
     }
 
-    /// Broadcast an event to both the primary and notification channels.
+    /// Broadcast an event to both the primary and notification channels and
+    /// (if installed) the tagged broadcaster.
     fn emit(&self, event: AgentEvent) {
         let _ = self.event_tx.send(event.clone());
-        let _ = self.notification_tx.send(event);
+        let _ = self.notification_tx.send(event.clone());
+        if let Some(b) = &self.broadcaster {
+            let pane_id = event.pane_id();
+            let timestamp_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            b(TaggedAgentEvent {
+                event,
+                pane_id,
+                timestamp_secs,
+            });
+        }
     }
 
     pub fn register(
@@ -307,5 +359,25 @@ mod tests {
             AgentStatus::from_inferred(&InferredStatus::Thinking),
             AgentStatus::Thinking
         );
+    }
+
+    #[test]
+    fn broadcaster_receives_tagged_events() {
+        use std::sync::Mutex;
+        let mut reg = AgentRegistry::new();
+        let received: Arc<Mutex<Vec<TaggedAgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = Arc::clone(&received);
+        reg.set_broadcaster(Arc::new(move |evt| {
+            received_clone.lock().unwrap().push(evt);
+        }));
+        reg.register(7, "node".into(), AgentType::Claude, None);
+        reg.update_status(7, AgentStatus::Thinking);
+        reg.unregister(7);
+        let evts = received.lock().unwrap();
+        assert_eq!(evts.len(), 3);
+        assert_eq!(evts[0].pane_id, 7);
+        assert!(matches!(evts[0].event, AgentEvent::Registered { .. }));
+        assert!(matches!(evts[1].event, AgentEvent::StatusChanged { .. }));
+        assert!(matches!(evts[2].event, AgentEvent::Unregistered { .. }));
     }
 }

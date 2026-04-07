@@ -234,6 +234,23 @@ async fn start_daemon(
     // produce zero events.
     let claude_events_tx = crate::claude_pipeline::spawn(lifecycle.shutdown_notify());
 
+    // Wire the AgentRegistry's lifecycle events into a tokio broadcast channel
+    // for the MCP `therminal://agents/events` resource. The registry takes a
+    // type-erased callback so therminal-terminal stays free of a tokio dep.
+    let (agent_events_tx, _) = tokio::sync::broadcast::channel::<
+        therminal_terminal::agent_registry::TaggedAgentEvent,
+    >(256);
+    {
+        let tx = agent_events_tx.clone();
+        let session_mgr = server.session_manager();
+        let mut mgr = session_mgr.lock().await;
+        mgr.set_agent_event_broadcaster(Arc::new(move |evt| {
+            // Drop on no subscribers — broadcast::send returns Err which we ignore.
+            let _ = tx.send(evt);
+        }));
+    }
+    let agent_events_tx_for_mcp = Some(agent_events_tx);
+
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = app_config.mcp.clone();
@@ -248,6 +265,7 @@ async fn start_daemon(
             mcp_trust,
             mcp_rl,
             claude_events_tx,
+            agent_events_tx_for_mcp,
             mcp_shutdown_clone,
         )
         .await
