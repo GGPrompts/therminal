@@ -136,7 +136,7 @@ enum WriterCmd {
 ///
 /// ```rust,no_run
 /// # async fn example() -> anyhow::Result<()> {
-/// use therminal_daemon::client::DaemonClient;
+/// use therminal_daemon_client::DaemonClient;
 /// use therminal_protocol::daemon::IpcRequest;
 ///
 /// let client = DaemonClient::connect("/tmp/therminal/daemon.sock").await?;

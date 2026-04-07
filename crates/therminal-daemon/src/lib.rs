@@ -26,14 +26,18 @@ pub mod claude_jsonl_tailer;
 pub mod claude_pipeline;
 pub mod claude_session_log;
 pub mod claude_state;
-pub mod client;
 pub mod control;
 pub mod ensure;
 #[cfg(unix)]
 pub mod fd_passing;
-pub mod framing;
 pub mod handoff;
-pub mod ipc_transport;
+
+// The IPC client, framing, and transport modules now live in
+// `therminal-daemon-client` so lightweight consumers (the GUI, tools) can
+// link them without pulling in the server / MCP / persistence stack.
+// Re-exported here so existing call sites (`therminal_daemon::client::*`)
+// keep working.
+pub use therminal_daemon_client::{client, framing, ipc_transport};
 pub mod lifecycle;
 pub mod mcp;
 pub mod pane_capacity;

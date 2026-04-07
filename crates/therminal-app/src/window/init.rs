@@ -196,6 +196,7 @@ impl App {
             zoomed_layout: None,
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
             toast: None,
+            daemon_client: None,
         }
     }
 

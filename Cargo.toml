@@ -6,6 +6,7 @@ members = [
     "crates/therminal-core",
     "crates/therminal-runtime",
     "crates/therminal-daemon",
+    "crates/therminal-daemon-client",
     "crates/therminal-app",
 ]
 exclude = ["vendor"]
@@ -24,6 +25,7 @@ therminal-terminal = { path = "crates/therminal-terminal" }
 therminal-core = { path = "crates/therminal-core" }
 therminal-runtime = { path = "crates/therminal-runtime" }
 therminal-daemon = { path = "crates/therminal-daemon" }
+therminal-daemon-client = { path = "crates/therminal-daemon-client" }
 therminal-app = { path = "crates/therminal-app" }
 
 # GPU Rendering

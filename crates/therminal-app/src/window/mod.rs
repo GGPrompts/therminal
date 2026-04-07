@@ -219,6 +219,14 @@ pub struct App {
     /// `show_toast`, cleared when expired. Used by `open_in_editor` to
     /// surface failures visibly and by the semantic region jump handler.
     pub(crate) toast: Option<toast::Toast>,
+
+    /// Persistent connection to the therminal-daemon. Established at startup
+    /// in `main()` before window creation. Currently kept alive but not yet
+    /// used to drive panes — that wiring lands in tn-382v follow-ups. The
+    /// `Arc` lets future subsystems (PaneBackend, MCP forwarder, agent
+    /// observers) clone a handle without re-connecting.
+    #[allow(dead_code)]
+    pub(crate) daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>,
 }
 
 impl App {
@@ -744,7 +752,7 @@ impl ApplicationHandler<UserEvent> for App {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /// Create the event loop, set control flow to Wait, and run the app.
-pub fn run() -> Result<()> {
+pub fn run(daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>) -> Result<()> {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("Therminal panic: {info}");
         eprintln!("Backtrace: {:?}", std::backtrace::Backtrace::capture());
@@ -755,6 +763,7 @@ pub fn run() -> Result<()> {
 
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
+    app.daemon_client = daemon_client;
     event_loop.run_app(&mut app)?;
 
     Ok(())

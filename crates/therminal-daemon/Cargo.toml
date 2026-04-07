@@ -16,6 +16,7 @@ path = "src/bin/claude-events.rs"
 
 [dependencies]
 therminal-protocol = { workspace = true }
+therminal-daemon-client = { workspace = true }
 therminal-terminal = { workspace = true }
 therminal-runtime = { workspace = true }
 therminal-core = { workspace = true }

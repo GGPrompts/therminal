@@ -3408,6 +3408,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "therminal-core",
+ "therminal-daemon-client",
  "therminal-protocol",
  "therminal-runtime",
  "therminal-terminal",
@@ -3457,6 +3458,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "therminal-core",
+ "therminal-daemon-client",
  "therminal-protocol",
  "therminal-runtime",
  "therminal-terminal",
@@ -3464,6 +3466,18 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "therminal-daemon-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rmp-serde",
+ "tempfile",
+ "therminal-protocol",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
