@@ -488,7 +488,6 @@ Overlay infrastructure exists (dual text renderers, caching, chrome rendering). 
 - [x] Config format — TOML (`therminal.toml`)
 - [x] CI — GitHub Actions cross-platform matrix
 - [x] OSC 7777 spec — designed and implemented (JSON payload over `OSC 7777 ; {json} ST`); publish as open standard (tn-pjg1)
-- [ ] MCP schema design — coordinate with TabzChrome's existing 85 tools (tn-auig)
 - [ ] Default theme — thermal aesthetic? Or neutral with thermal as an option? (tn-8ytq)
 - [ ] Distribution — cargo install? Homebrew? Winget? Flatpak? (tn-jern)
 - [ ] libghostty-vt — monitor maturity for potential future backend swap
