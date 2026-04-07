@@ -363,6 +363,16 @@ pub fn format_notification(event: &DaemonEvent) -> String {
         } => {
             format!("%workspace-changed {session_id} {active_workspace}\n")
         }
+        DaemonEvent::PaneExited {
+            session_id,
+            pane_id,
+            exit_code,
+        } => {
+            let code = exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            format!("%pane-exited {session_id} {pane_id} {code}\n")
+        }
     }
 }
 

@@ -135,6 +135,17 @@ pub enum IpcRequest {
     /// Used by the app on attach to restore workspace layout, and by MCP
     /// tools to query workspace state without the app being connected.
     GetWorkspaces { session_id: SessionId },
+    /// Resize a pane's PTY (rows/cols).
+    ///
+    /// **Stub for tn-5ps8**: the wire variant exists so the GUI's
+    /// `RemotePty` backend can compile and round-trip. Server-side
+    /// implementation lands in tn-5rm0 — until then the daemon answers
+    /// with `IpcResponse::Error { message: "ResizePane unimplemented" }`.
+    ResizePane {
+        pane_id: PaneId,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// Typed IPC responses.
@@ -207,6 +218,12 @@ pub enum IpcResponse {
         workspaces: Vec<WorkspaceInfo>,
         active_workspace: WorkspaceId,
     },
+    /// Pane resized (stub response paired with `IpcRequest::ResizePane`).
+    PaneResized {
+        pane_id: PaneId,
+        cols: u16,
+        rows: u16,
+    },
     /// Generic error response.
     Error { message: String },
 }
@@ -232,6 +249,18 @@ pub enum DaemonEvent {
         session_id: SessionId,
         active_workspace: WorkspaceId,
     },
+    /// A pane's PTY has exited (shell closed). The `RemotePty` GUI
+    /// backend listens for this to tear down the local pane.
+    ///
+    /// **Stub for tn-5ps8**: this variant is wired through the protocol
+    /// and reachable via `EventKind::PaneExited`, but the daemon does
+    /// not yet broadcast it from `DaemonPtyHandler::on_eof`. That
+    /// implementation lands in tn-5rm0.
+    PaneExited {
+        session_id: SessionId,
+        pane_id: PaneId,
+        exit_code: Option<i32>,
+    },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -242,6 +271,7 @@ pub enum EventKind {
     SessionDestroyed,
     PaneOutput,
     WorkspaceChanged,
+    PaneExited,
 }
 
 impl DaemonEvent {
@@ -253,6 +283,7 @@ impl DaemonEvent {
             DaemonEvent::SessionDestroyed { .. } => EventKind::SessionDestroyed,
             DaemonEvent::PaneOutput { .. } => EventKind::PaneOutput,
             DaemonEvent::WorkspaceChanged { .. } => EventKind::WorkspaceChanged,
+            DaemonEvent::PaneExited { .. } => EventKind::PaneExited,
         }
     }
 }

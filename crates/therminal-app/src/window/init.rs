@@ -333,6 +333,101 @@ impl App {
         let spawn_options = self.build_spawn_options();
         let proxy = self.event_proxy.clone();
         let registry = Some(Arc::clone(&self.agent_registry));
+
+        // ── tn-5ps8: gate on `mcp.attach_mode` ─────────────────────────
+        // Reads the new config field. `Local` is the default and matches
+        // pre-tn-5ps8 byte-identical behaviour. `Remote` routes through
+        // `RemotePty` if a daemon client is available; otherwise it
+        // logs a warning and falls through to local mode so the GUI
+        // still starts when the daemon is unreachable.
+        let attach_mode = self.config.mcp.attach_mode;
+        let use_remote = matches!(attach_mode, therminal_core::config::AttachMode::Remote)
+            && self.daemon_client.is_some();
+        if matches!(attach_mode, therminal_core::config::AttachMode::Remote)
+            && self.daemon_client.is_none()
+        {
+            tracing::warn!(
+                "mcp.attach_mode = remote but no daemon client connected; falling back to local"
+            );
+        }
+
+        let remote_handle = if use_remote {
+            tokio::runtime::Handle::try_current().ok()
+        } else {
+            None
+        };
+        if use_remote && remote_handle.is_none() {
+            tracing::warn!(
+                "no tokio runtime available; remote attach mode requires one — falling back to local"
+            );
+        }
+        if let (true, Some(handle)) = (use_remote, remote_handle) {
+            let dc = self.daemon_client.as_ref().expect("checked above").clone();
+            let socket = dc.socket_path().to_path_buf();
+            let p1 = proxy.clone();
+            let p2 = proxy.clone();
+            let p3 = proxy.clone();
+            let p4 = proxy.clone();
+            let callbacks = crate::pane::PaneCallbacks {
+                wake: Box::new(move || {
+                    let _ = p1.send_event(UserEvent::PtyOutput);
+                }),
+                on_exit: Box::new(move || {
+                    // The local pane id is captured by the worker
+                    // thread on the calling side; we can't know it
+                    // here yet, so we send a generic redraw and let
+                    // the next ResizePane attempt fail to clean up.
+                    let _ = p2.send_event(UserEvent::PtyOutput);
+                }),
+                on_bell: Box::new(move || {
+                    let _ = p3.send_event(UserEvent::Bell(0));
+                }),
+                on_notification: Box::new(move |text| {
+                    let _ = p4.send_event(UserEvent::DesktopNotification {
+                        title: "Therminal".to_string(),
+                        body: text,
+                        source: NotificationSource::Osc9,
+                    });
+                }),
+            };
+            match crate::pane::remote_spawn::spawn_remote_pane(
+                full_rect,
+                &grid_renderer,
+                scrollback,
+                interceptor_cfg.clone(),
+                Arc::clone(&dc),
+                handle,
+                socket,
+                callbacks,
+            ) {
+                Ok(pane) => {
+                    let pane_id = pane.id;
+                    info!(pane_id, "spawned initial pane in REMOTE attach mode");
+                    let layout = LayoutNode::Leaf(pane);
+                    let wm = WorkspaceManager::new(layout, Some(pane_id));
+                    self.window = Some(window);
+                    self.gpu = Some(GpuState {
+                        surface,
+                        device,
+                        queue,
+                        config,
+                    });
+                    self.grid_renderer = Some(grid_renderer);
+                    self.workspaces = Some(wm);
+                    if let Some(wm) = self.workspaces.as_mut()
+                        && let Some(renderer) = self.grid_renderer.as_ref()
+                    {
+                        wm.layout_mut()
+                            .resize_all_panes(renderer, self.config.general.show_pane_headers);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "remote pane spawn failed; falling back to local");
+                }
+            }
+        }
+
         let pane = match crate::pane::spawn_pane(
             full_rect,
             &grid_renderer,

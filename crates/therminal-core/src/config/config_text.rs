@@ -217,6 +217,13 @@ pub(super) fn default_config_text() -> String {
     out.push_str("[mcp]\n");
     out.push_str(&format!("# enabled = {}\n", d.mcp.enabled));
     out.push_str("# socket_path = \"\"  # empty = default runtime dir socket\n");
+    out.push_str(&format!(
+        "# attach_mode = \"{}\"  # \"local\" (GUI owns PTYs) or \"remote\" (stream from daemon)\n",
+        match d.mcp.attach_mode {
+            crate::config::AttachMode::Local => "local",
+            crate::config::AttachMode::Remote => "remote",
+        }
+    ));
     out.push('\n');
 
     // ── [bell] ──────────────────────────────────────────────────────────

@@ -1,7 +1,31 @@
-//! Pane backend abstraction: Terminal vs WebView.
+//! Pane backend abstraction: Terminal vs WebView vs RemotePty.
 //!
-//! Both backend types participate in tiling, geometry, MCP queries, and the
+//! All backend types participate in tiling, geometry, MCP queries, and the
 //! event bus through the shared `PaneBackend` trait.
+//!
+//! ## RemotePty (tn-5ps8)
+//!
+//! `RemotePty` streams PTY bytes from the daemon over IPC instead of owning
+//! a local `portable_pty::Child`. The GUI still holds a local `Term` so the
+//! renderer can read the grid every frame the same way it does for
+//! `Terminal` — only the byte source and input sink are remote.
+//!
+//! Wiring:
+//! - Output: a tokio task subscribed to `DaemonEvent::PaneOutput` on a
+//!   per-pane `DaemonClient` connection forwards filtered byte chunks
+//!   into a `std::sync::mpsc::Sender<Vec<u8>>` consumed by a dedicated
+//!   worker thread that runs `processor.advance_with_interceptor()` —
+//!   identical to the local PTY reader thread, just with a different
+//!   byte source.
+//! - Input: `write_input()` queues bytes onto a `tokio::sync::mpsc`
+//!   channel drained by a writer task that calls
+//!   `DaemonClient::send_request(IpcRequest::SendKeys { .. })`.
+//! - Resize: `resize()` sends `IpcRequest::ResizePane { .. }` (stub on
+//!   the daemon today, see tn-5rm0) and resizes the local `Term`
+//!   immediately so the renderer reflects the new size.
+//! - Exit: when `DaemonEvent::PaneExited` arrives for this pane (stub
+//!   today), the worker thread terminates and the on_exit callback fires
+//!   the same `UserEvent::PaneExited` flow used for local panes.
 
 use std::io::Write as IoWrite;
 use std::sync::Arc;
@@ -54,6 +78,30 @@ pub enum PaneBackendKind {
         #[allow(dead_code)]
         content: String,
     },
+    /// A pane whose PTY lives in the daemon. Bytes flow over IPC.
+    ///
+    /// The local `Term` is fed by a worker thread, identical to the
+    /// `Terminal` variant — only the byte source differs. See
+    /// `crate::pane::remote_spawn::spawn_remote_pane`.
+    RemotePty {
+        /// Daemon-assigned pane id (independent of the GUI's local PaneId).
+        pane_id: therminal_protocol::PaneId,
+        /// Local term fed by the worker thread.
+        term: Arc<FairMutex<Term<PaneListener>>>,
+        /// Sink for outbound input bytes; drained by a tokio task that
+        /// calls `DaemonClient::send_request(IpcRequest::SendKeys { .. })`.
+        input_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        /// Persistent client used for resize requests (input goes via
+        /// `input_tx` to keep `write_input` non-blocking).
+        daemon_client: Arc<therminal_daemon_client::DaemonClient>,
+        /// Tokio runtime handle for spawning ResizePane requests from
+        /// the synchronous `resize()` path.
+        tokio_handle: tokio::runtime::Handle,
+        /// Shutdown signal for the output forwarding task / worker thread.
+        /// Dropping the backend closes this and the workers wind down.
+        #[allow(dead_code)]
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+    },
 }
 
 impl PaneBackend for PaneBackendKind {
@@ -62,6 +110,17 @@ impl PaneBackend for PaneBackendKind {
             PaneBackendKind::Terminal { pty_writer, .. } => pty_writer.write_all(data),
             PaneBackendKind::WebView { .. } => {
                 // WebView input handling is a stub for now.
+                Ok(())
+            }
+            PaneBackendKind::RemotePty { input_tx, .. } => {
+                // Fire-and-forget; the writer task drains and forwards
+                // via DaemonClient::send_request(SendKeys).
+                if input_tx.send(data.to_vec()).is_err() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "remote pty input channel closed",
+                    ));
+                }
                 Ok(())
             }
         }
@@ -89,12 +148,50 @@ impl PaneBackend for PaneBackendKind {
             PaneBackendKind::WebView { .. } => {
                 // WebView resize is a stub for now.
             }
+            PaneBackendKind::RemotePty {
+                pane_id,
+                term,
+                daemon_client,
+                tokio_handle,
+                ..
+            } => {
+                {
+                    let mut term_guard = term.lock();
+                    let size = PaneTermSize {
+                        columns: cols,
+                        screen_lines: rows,
+                    };
+                    term_guard.resize(size);
+                }
+                let client = Arc::clone(daemon_client);
+                let pid = *pane_id;
+                let cols_u16 = cols as u16;
+                let rows_u16 = rows as u16;
+                tokio_handle.spawn(async move {
+                    use therminal_protocol::daemon::IpcRequest;
+                    if let Err(e) = client
+                        .send_request(IpcRequest::ResizePane {
+                            pane_id: pid,
+                            cols: cols_u16,
+                            rows: rows_u16,
+                        })
+                        .await
+                    {
+                        // Stub today: server returns Error{unimplemented}.
+                        // tn-5rm0 lands the real handler.
+                        tracing::debug!(
+                            error = %e,
+                            "ResizePane request failed (expected until tn-5rm0)"
+                        );
+                    }
+                });
+            }
         }
     }
 
     fn get_content(&self) -> String {
         match self {
-            PaneBackendKind::Terminal { term, .. } => {
+            PaneBackendKind::Terminal { term, .. } | PaneBackendKind::RemotePty { term, .. } => {
                 use alacritty_terminal::grid::Dimensions;
                 let term_guard = term.lock();
                 let rows = term_guard.screen_lines();
@@ -107,7 +204,6 @@ impl PaneBackend for PaneBackendKind {
                         let cell = &grid[Line(row_idx as i32)][Column(col_idx)];
                         content.push(cell.c);
                     }
-                    // Trim trailing spaces and add newline.
                     let trimmed = content.trim_end_matches(' ');
                     let trimmed_len = trimmed.len();
                     content.truncate(trimmed_len);
@@ -123,6 +219,7 @@ impl PaneBackend for PaneBackendKind {
         match self {
             PaneBackendKind::Terminal { .. } => "terminal",
             PaneBackendKind::WebView { .. } => "webview",
+            PaneBackendKind::RemotePty { .. } => "remote_pty",
         }
     }
 }
@@ -131,7 +228,9 @@ impl PaneBackendKind {
     /// Returns the terminal term if this is a Terminal backend, `None` otherwise.
     pub fn term(&self) -> Option<&Arc<FairMutex<Term<PaneListener>>>> {
         match self {
-            PaneBackendKind::Terminal { term, .. } => Some(term),
+            PaneBackendKind::Terminal { term, .. } | PaneBackendKind::RemotePty { term, .. } => {
+                Some(term)
+            }
             _ => None,
         }
     }

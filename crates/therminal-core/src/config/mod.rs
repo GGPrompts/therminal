@@ -583,6 +583,30 @@ pub struct McpConfig {
     /// If empty, defaults to the runtime directory socket path
     /// (`<runtime_dir>/mcp.sock`).
     pub socket_path: String,
+    /// How the GUI attaches its panes to the terminal backend.
+    ///
+    /// - `Local` (default): the GUI owns its own portable_pty `Child`
+    ///   processes via `PaneBackendKind::Terminal`. Byte-identical to
+    ///   pre-tn-5ps8 behaviour.
+    /// - `Remote`: the GUI subscribes to `DaemonEvent::PaneOutput` from
+    ///   the daemon and forwards input/resize over IPC via
+    ///   `PaneBackendKind::RemotePty`. Requires a running daemon.
+    ///
+    /// This is the migration switch for epic tn-382v. Local mode stays
+    /// available for one release while remote mode bakes in.
+    #[serde(default)]
+    pub attach_mode: AttachMode,
+}
+
+/// Strategy used by the GUI to obtain PTY-backed panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachMode {
+    /// GUI spawns and owns local PTY children (legacy / default).
+    #[default]
+    Local,
+    /// GUI streams PTY bytes from the daemon over IPC.
+    Remote,
 }
 
 impl McpConfig {
@@ -602,6 +626,7 @@ impl Default for McpConfig {
         Self {
             enabled: true,
             socket_path: String::new(),
+            attach_mode: AttachMode::default(),
         }
     }
 }

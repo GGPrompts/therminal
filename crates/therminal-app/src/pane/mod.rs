@@ -9,6 +9,7 @@ pub mod auto_tile;
 pub mod backend;
 pub mod geometry;
 pub mod layout;
+pub mod remote_spawn;
 pub mod spawn;
 pub mod state;
 pub mod swarm_watcher;
