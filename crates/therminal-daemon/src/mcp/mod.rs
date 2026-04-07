@@ -483,13 +483,14 @@ impl TherminalMcpServer {
 
     /// Parse a pane resource URI into (pane_id, resource_kind).
     ///
-    /// Accepts `terminal://pane/{id}/content` and `terminal://pane/{id}/output`.
+    /// Accepts `terminal://pane/{id}/content`, `terminal://pane/{id}/output`,
+    /// and `terminal://pane/{id}/scrollback`.
     pub(super) fn parse_pane_uri(uri: &str) -> Option<(u64, &str)> {
         let rest = uri.strip_prefix("terminal://pane/")?;
         let (id_str, kind) = rest.split_once('/')?;
         let pane_id: u64 = id_str.parse().ok()?;
         match kind {
-            "content" | "output" => Some((pane_id, kind)),
+            "content" | "output" | "scrollback" => Some((pane_id, kind)),
             _ => None,
         }
     }
@@ -785,6 +786,12 @@ pub(crate) mod tests {
     fn parse_pane_uri_output() {
         let result = TherminalMcpServer::parse_pane_uri("terminal://pane/7/output");
         assert_eq!(result, Some((7, "output")));
+    }
+
+    #[test]
+    fn parse_pane_uri_scrollback() {
+        let result = TherminalMcpServer::parse_pane_uri("terminal://pane/13/scrollback");
+        assert_eq!(result, Some((13, "scrollback")));
     }
 
     #[test]
@@ -1127,6 +1134,18 @@ pub(crate) mod tests {
         assert!(
             server
                 .enforce_resource_trust("terminal://pane/1/output", &agent)
+                .is_ok()
+        );
+    }
+
+    /// Sandboxed agents can read pane scrollback resources (Observer tier).
+    #[test]
+    fn sandboxed_agent_can_read_pane_scrollback() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_resource_trust("terminal://pane/1/scrollback", &agent)
                 .is_ok()
         );
     }

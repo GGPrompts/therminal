@@ -44,6 +44,20 @@ impl TherminalMcpServer {
                         None,
                     ));
 
+                    let scrollback_uri = format!("terminal://pane/{}/scrollback", pane.id);
+                    resources.push(Annotated::new(
+                        RawResource::new(
+                            &scrollback_uri,
+                            format!("Pane {} scrollback", pane.id),
+                        )
+                        .with_description(format!(
+                            "Historical scrollback above the visible grid for pane {} (session {}). Capped at 10,000 lines, oldest first.",
+                            pane.id, session_id
+                        ))
+                        .with_mime_type("text/plain"),
+                        None,
+                    ));
+
                     let output_uri = format!("terminal://pane/{}/output", pane.id);
                     resources.push(Annotated::new(
                         RawResource::new(&output_uri, format!("Pane {} output stream", pane.id))
@@ -98,6 +112,17 @@ impl TherminalMcpServer {
                 )
                 .with_description(
                     "Live PTY output stream for a terminal pane. Subscribe for real-time update notifications.",
+                )
+                .with_mime_type("text/plain"),
+                None,
+            ),
+            Annotated::new(
+                RawResourceTemplate::new(
+                    "terminal://pane/{pane_id}/scrollback",
+                    "Pane scrollback history",
+                )
+                .with_description(
+                    "Historical scrollback above the visible grid for a terminal pane. Static snapshot (no subscriptions), capped at 10,000 lines, oldest first.",
                 )
                 .with_mime_type("text/plain"),
                 None,
@@ -188,6 +213,26 @@ impl TherminalMcpServer {
                     ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain"),
                 ]))
             }
+            "scrollback" => {
+                let mgr = self.session_mgr.lock().await;
+                let snap = mgr.capture_pane(pane_id).map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("capture_pane failed: {e}"),
+                        None,
+                    )
+                })?;
+                // `PaneSnapshot.scrollback` is oldest-first, capped at 10k lines.
+                let lines: Vec<String> = snap
+                    .scrollback
+                    .iter()
+                    .map(|row| row.iter().map(|(ch, _)| ch).collect())
+                    .collect();
+                let text = lines.join("\n");
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain"),
+                ]))
+            }
             _ => Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("unknown resource kind in URI: {uri}"),
@@ -267,13 +312,16 @@ impl TherminalMcpServer {
 
         // Only output resources support subscriptions.
         if kind != "output" {
-            return Err(ErrorData::new(
-                ErrorCode::INVALID_PARAMS,
+            let hint = if kind == "scrollback" {
+                format!(
+                    "scrollback is a static snapshot and does not support subscriptions; use read_resource on {uri}"
+                )
+            } else {
                 format!(
                     "resource {uri} does not support subscriptions; use terminal://pane/{pane_id}/output"
-                ),
-                None,
-            ));
+                )
+            };
+            return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, hint, None));
         }
 
         // Get a broadcast receiver for daemon events.

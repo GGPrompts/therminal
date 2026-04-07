@@ -96,6 +96,7 @@ The server also exposes MCP Resources for pane content access:
 |-------------|----------|-------------|
 | `terminal://pane/{id}/content` | Observer | Current visible grid snapshot (plain text) |
 | `terminal://pane/{id}/output` | Observer | Live PTY output stream (subscribe for updates) |
+| `terminal://pane/{id}/scrollback` | Observer | Historical scrollback above the visible grid (plain text, oldest first, capped at 10,000 lines, no subscriptions) |
 
 **Resource listing**: `list_resources` returns concrete resources for each active pane. `list_resource_templates` returns URI templates for both content and output patterns.
 
