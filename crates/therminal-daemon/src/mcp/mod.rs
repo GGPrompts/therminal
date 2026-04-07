@@ -503,6 +503,35 @@ pub(super) struct AgentDetailsResult {
     pub(super) last_command_duration_ms: Option<u64>,
 }
 
+/// Dynamic status snapshot for the agent running in a specific pane.
+///
+/// Strict subset of `AgentDetailsResult` focused on the live mode + capacity
+/// fields used by sibling agents to coordinate. Combines the
+/// `AgentRegistry` view (mode-ish: `agent_type`, `status`, `current_tool`)
+/// with the `PaneCapacityCache` view (`context_percent`, `model`).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct AgentStatusResult {
+    /// The pane the agent is running in (echoed for caller convenience).
+    pub(super) pane_id: u64,
+    /// Agent type (claude, codex, copilot, aider) if registered. `None`
+    /// when only capacity data is known for this pane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) agent_type: Option<String>,
+    /// Lifecycle status. Identical formatting to `AgentInfoResult.status`
+    /// (`AgentStatus::as_str`). Falls back to "unknown" when no
+    /// `AgentRegistry` entry exists for the pane.
+    pub(super) status: String,
+    /// Current tool name when status is `tool_use`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) current_tool: Option<String>,
+    /// Context-window usage percentage (0.0 - 100.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) context_percent: Option<f32>,
+    /// Model string (e.g. "claude-opus-4-6").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) model: Option<String>,
+}
+
 // Reserved for terminal.semantic.query_history (Phase 4).
 #[allow(dead_code)]
 #[derive(Debug, Serialize, JsonSchema)]
@@ -963,6 +992,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_get_agent_details(params).await
             }
+            "terminal.agents.get_status" => {
+                let params: PaneIdParam = parse_args(args)?;
+                self.handle_get_agent_status(params).await
+            }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -1160,6 +1193,7 @@ pub(crate) mod tests {
             "terminal.workspaces.get_layout",
             "terminal.agents.list",
             "terminal.agents.get_details",
+            "terminal.agents.get_status",
         ];
         for tool in &observer_tools {
             assert!(
@@ -1274,6 +1308,7 @@ pub(crate) mod tests {
             "terminal.workspaces.get_layout",
             "terminal.agents.list",
             "terminal.agents.get_details",
+            "terminal.agents.get_status",
             // Writer
             "terminal.sessions.create",
             "terminal.panes.write",
@@ -1282,7 +1317,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 19, "expected exactly 19 tools");
+        assert_eq!(all_tools.len(), 20, "expected exactly 20 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -1453,11 +1488,11 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 16 tools must be returned.
+    /// Lock in the count: exactly 20 tools must be returned.
     #[test]
-    fn tool_definitions_returns_16_tools() {
+    fn tool_definitions_returns_20_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 19, "expected exactly 19 tool definitions");
+        assert_eq!(tools.len(), 20, "expected exactly 20 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1486,6 +1521,7 @@ pub(crate) mod tests {
             "terminal.workspaces.get_layout",
             "terminal.agents.list",
             "terminal.agents.get_details",
+            "terminal.agents.get_status",
         ];
         for name in &expected {
             assert!(names.contains(name), "missing tool definition: {name}");
@@ -1837,6 +1873,58 @@ pub(crate) mod tests {
                 .enforce_trust("terminal.agents.get_details", &agent)
                 .is_ok()
         );
+    }
+
+    // ── terminal.agents.get_status ──────────────────────────────────────
+
+    /// `terminal.agents.get_status` must be advertised in `tool_definitions()`.
+    #[test]
+    fn get_agent_status_tool_is_registered() {
+        let defs = super::tools::tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            names.contains(&"terminal.agents.get_status"),
+            "tool_definitions missing terminal.agents.get_status: {names:?}"
+        );
+    }
+
+    /// Observer-tier enforcement: a Sandboxed-tier caller is permitted.
+    #[test]
+    fn sandboxed_agent_can_call_get_agent_status() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.agents.get_status", &agent)
+                .is_ok()
+        );
+    }
+
+    /// Regression-lock the bypass class: the trust category map must
+    /// classify `get_status` as Observer (not None / unknown), so it
+    /// remains gated by `enforce_trust` even if the dispatch arm is
+    /// reordered.
+    #[test]
+    fn get_agent_status_is_observer_tier() {
+        use crate::trust::{ToolCategory, tool_category};
+        assert_eq!(
+            tool_category("terminal.agents.get_status"),
+            Some(ToolCategory::Observer)
+        );
+    }
+
+    /// Calling `handle_get_agent_status` with no agent registered and no
+    /// capacity entry must return a tool error rather than a transport
+    /// error or an empty success.
+    #[tokio::test]
+    async fn get_agent_status_unknown_pane_returns_tool_error() {
+        let server = make_server(trusted_config());
+        let params = super::PaneIdParam { pane_id: 999_999 };
+        let result = server
+            .handle_get_agent_status(params)
+            .await
+            .expect("handler should not error at transport level");
+        assert_eq!(result.is_error, Some(true));
     }
 
     // ── terminal.semantic.query_commands ────────────────────────────────

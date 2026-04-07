@@ -10,17 +10,18 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use tracing::debug;
 
 use super::{
-    AgentDetailsResult, AgentInfoResult, CommandInfo, CreateSessionParam, DestroyPaneResult,
-    EmptyParams, EventInfo, GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam,
-    GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo,
-    LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult,
-    ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult,
-    PaneIdParam, PaneInfo, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
-    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
-    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
-    SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer, WaitForOutputParam,
-    WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
-    build_content_preview, find_first_pane_in_session, find_pane_info, json_content,
+    AgentDetailsResult, AgentInfoResult, AgentStatusResult, CommandInfo, CreateSessionParam,
+    DestroyPaneResult, EmptyParams, EventInfo, GetHotspotsParam, GetHotspotsResult,
+    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
+    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
+    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
+    PaneContentResult, PaneIdParam, PaneInfo, QueryCommandsParam, QueryCommandsResult,
+    QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult,
+    SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult, SessionIdParam,
+    SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer,
+    WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
+    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
+    json_content,
 };
 
 impl TherminalMcpServer {
@@ -400,6 +401,54 @@ impl TherminalMcpServer {
             last_command_duration_ms: snapshot
                 .last_command_duration_ms
                 .and_then(|d| if d < 0 { None } else { Some(d as u64) }),
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return a dynamic mode + capacity snapshot for one pane's agent.
+    ///
+    /// Strict subset of `handle_get_agent_details` intended for sibling-agent
+    /// coordination. Combines the `AgentRegistry` view (`agent_type`,
+    /// `status`, `current_tool`) with the `PaneCapacityCache` view
+    /// (`context_percent`, `model`). If neither lookup yields anything for
+    /// the pane, returns a tool error.
+    pub(super) async fn handle_get_agent_status(
+        &self,
+        params: PaneIdParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        let registry_entry = mgr.agent_registry().get(params.pane_id);
+        let capacity_entry = mgr.pane_capacity(params.pane_id);
+
+        if registry_entry.is_none() && capacity_entry.is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "no agent for pane_id {}",
+                params.pane_id
+            ))]));
+        }
+
+        let (agent_type, status, current_tool) = match registry_entry {
+            Some(e) => (
+                Some(e.agent_type.as_str().to_string()),
+                e.status.as_str().to_string(),
+                e.status.tool_name().map(String::from),
+            ),
+            None => (None, "unknown".to_string(), None),
+        };
+
+        let (context_percent, model) = match capacity_entry {
+            Some(e) => (e.context_percent, e.model),
+            None => (None, None),
+        };
+
+        let result = AgentStatusResult {
+            pane_id: params.pane_id,
+            agent_type,
+            status,
+            current_tool,
+            context_percent,
+            model,
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
@@ -1007,6 +1056,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         Tool::new(
             "terminal.agents.get_details",
             "Get detailed inference data for the agent running in a pane: agent_type, model, context_percent, consecutive_failures, last_command, last_exit_code, last_command_duration_ms. All inference fields except consecutive_failures are currently None — the underlying state inference engine is not yet plumbed into the daemon (stub returning agent_type from AgentRegistry).",
+            schema_for_type::<PaneIdParam>(),
+        ),
+        Tool::new(
+            "terminal.agents.get_status",
+            "Get a dynamic mode + capacity snapshot for the agent in a pane: agent_type, status, current_tool (from AgentRegistry) plus context_percent and model (from PaneCapacityCache). Strict subset of terminal.agents.get_details intended for sibling-agent coordination. Returns an error if neither registry nor capacity data is known for the pane.",
             schema_for_type::<PaneIdParam>(),
         ),
     ]

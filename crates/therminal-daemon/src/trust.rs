@@ -53,7 +53,8 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.workspaces.list"
         | "terminal.workspaces.get_layout"
         | "terminal.agents.list"
-        | "terminal.agents.get_details" => Some(ToolCategory::Observer),
+        | "terminal.agents.get_details"
+        | "terminal.agents.get_status" => Some(ToolCategory::Observer),
         "terminal.sessions.create" | "terminal.panes.write" | "terminal.panes.create" => {
             Some(ToolCategory::Writer)
         }
