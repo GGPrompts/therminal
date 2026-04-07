@@ -20,7 +20,6 @@ pub(crate) struct TabBarInfo {
 
 const TAB_MIN_WIDTH: f32 = 48.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
-const TAB_CHAR_WIDTH: f32 = 8.0;
 const TAB_PADDING: f32 = 16.0;
 const TAB_ELLIPSIS: char = '…';
 const TAB_BAR_BG_COLOR: [f32; 4] = STATUS_BAR_BG_COLOR;
@@ -153,13 +152,6 @@ pub(crate) fn draw_tab_bar(
     let line_height = bar_h;
     let metrics = Metrics::new(font_size, line_height);
 
-    let bounds = TextBounds {
-        left: 0,
-        top: 0,
-        right: surface_width as i32,
-        bottom: surface_height as i32,
-    };
-
     let active_color = GlyphColor::rgba(
         PaletteColor::INK.r,
         PaletteColor::INK.g,
@@ -184,48 +176,94 @@ pub(crate) fn draw_tab_bar(
         } else {
             inactive_color
         };
-        let label_owned = truncate_label(&info.tab_labels[i], tab_w);
-        let label = label_owned.as_str();
+
+        // Shape-measure-trim: estimate heuristics (TAB_CHAR_WIDTH) routinely
+        // undershoot real glyph advance widths, producing labels that still
+        // overflow their slot. Instead, shape the full label first; if the
+        // measured width exceeds the available width, iteratively drop a
+        // char and append an ellipsis until it fits.
+        let avail = (tab_w - TAB_PADDING).max(0.0);
+        let full_label = info.tab_labels[i].clone();
         let active_tag = if is_active { "a" } else { "i" };
         let slot = format!("tab_{ws_id}");
-        let key = format!("{label}|{active_tag}");
 
-        // Pass the full surface width as the shaping constraint rather than
-        // `tab_w`. With a tight per-tab width, glyphon wraps long labels onto
-        // a second line and `layout_runs().next()` then only yields the first
-        // visual line — which is exactly the rename bug (user sees the leading
-        // workspace id but not the typed buffer or trailing cursor). Centering
-        // is computed post-shape from the real text width, so a generous
-        // shaping width is safe.
-        ensure_shaped(
-            &slot,
-            &key,
-            metrics,
-            sw,
-            bar_h,
-            label,
-            Attrs::new().family(Family::Name(&family)).color(color),
-            &mut renderer.font_system,
-            &mut renderer.overlay_cache,
-        );
+        let mut label = full_label.clone();
+        loop {
+            let key = format!("{label}|{active_tag}");
+            ensure_shaped(
+                &slot,
+                &key,
+                metrics,
+                sw,
+                bar_h,
+                &label,
+                Attrs::new().family(Family::Name(&family)).color(color),
+                &mut renderer.font_system,
+                &mut renderer.overlay_cache,
+            );
+            let text_w = cached_buf(&renderer.overlay_cache, &slot)
+                .map(|buf| {
+                    buf.layout_runs()
+                        .next()
+                        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+                        .unwrap_or(0.0)
+                })
+                .unwrap_or(0.0);
+            if text_w <= avail || label.chars().count() <= 1 {
+                break;
+            }
+            // Drop trailing chars and append ellipsis.
+            let char_count = label.chars().count();
+            // If the current label already ends with ellipsis, drop one more
+            // real char before it; otherwise drop one and append ellipsis.
+            let (without_ellipsis, has_ellipsis) = match label.strip_suffix(TAB_ELLIPSIS) {
+                Some(rest) => (rest.to_string(), true),
+                None => (label.clone(), false),
+            };
+            let take = if has_ellipsis {
+                without_ellipsis.chars().count().saturating_sub(1)
+            } else {
+                char_count.saturating_sub(2)
+            };
+            if take == 0 {
+                label = TAB_ELLIPSIS.to_string();
+                let key = format!("{label}|{active_tag}");
+                ensure_shaped(
+                    &slot,
+                    &key,
+                    metrics,
+                    sw,
+                    bar_h,
+                    &label,
+                    Attrs::new().family(Family::Name(&family)).color(color),
+                    &mut renderer.font_system,
+                    &mut renderer.overlay_cache,
+                );
+                break;
+            }
+            let mut next: String = without_ellipsis.chars().take(take).collect();
+            next.push(TAB_ELLIPSIS);
+            label = next;
+        }
 
         tab_slots.push((slot, tab_x, tab_w, color));
     }
 
     // Phase 2: immutable borrow. Missing slots are skipped.
-    let mut tab_positions: Vec<(&Buffer, f32, GlyphColor)> = Vec::new();
-    for (slot, tab_x, tab_w, color) in &tab_slots {
-        let Some(buf) = cached_buf(&renderer.overlay_cache, slot) else {
-            continue;
-        };
-        let text_width = buf
-            .layout_runs()
-            .next()
-            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-            .unwrap_or(0.0);
-        let centered_x = tab_x + ((tab_w - text_width) / 2.0).max(0.0);
-        tab_positions.push((buf, centered_x, *color));
-    }
+    // (buf, centered_x, tab_x, tab_w, color) — tab_x/tab_w retained for per-tab bounds clipping.
+    let tab_positions: Vec<(&Buffer, f32, f32, f32, GlyphColor)> = tab_slots
+        .iter()
+        .filter_map(|(slot, tab_x, tab_w, color)| {
+            let buf = cached_buf(&renderer.overlay_cache, slot)?;
+            let text_width = buf
+                .layout_runs()
+                .next()
+                .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+                .unwrap_or(0.0);
+            let centered_x = tab_x + ((tab_w - text_width) / 2.0).max(0.0);
+            Some((buf, centered_x, *tab_x, *tab_w, *color))
+        })
+        .collect();
 
     renderer.viewport.update(
         queue,
@@ -237,14 +275,26 @@ pub(crate) fn draw_tab_bar(
 
     let text_areas: Vec<TextArea<'_>> = tab_positions
         .iter()
-        .map(|(buf, x, color)| TextArea {
-            buffer: buf,
-            left: *x,
-            top: 0.0,
-            scale: 1.0,
-            bounds,
-            default_color: *color,
-            custom_glyphs: &[],
+        .map(|(buf, x, tab_x, tab_w, color)| {
+            // Clip each tab's text to its own slot rect so any residual
+            // overflow never bleeds into the adjacent tab.
+            let left = tab_x.floor() as i32;
+            let right = (tab_x + tab_w).ceil() as i32;
+            let slot_bounds = TextBounds {
+                left,
+                top: 0,
+                right,
+                bottom: bar_h as i32,
+            };
+            TextArea {
+                buffer: buf,
+                left: *x,
+                top: 0.0,
+                scale: 1.0,
+                bounds: slot_bounds,
+                default_color: *color,
+                custom_glyphs: &[],
+            }
         })
         .collect();
 
@@ -319,27 +369,6 @@ fn slot_width(bar_width: f32, tab_count: usize) -> f32 {
     even.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
 }
 
-/// Truncate a label so its rendered width fits within `slot_w` (accounting
-/// for TAB_PADDING). Appends an ellipsis when characters are dropped.
-fn truncate_label(label: &str, slot_w: f32) -> String {
-    let avail = (slot_w - TAB_PADDING).max(0.0);
-    let max_chars = (avail / TAB_CHAR_WIDTH).floor() as usize;
-    let char_count = label.chars().count();
-    if char_count <= max_chars {
-        return label.to_string();
-    }
-    if max_chars == 0 {
-        return String::new();
-    }
-    if max_chars == 1 {
-        return TAB_ELLIPSIS.to_string();
-    }
-    let keep = max_chars - 1;
-    let mut out: String = label.chars().take(keep).collect();
-    out.push(TAB_ELLIPSIS);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,20 +393,6 @@ mod tests {
     fn slot_width_floors_at_min() {
         // 100 tabs in 100 px → 1 each, raised to TAB_MIN_WIDTH.
         assert_eq!(slot_width(100.0, 100), TAB_MIN_WIDTH);
-    }
-
-    #[test]
-    fn truncate_label_short_unchanged() {
-        // slot 200 → avail 184 → 23 chars max → "hello" passes through.
-        assert_eq!(truncate_label("hello", 200.0), "hello");
-    }
-
-    #[test]
-    fn truncate_label_long_gets_ellipsis() {
-        // slot 48 → avail 32 → 4 chars max → 3 chars + ellipsis.
-        let out = truncate_label("verylonglabel", 48.0);
-        assert!(out.ends_with(TAB_ELLIPSIS));
-        assert_eq!(out.chars().count(), 4);
     }
 
     #[test]
