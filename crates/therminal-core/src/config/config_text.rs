@@ -236,6 +236,24 @@ pub(super) fn default_config_text() -> String {
     ));
     out.push('\n');
 
+    // ── [hotspots] ──────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [hotspots] — Clickable file/URL handling.\n");
+    out.push_str("# editor_chain: ordered list of editor commands to try when opening a\n");
+    out.push_str("# file hotspot. The first found on PATH wins. The tokens `$VISUAL` and\n");
+    out.push_str("# `$EDITOR` are substituted with those env vars at launch time.\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[hotspots]\n");
+    let chain_toml = d
+        .hotspots
+        .editor_chain
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("# editor_chain = [{chain_toml}]\n"));
+    out.push('\n');
+
     out
 }
 

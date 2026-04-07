@@ -684,15 +684,26 @@ impl App {
             }
         }
 
-        if let Ok(editor) = std::env::var("EDITOR") {
+        // Resolve a concrete editor command from the configured fallback
+        // chain. First entry that expands (env vars present) AND resolves
+        // on PATH wins.
+        let chain = &self.config.hotspots.editor_chain;
+        let resolved = resolve_editor_chain(chain, which_on_path, |var| std::env::var(var).ok());
+
+        if let Some(editor) = resolved {
             // Many editors support +line syntax.
             let arg = format!("+{line}");
             match Command::new(&editor).arg(&arg).arg(path).spawn() {
                 Ok(_) => return,
                 Err(e) => {
-                    tracing::warn!("failed to launch $EDITOR ({editor}): {e}");
+                    tracing::warn!("failed to launch editor ({editor}): {e}");
                 }
             }
+        } else {
+            tracing::warn!(
+                "open_in_editor: no editor from chain {:?} resolved on PATH",
+                chain
+            );
         }
 
         // Fallback: xdg-open / open.
@@ -1349,6 +1360,80 @@ impl App {
     }
 }
 
+/// Resolve an entry from the editor fallback chain to a concrete command.
+///
+/// Each entry is either a literal command (e.g. `"nvim"`) or an env-var
+/// token (`"$EDITOR"`, `"$VISUAL"`). Literal commands are probed via the
+/// supplied `which_fn`; env-var tokens are first expanded via `env_fn`
+/// and the result is then probed. The first successful resolution wins.
+/// Returns `None` if every entry fails.
+///
+/// This is factored out of [`App::open_in_editor`] so it can be unit
+/// tested without touching the real filesystem or environment.
+fn resolve_editor_chain<W, E>(chain: &[String], mut which_fn: W, mut env_fn: E) -> Option<String>
+where
+    W: FnMut(&str) -> bool,
+    E: FnMut(&str) -> Option<String>,
+{
+    for entry in chain {
+        let candidate: Option<String> = if let Some(var) = entry.strip_prefix('$') {
+            env_fn(var)
+        } else {
+            Some(entry.clone())
+        };
+        let Some(cmd) = candidate else {
+            continue;
+        };
+        if cmd.is_empty() {
+            continue;
+        }
+        // If the user's $EDITOR contains args ("code --wait"), take the
+        // head token for the PATH probe but return the full string so the
+        // args are preserved downstream.
+        let head = cmd.split_whitespace().next().unwrap_or("");
+        if head.is_empty() {
+            continue;
+        }
+        if which_fn(head) {
+            return Some(cmd);
+        }
+    }
+    None
+}
+
+/// Cross-platform PATH lookup. Returns `true` if `cmd` resolves to an
+/// executable file on any PATH entry. On Windows, also tries the common
+/// extensions from `PATHEXT`.
+fn which_on_path(cmd: &str) -> bool {
+    // If it contains a path separator, probe it directly.
+    if cmd.contains('/') || cmd.contains('\\') {
+        return std::path::Path::new(cmd).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    #[cfg(windows)]
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".EXE;.BAT;.CMD;.COM".to_string())
+        .split(';')
+        .map(|s| s.to_string())
+        .collect();
+    for dir in std::env::split_paths(&path) {
+        let full = dir.join(cmd);
+        if full.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        for ext in &exts {
+            let with_ext = dir.join(format!("{cmd}{ext}"));
+            if with_ext.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Minimal POSIX shell single-quote escape for embedding a path in a
 /// command line. Wraps in `'...'` and escapes embedded single quotes.
 fn shell_quote(s: &str) -> String {
@@ -1363,4 +1448,70 @@ fn shell_quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn chain(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn resolve_picks_first_hit_on_path() {
+        let c = chain(&["$VISUAL", "$EDITOR", "code", "nvim", "vim", "nano"]);
+        let env: HashMap<&str, &str> = HashMap::new();
+        let resolved = resolve_editor_chain(
+            &c,
+            |cmd| matches!(cmd, "nvim" | "vim" | "nano"),
+            |v| env.get(v).map(|s| s.to_string()),
+        );
+        assert_eq!(resolved.as_deref(), Some("nvim"));
+    }
+
+    #[test]
+    fn resolve_expands_env_tokens_first() {
+        let c = chain(&["$VISUAL", "$EDITOR", "vim"]);
+        let mut env: HashMap<&str, &str> = HashMap::new();
+        env.insert("EDITOR", "hx");
+        let resolved =
+            resolve_editor_chain(&c, |cmd| cmd == "hx", |v| env.get(v).map(|s| s.to_string()));
+        assert_eq!(resolved.as_deref(), Some("hx"));
+    }
+
+    #[test]
+    fn resolve_skips_unset_env_tokens() {
+        let c = chain(&["$VISUAL", "$EDITOR", "nano"]);
+        let resolved = resolve_editor_chain(&c, |cmd| cmd == "nano", |_| None);
+        assert_eq!(resolved.as_deref(), Some("nano"));
+    }
+
+    #[test]
+    fn resolve_preserves_editor_args_but_probes_head() {
+        let c = chain(&["$EDITOR", "vim"]);
+        let mut env: HashMap<&str, &str> = HashMap::new();
+        env.insert("EDITOR", "code --wait");
+        let resolved = resolve_editor_chain(
+            &c,
+            |cmd| cmd == "code",
+            |v| env.get(v).map(|s| s.to_string()),
+        );
+        assert_eq!(resolved.as_deref(), Some("code --wait"));
+    }
+
+    #[test]
+    fn resolve_returns_none_when_nothing_on_path() {
+        let c = chain(&["$EDITOR", "code", "nvim"]);
+        let resolved = resolve_editor_chain(&c, |_| false, |_| None);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_skips_empty_entries() {
+        let c = chain(&["", "$VISUAL", "vim"]);
+        let resolved = resolve_editor_chain(&c, |cmd| cmd == "vim", |_| None);
+        assert_eq!(resolved.as_deref(), Some("vim"));
+    }
 }

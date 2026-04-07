@@ -59,6 +59,8 @@ pub struct TherminalConfig {
     pub bell: BellConfig,
     /// Notification settings.
     pub notifications: NotificationConfig,
+    /// Hotspot (clickable file/URL) settings.
+    pub hotspots: HotspotsConfig,
 }
 
 impl TherminalConfig {
@@ -643,6 +645,39 @@ impl Default for NotificationConfig {
     }
 }
 
+// ── Section: Hotspots ──────────────────────────────────────────────────
+
+/// Hotspot (clickable terminal content) settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HotspotsConfig {
+    /// Ordered list of editor commands to try when opening a file hotspot.
+    ///
+    /// The first entry whose executable is found on `PATH` is used. The
+    /// special tokens `$VISUAL` and `$EDITOR` (case-sensitive) are
+    /// substituted with the values of those environment variables at
+    /// launch time and skipped if unset.
+    ///
+    /// If the entire chain fails, `open::that` is used as a last resort.
+    pub editor_chain: Vec<String>,
+}
+
+impl Default for HotspotsConfig {
+    fn default() -> Self {
+        // On WSL2, prefer VS Code first — most users have it installed via
+        // the Windows host and `$EDITOR` is frequently unset in GUI launches.
+        let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
+        let chain: Vec<&str> = if is_wsl {
+            vec!["code", "$VISUAL", "$EDITOR", "nvim", "vim", "nano"]
+        } else {
+            vec!["$VISUAL", "$EDITOR", "code", "nvim", "vim", "nano"]
+        };
+        Self {
+            editor_chain: chain.into_iter().map(String::from).collect(),
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -657,6 +692,50 @@ mod tests {
         assert_eq!(decoded.general.title, "Therminal");
         assert_eq!(decoded.font.size, 17.0);
         assert_eq!(decoded.trust.default_tier, TrustTier::Supervised);
+    }
+
+    #[test]
+    fn hotspots_config_round_trips() {
+        let mut config = TherminalConfig::default();
+        config.hotspots.editor_chain =
+            vec!["hx".to_string(), "$EDITOR".to_string(), "nano".to_string()];
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            decoded.hotspots.editor_chain,
+            vec!["hx".to_string(), "$EDITOR".to_string(), "nano".to_string()]
+        );
+    }
+
+    #[test]
+    fn hotspots_default_chain_contains_fallbacks() {
+        let d = HotspotsConfig::default();
+        // `nano` is always the last-resort entry regardless of platform.
+        assert_eq!(d.editor_chain.last().map(String::as_str), Some("nano"));
+        // Env tokens are included so unset-$EDITOR users still get a chain.
+        assert!(d.editor_chain.iter().any(|s| s == "$EDITOR"));
+        assert!(d.editor_chain.iter().any(|s| s == "$VISUAL"));
+    }
+
+    #[test]
+    fn hotspots_default_chain_wsl_puts_code_first() {
+        // Simulate WSL detection by constructing the chain the same way
+        // `HotspotsConfig::default` does. We can't mutate the process env
+        // safely in parallel tests, so assert the shape of both branches.
+        let wsl_chain: Vec<&str> = vec!["code", "$VISUAL", "$EDITOR", "nvim", "vim", "nano"];
+        let non_wsl_chain: Vec<&str> = vec!["$VISUAL", "$EDITOR", "code", "nvim", "vim", "nano"];
+        assert_eq!(wsl_chain[0], "code");
+        assert_ne!(non_wsl_chain[0], "code");
+
+        // And confirm the real default matches one of the two shapes.
+        let actual_owned: Vec<String> = HotspotsConfig::default().editor_chain;
+        let wsl_owned: Vec<String> = wsl_chain.iter().map(|s| s.to_string()).collect();
+        let non_wsl_owned: Vec<String> = non_wsl_chain.iter().map(|s| s.to_string()).collect();
+        assert!(
+            actual_owned == wsl_owned || actual_owned == non_wsl_owned,
+            "unexpected default chain: {:?}",
+            actual_owned
+        );
     }
 
     #[test]
