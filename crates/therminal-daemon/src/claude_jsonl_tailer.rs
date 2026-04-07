@@ -6,8 +6,12 @@
 //!
 //! `ClaudeJsonlRegistry` owns one tailer per *top-level* Claude session
 //! (sessions whose `parent_session_id` is `None`) and is driven by
-//! [`ClaudeStatePoller`] updates. Subagent JSONLs (under `.../subagents/`) are
-//! intentionally out of scope here — see future task tn-xvwv.
+//! [`ClaudeStatePoller`] updates. It also discovers and tails subagent JSONLs
+//! that live under `~/.claude/projects/{hash}/{parent-sid}/subagents/agent-*.jsonl`,
+//! one [`SessionJsonlTailer`] per subagent. Events from both top-level and
+//! subagent tailers are emitted as [`TaggedAgentEvent`]s carrying an
+//! [`EventSource`] discriminator so consumers can rebuild the parent/child
+//! topology.
 //!
 //! ## Wiring
 //!
@@ -26,6 +30,25 @@ use tracing::{debug, trace, warn};
 use crate::agent_events::AgentEvent;
 use crate::claude_session_log::{self, SessionEventType};
 use crate::claude_state::{ClaudeSessionState, ClaudeStateUpdate};
+
+/// Identifies which JSONL stream a [`TaggedAgentEvent`] originated from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventSource {
+    /// Top-level Claude session (no parent).
+    TopLevel { session_id: String },
+    /// Subagent (sidechain) spawned via the `Task` tool by a parent session.
+    Subagent {
+        parent_session_id: String,
+        agent_id: String,
+    },
+}
+
+/// An [`AgentEvent`] paired with the source stream it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaggedAgentEvent {
+    pub event: AgentEvent,
+    pub source: EventSource,
+}
 
 /// Incrementally reads a Claude Code JSONL session file and emits `AgentEvent`s.
 pub struct SessionJsonlTailer {
@@ -52,9 +75,26 @@ impl SessionJsonlTailer {
         }
     }
 
+    /// Construct a tailer pre-bound to an explicit JSONL file path. Used for
+    /// subagent JSONLs whose paths are discovered directly rather than
+    /// resolved from a session_id. The tailer reads from offset 0 so the
+    /// full sidechain transcript is captured.
+    pub fn for_path(session_id: String, path: PathBuf) -> Self {
+        Self {
+            current_session_id: Some(session_id),
+            current_path: Some(path),
+            read_offset: 0,
+        }
+    }
+
     /// Poll for new JSONL lines. If the session_id changed, resolve the new
     /// JSONL file and start tailing from the current end (skip history).
-    pub fn poll(&mut self, session_id: Option<&str>, tx: &Sender<AgentEvent>) {
+    pub fn poll(
+        &mut self,
+        session_id: Option<&str>,
+        tx: &Sender<TaggedAgentEvent>,
+        tag: &EventSource,
+    ) {
         match session_id {
             Some(sid) => {
                 if self.current_session_id.as_deref() != Some(sid) {
@@ -77,7 +117,17 @@ impl SessionJsonlTailer {
             None => return,
         };
 
-        self.read_new_lines(&path, tx);
+        self.read_new_lines(&path, tx, tag);
+    }
+
+    /// Poll an explicit-path tailer (used by subagents). No session-id switch
+    /// logic; just reads any new bytes from the configured path.
+    pub fn poll_path(&mut self, tx: &Sender<TaggedAgentEvent>, tag: &EventSource) {
+        let path = match &self.current_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        self.read_new_lines(&path, tx, tag);
     }
 
     /// Switch to a new session: resolve JSONL path and seek to end.
@@ -108,7 +158,7 @@ impl SessionJsonlTailer {
     }
 
     /// Incrementally read new lines from the JSONL file.
-    fn read_new_lines(&mut self, path: &Path, tx: &Sender<AgentEvent>) {
+    fn read_new_lines(&mut self, path: &Path, tx: &Sender<TaggedAgentEvent>, tag: &EventSource) {
         let mut file = match File::open(path) {
             Ok(f) => f,
             Err(_) => return,
@@ -151,7 +201,11 @@ impl SessionJsonlTailer {
 
             for se in session_events {
                 if let Some(agent_event) = session_event_to_agent_event(&se) {
-                    if tx.send(agent_event).is_err() {
+                    let tagged = TaggedAgentEvent {
+                        event: agent_event,
+                        source: tag.clone(),
+                    };
+                    if tx.send(tagged).is_err() {
                         warn!("JSONL tailer: agent_event_tx receiver dropped");
                         return;
                     }
@@ -244,17 +298,31 @@ fn home_dir() -> PathBuf {
 
 // ── Top-level session registry ──────────────────────────────────────────────
 
+/// Tracks one subagent JSONL stream owned by a parent session.
+struct SubagentTailer {
+    tailer: SessionJsonlTailer,
+    tag: EventSource,
+}
+
 /// Holds one [`SessionJsonlTailer`] per *top-level* Claude session and drives
-/// them from [`ClaudeStateUpdate`]s.
+/// them from [`ClaudeStateUpdate`]s. Also discovers and tails subagent
+/// (sidechain) JSONLs nested under each parent session's directory.
 ///
-/// Subagents (entries with `parent_session_id.is_some()`) are filtered out.
+/// Subagents are tracked separately and emitted with
+/// [`EventSource::Subagent`] tags so consumers can rebuild the parent/child
+/// topology.
 pub struct ClaudeJsonlRegistry {
     tailers: HashMap<String, SessionJsonlTailer>,
+    /// Subagents grouped by parent session id, keyed by agent id.
+    subagents: HashMap<String, HashMap<String, SubagentTailer>>,
     /// Maps state-file path → session_id so `Removed { path }` updates can
     /// drop the right tailer.
     path_to_session: HashMap<PathBuf, String>,
-    event_tx: Sender<AgentEvent>,
-    event_rx: Option<mpsc::Receiver<AgentEvent>>,
+    /// For tests / overrides: explicit subagents directories per parent
+    /// session, used in place of the standard `~/.claude/projects/...` lookup.
+    subagent_dir_overrides: HashMap<String, PathBuf>,
+    event_tx: Sender<TaggedAgentEvent>,
+    event_rx: Option<mpsc::Receiver<TaggedAgentEvent>>,
 }
 
 impl Default for ClaudeJsonlRegistry {
@@ -268,7 +336,9 @@ impl ClaudeJsonlRegistry {
         let (event_tx, event_rx) = mpsc::channel();
         Self {
             tailers: HashMap::new(),
+            subagents: HashMap::new(),
             path_to_session: HashMap::new(),
+            subagent_dir_overrides: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
         }
@@ -276,8 +346,21 @@ impl ClaudeJsonlRegistry {
 
     /// Take the receiver half of the agent-event channel. Can only be called
     /// once — returns `None` on subsequent calls.
-    pub fn events(&mut self) -> Option<mpsc::Receiver<AgentEvent>> {
+    pub fn events(&mut self) -> Option<mpsc::Receiver<TaggedAgentEvent>> {
         self.event_rx.take()
+    }
+
+    /// Override the subagents directory for a given parent session. Used by
+    /// tests to point at a tempdir; in production the discovery walks
+    /// `~/.claude/projects/{hash}/{parent-sid}/subagents/` instead.
+    pub fn set_subagent_dir_override(&mut self, parent_session_id: &str, dir: PathBuf) {
+        self.subagent_dir_overrides
+            .insert(parent_session_id.to_string(), dir);
+    }
+
+    /// Total number of currently-tracked subagent tailers across all parents.
+    pub fn subagent_count(&self) -> usize {
+        self.subagents.values().map(|m| m.len()).sum()
     }
 
     /// Returns the number of currently-tracked top-level sessions.
@@ -305,6 +388,15 @@ impl ClaudeJsonlRegistry {
                     && self.tailers.remove(&sid).is_some()
                 {
                     debug!(session_id = %sid, "JSONL registry: dropped tailer for removed session");
+                    // Drop any subagent tailers spawned under this parent.
+                    if let Some(children) = self.subagents.remove(&sid) {
+                        debug!(
+                            session_id = %sid,
+                            subagents = children.len(),
+                            "JSONL registry: dropped subagent tailers with parent"
+                        );
+                    }
+                    self.subagent_dir_overrides.remove(&sid);
                 }
             }
         }
@@ -354,11 +446,118 @@ impl ClaudeJsonlRegistry {
         // We clone keys to avoid holding an immutable borrow while we mutate
         // the tailers below.
         let session_ids: Vec<String> = self.tailers.keys().cloned().collect();
-        for sid in session_ids {
-            if let Some(tailer) = self.tailers.get_mut(&sid) {
-                tailer.poll(Some(&sid), &self.event_tx);
+        for sid in &session_ids {
+            if let Some(tailer) = self.tailers.get_mut(sid) {
+                let tag = EventSource::TopLevel {
+                    session_id: sid.clone(),
+                };
+                tailer.poll(Some(sid), &self.event_tx, &tag);
             }
         }
+
+        // Discover any new subagent JSONLs for each parent and spawn tailers.
+        for sid in &session_ids {
+            self.discover_subagents(sid);
+        }
+
+        // Drive existing subagent tailers.
+        let parent_ids: Vec<String> = self.subagents.keys().cloned().collect();
+        for parent in parent_ids {
+            if let Some(children) = self.subagents.get_mut(&parent) {
+                for sub in children.values_mut() {
+                    sub.tailer.poll_path(&self.event_tx, &sub.tag);
+                }
+            }
+        }
+    }
+
+    /// Scan the subagents directory for a parent session and spawn tailers
+    /// for any newly-appeared `agent-*.jsonl` files. No-op if the directory
+    /// doesn't exist (the parent may not have spawned any sidechains).
+    fn discover_subagents(&mut self, parent_sid: &str) {
+        let dirs = self.subagent_dirs_for_parent(parent_sid);
+        if dirs.is_empty() {
+            return;
+        }
+
+        let known: std::collections::HashSet<String> = self
+            .subagents
+            .get(parent_sid)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+
+        let mut new_entries: Vec<(String, PathBuf)> = Vec::new();
+        for dir in &dirs {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
+                    continue;
+                }
+                let agent_id = name
+                    .trim_start_matches("agent-")
+                    .trim_end_matches(".jsonl")
+                    .to_string();
+                if agent_id.is_empty() || known.contains(&agent_id) {
+                    continue;
+                }
+                new_entries.push((agent_id, path));
+            }
+        }
+
+        if new_entries.is_empty() {
+            return;
+        }
+
+        let bucket = self.subagents.entry(parent_sid.to_string()).or_default();
+        for (agent_id, path) in new_entries {
+            debug!(
+                parent = %parent_sid,
+                agent_id = %agent_id,
+                path = %path.display(),
+                "JSONL registry: spawning subagent tailer"
+            );
+            let tag = EventSource::Subagent {
+                parent_session_id: parent_sid.to_string(),
+                agent_id: agent_id.clone(),
+            };
+            let tailer = SessionJsonlTailer::for_path(agent_id.clone(), path);
+            bucket.insert(agent_id, SubagentTailer { tailer, tag });
+        }
+    }
+
+    /// Resolve all candidate `subagents/` directories for a parent session.
+    /// In tests an explicit override may be set; otherwise we walk every
+    /// project hash dir under `~/.claude/projects/` and probe for
+    /// `{hash}/{parent_sid}/subagents`.
+    fn subagent_dirs_for_parent(&self, parent_sid: &str) -> Vec<PathBuf> {
+        if let Some(dir) = self.subagent_dir_overrides.get(parent_sid) {
+            return vec![dir.clone()];
+        }
+
+        let projects_dir = home_dir().join(".claude").join("projects");
+        let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let candidate = project_dir.join(parent_sid).join("subagents");
+            if candidate.is_dir() {
+                out.push(candidate);
+            }
+        }
+        out
     }
 }
 
@@ -382,7 +581,10 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut tailer = SessionJsonlTailer::new();
         tailer.current_session_id = Some("old".into());
-        tailer.poll(None, &tx);
+        let tag = EventSource::TopLevel {
+            session_id: "old".into(),
+        };
+        tailer.poll(None, &tx, &tag);
         assert!(tailer.current_session_id.is_none());
     }
 
@@ -499,15 +701,19 @@ mod tests {
             .unwrap();
         }
 
-        tailer.read_new_lines(&path, &tx);
+        let tag = EventSource::TopLevel {
+            session_id: "test".into(),
+        };
+        tailer.read_new_lines(&path, &tx, &tag);
 
         let event = rx.try_recv().unwrap();
         assert_eq!(
-            event,
+            event.event,
             AgentEvent::UserMessage {
                 content: "new message".into()
             }
         );
+        assert_eq!(event.source, tag);
 
         assert!(rx.try_recv().is_err());
     }
@@ -528,17 +734,20 @@ mod tests {
             writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Let me check."}},{{"type":"tool_use","name":"Bash","id":"tu_abc","input":{{"command":"ls"}}}}]}},"timestamp":"2026-04-02T00:14:00.000Z"}}"#).unwrap();
         }
 
-        tailer.read_new_lines(&path, &tx);
+        let tag = EventSource::TopLevel {
+            session_id: "test".into(),
+        };
+        tailer.read_new_lines(&path, &tx, &tag);
 
         let ev1 = rx.try_recv().unwrap();
         assert_eq!(
-            ev1,
+            ev1.event,
             AgentEvent::AssistantMessage {
                 content: "Let me check.".into()
             }
         );
 
-        let ev2 = rx.try_recv().unwrap();
+        let ev2 = rx.try_recv().unwrap().event;
         match ev2 {
             AgentEvent::ToolUse {
                 tool, tool_use_id, ..
@@ -596,15 +805,24 @@ mod tests {
 
         let event = rx.try_recv().expect("event");
         assert_eq!(
-            event,
+            event.event,
             AgentEvent::UserMessage {
                 content: "hi from registry".into()
+            }
+        );
+        assert_eq!(
+            event.source,
+            EventSource::TopLevel {
+                session_id: "top-1".into()
             }
         );
     }
 
     #[test]
-    fn registry_filters_out_subagents() {
+    fn registry_filters_out_subagents_from_state_poller() {
+        // Subagent state-file entries are still skipped by the top-level
+        // registry — subagents are discovered via the JSONL filesystem layout
+        // (the `subagents/` directory) instead of via state files.
         let mut registry = ClaudeJsonlRegistry::new();
 
         let subagent = ClaudeSessionState {
@@ -641,5 +859,127 @@ mod tests {
             None,
         );
         assert!(registry.is_empty());
+    }
+
+    // ── Subagent discovery tests ────────────────────────────────────────
+
+    fn install_parent_with_subagent_dir(
+        registry: &mut ClaudeJsonlRegistry,
+        parent_sid: &str,
+        sub_dir: &Path,
+        state_path: &Path,
+    ) {
+        let state = ClaudeSessionState {
+            session_id: parent_sid.into(),
+            parent_session_id: None,
+            ..ClaudeSessionState::default()
+        };
+        registry.apply_update(
+            &ClaudeStateUpdate::Upserted(Box::new(state)),
+            Some(state_path),
+        );
+        registry.set_subagent_dir_override(parent_sid, sub_dir.to_path_buf());
+    }
+
+    #[test]
+    fn registry_discovers_subagent_jsonls_and_tags_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let agent_id = "a2834e759e4f02c68";
+        let sub_path = sub_dir.join(format!("agent-{agent_id}.jsonl"));
+        {
+            let mut f = File::create(&sub_path).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"user","content":"hello from subagent","timestamp":"2026-04-06T00:00:00Z"}}"#
+            )
+            .unwrap();
+        }
+
+        let mut registry = ClaudeJsonlRegistry::new();
+        let rx = registry.events().expect("events receiver");
+
+        let state_path = PathBuf::from("/tmp/claude-code-state/parent-xyz.json");
+        install_parent_with_subagent_dir(&mut registry, "parent-xyz", &sub_dir, &state_path);
+
+        // First poll discovers + reads the subagent file.
+        registry.poll_all();
+
+        // Drain events; we should see at least one Subagent-tagged event.
+        let mut found = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let EventSource::Subagent {
+                parent_session_id,
+                agent_id: aid,
+            } = &ev.source
+            {
+                assert_eq!(parent_session_id, "parent-xyz");
+                assert_eq!(aid, agent_id);
+                assert_eq!(
+                    ev.event,
+                    AgentEvent::UserMessage {
+                        content: "hello from subagent".into()
+                    }
+                );
+                found = true;
+            }
+        }
+        assert!(found, "expected a Subagent-tagged event");
+        assert_eq!(registry.subagent_count(), 1);
+    }
+
+    #[test]
+    fn registry_drops_subagent_tailers_when_parent_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let sub_path = sub_dir.join("agent-deadbeef.jsonl");
+        File::create(&sub_path).unwrap();
+
+        let mut registry = ClaudeJsonlRegistry::new();
+        let _rx = registry.events();
+        let state_path = PathBuf::from("/tmp/claude-code-state/parent-rm.json");
+        install_parent_with_subagent_dir(&mut registry, "parent-rm", &sub_dir, &state_path);
+
+        registry.poll_all();
+        assert_eq!(registry.subagent_count(), 1);
+
+        registry.apply_update(
+            &ClaudeStateUpdate::Removed {
+                path: state_path.clone(),
+            },
+            None,
+        );
+        assert!(registry.is_empty());
+        assert_eq!(
+            registry.subagent_count(),
+            0,
+            "subagent tailers should be cleaned up with parent"
+        );
+    }
+
+    #[test]
+    fn registry_does_not_double_spawn_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let sub_path = sub_dir.join("agent-stable.jsonl");
+        File::create(&sub_path).unwrap();
+
+        let mut registry = ClaudeJsonlRegistry::new();
+        let _rx = registry.events();
+        install_parent_with_subagent_dir(
+            &mut registry,
+            "parent-stable",
+            &sub_dir,
+            Path::new("/tmp/claude-code-state/parent-stable.json"),
+        );
+
+        registry.poll_all();
+        registry.poll_all();
+        registry.poll_all();
+        assert_eq!(registry.subagent_count(), 1);
     }
 }
