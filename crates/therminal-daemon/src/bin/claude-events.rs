@@ -8,10 +8,8 @@
 //! initial buffer, and prints styled lines for every `TaggedAgentEvent` that
 //! arrives via `notifications/resources/updated`.
 //!
-//! Run via: `cargo run -p therminal-daemon --bin claude-events`.
-//
-// TODO(docs): once a sensible README "Dev tools" section exists, document
-// flags there. The orchestrator may add this in a follow-up.
+//! Run via: `cargo run -p therminal-daemon --bin claude-events`. Flags and
+//! output format are documented in the repo README under "Dev tools".
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

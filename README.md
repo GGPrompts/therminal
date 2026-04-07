@@ -32,6 +32,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 - Process tree agent detection via sysinfo (Claude Code, Codex, Aider, Copilot)
 - Output cadence analysis — distinguishes human typing from agent output
 - Live AgentRegistry tracking agent status (Idle/Processing/Streaming/Thinking/ToolUse/AwaitingInput) across panes
+- Live Claude Code session observability: `/tmp/claude-code-state/` watcher + JSONL tailers stream every `UserMessage`, `AssistantMessage`, `ToolUse`, `ToolResult`, `Thinking`, and `Progress` event from parent sessions and Task-tool subagents in real time. Events are tagged with `EventSource::{TopLevel, Subagent}` so consumers can reconstruct the session tree. Exposed over MCP as `therminal://claude/events` (see "Dev tools" below for a CLI viewer).
 
 **Daemon & multiplexing**
 - Session daemon with socket-as-lock lifecycle and zero-downtime handoff via SCM_RIGHTS FD passing
@@ -60,7 +61,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 - MCP server in the daemon with stdio bridge (`therminal mcp`) for Claude Code integration
 - Cross-platform IPC: Unix sockets (Linux/macOS), named pipes (Windows)
 - 15 tools across 5 domains (sessions, panes, semantic, workspaces, agents)
-- MCP Resources with subscription-based pane content streaming (`terminal://pane/{id}/output`)
+- MCP Resources with subscription-based pane content streaming (`terminal://pane/{id}/output`) and live Claude Code event streaming (`therminal://claude/events`)
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at the MCP handler layer
 - Sliding-window rate limiter for destructive tools; all decisions audit-logged
 - Configure in Claude Code: `{ "command": "therminal", "args": ["mcp"] }` in `.mcp.json`
@@ -122,6 +123,45 @@ cargo run --bin therminal
 ```bash
 ./scripts/ci.sh    # fmt check, clippy, build, test
 ```
+
+### Dev tools
+
+#### `claude-events` — live Claude Code session viewer
+
+A small CLI subscriber that connects to the running daemon, subscribes to the `therminal://claude/events` MCP resource, and prints live `TaggedAgentEvent`s as styled terminal lines. Run it in one pane while Claude Code runs in another to see tool calls, results, and subagent activity stream in real time. Handy while waiting out long Task-tool subagent runs that would otherwise look like silence.
+
+```bash
+# Basic run — prints tool use, results, thinking, progress
+cargo run -p therminal-daemon --bin claude-events
+
+# Include UserMessage + AssistantMessage (noisy)
+cargo run -p therminal-daemon --bin claude-events -- --verbose
+
+# Only show subagent events
+cargo run -p therminal-daemon --bin claude-events -- --filter sub
+
+# Filter to one top-level session and its subagents
+cargo run -p therminal-daemon --bin claude-events -- --session <session-uuid>
+
+# Machine-readable JSON per line, pipe to jq
+cargo run -p therminal-daemon --bin claude-events -- --json | jq .
+
+# Disable ANSI colors (for logs / non-tty output)
+cargo run -p therminal-daemon --bin claude-events -- --no-color
+```
+
+Output format (non-`--json`):
+
+```
+HH:MM:SS [top abc12345]  Bash        ls -la
+HH:MM:SS [top abc12345]  ✓
+HH:MM:SS [sub 7ee3d21a]    Grep        jsonl_tailer
+HH:MM:SS [sub 7ee3d21a]    ✓
+```
+
+Top-level lines are tagged `top <sid8>`, subagent lines are tagged `sub <agent8>` and indented. Tool names are cyan, successful results green, errors red, thinking yellow.
+
+This is a stopgap dev tool until the GPU timeline overlay widget (tracked as `tn-x85k`) ships with Phase 6. Any MCP client that speaks the resource subscription protocol can consume the same stream; the binary is also a working reference implementation of how to do so.
 
 ### Windows-native build
 

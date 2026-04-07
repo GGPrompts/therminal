@@ -87,6 +87,7 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 
 - **Pane Swap**: `LayoutNode::swap_pane(a, b)` swaps two leaves in the binary tree. `SwapNext` (`Alt+Shift+Right`) / `SwapPrev` (`Alt+Shift+Left`).
 - **Mouse-Drag Separator Resize**: Dragging a pane separator adjusts `split_ratio`. Implemented in `window/mouse.rs`. 6 px hit-test threshold.
+- **Window Edge Resize (CSD)**: When `general.use_csd = true` (default on Linux/Windows) the winit window is created with `with_decorations(false)`, so the OS provides no resize grips. `window/mouse.rs` compensates with `ResizeEdge` hit-testing at the four edges + four corners, updates the cursor icon on hover (`N/S/E/W/NE/NW/SE/SW Resize`), and on mouse-down calls `Window::drag_resize_window(direction)` so the compositor handles the interactive resize. Gated on `use_csd` — disabled when native decorations are on. Precedence runs *after* tab bar, status bar, context menu, and pane separator hit-tests, so edge resize is the fallback when no other UI element claims the point.
 - **Font Size**: `Ctrl+=` increase, `Ctrl+-` decrease, `Ctrl+0` reset (clamped 8–32 pt).
 - **Help Overlay**: `Ctrl+Shift+?` toggles full-window overlay showing all keybindings by category.
 - **Context Menu**: Right-click renders a GPU-drawn floating menu with pane actions (split, close, zoom, copy, paste).
