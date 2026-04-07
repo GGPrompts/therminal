@@ -31,7 +31,7 @@ use therminal_terminal::state_inference::{
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use therminal_protocol::daemon::{DaemonEvent, WorkspaceInfo};
+use therminal_protocol::daemon::{DaemonEvent, LayoutSnapshot, WorkspaceInfo};
 pub use therminal_protocol::{PaneId, SessionId, WindowId, WorkspaceId};
 
 #[cfg(unix)]
@@ -856,7 +856,25 @@ impl SessionManager {
         spawn_options: &therminal_terminal::pty::SpawnOptions,
     ) -> Result<SessionId, therminal_terminal::pty::PtyError> {
         let mut session = Session::new(name, self.event_tx.clone());
-        session.create_default_pane(self.default_cols, self.default_rows, spawn_options)?;
+        let default_pane_id = session
+            .create_default_pane(self.default_cols, self.default_rows, spawn_options)?
+            .id;
+
+        // Seed workspace_state with a single default workspace containing the
+        // newly-spawned pane. Without this, GetWorkspaces on a fresh session
+        // returns an empty vec, which broke the GUI attach flow in tn-ytw2
+        // (remote_spawn.rs couldn't discover the initial pane id).
+        session.workspace_state = vec![WorkspaceInfo {
+            id: 1,
+            name: "1".to_string(),
+            order: 0,
+            pane_ids: vec![default_pane_id],
+            focused_pane: Some(default_pane_id),
+            layout: Some(LayoutSnapshot::Leaf {
+                pane_id: default_pane_id,
+            }),
+        }];
+        session.active_workspace = 1;
 
         let session_id = session.id;
         info!(session_id = session_id, "session created");
@@ -1467,10 +1485,40 @@ impl SessionManager {
                 }
             }
 
-            // Restore workspace topology if saved.
+            // Restore workspace topology if saved. If the persisted data
+            // predates workspace_state (old format), seed a default workspace
+            // from whatever panes were restored so GetWorkspaces returns
+            // something usable to the GUI attach flow.
             if !persisted_session.workspaces.is_empty() {
                 session.workspace_state = persisted_session.workspaces.clone();
                 session.active_workspace = persisted_session.active_workspace;
+            } else {
+                let pane_ids: Vec<PaneId> = session
+                    .windows
+                    .iter()
+                    .flat_map(|w| w.panes.iter().map(|p| p.id))
+                    .collect();
+                if let Some(&first_pane) = pane_ids.first() {
+                    let layout = if pane_ids.len() == 1 {
+                        Some(LayoutSnapshot::Leaf {
+                            pane_id: first_pane,
+                        })
+                    } else {
+                        // Multi-pane session with no stored layout — leave
+                        // layout as None so the client falls back to a flat
+                        // cascade rather than guessing at split ratios.
+                        None
+                    };
+                    session.workspace_state = vec![WorkspaceInfo {
+                        id: 1,
+                        name: "1".to_string(),
+                        order: 0,
+                        pane_ids,
+                        focused_pane: Some(first_pane),
+                        layout,
+                    }];
+                    session.active_workspace = 1;
+                }
             }
 
             let pane_count = session.pane_count();
