@@ -23,6 +23,7 @@
 
 pub mod agent_events;
 pub mod claude_jsonl_tailer;
+pub mod claude_pipeline;
 pub mod claude_session_log;
 pub mod claude_state;
 pub mod client;

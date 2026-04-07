@@ -3,8 +3,11 @@
 //! `AgentEvent` variants are produced by the JSONL tailer
 //! via `claude_session_log::parse_session_event` and consumed by overlay widgets.
 
+use serde::Serialize;
+
 /// A parsed event from an agent's structured JSON output stream.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// User message sent to the agent.
     UserMessage { content: String },

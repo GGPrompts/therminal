@@ -36,6 +36,7 @@ use tracing::{debug, error, info, warn};
 
 use therminal_core::config::TrustConfig;
 
+use crate::claude_jsonl_tailer::TaggedAgentEvent;
 use crate::session::SessionManager;
 use crate::trust::{
     AgentIdentity, RateLimiter, TrustCheckResult, check_resource_access, check_tool_access,
@@ -388,10 +389,24 @@ pub struct TherminalMcpServer {
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
+    /// Optional broadcast sender for the Claude agent-event pipeline. Cloned
+    /// per `subscribe(therminal://claude/events)` call so each MCP client gets
+    /// its own broadcast::Receiver. `None` if the pipeline failed to start.
+    claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     /// Active resource subscriptions: maps URI -> JoinHandle for the background
     /// forwarding task. Protected by a std Mutex since we only hold it briefly.
     subscriptions: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Per-connection ring buffer of recent Claude agent events. Filled by the
+    /// background subscription task; drained by `read_resource` calls against
+    /// `therminal://claude/events`. Cap is small — clients should re-read on
+    /// every `notifications/resources/updated`.
+    claude_event_buffer: Arc<std::sync::Mutex<std::collections::VecDeque<TaggedAgentEvent>>>,
 }
+
+const CLAUDE_EVENT_BUFFER_CAP: usize = 256;
+
+/// URI for the global Claude agent-event stream.
+const CLAUDE_EVENTS_URI: &str = "therminal://claude/events";
 
 impl TherminalMcpServer {
     /// Create a new MCP server backed by the given session manager and trust config.
@@ -399,12 +414,17 @@ impl TherminalMcpServer {
         session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
         trust_config: Arc<TrustConfig>,
         rate_limiter: Arc<RateLimiter>,
+        claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     ) -> Self {
         Self {
             session_mgr,
             trust_config,
             rate_limiter,
+            claude_events,
             subscriptions: std::sync::Mutex::new(HashMap::new()),
+            claude_event_buffer: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(CLAUDE_EVENT_BUFFER_CAP),
+            )),
         }
     }
 
@@ -467,6 +487,20 @@ impl TherminalMcpServer {
                 }
             }
         }
+
+        // Global Claude agent-event stream (always advertised; subscriptions
+        // become no-ops if the pipeline failed to start).
+        resources.push(Annotated::new(
+            RawResource::new(CLAUDE_EVENTS_URI, "Claude agent events".to_string())
+                .with_description(
+                    "Live structured event stream from all tracked Claude Code (and Codex / Copilot) sessions. \
+                     Subscribe for real-time TaggedAgentEvent notifications. read_resource returns an empty snapshot \
+                     — events are only delivered via subscription.".to_string(),
+                )
+                .with_mime_type("application/json"),
+            None,
+        ));
+
         resources
     }
 
@@ -1373,6 +1407,30 @@ impl ServerHandler for TherminalMcpServer {
         let agent = extract_agent_identity(&context);
         self.enforce_resource_trust(uri, &agent)?;
 
+        // Global Claude event stream: drain the buffered events that the
+        // subscription background task has accumulated since the last read.
+        // Returns a JSON array of TaggedAgentEvent. Empty array if there is
+        // no active subscription on this connection.
+        if uri == CLAUDE_EVENTS_URI {
+            let drained: Vec<TaggedAgentEvent> = {
+                let mut buf = self
+                    .claude_event_buffer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                buf.drain(..).collect()
+            };
+            let json = serde_json::to_string(&drained).map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("failed to serialize claude events: {e}"),
+                    None,
+                )
+            })?;
+            return Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(json, uri.to_string()).with_mime_type("application/json"),
+            ]));
+        }
+
         let (pane_id, kind) = Self::parse_pane_uri(uri).ok_or_else(|| {
             ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
@@ -1438,6 +1496,58 @@ impl ServerHandler for TherminalMcpServer {
         let uri = &request.uri;
         let agent = extract_agent_identity(&context);
         self.enforce_resource_trust(uri, &agent)?;
+
+        // Global Claude agent-event stream subscription.
+        if uri == CLAUDE_EVENTS_URI {
+            let Some(tx) = self.claude_events.as_ref() else {
+                return Err(ErrorData::new(
+                    ErrorCode(-32002),
+                    "claude agent-event pipeline is not running on this daemon".to_string(),
+                    None,
+                ));
+            };
+            let mut event_rx = tx.subscribe();
+            let peer = context.peer.clone();
+            let uri_owned = uri.to_string();
+            let buffer = Arc::clone(&self.claude_event_buffer);
+            let handle = tokio::spawn(async move {
+                loop {
+                    match event_rx.recv().await {
+                        Ok(event) => {
+                            {
+                                let mut buf = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                                if buf.len() == CLAUDE_EVENT_BUFFER_CAP {
+                                    buf.pop_front();
+                                }
+                                buf.push_back(event);
+                            }
+                            let params = ResourceUpdatedNotificationParam::new(&uri_owned);
+                            if let Err(e) = peer.notify_resource_updated(params).await {
+                                debug!(
+                                    error = %e,
+                                    uri = %uri_owned,
+                                    "failed to send claude resource-updated notification, stopping subscription"
+                                );
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            debug!(uri = %uri_owned, "claude event channel closed");
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            debug!(uri = %uri_owned, lagged = n, "claude subscription lagged");
+                        }
+                    }
+                }
+            });
+            let mut subs = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = subs.insert(uri.to_string(), handle) {
+                old.abort();
+            }
+            info!(uri = %uri, "claude agent-event subscription active");
+            return Ok(());
+        }
 
         let (pane_id, kind) = Self::parse_pane_uri(uri).ok_or_else(|| {
             ErrorData::new(
@@ -1629,6 +1739,7 @@ pub async fn start_mcp_server(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
+    claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if !config.enabled {
@@ -1645,6 +1756,7 @@ pub async fn start_mcp_server(
             session_mgr,
             trust_config,
             rate_limiter,
+            claude_events,
             shutdown,
         )
         .await?;
@@ -1657,6 +1769,7 @@ pub async fn start_mcp_server(
             session_mgr,
             trust_config,
             rate_limiter,
+            claude_events,
             shutdown,
         )
         .await?;
@@ -1675,12 +1788,14 @@ fn spawn_mcp_connection<R, W>(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
+    claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
 ) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     tokio::spawn(async move {
-        let server = TherminalMcpServer::new(session_mgr, trust_config, rate_limiter);
+        let server =
+            TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, claude_events);
         match server.serve((reader, writer)).await {
             Ok(running) => {
                 if let Err(e) = running.waiting().await {
@@ -1701,6 +1816,7 @@ async fn start_mcp_server_unix(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
+    claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     // Clean stale socket
@@ -1739,6 +1855,7 @@ async fn start_mcp_server_unix(
                             Arc::clone(&session_mgr),
                             Arc::clone(&trust_config),
                             Arc::clone(&rate_limiter),
+                            claude_events.clone(),
                         );
                     }
                     Err(e) => {
@@ -1774,6 +1891,7 @@ async fn start_mcp_server_windows(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     trust_config: Arc<TrustConfig>,
     rate_limiter: Arc<RateLimiter>,
+    claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -1801,6 +1919,7 @@ async fn start_mcp_server_windows(
                             Arc::clone(&session_mgr),
                             Arc::clone(&trust_config),
                             Arc::clone(&rate_limiter),
+                            claude_events.clone(),
                         );
 
                         // Create a new pipe instance for the next client.

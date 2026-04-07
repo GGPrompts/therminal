@@ -32,7 +32,8 @@ use crate::claude_session_log::{self, SessionEventType};
 use crate::claude_state::{ClaudeSessionState, ClaudeStateUpdate};
 
 /// Identifies which JSONL stream a [`TaggedAgentEvent`] originated from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventSource {
     /// Top-level Claude session (no parent).
     TopLevel { session_id: String },
@@ -44,7 +45,7 @@ pub enum EventSource {
 }
 
 /// An [`AgentEvent`] paired with the source stream it came from.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TaggedAgentEvent {
     pub event: AgentEvent,
     pub source: EventSource,

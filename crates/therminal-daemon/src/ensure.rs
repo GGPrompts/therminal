@@ -226,6 +226,12 @@ async fn start_daemon(
         app_config.trust.destructive_rate_limit,
     ));
 
+    // Spawn the Claude agent-event pipeline (file watcher → JSONL tailers →
+    // broadcast). Returns None if the OS file watcher cannot be created, in
+    // which case the MCP `therminal://claude/events` resource will simply
+    // produce zero events.
+    let claude_events_tx = crate::claude_pipeline::spawn();
+
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = app_config.mcp.clone();
@@ -239,6 +245,7 @@ async fn start_daemon(
             mcp_session_mgr,
             mcp_trust,
             mcp_rl,
+            claude_events_tx,
             mcp_shutdown_clone,
         )
         .await
