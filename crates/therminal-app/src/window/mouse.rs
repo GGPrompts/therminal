@@ -19,6 +19,19 @@ use therminal_terminal::input::{self, MouseButton as InputMouseButton};
 use super::App;
 use super::chrome::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 
+/// Maximum pixel distance (squared) between press and release that still
+/// counts as a click rather than a drag. ~4px radius tolerates pointer jitter
+/// during a click without swallowing real drag selections.
+pub(crate) const CLICK_JITTER_TOLERANCE_SQ: f64 = 16.0;
+
+/// Pure helper: was a press/release pair close enough in screen pixels to
+/// count as a click? Used for hotspot/hyperlink click activation.
+pub(crate) fn is_click_within_tolerance(press: (f64, f64), release: (f64, f64)) -> bool {
+    let dx = release.0 - press.0;
+    let dy = release.1 - press.1;
+    (dx * dx + dy * dy) <= CLICK_JITTER_TOLERANCE_SQ
+}
+
 // ── Hover cursor (hyperlink / hotspot) state machine ──────────────────
 
 /// Pure decision for the hyperlink/hotspot hover cursor state machine.
@@ -392,14 +405,9 @@ impl App {
                 // Treat as a click (not drag) if the release landed within
                 // ~4 pixels of the press, OR on the same cell. This tolerates
                 // tiny pointer jitter while still suppressing real drags.
-                let pixel_close = match self.last_press_pixel {
-                    Some((sx, sy)) => {
-                        let dx = px - sx;
-                        let dy = py - sy;
-                        (dx * dx + dy * dy) <= 16.0
-                    }
-                    None => false,
-                };
+                let pixel_close = self
+                    .last_press_pixel
+                    .is_some_and(|p| is_click_within_tolerance(p, (px, py)));
                 let same_cell = self.last_click_pos == Some((col, row));
                 let is_click = self.click_count == 1 && (pixel_close || same_cell);
                 if is_click {
@@ -1239,5 +1247,39 @@ mod hover_cursor_tests {
                 HoverCursorTransition::Deactivate,
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod click_tolerance_tests {
+    use super::*;
+
+    #[test]
+    fn tiny_jitter_counts_as_click() {
+        // Press at (100, 100), release at (102, 101) -- ~2.2 px away.
+        assert!(is_click_within_tolerance((100.0, 100.0), (102.0, 101.0)));
+    }
+
+    #[test]
+    fn exact_same_pixel_is_click() {
+        assert!(is_click_within_tolerance((100.0, 100.0), (100.0, 100.0)));
+    }
+
+    #[test]
+    fn at_tolerance_boundary_is_click() {
+        // dx=4, dy=0 -> 16, equal to tolerance.
+        assert!(is_click_within_tolerance((100.0, 100.0), (104.0, 100.0)));
+    }
+
+    #[test]
+    fn real_horizontal_drag_is_not_click() {
+        // Press at (100, 100), release at (200, 100) -- 100 px away.
+        assert!(!is_click_within_tolerance((100.0, 100.0), (200.0, 100.0)));
+    }
+
+    #[test]
+    fn drag_past_tolerance_is_not_click() {
+        // dx=5, dy=0 -> 25 > 16.
+        assert!(!is_click_within_tolerance((100.0, 100.0), (105.0, 100.0)));
     }
 }
