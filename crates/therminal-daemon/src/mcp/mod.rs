@@ -700,3 +700,522 @@ impl ServerHandler for TherminalMcpServer {
         }
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::Arc;
+
+    use therminal_core::config::{AgentTrust, TrustConfig, TrustTier};
+    use tokio::sync::broadcast;
+
+    use crate::session::SessionManager;
+    use crate::trust::{AgentIdentity, RateLimiter};
+
+    use super::TherminalMcpServer;
+    use super::tools::tool_definitions;
+
+    // ── Fixture helpers ─────────────────────────────────────────────────
+
+    /// Build a `TherminalMcpServer` with a real (empty) `SessionManager` and
+    /// the given `TrustConfig`. No PTY is spawned — the session manager is
+    /// empty so any tool that looks up panes/sessions will return "not found"
+    /// rather than doing any real work.
+    pub(crate) fn make_server(trust_config: TrustConfig) -> TherminalMcpServer {
+        let (event_tx, _) = broadcast::channel(16);
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(SessionManager::new(event_tx)));
+        let trust_config = Arc::new(trust_config);
+        let rate_limiter = Arc::new(RateLimiter::new(100));
+        TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None)
+    }
+
+    /// Build an `AgentIdentity` with the given name.
+    fn agent(name: &str) -> AgentIdentity {
+        AgentIdentity {
+            name: name.to_string(),
+        }
+    }
+
+    /// `TrustConfig` where the default tier is `Sandboxed` (most restrictive).
+    fn sandboxed_config() -> TrustConfig {
+        TrustConfig {
+            default_tier: TrustTier::Sandboxed,
+            ..TrustConfig::default()
+        }
+    }
+
+    /// `TrustConfig` where the default tier is `Supervised` (can call Writer tools).
+    fn supervised_config() -> TrustConfig {
+        TrustConfig {
+            default_tier: TrustTier::Supervised,
+            ..TrustConfig::default()
+        }
+    }
+
+    /// `TrustConfig` where the default tier is `Trusted` (full Admin access).
+    fn trusted_config() -> TrustConfig {
+        TrustConfig {
+            default_tier: TrustTier::Trusted,
+            ..TrustConfig::default()
+        }
+    }
+
+    // ── parse_pane_uri ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_pane_uri_content() {
+        let result = TherminalMcpServer::parse_pane_uri("terminal://pane/42/content");
+        assert_eq!(result, Some((42, "content")));
+    }
+
+    #[test]
+    fn parse_pane_uri_output() {
+        let result = TherminalMcpServer::parse_pane_uri("terminal://pane/7/output");
+        assert_eq!(result, Some((7, "output")));
+    }
+
+    #[test]
+    fn parse_pane_uri_rejects_unknown_kind() {
+        assert!(TherminalMcpServer::parse_pane_uri("terminal://pane/1/hotspot").is_none());
+    }
+
+    #[test]
+    fn parse_pane_uri_rejects_malformed() {
+        assert!(TherminalMcpServer::parse_pane_uri("terminal://pane/notanumber/content").is_none());
+        assert!(TherminalMcpServer::parse_pane_uri("http://example.com").is_none());
+        assert!(TherminalMcpServer::parse_pane_uri("").is_none());
+    }
+
+    // ── split_file_path_parts ───────────────────────────────────────────
+
+    #[test]
+    fn split_file_path_parts_with_line_col() {
+        let (path, suffix) = super::split_file_path_parts("src/main.rs:42:5");
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(suffix, ":42:5");
+    }
+
+    #[test]
+    fn split_file_path_parts_no_suffix() {
+        let (path, suffix) = super::split_file_path_parts("src/main.rs");
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(suffix, "");
+    }
+
+    // ── build_content_preview ───────────────────────────────────────────
+
+    #[test]
+    fn build_content_preview_uses_command_field() {
+        use std::time::Instant;
+        use therminal_terminal::region_index::{Region, RegionKind};
+        let mut region = Region {
+            kind: RegionKind::Command,
+            start_line: 0,
+            end_line: None,
+            metadata: std::collections::HashMap::new(),
+            timestamp: Instant::now(),
+        };
+        region
+            .metadata
+            .insert("command".to_string(), "cargo build".to_string());
+        region
+            .metadata
+            .insert("cwd".to_string(), "/home/user".to_string());
+        let preview = super::build_content_preview(&region);
+        assert_eq!(preview, "cargo build");
+    }
+
+    #[test]
+    fn build_content_preview_falls_back_to_cwd() {
+        use std::time::Instant;
+        use therminal_terminal::region_index::{Region, RegionKind};
+        let mut region = Region {
+            kind: RegionKind::Prompt,
+            start_line: 0,
+            end_line: None,
+            metadata: std::collections::HashMap::new(),
+            timestamp: Instant::now(),
+        };
+        region
+            .metadata
+            .insert("cwd".to_string(), "/home/user/projects".to_string());
+        let preview = super::build_content_preview(&region);
+        assert_eq!(preview, "/home/user/projects");
+    }
+
+    #[test]
+    fn build_content_preview_truncates_long_content() {
+        use std::time::Instant;
+        use therminal_terminal::region_index::{Region, RegionKind};
+        let mut region = Region {
+            kind: RegionKind::Output,
+            start_line: 0,
+            end_line: None,
+            metadata: std::collections::HashMap::new(),
+            timestamp: Instant::now(),
+        };
+        let long = "x".repeat(300);
+        region.metadata.insert("command".to_string(), long);
+        let preview = super::build_content_preview(&region);
+        assert_eq!(preview.len(), 200);
+        assert!(preview.ends_with("..."));
+    }
+
+    // ── enforce_trust (Observer tools) ─────────────────────────────────
+
+    /// All 10 Observer tools must be accessible to a Sandboxed agent.
+    #[test]
+    fn sandboxed_agent_can_call_all_observer_tools() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        let observer_tools = [
+            "terminal.sessions.list",
+            "terminal.sessions.get",
+            "terminal.panes.list",
+            "terminal.panes.get_geometry",
+            "terminal.panes.get_content",
+            "terminal.panes.wait_for_output",
+            "terminal.semantic.query_history",
+            "terminal.semantic.get_hotspots",
+            "terminal.workspaces.list",
+            "terminal.agents.list",
+        ];
+        for tool in &observer_tools {
+            assert!(
+                server.enforce_trust(tool, &agent).is_ok(),
+                "expected Sandboxed to be allowed for Observer tool: {tool}"
+            );
+        }
+    }
+
+    // ── enforce_trust (Writer tools) ────────────────────────────────────
+
+    /// A Sandboxed agent must be denied all Writer tools.
+    #[test]
+    fn sandboxed_agent_denied_writer_tools() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        let writer_tools = [
+            "terminal.sessions.create",
+            "terminal.panes.write",
+            "terminal.panes.create",
+        ];
+        for tool in &writer_tools {
+            let result = server.enforce_trust(tool, &agent);
+            assert!(
+                result.is_err(),
+                "expected Sandboxed to be denied for Writer tool: {tool}"
+            );
+        }
+    }
+
+    /// A Supervised agent must be allowed all Writer tools.
+    #[test]
+    fn supervised_agent_can_call_writer_tools() {
+        let server = make_server(supervised_config());
+        let agent = agent("supervised-bot");
+        let writer_tools = [
+            "terminal.sessions.create",
+            "terminal.panes.write",
+            "terminal.panes.create",
+        ];
+        for tool in &writer_tools {
+            assert!(
+                server.enforce_trust(tool, &agent).is_ok(),
+                "expected Supervised to be allowed for Writer tool: {tool}"
+            );
+        }
+    }
+
+    // ── enforce_trust (Admin tools) ─────────────────────────────────────
+
+    /// A Sandboxed agent must be denied all Admin tools.
+    #[test]
+    fn sandboxed_agent_denied_admin_tools() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        for tool in &["terminal.sessions.destroy", "terminal.panes.destroy"] {
+            let result = server.enforce_trust(tool, &agent);
+            assert!(
+                result.is_err(),
+                "expected Sandboxed to be denied for Admin tool: {tool}"
+            );
+        }
+    }
+
+    /// A Supervised agent must be denied Admin tools.
+    #[test]
+    fn supervised_agent_denied_admin_tools() {
+        let server = make_server(supervised_config());
+        let agent = agent("supervised-bot");
+        for tool in &["terminal.sessions.destroy", "terminal.panes.destroy"] {
+            let result = server.enforce_trust(tool, &agent);
+            assert!(
+                result.is_err(),
+                "expected Supervised to be denied for Admin tool: {tool}"
+            );
+        }
+    }
+
+    /// A Trusted agent must be allowed all Admin tools.
+    #[test]
+    fn trusted_agent_can_call_admin_tools() {
+        let server = make_server(trusted_config());
+        let agent = agent("trusted-bot");
+        for tool in &["terminal.sessions.destroy", "terminal.panes.destroy"] {
+            assert!(
+                server.enforce_trust(tool, &agent).is_ok(),
+                "expected Trusted to be allowed for Admin tool: {tool}"
+            );
+        }
+    }
+
+    // ── enforce_trust (all 15 tools parameterized) ──────────────────────
+
+    /// Exhaustive: every tool has a known category — Trusted can call all 15.
+    #[test]
+    fn trusted_agent_can_call_all_15_tools() {
+        let server = make_server(trusted_config());
+        let agent = agent("trusted-bot");
+        let all_tools = [
+            // Observer (10)
+            "terminal.sessions.list",
+            "terminal.sessions.get",
+            "terminal.panes.list",
+            "terminal.panes.get_geometry",
+            "terminal.panes.get_content",
+            "terminal.panes.wait_for_output",
+            "terminal.semantic.query_history",
+            "terminal.semantic.get_hotspots",
+            "terminal.workspaces.list",
+            "terminal.agents.list",
+            // Writer (3)
+            "terminal.sessions.create",
+            "terminal.panes.write",
+            "terminal.panes.create",
+            // Admin (2)
+            "terminal.sessions.destroy",
+            "terminal.panes.destroy",
+        ];
+        assert_eq!(all_tools.len(), 15, "expected exactly 15 tools");
+        for tool in &all_tools {
+            assert!(
+                server.enforce_trust(tool, &agent).is_ok(),
+                "expected Trusted to be allowed for: {tool}"
+            );
+        }
+    }
+
+    // ── enforce_trust (per-agent allowlist) ─────────────────────────────
+
+    /// Trust bypass regression: an agent with per-agent `allowed_tools` must
+    /// not gain access to tools not in the list, even if the tier would
+    /// otherwise permit them.
+    #[test]
+    fn per_agent_allowlist_restricts_trusted_agent() {
+        let mut config = trusted_config();
+        config.agents.insert(
+            "restricted-claude".to_string(),
+            AgentTrust {
+                tier: TrustTier::Trusted,
+                allowed_tools: Some(vec!["terminal.sessions.list".to_string()]),
+            },
+        );
+        let server = make_server(config);
+        let agent = agent("restricted-claude");
+
+        // Allowed tool must pass.
+        assert!(
+            server
+                .enforce_trust("terminal.sessions.list", &agent)
+                .is_ok()
+        );
+
+        // All other tools must be denied regardless of tier.
+        for tool in &[
+            "terminal.sessions.get",
+            "terminal.sessions.create",
+            "terminal.sessions.destroy",
+            "terminal.panes.list",
+            "terminal.panes.write",
+            "terminal.panes.destroy",
+        ] {
+            assert!(
+                server.enforce_trust(tool, &agent).is_err(),
+                "expected allowlist to deny: {tool}"
+            );
+        }
+    }
+
+    /// An empty allowlist must deny every tool call, even for a Trusted agent.
+    #[test]
+    fn per_agent_empty_allowlist_denies_all_tools() {
+        let mut config = trusted_config();
+        config.agents.insert(
+            "locked-agent".to_string(),
+            AgentTrust {
+                tier: TrustTier::Trusted,
+                allowed_tools: Some(vec![]),
+            },
+        );
+        let server = make_server(config);
+        let agent = agent("locked-agent");
+        for tool in &[
+            "terminal.sessions.list",
+            "terminal.sessions.create",
+            "terminal.sessions.destroy",
+        ] {
+            assert!(
+                server.enforce_trust(tool, &agent).is_err(),
+                "expected empty allowlist to deny: {tool}"
+            );
+        }
+    }
+
+    // ── enforce_trust (rate limiting) ───────────────────────────────────
+
+    /// Trusted agents must be rate-limited on Admin tools when the limiter cap is hit.
+    #[test]
+    fn admin_tools_rate_limited_for_trusted_agent() {
+        let (event_tx, _) = broadcast::channel(16);
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(SessionManager::new(event_tx)));
+        let trust_config = Arc::new(trusted_config());
+        // Allow only 1 destructive call per minute.
+        let rate_limiter = Arc::new(RateLimiter::new(1));
+        let server = TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None);
+        let agent = agent("trusted-bot");
+
+        // First call allowed.
+        assert!(
+            server
+                .enforce_trust("terminal.sessions.destroy", &agent)
+                .is_ok()
+        );
+        // Second call denied due to rate limit.
+        assert!(
+            server
+                .enforce_trust("terminal.sessions.destroy", &agent)
+                .is_err()
+        );
+    }
+
+    // ── enforce_resource_trust ──────────────────────────────────────────
+
+    /// Sandboxed agents can read pane resources (Observer tier).
+    #[test]
+    fn sandboxed_agent_can_read_pane_resources() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_resource_trust("terminal://pane/1/content", &agent)
+                .is_ok()
+        );
+        assert!(
+            server
+                .enforce_resource_trust("terminal://pane/1/output", &agent)
+                .is_ok()
+        );
+    }
+
+    /// Sandboxed agents can read the Claude events resource (Observer tier).
+    /// This is the trust bypass site — the resource must not silently allow
+    /// lower-trust agents by failing open.
+    #[test]
+    fn sandboxed_agent_can_read_claude_events_resource() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_resource_trust(super::CLAUDE_EVENTS_URI, &agent)
+                .is_ok(),
+            "Sandboxed is Observer-tier and must be allowed for claude/events"
+        );
+    }
+
+    /// An agent with no configured tier below Sandboxed would be denied — but
+    /// since Sandboxed is the minimum, verify that the boundary is correctly
+    /// enforced: there is no tier below Sandboxed in the current model.
+    /// This test documents the current trust floor.
+    #[test]
+    fn sandboxed_is_minimum_tier_for_resources() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("any-agent");
+        // Sandboxed agents are always allowed for Observer resources.
+        assert!(
+            server
+                .enforce_resource_trust("terminal://pane/99/content", &agent)
+                .is_ok()
+        );
+        assert!(
+            server
+                .enforce_resource_trust("therminal://claude/events", &agent)
+                .is_ok()
+        );
+    }
+
+    // ── tool_definitions() surface lock ─────────────────────────────────
+
+    /// Lock in the count: exactly 15 tools must be returned.
+    #[test]
+    fn tool_definitions_returns_15_tools() {
+        let tools = tool_definitions();
+        assert_eq!(tools.len(), 15, "expected exactly 15 tool definitions");
+    }
+
+    /// Lock in the names so a rename or accidental drop is caught immediately.
+    #[test]
+    fn tool_definitions_contains_all_expected_names() {
+        use std::collections::HashSet;
+        let tools = tool_definitions();
+        let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        let expected = [
+            "terminal.sessions.list",
+            "terminal.sessions.get",
+            "terminal.sessions.create",
+            "terminal.sessions.destroy",
+            "terminal.panes.create",
+            "terminal.panes.destroy",
+            "terminal.panes.list",
+            "terminal.panes.write",
+            "terminal.panes.get_geometry",
+            "terminal.panes.get_content",
+            "terminal.semantic.query_history",
+            "terminal.panes.wait_for_output",
+            "terminal.semantic.get_hotspots",
+            "terminal.workspaces.list",
+            "terminal.agents.list",
+        ];
+        for name in &expected {
+            assert!(names.contains(name), "missing tool definition: {name}");
+        }
+    }
+
+    // ── Resource surface lock ────────────────────────────────────────────
+
+    /// `build_resource_list` must always include the Claude events URI even
+    /// when there are no active panes.
+    #[tokio::test]
+    async fn build_resource_list_always_includes_claude_events() {
+        let server = make_server(trusted_config());
+        let resources = server.build_resource_list().await;
+        let uris: Vec<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
+        assert!(
+            uris.contains(&super::CLAUDE_EVENTS_URI),
+            "expected claude/events in resource list, got: {uris:?}"
+        );
+    }
+
+    /// With an empty session manager, the only resource should be claude/events.
+    #[tokio::test]
+    async fn build_resource_list_no_panes_only_claude_events() {
+        let server = make_server(trusted_config());
+        let resources = server.build_resource_list().await;
+        assert_eq!(
+            resources.len(),
+            1,
+            "expected only claude/events resource with no panes"
+        );
+    }
+}

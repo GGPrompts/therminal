@@ -206,3 +206,71 @@ pub(crate) fn push_visual_bell_overlay(
 
     overlay.push_rect(0.0, 0.0, sw, sh, color, OverlayTier::Modal);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_visual_bell_overlay_zero_intensity_pushes_nothing() {
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(0.0, 800, 600, &mut overlay);
+        assert!(overlay.is_empty());
+        assert_eq!(overlay.quad_count(), 0);
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_negative_intensity_pushes_nothing() {
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(-1.0, 800, 600, &mut overlay);
+        assert!(overlay.is_empty());
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_positive_intensity_pushes_one_quad() {
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(0.5, 800, 600, &mut overlay);
+        assert!(!overlay.is_empty());
+        assert_eq!(overlay.quad_count(), 1);
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_full_intensity_pushes_one_quad() {
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(1.0, 1920, 1080, &mut overlay);
+        assert_eq!(overlay.quad_count(), 1);
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_small_positive_intensity_still_pushes() {
+        // Even the tiniest positive value above 0.0 should produce a quad.
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(f32::MIN_POSITIVE, 640, 480, &mut overlay);
+        assert_eq!(overlay.quad_count(), 1);
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_exactly_zero_intensity_is_skipped() {
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(0.0, 100, 100, &mut overlay);
+        assert_eq!(overlay.quad_count(), 0);
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_multiple_calls_accumulate() {
+        // Each positive-intensity call should add one quad.
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(0.2, 800, 600, &mut overlay);
+        push_visual_bell_overlay(0.5, 800, 600, &mut overlay);
+        assert_eq!(overlay.quad_count(), 2);
+    }
+
+    #[test]
+    fn push_visual_bell_overlay_mixed_calls_only_positive_count() {
+        let mut overlay = OverlayLayer::new();
+        push_visual_bell_overlay(-0.5, 800, 600, &mut overlay); // skipped
+        push_visual_bell_overlay(0.0, 800, 600, &mut overlay); // skipped
+        push_visual_bell_overlay(0.3, 800, 600, &mut overlay); // added
+        assert_eq!(overlay.quad_count(), 1);
+    }
+}

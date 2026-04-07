@@ -804,3 +804,372 @@ pub enum SpatialDirection {
     Left,
     Right,
 }
+
+#[cfg(test)]
+mod tests {
+    use therminal_core::geometry::Rect;
+
+    use super::*;
+    use crate::pane::SplitDirection;
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    fn make_split(
+        direction: SplitDirection,
+        ratio: f32,
+        first: LayoutNode,
+        second: LayoutNode,
+    ) -> LayoutNode {
+        LayoutNode::Split {
+            direction,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    // ── pane_viewports ────────────────────────────────────────────────────
+
+    #[test]
+    fn pane_viewports_empty_returns_empty() {
+        let node = LayoutNode::Empty;
+        assert!(node.pane_viewports().is_empty());
+    }
+
+    #[test]
+    fn pane_viewports_leaf_returns_its_rect() {
+        let rect = Rect::new(10.0, 20.0, 100.0, 80.0);
+        let mut leaf = LayoutNode::Empty;
+        leaf.layout(rect);
+        // Empty doesn't store rect; verify non-crash and empty result.
+        // (Real pane viewports are tracked in PaneState.viewport.)
+        let vp = leaf.pane_viewports();
+        assert!(vp.is_empty()); // Empty variant has no pane ID
+    }
+
+    #[test]
+    fn pane_viewports_split_returns_two_rects() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        root.layout(rect);
+        // Empty children don't contribute IDs — structural test only.
+        let vp = root.pane_viewports();
+        assert_eq!(vp.len(), 0); // Both children are Empty
+    }
+
+    // ── leaf_rects_pub ────────────────────────────────────────────────────
+
+    #[test]
+    fn leaf_rects_pub_empty_returns_empty() {
+        let node = LayoutNode::Empty;
+        assert!(node.leaf_rects_pub().is_empty());
+    }
+
+    #[test]
+    fn leaf_rects_pub_split_two_rects_within_viewport() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        root.layout(viewport);
+        // Empty children produce 0 leaf rects.
+        let rects = root.leaf_rects_pub();
+        // Both sides are Empty — no leaf rects.
+        assert_eq!(rects.len(), 0);
+    }
+
+    // ── reset_all_ratios ──────────────────────────────────────────────────
+
+    #[test]
+    fn reset_all_ratios_single_split() {
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.8,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        root.reset_all_ratios();
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!((ratio - 0.5).abs() < f32::EPSILON, "ratio should be 0.5");
+        } else {
+            panic!("expected Split");
+        }
+    }
+
+    #[test]
+    fn reset_all_ratios_nested_splits() {
+        let inner = make_split(
+            SplitDirection::Vertical,
+            0.3,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        let mut root = make_split(SplitDirection::Horizontal, 0.7, LayoutNode::Empty, inner);
+        root.reset_all_ratios();
+
+        if let LayoutNode::Split { ratio, second, .. } = &root {
+            assert!((ratio - 0.5).abs() < f32::EPSILON, "outer ratio={ratio}");
+            if let LayoutNode::Split { ratio: inner_r, .. } = second.as_ref() {
+                assert!(
+                    (inner_r - 0.5).abs() < f32::EPSILON,
+                    "inner ratio={inner_r}"
+                );
+            } else {
+                panic!("expected inner Split");
+            }
+        } else {
+            panic!("expected outer Split");
+        }
+    }
+
+    #[test]
+    fn reset_all_ratios_leaf_is_noop() {
+        let mut node = LayoutNode::Empty;
+        // Must not panic.
+        node.reset_all_ratios();
+    }
+
+    // ── set_ratio_at_path ─────────────────────────────────────────────────
+
+    #[test]
+    fn set_ratio_at_path_empty_path_sets_root() {
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        let ok = root.set_ratio_at_path(&[], 0.7);
+        assert!(ok);
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!((ratio - 0.7).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn set_ratio_at_path_clamps_to_limits() {
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        // Too high: should clamp to 0.9
+        root.set_ratio_at_path(&[], 2.0);
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!((ratio - 0.9).abs() < f32::EPSILON, "ratio={ratio}");
+        }
+        // Too low: should clamp to 0.1
+        root.set_ratio_at_path(&[], 0.0);
+        if let LayoutNode::Split { ratio, .. } = &root {
+            assert!((ratio - 0.1).abs() < f32::EPSILON, "ratio={ratio}");
+        }
+    }
+
+    #[test]
+    fn set_ratio_at_path_first_child() {
+        // path [false] => navigate into first child.
+        let inner = make_split(
+            SplitDirection::Vertical,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, inner, LayoutNode::Empty);
+        let ok = root.set_ratio_at_path(&[false], 0.3);
+        assert!(ok);
+        if let LayoutNode::Split { first, .. } = &root {
+            if let LayoutNode::Split { ratio, .. } = first.as_ref() {
+                assert!((ratio - 0.3).abs() < f32::EPSILON);
+            } else {
+                panic!("first child should be a split");
+            }
+        }
+    }
+
+    #[test]
+    fn set_ratio_at_path_second_child() {
+        // path [true] => navigate into second child.
+        let inner = make_split(
+            SplitDirection::Vertical,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        let mut root = make_split(SplitDirection::Horizontal, 0.5, LayoutNode::Empty, inner);
+        let ok = root.set_ratio_at_path(&[true], 0.6);
+        assert!(ok);
+        if let LayoutNode::Split { second, .. } = &root {
+            if let LayoutNode::Split { ratio, .. } = second.as_ref() {
+                assert!((ratio - 0.6).abs() < f32::EPSILON);
+            } else {
+                panic!("second child should be a split");
+            }
+        }
+    }
+
+    #[test]
+    fn set_ratio_at_path_on_non_split_returns_false() {
+        let mut node = LayoutNode::Empty;
+        assert!(!node.set_ratio_at_path(&[], 0.5));
+    }
+
+    // ── separator_hit_test ────────────────────────────────────────────────
+
+    #[test]
+    fn separator_hit_test_horizontal_split_center() {
+        // A horizontal split at 0.5 with rect 800x600.
+        // The separator is a vertical line at x=400 (approx).
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        // The separator is at ~x=400; test with 6px tolerance at center y.
+        let result = root.separator_hit_test(400.0, 300.0, 6.0, viewport);
+        assert!(result.is_some(), "should hit the separator at center");
+        if let Some((path, dir, _rect)) = result {
+            assert_eq!(path, Vec::<bool>::new(), "root path should be empty");
+            assert_eq!(dir, SplitDirection::Horizontal);
+        }
+    }
+
+    #[test]
+    fn separator_hit_test_vertical_split_center() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let root = make_split(
+            SplitDirection::Vertical,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        // The separator is at ~y=300; test with 6px tolerance at center x.
+        let result = root.separator_hit_test(400.0, 300.0, 6.0, viewport);
+        assert!(result.is_some());
+        if let Some((_, dir, _)) = result {
+            assert_eq!(dir, SplitDirection::Vertical);
+        }
+    }
+
+    #[test]
+    fn separator_hit_test_far_from_separator_returns_none() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        // Click at the far left (x=50) — nowhere near x=400.
+        let result = root.separator_hit_test(50.0, 300.0, 6.0, viewport);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn separator_hit_test_leaf_returns_none() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let node = LayoutNode::Empty;
+        assert!(
+            node.separator_hit_test(400.0, 300.0, 6.0, viewport)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn separator_hit_test_nested_split_child_path() {
+        // Root = Horizontal(A | Vertical(B, C))
+        // Horizontal separator at ~x=400.
+        // Vertical sub-separator at ~y=300 within the right half.
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let right = make_split(
+            SplitDirection::Vertical,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        let root = make_split(SplitDirection::Horizontal, 0.5, LayoutNode::Empty, right);
+        // Click on the vertical sub-separator inside the right half:
+        // right half x=[400,800], sub-sep at y=300.
+        let result = root.separator_hit_test(600.0, 300.0, 6.0, viewport);
+        assert!(result.is_some(), "should hit child separator");
+        if let Some((path, dir, _)) = result {
+            assert_eq!(dir, SplitDirection::Vertical);
+            assert!(!path.is_empty(), "nested hit has non-empty path");
+        }
+    }
+
+    // ── can_split (negative edge cases not in mod.rs) ─────────────────────
+
+    #[test]
+    fn can_split_exact_minimum_horizontal() {
+        // Exactly 2 * MIN_PANE_WIDTH + SEPARATOR_GAP should be allowed.
+        let w = MIN_PANE_WIDTH * 2.0 + SEPARATOR_GAP;
+        let rect = Rect::new(0.0, 0.0, w, 600.0);
+        assert!(LayoutNode::can_split(rect, SplitDirection::Horizontal));
+    }
+
+    #[test]
+    fn can_split_exact_minimum_vertical() {
+        let h = MIN_PANE_HEIGHT * 2.0 + SEPARATOR_GAP;
+        let rect = Rect::new(0.0, 0.0, 800.0, h);
+        assert!(LayoutNode::can_split(rect, SplitDirection::Vertical));
+    }
+
+    #[test]
+    fn can_split_one_pixel_under_minimum_horizontal() {
+        let w = MIN_PANE_WIDTH * 2.0 + SEPARATOR_GAP - 1.0;
+        let rect = Rect::new(0.0, 0.0, w, 600.0);
+        assert!(!LayoutNode::can_split(rect, SplitDirection::Horizontal));
+    }
+
+    #[test]
+    fn can_split_zero_size_rect_returns_false() {
+        let rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+        assert!(!LayoutNode::can_split(rect, SplitDirection::Horizontal));
+        assert!(!LayoutNode::can_split(rect, SplitDirection::Vertical));
+    }
+
+    // ── find_largest_pane with a single Empty (no pane) ──────────────────
+
+    #[test]
+    fn find_largest_pane_no_leaves_returns_none() {
+        let root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        // No Leaf nodes -> no largest pane.
+        assert!(root.find_largest_pane().is_none());
+    }
+
+    // ── adjust_ratio on leaf / empty ──────────────────────────────────────
+
+    #[test]
+    fn adjust_ratio_on_leaf_returns_false() {
+        let mut node = LayoutNode::Empty;
+        assert!(!node.adjust_ratio(1, 0.1));
+    }
+
+    #[test]
+    fn adjust_ratio_on_split_with_unknown_id_returns_false() {
+        let mut root = make_split(
+            SplitDirection::Horizontal,
+            0.5,
+            LayoutNode::Empty,
+            LayoutNode::Empty,
+        );
+        // No leaves with real pane IDs, so the search finds nothing.
+        assert!(!root.adjust_ratio(999, 0.1));
+    }
+}

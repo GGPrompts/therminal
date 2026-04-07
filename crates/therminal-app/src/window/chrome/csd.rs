@@ -305,3 +305,112 @@ pub(crate) fn draw_csd_buttons(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // CSD_BTN_W = 46.0 (CSD_BUTTON_WIDTH from pane::geometry)
+    // Three buttons right-to-left: Close, Maximize, Minimize
+    // surface_width = 600
+    //   close_x  = 600 - 46 = 554
+    //   max_x    = 554 - 46 = 508
+    //   min_x    = 508 - 46 = 462
+
+    const SW: f32 = 600.0;
+    const BTN_W: f32 = crate::pane::CSD_BUTTON_WIDTH;
+
+    fn close_x() -> f32 {
+        SW - BTN_W
+    }
+    fn max_x() -> f32 {
+        close_x() - BTN_W
+    }
+    fn min_x() -> f32 {
+        max_x() - BTN_W
+    }
+
+    #[test]
+    fn csd_hit_test_returns_none_when_bar_h_zero() {
+        let result = csd_button_hit_test(SW - 1.0, 0.0, SW);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn csd_hit_test_returns_none_when_bar_h_negative() {
+        let result = csd_button_hit_test(SW - 1.0, -1.0, SW);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn csd_hit_test_close_at_right_edge() {
+        // Any px >= close_x is Close.
+        assert!(matches!(
+            csd_button_hit_test(close_x(), 30.0, SW),
+            Some(CsdAction::Close)
+        ));
+        assert!(matches!(
+            csd_button_hit_test(SW - 1.0, 30.0, SW),
+            Some(CsdAction::Close)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_maximize_in_middle_button() {
+        let px = max_x() + BTN_W / 2.0; // center of the maximize button
+        assert!(matches!(
+            csd_button_hit_test(px, 30.0, SW),
+            Some(CsdAction::Maximize)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_minimize_in_leftmost_button() {
+        let px = min_x() + 1.0;
+        assert!(matches!(
+            csd_button_hit_test(px, 30.0, SW),
+            Some(CsdAction::Minimize)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_left_of_minimize_is_none() {
+        let px = min_x() - 1.0;
+        assert!(csd_button_hit_test(px, 30.0, SW).is_none());
+    }
+
+    #[test]
+    fn csd_hit_test_at_exact_boundary_close_vs_maximize() {
+        // Exactly at close_x → Close.
+        assert!(matches!(
+            csd_button_hit_test(close_x(), 30.0, SW),
+            Some(CsdAction::Close)
+        ));
+        // One pixel left → Maximize.
+        assert!(matches!(
+            csd_button_hit_test(close_x() - 1.0, 30.0, SW),
+            Some(CsdAction::Maximize)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_at_exact_boundary_maximize_vs_minimize() {
+        assert!(matches!(
+            csd_button_hit_test(max_x(), 30.0, SW),
+            Some(CsdAction::Maximize)
+        ));
+        assert!(matches!(
+            csd_button_hit_test(max_x() - 1.0, 30.0, SW),
+            Some(CsdAction::Minimize)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_at_exact_min_x_boundary() {
+        // Exactly at min_x → Minimize.
+        assert!(matches!(
+            csd_button_hit_test(min_x(), 30.0, SW),
+            Some(CsdAction::Minimize)
+        ));
+    }
+}

@@ -300,3 +300,90 @@ pub(crate) fn tab_bar_hit_test(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Compute the expected tab width for a label, mirroring `tab_bar_hit_test`.
+    fn tab_w(label: &str) -> f32 {
+        (label.len() as f32 * TAB_CHAR_WIDTH + TAB_PADDING).max(TAB_MIN_WIDTH)
+    }
+
+    #[test]
+    fn tab_bar_hit_test_empty_workspaces_returns_none() {
+        assert!(tab_bar_hit_test(0.0, &[], &[]).is_none());
+        assert!(tab_bar_hit_test(100.0, &[], &labels(&["ws1"])).is_none());
+    }
+
+    #[test]
+    fn tab_bar_hit_test_single_tab_at_origin() {
+        let ids = vec![1usize];
+        let ls = labels(&["alpha"]);
+        // Any x in [0, tab_w("alpha")) must return workspace 1.
+        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls), Some(1));
+        assert_eq!(tab_bar_hit_test(tab_w("alpha") - 0.001, &ids, &ls), Some(1));
+    }
+
+    #[test]
+    fn tab_bar_hit_test_single_tab_beyond_width_returns_none() {
+        let ids = vec![1usize];
+        let ls = labels(&["alpha"]);
+        assert!(tab_bar_hit_test(tab_w("alpha"), &ids, &ls).is_none());
+        assert!(tab_bar_hit_test(tab_w("alpha") + 100.0, &ids, &ls).is_none());
+    }
+
+    #[test]
+    fn tab_bar_hit_test_two_tabs_correct_workspace() {
+        let ids = vec![1usize, 2];
+        let ls = labels(&["one", "two"]);
+        let w1 = tab_w("one");
+        let w2 = tab_w("two");
+
+        // Click in the first tab.
+        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls), Some(1));
+        assert_eq!(tab_bar_hit_test(w1 - 1.0, &ids, &ls), Some(1));
+
+        // Click exactly at the start of the second tab.
+        assert_eq!(tab_bar_hit_test(w1, &ids, &ls), Some(2));
+        assert_eq!(tab_bar_hit_test(w1 + w2 - 1.0, &ids, &ls), Some(2));
+
+        // Click beyond both tabs.
+        assert!(tab_bar_hit_test(w1 + w2, &ids, &ls).is_none());
+    }
+
+    #[test]
+    fn tab_bar_hit_test_short_labels_respect_min_width() {
+        // A single-character label must still produce a tab of at least TAB_MIN_WIDTH.
+        let ids = vec![7usize];
+        let ls = labels(&["X"]);
+        let expected_w = TAB_MIN_WIDTH; // "X" * 8 + 16 = 24 < 48, so clamped to 48.
+        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls), Some(7));
+        assert_eq!(tab_bar_hit_test(expected_w - 0.001, &ids, &ls), Some(7));
+        assert!(tab_bar_hit_test(expected_w, &ids, &ls).is_none());
+    }
+
+    #[test]
+    fn tab_bar_hit_test_three_tabs_middle_selected() {
+        let ids = vec![10usize, 20, 30];
+        let ls = labels(&["first", "second", "third"]);
+        let w0 = tab_w("first");
+        let w1 = tab_w("second");
+
+        // Middle tab.
+        let mid_px = w0 + w1 / 2.0;
+        assert_eq!(tab_bar_hit_test(mid_px, &ids, &ls), Some(20));
+    }
+
+    #[test]
+    fn tab_bar_hit_test_negative_x_hits_first_tab() {
+        // Negative x is less than cumulative_x (0) + tab_w, so it hits the first tab.
+        let ids = vec![1usize];
+        let ls = labels(&["hello"]);
+        assert_eq!(tab_bar_hit_test(-10.0, &ids, &ls), Some(1));
+    }
+}
