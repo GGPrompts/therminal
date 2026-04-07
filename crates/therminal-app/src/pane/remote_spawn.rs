@@ -19,7 +19,7 @@ use therminal_protocol::daemon::{DaemonEvent, EventKind, IpcRequest, IpcResponse
 use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
 use therminal_terminal::pty_runtime::TermSize;
 use therminal_terminal::region_index::RegionIndex;
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use super::PaneId;
 use super::PaneListener;
@@ -259,6 +259,16 @@ pub(crate) fn build_remote_pane_state(
             warn!(error = %e, "remote pane forwarder Subscribe failed");
             return;
         }
+        // tn-wlu6 instrumentation: hex-dump the first chunks after subscribe
+        // so we can see whether stale OSC 633 bytes arrive (and from where).
+        // Window: 2 seconds from subscribe. Gated by tracing target so it
+        // only fires with RUST_LOG=therminal_app::pane::remote_spawn=trace.
+        let trace_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut trace_chunk_idx: usize = 0;
+        trace!(
+            remote_pane_id,
+            "tn-wlu6: forwarder subscribed, begin 2s trace window"
+        );
         loop {
             if shutdown_for_forwarder.load(Ordering::Acquire) {
                 break;
@@ -267,6 +277,34 @@ pub(crate) fn build_remote_pane_state(
                 Some(DaemonEvent::PaneOutput { pane_id, data, .. })
                     if pane_id == remote_pane_id =>
                 {
+                    if std::time::Instant::now() < trace_deadline {
+                        let preview_len = data.len().min(256);
+                        let hex: String = data[..preview_len]
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let ascii: String = data[..preview_len]
+                            .iter()
+                            .map(|&b| {
+                                if (0x20..=0x7e).contains(&b) {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
+                            .collect();
+                        trace!(
+                            remote_pane_id,
+                            chunk_idx = trace_chunk_idx,
+                            len = data.len(),
+                            preview_len,
+                            hex = %hex,
+                            ascii = %ascii,
+                            "tn-wlu6: PaneOutput chunk"
+                        );
+                        trace_chunk_idx += 1;
+                    }
                     if byte_tx.send(data).is_err() {
                         break;
                     }
