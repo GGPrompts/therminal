@@ -535,11 +535,19 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
-        IpcRequest::ResizePane { pane_id, .. } => {
-            // Stub for tn-5ps8: real implementation lands in tn-5rm0.
-            // Returning Error keeps the wire round-trip honest until then.
-            IpcResponse::Error {
-                message: format!("ResizePane unimplemented (pane_id={pane_id})"),
+        IpcRequest::ResizePane {
+            pane_id,
+            cols,
+            rows,
+        } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.resize_pane(*pane_id, *cols, *rows) {
+                Ok(()) => IpcResponse::PaneResized {
+                    pane_id: *pane_id,
+                    cols: *cols,
+                    rows: *rows,
+                },
+                Err(e) => IpcResponse::Error { message: e },
             }
         }
         IpcRequest::SelectPane { pane_id } => {

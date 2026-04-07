@@ -365,6 +365,7 @@ impl App {
                 }
                 self.last_click_time = Some(now);
                 self.last_click_pos = Some((col, row));
+                self.last_press_pixel = Some((px, py));
 
                 if shift_held && self.selection_pane == Some(target_pane) {
                     // Shift+click: extend existing selection.
@@ -388,7 +389,20 @@ impl App {
 
                 // Single click on a hyperlinked cell: open the URL.
                 // Single click on a hotspot cell: open the action palette.
-                if self.click_count == 1 && self.last_click_pos == Some((col, row)) {
+                // Treat as a click (not drag) if the release landed within
+                // ~4 pixels of the press, OR on the same cell. This tolerates
+                // tiny pointer jitter while still suppressing real drags.
+                let pixel_close = match self.last_press_pixel {
+                    Some((sx, sy)) => {
+                        let dx = px - sx;
+                        let dy = py - sy;
+                        (dx * dx + dy * dy) <= 16.0
+                    }
+                    None => false,
+                };
+                let same_cell = self.last_click_pos == Some((col, row));
+                let is_click = self.click_count == 1 && (pixel_close || same_cell);
+                if is_click {
                     if let Some(url) = self.hyperlink_at(target_pane, row, col) {
                         self.open_hyperlink(&url);
                     } else {

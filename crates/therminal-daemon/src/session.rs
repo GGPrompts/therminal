@@ -170,6 +170,15 @@ impl PtyReaderHandler for DaemonPtyHandler {
 
     fn on_eof(&mut self) {
         info!(pane_id = %self.pane_id, "PTY closed (EOF)");
+        // Broadcast PaneExited so RemotePty backends in the GUI can tear
+        // down their local mirror. portable_pty does not surface a child
+        // exit code through the reader thread today (tn-5rm0 follow-up),
+        // so exit_code is None for now.
+        let _ = self.event_tx.send(DaemonEvent::PaneExited {
+            session_id: self.session_id,
+            pane_id: self.pane_id,
+            exit_code: None,
+        });
     }
 }
 
@@ -934,6 +943,17 @@ impl SessionManager {
         for session in self.sessions.values_mut() {
             if let Some(pane) = session.find_pane_mut(pane_id) {
                 return pane.write(keys).map_err(|e| format!("write error: {e}"));
+            }
+        }
+        Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Resize a pane's PTY by pane ID (searches all sessions).
+    pub fn resize_pane(&mut self, pane_id: PaneId, cols: u16, rows: u16) -> Result<(), String> {
+        for session in self.sessions.values_mut() {
+            if let Some(pane) = session.find_pane_mut(pane_id) {
+                pane.resize(cols, rows);
+                return Ok(());
             }
         }
         Err(format!("pane not found: {pane_id}"))

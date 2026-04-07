@@ -172,6 +172,7 @@ impl App {
             selection_pane: None,
             last_click_time: None,
             last_click_pos: None,
+            last_press_pixel: None,
             click_count: 0,
             config,
             binding_map,

@@ -135,6 +135,9 @@ pub struct App {
     /// Position of the last left-click in grid coords (col, row).
     last_click_pos: Option<(usize, usize)>,
 
+    /// Pixel position of the last left-button press (for click jitter tolerance).
+    last_press_pixel: Option<(f64, f64)>,
+
     /// Click count (1 = single, 2 = double/word, 3 = triple/line).
     click_count: u8,
 
