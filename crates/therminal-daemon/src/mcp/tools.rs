@@ -11,9 +11,10 @@ use tracing::debug;
 
 use super::{
     AgentInfoResult, CreateSessionParam, DestroyPaneResult, GetHotspotsParam, GetHotspotsResult,
-    GetPaneGeometryParam, GetPaneGeometryResult, HotspotInfo, ListAgentsParam, ListAgentsResult,
-    ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
-    MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, QuerySemanticHistoryParam,
+    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
+    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
+    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
+    PaneContentResult, PaneIdParam, PaneInfo, QuerySemanticHistoryParam,
     QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
     SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
     TherminalMcpServer, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult,
@@ -292,6 +293,43 @@ impl TherminalMcpServer {
 
         let result = ListWorkspacesResult { workspaces };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    pub(super) async fn handle_get_workspace_layout(
+        &self,
+        params: GetWorkspaceLayoutParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        // Find the first session whose workspace_state contains `workspace_id`.
+        // If `session_id` is provided, restrict to that session.
+        for (session_id, session) in mgr.iter_sessions() {
+            if let Some(filter_id) = params.session_id
+                && *session_id != filter_id
+            {
+                continue;
+            }
+            if let Some(ws) = session
+                .workspace_state
+                .iter()
+                .find(|w| w.id == params.workspace_id)
+            {
+                let layout = LayoutNodeJson::from_flat_pane_ids(&ws.pane_ids);
+                let result = GetWorkspaceLayoutResult {
+                    workspace_id: ws.id,
+                    session_id: *session_id,
+                    layout,
+                    focused_pane: ws.focused_pane,
+                    degraded: true,
+                };
+                return Ok(CallToolResult::success(vec![json_content(&result)?]));
+            }
+        }
+
+        Err(ErrorData::invalid_params(
+            format!("workspace {} not found", params.workspace_id),
+            None,
+        ))
     }
 
     pub(super) async fn handle_list_agents(
@@ -790,6 +828,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.workspaces.list",
             "List workspace tabs with their names, pane counts, and active status. Optionally filter by session ID.",
             schema_for_type::<ListWorkspacesParam>(),
+        ),
+        Tool::new(
+            "terminal.workspaces.get_layout",
+            "Get the binary layout tree and focused pane for a workspace. Returns a tagged-union tree of splits (direction, ratio, left, right) and leaves (pane_id). Note: the tree is currently a degraded cascade built from flat pane IDs until the real LayoutNode is plumbed into the daemon; check the `degraded` field.",
+            schema_for_type::<GetWorkspaceLayoutParam>(),
         ),
         Tool::new(
             "terminal.agents.list",

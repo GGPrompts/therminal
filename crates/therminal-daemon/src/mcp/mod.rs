@@ -124,6 +124,15 @@ pub(super) struct GetHotspotsParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct GetWorkspaceLayoutParam {
+    /// The workspace slot number (1-9) to fetch the layout for.
+    pub(super) workspace_id: u64,
+    /// Optional session ID. If omitted, searches across all sessions and uses
+    /// the first workspace with a matching ID.
+    pub(super) session_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ListWorkspacesParam {
     /// Optional session ID to filter workspaces by. If omitted, returns workspaces from all sessions.
     pub(super) session_id: Option<u64>,
@@ -308,6 +317,67 @@ pub(super) struct WorkspaceInfoResult {
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct ListWorkspacesResult {
     pub(super) workspaces: Vec<WorkspaceInfoResult>,
+}
+
+/// Serializable mirror of `therminal-app`'s `LayoutNode`.
+///
+/// The real tree (with split directions + ratios) lives in `therminal-app`
+/// and is not currently plumbed into the daemon. For now, `get_workspace_layout`
+/// returns a DEGRADED tree built from the flat `pane_ids` stored in
+/// `WorkspaceInfo`: a right-leaning cascade of horizontal splits with
+/// ratio 0.5. Tracked as follow-up `tn-vs0u`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum LayoutNodeJson {
+    /// A split node with a direction, ratio, and two children.
+    Split {
+        /// Split direction: "horizontal" or "vertical".
+        direction: String,
+        /// Share of the first child (0.0..1.0).
+        ratio: f32,
+        left: Box<LayoutNodeJson>,
+        right: Box<LayoutNodeJson>,
+    },
+    /// A leaf pane.
+    Leaf { pane_id: u64 },
+    /// An empty placeholder (used when a workspace has no panes).
+    Empty,
+}
+
+impl LayoutNodeJson {
+    /// Build a degraded layout tree from a flat list of pane IDs.
+    ///
+    /// Produces a right-leaning cascade of horizontal splits with ratio 0.5.
+    /// This is a temporary shim until the real `LayoutNode` tree is plumbed
+    /// through to the daemon (see `tn-vs0u`).
+    pub fn from_flat_pane_ids(pane_ids: &[u64]) -> Self {
+        match pane_ids {
+            [] => LayoutNodeJson::Empty,
+            [only] => LayoutNodeJson::Leaf { pane_id: *only },
+            [first, rest @ ..] => LayoutNodeJson::Split {
+                direction: "horizontal".to_string(),
+                ratio: 0.5,
+                left: Box::new(LayoutNodeJson::Leaf { pane_id: *first }),
+                right: Box::new(LayoutNodeJson::from_flat_pane_ids(rest)),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct GetWorkspaceLayoutResult {
+    /// Workspace slot number (1-9).
+    pub(super) workspace_id: u64,
+    /// Session that owns this workspace.
+    pub(super) session_id: u64,
+    /// Layout tree. Currently a degraded cascade; see `LayoutNodeJson`.
+    pub(super) layout: LayoutNodeJson,
+    /// Focused pane within the workspace, if any.
+    pub(super) focused_pane: Option<u64>,
+    /// True when the `layout` field is the degraded shim (no real directions
+    /// or ratios). Clients can ignore this and use the tree shape as-is; it
+    /// exists so debugging tools can call out the limitation.
+    pub(super) degraded: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -702,6 +772,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: ListWorkspacesParam = parse_args(args)?;
                 self.handle_list_workspaces(params).await
             }
+            "terminal.workspaces.get_layout" => {
+                let params: GetWorkspaceLayoutParam = parse_args(args)?;
+                self.handle_get_workspace_layout(params).await
+            }
             "terminal.agents.list" => {
                 let params: ListAgentsParam = parse_args(args)?;
                 self.handle_list_agents(params).await
@@ -898,6 +972,7 @@ pub(crate) mod tests {
             "terminal.semantic.query_history",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
+            "terminal.workspaces.get_layout",
             "terminal.agents.list",
         ];
         for tool in &observer_tools {
@@ -1188,11 +1263,11 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 15 tools must be returned.
+    /// Lock in the count: exactly 16 tools must be returned.
     #[test]
-    fn tool_definitions_returns_15_tools() {
+    fn tool_definitions_returns_16_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 15, "expected exactly 15 tool definitions");
+        assert_eq!(tools.len(), 16, "expected exactly 16 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1216,6 +1291,7 @@ pub(crate) mod tests {
             "terminal.panes.wait_for_output",
             "terminal.semantic.get_hotspots",
             "terminal.workspaces.list",
+            "terminal.workspaces.get_layout",
             "terminal.agents.list",
         ];
         for name in &expected {
@@ -1236,6 +1312,70 @@ pub(crate) mod tests {
             uris.contains(&super::CLAUDE_EVENTS_URI),
             "expected claude/events in resource list, got: {uris:?}"
         );
+    }
+
+    // ── LayoutNodeJson ──────────────────────────────────────────────────
+
+    #[test]
+    fn layout_node_json_from_empty_pane_ids_is_empty() {
+        let tree = super::LayoutNodeJson::from_flat_pane_ids(&[]);
+        assert_eq!(tree, super::LayoutNodeJson::Empty);
+    }
+
+    #[test]
+    fn layout_node_json_single_pane_is_leaf() {
+        let tree = super::LayoutNodeJson::from_flat_pane_ids(&[42]);
+        assert_eq!(tree, super::LayoutNodeJson::Leaf { pane_id: 42 });
+    }
+
+    #[test]
+    fn layout_node_json_two_panes_single_split() {
+        let tree = super::LayoutNodeJson::from_flat_pane_ids(&[1, 2]);
+        match tree {
+            super::LayoutNodeJson::Split {
+                direction,
+                ratio,
+                left,
+                right,
+            } => {
+                assert_eq!(direction, "horizontal");
+                assert!((ratio - 0.5).abs() < f32::EPSILON);
+                assert_eq!(*left, super::LayoutNodeJson::Leaf { pane_id: 1 });
+                assert_eq!(*right, super::LayoutNodeJson::Leaf { pane_id: 2 });
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layout_node_json_many_panes_cascade() {
+        let tree = super::LayoutNodeJson::from_flat_pane_ids(&[1, 2, 3, 4]);
+        // Walk the right spine: leaves 1, 2, 3, 4.
+        fn collect(node: &super::LayoutNodeJson, out: &mut Vec<u64>) {
+            match node {
+                super::LayoutNodeJson::Leaf { pane_id } => out.push(*pane_id),
+                super::LayoutNodeJson::Split { left, right, .. } => {
+                    collect(left, out);
+                    collect(right, out);
+                }
+                super::LayoutNodeJson::Empty => {}
+            }
+        }
+        let mut ids = Vec::new();
+        collect(&tree, &mut ids);
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn layout_node_json_serde_round_trip() {
+        let tree = super::LayoutNodeJson::from_flat_pane_ids(&[10, 20, 30]);
+        let json = serde_json::to_string(&tree).expect("serialize");
+        let parsed: super::LayoutNodeJson = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, tree);
+        // Spot-check the tagged union shape.
+        assert!(json.contains("\"type\":\"split\""));
+        assert!(json.contains("\"direction\":\"horizontal\""));
+        assert!(json.contains("\"type\":\"leaf\""));
     }
 
     // ── PaneInfo serialization ──────────────────────────────────────────
