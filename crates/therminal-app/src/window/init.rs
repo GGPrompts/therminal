@@ -182,7 +182,7 @@ impl App {
             visual_bell_start: None,
             zoomed_layout: None,
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
-            region_jump_toast: None,
+            toast: None,
         }
     }
 

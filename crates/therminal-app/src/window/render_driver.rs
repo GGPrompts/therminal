@@ -316,6 +316,32 @@ impl App {
             );
         }
 
+        // ── Toast (lower-right transient notification) ──────────────────
+        // Drop expired toast first so we don't draw stale text.
+        let mut toast_active = false;
+        if let Some(t) = self.toast.as_ref() {
+            if t.is_expired(Instant::now()) {
+                self.toast = None;
+            } else {
+                toast_active = true;
+            }
+        }
+        if toast_active {
+            // Clone the toast so we can pass it to draw_toast without
+            // holding a borrow on `self` while also borrowing `renderer`.
+            let toast_clone = self.toast.clone().expect("toast_active implies Some");
+            super::toast::draw_toast(
+                &toast_clone,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+                &mut chrome_overlay,
+            );
+        }
+
         // ── Overlay pass: render all batched chrome/modal quads ─────────
         // This is the second GPU pass — composites semi-transparent overlay
         // geometry on top of the grid content in a single batched draw call.
@@ -341,6 +367,12 @@ impl App {
             }
         } else {
             self.visual_bell_start = None;
+        }
+
+        // Keep the event loop ticking while a toast is visible so it
+        // animates out cleanly when it expires.
+        if toast_active && let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -424,13 +456,10 @@ impl App {
         let (start_line, label) = match target {
             Some(t) => t,
             None => {
-                self.region_jump_toast = Some((
-                    format!("no {} region", if errors_only { "error" } else { "more" }),
-                    Instant::now(),
+                self.show_toast(format!(
+                    "no {} region",
+                    if errors_only { "error" } else { "more" }
                 ));
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
                 return;
             }
         };
@@ -449,9 +478,6 @@ impl App {
         }
 
         info!(target: "therminal::region_jump", "{}", label);
-        self.region_jump_toast = Some((label, Instant::now()));
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.show_toast(label);
     }
 }

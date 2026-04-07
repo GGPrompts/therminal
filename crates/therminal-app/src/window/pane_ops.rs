@@ -657,58 +657,41 @@ impl App {
     /// The path may include `:line` or `:line:col` suffixes. If `$EDITOR` supports
     /// `+line` syntax (vim, nvim, nano, code, etc.), we pass it; otherwise we
     /// fall back to `xdg-open` / `open` with just the file path.
-    pub(crate) fn open_in_editor(&self, path_with_loc: &str) {
+    pub(crate) fn open_in_editor(&mut self, path_with_loc: &str) {
         use std::process::Command;
 
-        // Split path from optional :line:col.
-        let (path, line) = match path_with_loc.find(':') {
-            Some(idx) if path_with_loc[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
-                let rest = &path_with_loc[idx + 1..];
-                let line_str = rest.split(':').next().unwrap_or("1");
-                (&path_with_loc[..idx], line_str)
-            }
-            _ => (path_with_loc, "1"),
-        };
+        let chain = self.config.hotspots.editor_chain.clone();
+        let outcome = plan_open_in_editor(
+            path_with_loc,
+            &chain,
+            |p| std::fs::metadata(p).map(|m| m.is_file()),
+            |c| resolve_editor_chain(c, which_on_path, |var| std::env::var(var).ok()),
+        );
 
-        // Validate hotspot is a real file before spawning editor — hotspot paths
-        // come from terminal screen content and may be attacker-controlled.
-        match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => {}
-            Ok(_) => {
-                tracing::warn!("open_in_editor: {path} is not a regular file, skipping");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("open_in_editor: cannot stat {path}: {e}, skipping");
-                return;
-            }
-        }
-
-        // Resolve a concrete editor command from the configured fallback
-        // chain. First entry that expands (env vars present) AND resolves
-        // on PATH wins.
-        let chain = &self.config.hotspots.editor_chain;
-        let resolved = resolve_editor_chain(chain, which_on_path, |var| std::env::var(var).ok());
-
-        if let Some(editor) = resolved {
-            // Many editors support +line syntax.
-            let arg = format!("+{line}");
-            match Command::new(&editor).arg(&arg).arg(path).spawn() {
-                Ok(_) => return,
-                Err(e) => {
-                    tracing::warn!("failed to launch editor ({editor}): {e}");
+        match outcome {
+            OpenInEditorPlan::Spawn { editor, path, line } => {
+                let arg = format!("+{line}");
+                match Command::new(&editor).arg(&arg).arg(&path).spawn() {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("failed to launch editor ({editor}): {e}");
+                        self.show_toast(format!("$EDITOR ({editor}) failed to launch"));
+                    }
                 }
             }
-        } else {
-            tracing::warn!(
-                "open_in_editor: no editor from chain {:?} resolved on PATH",
-                chain
-            );
-        }
-
-        // Fallback: xdg-open / open.
-        if let Err(e) = open::that(path) {
-            tracing::warn!("failed to open {path}: {e}");
+            OpenInEditorPlan::OpenFallback { path } => {
+                if let Err(e) = open::that(&path) {
+                    tracing::warn!(
+                        "open_in_editor: no editor from chain {:?} resolved, and fallback failed: {e}",
+                        chain
+                    );
+                    self.show_toast("no $EDITOR set, and fallback failed");
+                }
+            }
+            OpenInEditorPlan::Fail(msg) => {
+                tracing::warn!("open_in_editor: {msg}");
+                self.show_toast(msg);
+            }
         }
     }
 
@@ -1360,6 +1343,77 @@ impl App {
     }
 }
 
+/// Outcome of planning an `open_in_editor` call, decoupled from the real
+/// filesystem / process spawn so it can be unit tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpenInEditorPlan {
+    /// Spawn `editor +line path`.
+    Spawn {
+        editor: String,
+        path: String,
+        line: String,
+    },
+    /// No editor resolved from the chain, but the file exists — try
+    /// `xdg-open` / `open` as a last resort.
+    OpenFallback { path: String },
+    /// Pre-flight validation failed. `String` is the user-facing message
+    /// (suitable for a toast).
+    Fail(String),
+}
+
+/// Pure planner for [`App::open_in_editor`]. Separates path parsing,
+/// filesystem validation, and editor resolution from actual IO so each
+/// failure branch can be asserted from a unit test.
+pub(crate) fn plan_open_in_editor<M, R>(
+    path_with_loc: &str,
+    chain: &[String],
+    mut is_file_fn: M,
+    mut resolve_fn: R,
+) -> OpenInEditorPlan
+where
+    M: FnMut(&str) -> std::io::Result<bool>,
+    R: FnMut(&[String]) -> Option<String>,
+{
+    // Split path from optional :line[:col].
+    let (path, line) = match path_with_loc.find(':') {
+        Some(idx) if path_with_loc[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
+            let rest = &path_with_loc[idx + 1..];
+            let line_str = rest.split(':').next().unwrap_or("1");
+            (&path_with_loc[..idx], line_str)
+        }
+        _ => (path_with_loc, "1"),
+    };
+
+    let basename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_string();
+
+    // Validate hotspot is a real file — hotspot paths come from terminal
+    // screen content and may be attacker-controlled.
+    match is_file_fn(path) {
+        Ok(true) => {}
+        Ok(false) => {
+            return OpenInEditorPlan::Fail(format!("{basename} is not a regular file"));
+        }
+        Err(_) => {
+            return OpenInEditorPlan::Fail(format!("file not found: {basename}"));
+        }
+    }
+
+    match resolve_fn(chain) {
+        Some(editor) => OpenInEditorPlan::Spawn {
+            editor,
+            path: path.to_string(),
+            line: line.to_string(),
+        },
+        None => OpenInEditorPlan::OpenFallback {
+            path: path.to_string(),
+        },
+    }
+}
+
 /// Resolve an entry from the editor fallback chain to a concrete command.
 ///
 /// Each entry is either a literal command (e.g. `"nvim"`) or an env-var
@@ -1499,6 +1553,76 @@ mod tests {
             |v| env.get(v).map(|s| s.to_string()),
         );
         assert_eq!(resolved.as_deref(), Some("code --wait"));
+    }
+
+    // ── plan_open_in_editor (end-to-end failure paths) ──
+
+    fn ok_file(_: &str) -> std::io::Result<bool> {
+        Ok(true)
+    }
+    fn not_regular(_: &str) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn not_found(_: &str) -> std::io::Result<bool> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
+    #[test]
+    fn plan_file_not_found_yields_fail_with_basename() {
+        let c = chain(&["nvim"]);
+        let plan = plan_open_in_editor("/nope/missing.rs:42", &c, not_found, |_| None);
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::Fail("file not found: missing.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_not_regular_file_yields_fail_with_basename() {
+        let c = chain(&["nvim"]);
+        let plan = plan_open_in_editor("/tmp/somedir", &c, not_regular, |_| None);
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::Fail("somedir is not a regular file".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_no_editor_resolved_yields_open_fallback() {
+        let c = chain(&["$EDITOR", "vim"]);
+        let plan = plan_open_in_editor("/tmp/foo.rs:10", &c, ok_file, |_| None);
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::OpenFallback {
+                path: "/tmp/foo.rs".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_happy_path_yields_spawn_with_line() {
+        let c = chain(&["nvim"]);
+        let plan = plan_open_in_editor("/tmp/foo.rs:42:7", &c, ok_file, |_| {
+            Some("nvim".to_string())
+        });
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::Spawn {
+                editor: "nvim".to_string(),
+                path: "/tmp/foo.rs".to_string(),
+                line: "42".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_no_line_defaults_to_1() {
+        let c = chain(&["vim"]);
+        let plan = plan_open_in_editor("/tmp/bar.md", &c, ok_file, |_| Some("vim".to_string()));
+        match plan {
+            OpenInEditorPlan::Spawn { line, .. } => assert_eq!(line, "1"),
+            other => panic!("expected Spawn, got {other:?}"),
+        }
     }
 
     #[test]

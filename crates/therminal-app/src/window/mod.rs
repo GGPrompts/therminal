@@ -22,6 +22,7 @@ mod mouse;
 mod pane_ops;
 mod render;
 mod render_driver;
+pub(crate) mod toast;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -208,12 +209,26 @@ pub struct App {
     /// the agent indicator.
     status_bar_hit_areas: chrome::StatusBarHitAreas,
 
-    /// Transient label shown after a semantic region jump (region kind +
-    /// optional command text), with the timestamp of when it was set.
-    /// Currently logged via tracing; future work will surface it as an
-    /// on-screen overlay toast.
-    #[allow(dead_code)]
-    region_jump_toast: Option<(String, Instant)>,
+    /// Active transient toast notification (lower-right), if any. Set by
+    /// `show_toast`, cleared when expired. Used by `open_in_editor` to
+    /// surface failures visibly and by the semantic region jump handler.
+    pub(crate) toast: Option<toast::Toast>,
+}
+
+impl App {
+    /// Show a toast notification in the lower-right corner. Replaces any
+    /// existing toast and schedules a redraw so it becomes visible
+    /// immediately.
+    ///
+    /// Lifetime is [`toast::TOAST_TTL`] (2.5s). Use for short user-facing
+    /// failure messages that would otherwise be silently swallowed by
+    /// `tracing::warn!`.
+    pub(crate) fn show_toast(&mut self, text: impl Into<String>) {
+        self.toast = Some(toast::Toast::new(text, Instant::now(), toast::TOAST_TTL));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
 }
 
 /// Compute the display labels for the workspace tab bar.
