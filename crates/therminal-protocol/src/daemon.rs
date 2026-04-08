@@ -173,6 +173,20 @@ pub enum IpcRequest {
     /// freshly-attached GUI client can replay it onto a local `Term`
     /// before going live with `PaneOutput` events. See tn-zamd.
     CapturePaneState { pane_id: PaneId },
+    /// Move a pane between workspaces inside its containing session
+    /// (tn-fi1k). The pane keeps its identity and PTY — only its
+    /// `WorkspaceInfo` membership changes. The daemon removes the
+    /// pane from its current workspace's `pane_ids` and `LayoutSnapshot`,
+    /// then appends it to the target workspace (creating the target
+    /// workspace as a single-pane leaf if it doesn't exist yet).
+    ///
+    /// This is a metadata-only operation: the underlying PTY is not
+    /// touched. Cross-session moves are not supported and return
+    /// `IpcResponse::Error`.
+    MovePane {
+        pane_id: PaneId,
+        target_workspace_id: WorkspaceId,
+    },
 }
 
 /// Typed IPC responses.
@@ -229,6 +243,14 @@ pub enum IpcResponse {
     PaneSelected { pane_id: PaneId },
     /// Two panes swapped positions in the layout tree.
     PaneSwapped { a: PaneId, b: PaneId },
+    /// A pane was moved from one workspace to another (tn-fi1k).
+    /// `source_workspace_id` is the workspace the pane belonged to
+    /// before the move (useful for clients tracking the prior topology).
+    PaneMoved {
+        pane_id: PaneId,
+        source_workspace_id: WorkspaceId,
+        target_workspace_id: WorkspaceId,
+    },
     /// Handoff ready: the old daemon has prepared FDs for transfer.
     ///
     /// The new daemon should connect to `handoff_socket` to receive the
@@ -748,6 +770,35 @@ mod tests {
     fn daemon_event_kind() {
         let e = DaemonEvent::SessionCreated { session_id: 1 };
         assert_eq!(e.kind(), EventKind::SessionCreated);
+    }
+
+    #[test]
+    fn move_pane_request_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 99,
+            payload: IpcRequest::MovePane {
+                pane_id: 17,
+                target_workspace_id: 3,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn pane_moved_response_round_trip() {
+        let msg = IpcMessage::Response {
+            request_id: 99,
+            payload: IpcResponse::PaneMoved {
+                pane_id: 17,
+                source_workspace_id: 1,
+                target_workspace_id: 3,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     #[test]

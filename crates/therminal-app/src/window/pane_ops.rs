@@ -250,6 +250,193 @@ impl App {
         }
     }
 
+    /// tn-fi1k: spawn a brand-new remote pane "off" an existing daemon
+    /// pane (the anchor) WITHOUT inserting it into any local layout. The
+    /// caller is responsible for placing the returned `PaneState` wherever
+    /// it wants — typically into a fresh workspace's layout (switch_workspace
+    /// / send_to_workspace replacement / restore_layout rebuild).
+    ///
+    /// Flow:
+    /// 1. Issue `IpcRequest::SplitPane { pane_id: anchor_daemon_id, horizontal: true }`
+    /// 2. Allocate a fresh local id via `next_pane_id()`
+    /// 3. Build the local `PaneState` via `remote_spawn::build_remote_pane_state`
+    /// 4. Insert the (local, daemon) pair into `pane_id_map`
+    ///
+    /// On any failure, returns `None` and best-effort issues `KillPane`
+    /// against the daemon-allocated pane (if step 1 succeeded but step 3
+    /// failed) so we don't leak orphan daemon panes.
+    ///
+    /// `viewport` is the rect the caller intends to assign to the new
+    /// pane in its layout — used to compute the initial grid size for
+    /// the local `Term`. The pane's actual on-screen rect will be
+    /// recomputed when the caller calls `relayout_and_redraw`.
+    pub(crate) fn spawn_remote_pane_off_existing(
+        &mut self,
+        anchor_daemon_id: therminal_protocol::PaneId,
+        viewport: Rect,
+    ) -> Option<crate::pane::PaneState> {
+        // 1. Daemon split RPC.
+        let resp = match self.daemon_rpc_blocking(IpcRequest::SplitPane {
+            pane_id: anchor_daemon_id,
+            horizontal: true,
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, anchor_daemon_id, "spawn_remote_pane_off_existing: SplitPane RPC failed");
+                self.show_toast("daemon split failed");
+                return None;
+            }
+        };
+        let new_daemon_pane_id = match resp {
+            IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
+            IpcResponse::Error { message } => {
+                warn!(
+                    message,
+                    anchor_daemon_id, "spawn_remote_pane_off_existing: daemon error"
+                );
+                self.show_toast(format!("split failed: {message}"));
+                return None;
+            }
+            other => {
+                warn!(
+                    ?other,
+                    "spawn_remote_pane_off_existing: unexpected response"
+                );
+                return None;
+            }
+        };
+
+        // 2. Allocate local id and build the remote-backed PaneState.
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
+            osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
+        };
+        let renderer = self.grid_renderer.as_ref()?;
+        let (cols, rows) = crate::pane::grid_size_for_rect(viewport, renderer);
+        let cols = cols.max(2);
+        let rows = rows.max(1);
+        let dc = Arc::clone(self.daemon_client.as_ref()?);
+        let handle = self.daemon_runtime.as_ref()?.clone();
+        let socket = dc.socket_path().to_path_buf();
+        let local_id = crate::pane::next_pane_id();
+        let callbacks = make_pane_callbacks(&self.event_proxy, local_id);
+
+        let state = match crate::pane::remote_spawn::build_remote_pane_state(
+            local_id,
+            new_daemon_pane_id,
+            viewport,
+            cols,
+            rows,
+            scrollback,
+            interceptor_cfg,
+            dc,
+            handle,
+            socket,
+            callbacks,
+        ) {
+            Ok(state) => state,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    new_daemon_pane_id,
+                    "spawn_remote_pane_off_existing: build_remote_pane_state failed AFTER daemon split — best-effort cleanup"
+                );
+                // Recover: kill the orphan daemon pane we couldn't mount.
+                match self.daemon_rpc_blocking(IpcRequest::KillPane {
+                    pane_id: new_daemon_pane_id,
+                }) {
+                    Ok(IpcResponse::PaneKilled { .. }) => {}
+                    Ok(other) => warn!(
+                        new_daemon_pane_id,
+                        ?other,
+                        "spawn_remote_pane_off_existing: orphan KillPane returned unexpected response"
+                    ),
+                    Err(e) => warn!(
+                        new_daemon_pane_id,
+                        error = %e,
+                        "spawn_remote_pane_off_existing: orphan KillPane RPC failed"
+                    ),
+                }
+                return None;
+            }
+        };
+
+        self.pane_id_map.insert(local_id, new_daemon_pane_id);
+        info!(
+            anchor_daemon_id,
+            new_local = local_id,
+            new_daemon = new_daemon_pane_id,
+            "spawn_remote_pane_off_existing: daemon split + local mount complete"
+        );
+        Some(state)
+    }
+
+    /// tn-fi1k: spawn a brand-new daemon session and materialise its
+    /// initial pane locally, returning a `PaneState`. Used by
+    /// `restore_layout` when no existing daemon pane is available to
+    /// anchor a `SplitPane` against (e.g. after `take_layout()` cleared
+    /// the workspace and no other workspace held a pane).
+    ///
+    /// Returns `None` and shows a toast on any failure.
+    pub(crate) fn spawn_remote_pane_fresh_session(
+        &mut self,
+        viewport: Rect,
+    ) -> Option<crate::pane::PaneState> {
+        let renderer = self.grid_renderer.as_ref()?;
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
+            osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
+        };
+        let dc = Arc::clone(self.daemon_client.as_ref()?);
+        let handle = self.daemon_runtime.as_ref()?.clone();
+        let socket = dc.socket_path().to_path_buf();
+        let local_id = crate::pane::next_pane_id();
+        let callbacks = make_pane_callbacks(&self.event_proxy, local_id);
+
+        match crate::pane::remote_spawn::spawn_remote_pane(
+            local_id,
+            viewport,
+            renderer,
+            scrollback,
+            interceptor_cfg,
+            dc,
+            handle,
+            socket,
+            callbacks,
+            None,
+        ) {
+            Ok((state, session_id, daemon_pane_id)) => {
+                self.pane_id_map.insert(local_id, daemon_pane_id);
+                // If we don't yet have a daemon session id, claim this one
+                // so subsequent publish_workspace_state calls have somewhere
+                // to send. (Should already be set in normal flows.)
+                if self.daemon_session_id.is_none() {
+                    self.daemon_session_id = Some(session_id);
+                }
+                info!(
+                    local_id,
+                    daemon_pane_id, session_id, "spawn_remote_pane_fresh_session: created"
+                );
+                Some(state)
+            }
+            Err(e) => {
+                warn!(error = %e, "spawn_remote_pane_fresh_session: spawn_remote_pane failed");
+                self.show_toast("daemon session create failed");
+                None
+            }
+        }
+    }
+
     /// Best-effort `SelectPane` to keep daemon focus metadata in sync with
     /// the GUI's focused pane. Fire-and-forget: spawns the RPC on the tokio
     /// runtime so the winit event loop never blocks on it. Only runs in
@@ -1259,16 +1446,44 @@ impl App {
             self.set_focused_pane(None);
         }
 
-        let renderer = match self.grid_renderer.as_ref() {
-            Some(r) => r,
-            None => return,
-        };
         let full_rect = match self.compute_layout_rect() {
             Some(r) => r,
             None => return,
         };
 
-        // Rebuild the layout tree from the snapshot by spawning new panes.
+        // tn-fi1k Phase B: in daemon mode, route the rebuild through
+        // SplitPane / CreateSession so each leaf carries a daemon id.
+        if self.is_daemon_mode() {
+            match self.rebuild_from_snapshot_remote(&snapshot, full_rect) {
+                Some(node) => {
+                    if let Some(wm) = self.workspaces.as_mut() {
+                        wm.set_layout(node);
+                    }
+                    let first_id = self
+                        .get_layout()
+                        .map(|l| l.pane_ids())
+                        .and_then(|ids| ids.first().copied());
+                    let pane_count = self.get_layout().map(|l| l.pane_ids().len()).unwrap_or(0);
+                    self.set_focused_pane(first_id);
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
+                    info!(
+                        panes = pane_count,
+                        "Restored layout from snapshot (daemon mode)"
+                    );
+                }
+                None => {
+                    warn!("Failed to restore layout from snapshot (daemon mode)");
+                }
+            }
+            return;
+        }
+
+        // Local-mode rebuild path: unchanged.
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
             osc_633: self.config.terminal.osc_633,
@@ -1397,6 +1612,62 @@ impl App {
         }
     }
 
+    /// tn-fi1k: daemon-mode counterpart to `rebuild_from_snapshot`.
+    ///
+    /// Walks the snapshot tree and allocates each leaf via the daemon
+    /// (`SplitPane` against an existing daemon pane, falling back to
+    /// `CreateSession` for the very first leaf when the GUI has no
+    /// existing daemon panes left to anchor against). The first
+    /// successfully spawned leaf is then used as the anchor for all
+    /// subsequent splits.
+    ///
+    /// Returns `None` if any leaf fails to spawn — partial trees are
+    /// dropped to avoid leaking daemon panes (the helpers
+    /// `spawn_remote_pane_off_existing` / `spawn_remote_pane_fresh_session`
+    /// already best-effort cleanup their own failures).
+    fn rebuild_from_snapshot_remote(
+        &mut self,
+        snapshot: &LayoutSnapshot,
+        rect: Rect,
+    ) -> Option<LayoutNode> {
+        use crate::pane::SEPARATOR_GAP;
+
+        match snapshot {
+            LayoutSnapshot::Leaf => {
+                // Pick an anchor: any existing daemon pane in the map.
+                // If none exist (we just took the layout), fall back to
+                // CreateSession.
+                let state = if let Some(anchor) = self.pane_id_map.any_daemon_id() {
+                    self.spawn_remote_pane_off_existing(anchor, rect)?
+                } else {
+                    self.spawn_remote_pane_fresh_session(rect)?
+                };
+                Some(LayoutNode::Leaf(state))
+            }
+            LayoutSnapshot::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let (r1, r2) = match direction {
+                    SplitDirection::Horizontal => {
+                        rect.split_horizontal_ratio(*ratio, SEPARATOR_GAP)
+                    }
+                    SplitDirection::Vertical => rect.split_vertical_ratio(*ratio, SEPARATOR_GAP),
+                };
+                let first_node = self.rebuild_from_snapshot_remote(first, r1)?;
+                let second_node = self.rebuild_from_snapshot_remote(second, r2)?;
+                Some(LayoutNode::Split {
+                    direction: *direction,
+                    ratio: *ratio,
+                    first: Box::new(first_node),
+                    second: Box::new(second_node),
+                })
+            }
+        }
+    }
+
     // ── Workspace operations ──────────────────────────────────────────
 
     /// Switch to workspace `n` (1-9).
@@ -1411,6 +1682,85 @@ impl App {
             Some(r) => r,
             None => return,
         };
+
+        // tn-fi1k Phase B: in daemon mode, route the fresh-pane allocation
+        // through SplitPane against any existing daemon pane in the session,
+        // so the new workspace's pane carries a daemon id and survives
+        // restarts. Pre-spawn the pane BEFORE calling switch_to so we don't
+        // need to take a `&mut self` borrow inside the WorkspaceManager
+        // closure.
+        if self.is_daemon_mode() {
+            // Don't pre-spawn if we're already on workspace n (or n is invalid)
+            // — switch_to would no-op the pane and leak it.
+            let already_on_n = self
+                .workspaces
+                .as_ref()
+                .map(|wm| wm.active_id() == n as usize)
+                .unwrap_or(false);
+            let target_exists = self
+                .workspaces
+                .as_ref()
+                .map(|wm| wm.workspace_ids().contains(&(n as usize)))
+                .unwrap_or(false);
+            if already_on_n || !(1..=9).contains(&n) {
+                return;
+            }
+            if target_exists {
+                // Target workspace already exists with panes — no spawn needed,
+                // just route through switch_to with a no-op closure.
+                let switched = self
+                    .workspaces
+                    .as_mut()
+                    .map(|wm| wm.switch_to(n as usize, || None))
+                    .unwrap_or(false);
+                if switched {
+                    info!("Switched to workspace {n}");
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
+                }
+                return;
+            }
+            // Target workspace does not exist — pre-spawn the pane.
+            let Some(anchor) = self.pane_id_map.any_daemon_id() else {
+                warn!(
+                    "switch_workspace: daemon mode but no daemon pane to anchor split — falling back to fresh session"
+                );
+                let Some(state) = self.spawn_remote_pane_fresh_session(full_rect) else {
+                    return;
+                };
+                let new_pane_id = state.id;
+                let switched = self
+                    .workspaces
+                    .as_mut()
+                    .map(|wm| {
+                        wm.switch_to(n as usize, || Some((LayoutNode::Leaf(state), new_pane_id)))
+                    })
+                    .unwrap_or(false);
+                if switched {
+                    info!("Switched to (new) workspace {n} via fresh-session spawn");
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
+                }
+                return;
+            };
+            let Some(state) = self.spawn_remote_pane_off_existing(anchor, full_rect) else {
+                return;
+            };
+            let new_pane_id = state.id;
+            let switched = self
+                .workspaces
+                .as_mut()
+                .map(|wm| wm.switch_to(n as usize, || Some((LayoutNode::Leaf(state), new_pane_id))))
+                .unwrap_or(false);
+            if switched {
+                info!("Switched to (new) workspace {n} via daemon split");
+                self.relayout_and_redraw();
+                self.publish_workspace_state();
+            }
+            return;
+        }
+
+        // Local-mode path: unchanged.
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
             None => return,
@@ -1495,6 +1845,136 @@ impl App {
             Some(r) => r,
             None => return,
         };
+
+        // tn-fi1k Phase B: in daemon mode, the move is metadata-only on
+        // the daemon side (the pane's PTY isn't touched). The replacement
+        // pane in the source workspace, if needed, is allocated via
+        // SplitPane so it carries a daemon id.
+        if self.is_daemon_mode() {
+            if !(1..=9).contains(&n) {
+                return;
+            }
+            // Reject same-workspace moves up front.
+            if let Some(wm) = self.workspaces.as_ref()
+                && wm.active_id() == n as usize
+            {
+                return;
+            }
+            // Pre-spawn a replacement pane if removing the focused pane
+            // would empty the source workspace AND the target already
+            // exists (otherwise the moved pane will become the new
+            // workspace's only pane and the source becomes empty too —
+            // both cases need the replacement).
+            //
+            // We can't tell ahead of time whether send_pane_to will
+            // actually need the replacement closure (it depends on
+            // whether the focused pane was the last in its workspace).
+            // The safe approach: pre-spawn lazily on demand using the
+            // same anchor selection. Since the closure is `FnOnce`, we
+            // pre-spawn and pass it through.
+            let needs_replacement = self
+                .workspaces
+                .as_ref()
+                .map(|wm| {
+                    wm.layout().pane_count() == 1
+                        && wm.layout().pane_ids().first().copied() == Some(focused)
+                })
+                .unwrap_or(false);
+
+            let replacement_state: Option<crate::pane::PaneState> = if needs_replacement {
+                // Pick an anchor that ISN'T the pane being moved.
+                let anchor = self
+                    .pane_id_map
+                    .any_daemon_id()
+                    .filter(|&d| Some(d) != self.pane_id_map.daemon_for_local(focused));
+                let anchor = match anchor.or_else(|| self.pane_id_map.any_daemon_id()) {
+                    Some(a) => a,
+                    None => {
+                        warn!("send_to_workspace: no daemon pane available for replacement anchor");
+                        return;
+                    }
+                };
+                let Some(state) = self.spawn_remote_pane_off_existing(anchor, full_rect) else {
+                    return;
+                };
+                Some(state)
+            } else {
+                None
+            };
+
+            // Capture the daemon id of the moved pane BEFORE the local mutate
+            // so we can MovePane on the daemon side too.
+            let moved_daemon_id = self.pane_id_map.daemon_for_local(focused);
+
+            let wm = match self.workspaces.as_mut() {
+                Some(wm) => wm,
+                None => return,
+            };
+            let mut replacement_state = replacement_state;
+            let moved = wm.send_pane_to(focused, n as usize, || {
+                replacement_state.take().map(|state| {
+                    let id = state.id;
+                    (LayoutNode::Leaf(state), id)
+                })
+            });
+
+            if !moved {
+                // The local move was rejected. Roll back any replacement
+                // pane we pre-spawned so it doesn't become an orphan: the
+                // pre-spawned pane was inserted into pane_id_map by
+                // spawn_remote_pane_off_existing but never made it into a
+                // local layout — if `replacement_state` is still `Some`
+                // here, the take() inside the closure never ran.
+                if let Some(state) = replacement_state {
+                    let local_id = state.id;
+                    if let Some(daemon_id) = self.pane_id_map.daemon_for_local(local_id) {
+                        warn!(
+                            local_id,
+                            daemon_id,
+                            "send_to_workspace: rolling back unused pre-spawned replacement"
+                        );
+                        let _ =
+                            self.daemon_rpc_blocking(IpcRequest::KillPane { pane_id: daemon_id });
+                        self.pane_id_map.remove_by_local(local_id);
+                    }
+                    drop(state);
+                }
+                return;
+            }
+
+            // Mirror the move on the daemon side via MovePane (metadata
+            // sync; the underlying PTY is not touched). publish_workspace_state
+            // below will also re-sync the full topology, but issuing an
+            // explicit MovePane keeps the daemon's view tight in case the
+            // batched SetWorkspaceState drops bytes.
+            if let Some(daemon_id) = moved_daemon_id {
+                match self.daemon_rpc_blocking(IpcRequest::MovePane {
+                    pane_id: daemon_id,
+                    target_workspace_id: n as therminal_protocol::WorkspaceId,
+                }) {
+                    Ok(IpcResponse::PaneMoved { .. }) => {}
+                    Ok(IpcResponse::Error { message }) => {
+                        warn!(
+                            focused,
+                            daemon_id, message, "send_to_workspace: daemon MovePane error"
+                        );
+                    }
+                    Ok(other) => {
+                        warn!(?other, "send_to_workspace: unexpected MovePane response");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "send_to_workspace: MovePane RPC failed");
+                    }
+                }
+            }
+
+            info!("Sent pane {focused} to workspace {n} (daemon mode)");
+            self.relayout_and_redraw();
+            self.publish_workspace_state();
+            return;
+        }
+
+        // Local-mode path: unchanged.
         let wm = match self.workspaces.as_mut() {
             Some(wm) => wm,
             None => return,
@@ -2105,9 +2585,12 @@ mod tests {
         };
         // When the inner cwd_from_source_pane returns None (covered above),
         // split_spawn_options must clone base.cwd. Here we check the wiring
-        // by calling the inner helper components.
-        let inherited: Option<String> = None;
-        let chosen = inherited.unwrap_or_else(|| base.cwd.clone());
+        // by calling the inner helper components. The redundant
+        // `unwrap_or_else` mirrors the production-path expression so that
+        // if anyone changes the fallback to `unwrap_or_default()` (which
+        // would silently swallow base.cwd), this assertion fails.
+        #[allow(clippy::unnecessary_literal_unwrap)]
+        let chosen = Option::<String>::None.unwrap_or_else(|| base.cwd.clone());
         assert_eq!(chosen, "/some/base");
     }
 

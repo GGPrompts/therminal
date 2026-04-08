@@ -584,6 +584,20 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::MovePane {
+            pane_id,
+            target_workspace_id,
+        } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.move_pane(*pane_id, *target_workspace_id) {
+                Ok((source_workspace_id, target_workspace_id)) => IpcResponse::PaneMoved {
+                    pane_id: *pane_id,
+                    source_workspace_id,
+                    target_workspace_id,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
         IpcRequest::SelectPane { pane_id } => {
             let mgr = session_mgr.lock().await;
             match mgr.select_pane(*pane_id) {

@@ -258,9 +258,11 @@ mod tests {
     fn later_push_overwrites_earlier() {
         // Emulate App::show_toast semantics: newer toast replaces older.
         let now = Instant::now();
-        let mut slot: Option<Toast> = None;
-        slot = Some(Toast::new("first", now, TOAST_TTL));
-        slot = Some(Toast::new("second", now, TOAST_TTL));
+        let slot: Option<Toast> = Some(Toast::new("first", now, TOAST_TTL));
+        assert_eq!(slot.as_ref().map(|t| t.text.as_str()), Some("first"));
+        // A subsequent show_toast call replaces the slot wholesale; emulate
+        // that by re-binding instead of mutating.
+        let slot: Option<Toast> = Some(Toast::new("second", now, TOAST_TTL));
         assert_eq!(slot.as_ref().map(|t| t.text.as_str()), Some("second"));
     }
 }

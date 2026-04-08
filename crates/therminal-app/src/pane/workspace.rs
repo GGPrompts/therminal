@@ -1075,7 +1075,10 @@ mod tests {
 
         let wm = WorkspaceManager::from_workspace_info(&[ws1, ws2], 2, &mut make_leaf)
             .expect("reconstruction succeeded");
-        drop(make_leaf);
+        // Closures don't implement Drop, so use scope-based dropping instead
+        // of `drop(make_leaf)` to satisfy clippy::drop_non_drop. The closure
+        // is no longer needed past this point.
+        let _ = make_leaf;
 
         // Active workspace is the one matching active_workspace_id (2).
         assert_eq!(wm.active_id(), 2);

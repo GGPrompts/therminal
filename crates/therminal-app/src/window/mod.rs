@@ -80,6 +80,15 @@ impl PaneIdMap {
             self.daemon_to_local.remove(&daemon);
         }
     }
+
+    /// Return any daemon pane id from the map, or `None` if the map is
+    /// empty. Used by tn-fi1k cross-workspace spawn paths to pick an
+    /// anchor pane for `IpcRequest::SplitPane` when the caller has no
+    /// natural source pane (e.g. switching to a fresh workspace).
+    #[allow(dead_code)]
+    pub(crate) fn any_daemon_id(&self) -> Option<therminal_protocol::PaneId> {
+        self.local_to_daemon.values().next().copied()
+    }
 }
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::ConfigWatcher;
@@ -747,9 +756,24 @@ impl App {
             }
         }
         if translation_failed {
-            debug!(
-                "publish_workspace_state: mixed local/remote pane ids (Phase B not landed); skipping publish to avoid corrupting daemon state"
-            );
+            // tn-fi1k: Phase B finally cut switch_workspace / send_to_workspace
+            // / restore_layout over to daemon RPCs, so reaching this branch
+            // is a bug — every pane in any workspace should now have a
+            // daemon id. Keep the safety net (don't publish a partial
+            // layout) but log loud so a regression is visible. The first
+            // hit per process is a `warn!`; subsequent hits stay debug-only
+            // to avoid log spam if a bug repeats every redraw.
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "publish_workspace_state: tn-5hqp guard fired — at least one pane has no daemon id mapping despite tn-fi1k cutover. This indicates a regression: a code path is creating panes via crate::pane::spawn_pane in daemon mode without populating pane_id_map."
+                );
+            } else {
+                debug!(
+                    "publish_workspace_state: tn-5hqp guard fired again (warn-once already issued)"
+                );
+            }
             return false;
         }
         let active_workspace = wm.active_id() as therminal_protocol::WorkspaceId;
@@ -1101,6 +1125,24 @@ mod rename_state_tests {
         m.remove_by_local(42);
         assert_eq!(m.daemon_for_local(42), None);
         assert_eq!(m.local_for_daemon(7), None);
+    }
+
+    #[test]
+    fn pane_id_map_any_daemon_id_returns_none_when_empty() {
+        use super::PaneIdMap;
+        let m = PaneIdMap::default();
+        assert_eq!(m.any_daemon_id(), None);
+    }
+
+    #[test]
+    fn pane_id_map_any_daemon_id_returns_value_when_populated() {
+        use super::PaneIdMap;
+        let mut m = PaneIdMap::default();
+        m.insert(1, 100);
+        m.insert(2, 200);
+        // Either 100 or 200 is acceptable — order is HashMap-iter-defined.
+        let any = m.any_daemon_id().expect("expected Some");
+        assert!(any == 100 || any == 200, "got {any}");
     }
 
     #[test]

@@ -444,6 +444,65 @@ pub(super) fn compose_center_text(cwd: Option<&str>, focused_pane_id: Option<usi
     }
 }
 
+/// Abbreviate a path for status bar display: replace the home directory with `~`
+/// and extract the path from `file://` URLs.
+pub(super) fn abbreviate_path(path: &str) -> String {
+    let path = if let Some(rest) = path.strip_prefix("file://") {
+        rest.find('/').map(|i| &rest[i..]).unwrap_or(rest)
+    } else {
+        path
+    };
+
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = path.strip_prefix(home.as_str())
+    {
+        return format!("~{rest}");
+    }
+
+    if let Some(win_home) = wsl2_windows_home()
+        && let Some(rest) = path.strip_prefix(win_home.as_str())
+    {
+        return format!("~win{rest}");
+    }
+
+    path.to_string()
+}
+
+/// Detect the WSL2 Windows user home directory as a Linux path.
+fn wsl2_windows_home() -> Option<String> {
+    std::env::var_os("WSL_DISTRO_NAME")?;
+
+    if let Ok(userprofile) = std::env::var("USERPROFILE")
+        && let Some(linux_path) = windows_path_to_linux(&userprofile)
+    {
+        return Some(linux_path);
+    }
+
+    if let (Ok(drive), Ok(homepath)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        let combined = format!("{drive}{homepath}");
+        if let Some(linux_path) = windows_path_to_linux(&combined) {
+            return Some(linux_path);
+        }
+    }
+
+    None
+}
+
+/// Convert a Windows-style absolute path to a WSL2 Linux mount path.
+pub(super) fn windows_path_to_linux(windows_path: &str) -> Option<String> {
+    if windows_path.len() < 3 {
+        return None;
+    }
+    let (drive, rest) = windows_path.split_at(2);
+    if !drive.ends_with(':') {
+        return None;
+    }
+    let drive_letter = drive.chars().next()?.to_ascii_lowercase();
+    let rest = rest.trim_start_matches(['\\', '/']);
+    let rest = rest.replace('\\', "/");
+    Some(format!("/mnt/{drive_letter}/{rest}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,63 +565,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Abbreviate a path for status bar display: replace the home directory with `~`
-/// and extract the path from `file://` URLs.
-pub(super) fn abbreviate_path(path: &str) -> String {
-    let path = if let Some(rest) = path.strip_prefix("file://") {
-        rest.find('/').map(|i| &rest[i..]).unwrap_or(rest)
-    } else {
-        path
-    };
-
-    if let Ok(home) = std::env::var("HOME")
-        && let Some(rest) = path.strip_prefix(home.as_str())
-    {
-        return format!("~{rest}");
-    }
-
-    if let Some(win_home) = wsl2_windows_home()
-        && let Some(rest) = path.strip_prefix(win_home.as_str())
-    {
-        return format!("~win{rest}");
-    }
-
-    path.to_string()
-}
-
-/// Detect the WSL2 Windows user home directory as a Linux path.
-fn wsl2_windows_home() -> Option<String> {
-    std::env::var_os("WSL_DISTRO_NAME")?;
-
-    if let Ok(userprofile) = std::env::var("USERPROFILE")
-        && let Some(linux_path) = windows_path_to_linux(&userprofile)
-    {
-        return Some(linux_path);
-    }
-
-    if let (Ok(drive), Ok(homepath)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
-        let combined = format!("{drive}{homepath}");
-        if let Some(linux_path) = windows_path_to_linux(&combined) {
-            return Some(linux_path);
-        }
-    }
-
-    None
-}
-
-/// Convert a Windows-style absolute path to a WSL2 Linux mount path.
-pub(super) fn windows_path_to_linux(windows_path: &str) -> Option<String> {
-    if windows_path.len() < 3 {
-        return None;
-    }
-    let (drive, rest) = windows_path.split_at(2);
-    if !drive.ends_with(':') {
-        return None;
-    }
-    let drive_letter = drive.chars().next()?.to_ascii_lowercase();
-    let rest = rest.trim_start_matches(['\\', '/']);
-    let rest = rest.replace('\\', "/");
-    Some(format!("/mnt/{drive_letter}/{rest}"))
 }

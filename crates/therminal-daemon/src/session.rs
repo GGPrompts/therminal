@@ -928,6 +928,72 @@ fn swap_layout_leaves(node: &mut LayoutSnapshot, a: PaneId, b: PaneId) {
     }
 }
 
+/// Remove a single leaf with the given `pane_id` from a `LayoutSnapshot`,
+/// promoting its sibling. Returns `None` if the resulting tree would be
+/// empty (the caller is the workspace state holder, which should then
+/// drop the layout entirely or fall back to a flat reconstruction). Used
+/// by [`SessionManager::move_pane`] (tn-fi1k).
+///
+/// `target` MUST refer to a leaf actually present in the tree; if it is
+/// missing, the original tree is returned unchanged so the caller's
+/// workspace state stays consistent (the GUI will resync via
+/// `SetWorkspaceState` shortly anyway).
+fn remove_layout_leaf(node: LayoutSnapshot, target: PaneId) -> Option<LayoutSnapshot> {
+    match node {
+        LayoutSnapshot::Leaf { pane_id } => {
+            if pane_id == target {
+                None
+            } else {
+                Some(LayoutSnapshot::Leaf { pane_id })
+            }
+        }
+        LayoutSnapshot::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let first_out = remove_layout_leaf(*first, target);
+            let second_out = remove_layout_leaf(*second, target);
+            match (first_out, second_out) {
+                (Some(f), Some(s)) => Some(LayoutSnapshot::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(f),
+                    second: Box::new(s),
+                }),
+                (Some(f), None) => Some(f),
+                (None, Some(s)) => Some(s),
+                (None, None) => None,
+            }
+        }
+    }
+}
+
+/// Append a new leaf to the right of an existing `LayoutSnapshot` via a
+/// horizontal split (matching the GUI's `WorkspaceManager::send_pane_to`
+/// behaviour for the cross-workspace pane transfer). Used by
+/// [`SessionManager::move_pane`] (tn-fi1k).
+///
+/// If the target workspace had no layout yet, the result is a single
+/// leaf containing only `pane_id`.
+fn append_layout_leaf(layout: Option<LayoutSnapshot>, pane_id: PaneId) -> LayoutSnapshot {
+    use therminal_protocol::daemon::LayoutSplitDirection;
+    match layout {
+        None => LayoutSnapshot::Leaf { pane_id },
+        Some(LayoutSnapshot::Leaf { pane_id: existing }) if existing == pane_id => {
+            // Already present as the only leaf — no change needed.
+            LayoutSnapshot::Leaf { pane_id }
+        }
+        Some(other) => LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(other),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id }),
+        },
+    }
+}
+
 impl SessionManager {
     /// Create a new empty session manager.
     pub fn new(event_tx: broadcast::Sender<DaemonEvent>) -> Self {
@@ -1394,6 +1460,103 @@ impl SessionManager {
 
         self.mark_dirty();
         Ok(())
+    }
+
+    /// Move a pane between workspaces inside its containing session
+    /// (tn-fi1k). Metadata-only: the underlying PTY is not touched.
+    ///
+    /// Returns `(source_workspace_id, target_workspace_id)` on success.
+    /// Errors if the pane does not exist anywhere in any session, or if
+    /// it is somehow not present in any workspace's `pane_ids` (a corrupt
+    /// state that should be loud).
+    ///
+    /// If the target workspace doesn't exist yet, it is created as a
+    /// fresh single-pane workspace whose layout is just `Leaf { pane_id }`.
+    ///
+    /// If the move is a no-op (target == source), it succeeds with the
+    /// source as both source and target.
+    pub fn move_pane(
+        &mut self,
+        pane_id: PaneId,
+        target_workspace_id: WorkspaceId,
+    ) -> Result<(WorkspaceId, WorkspaceId), String> {
+        let session_id = self
+            .session_for_pane(pane_id)
+            .ok_or_else(|| format!("pane not found: {pane_id}"))?;
+
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| "session disappeared under concurrent request".to_string())?;
+
+        // 1. Find the workspace currently owning the pane.
+        let source_idx = session
+            .workspace_state
+            .iter()
+            .position(|ws| ws.pane_ids.contains(&pane_id))
+            .ok_or_else(|| {
+                format!(
+                    "pane {pane_id} exists in session {session_id} but is not bound to any workspace"
+                )
+            })?;
+        let source_workspace_id = session.workspace_state[source_idx].id;
+
+        if source_workspace_id == target_workspace_id {
+            // No-op move: nothing to do, but report it as success so callers
+            // can keep the local <-> daemon state mirror in sync without
+            // special-casing.
+            return Ok((source_workspace_id, target_workspace_id));
+        }
+
+        // 2. Remove the pane from the source workspace's pane_ids and layout.
+        {
+            let src = &mut session.workspace_state[source_idx];
+            src.pane_ids.retain(|p| *p != pane_id);
+            if src.focused_pane == Some(pane_id) {
+                src.focused_pane = src.pane_ids.first().copied();
+            }
+            if let Some(layout) = src.layout.as_mut() {
+                let new_layout = remove_layout_leaf(layout.clone(), pane_id);
+                src.layout = new_layout;
+            }
+        }
+
+        // 3. Add the pane to the target workspace, creating it if missing.
+        let target_idx_opt = session
+            .workspace_state
+            .iter()
+            .position(|ws| ws.id == target_workspace_id);
+        match target_idx_opt {
+            Some(idx) => {
+                let target = &mut session.workspace_state[idx];
+                if !target.pane_ids.contains(&pane_id) {
+                    target.pane_ids.push(pane_id);
+                }
+                target.layout = Some(append_layout_leaf(target.layout.take(), pane_id));
+            }
+            None => {
+                // Create a fresh workspace tab for the target id with the
+                // moved pane as its only leaf.
+                let next_order = session
+                    .workspace_state
+                    .iter()
+                    .map(|w| w.order)
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0);
+                session.workspace_state.push(WorkspaceInfo {
+                    id: target_workspace_id,
+                    name: target_workspace_id.to_string(),
+                    order: next_order,
+                    pane_ids: vec![pane_id],
+                    focused_pane: Some(pane_id),
+                    layout: Some(LayoutSnapshot::Leaf { pane_id }),
+                });
+            }
+        }
+
+        self.mark_dirty();
+        Ok((source_workspace_id, target_workspace_id))
     }
 
     /// Merge opaque key/value tags into a pane (tn-bbvf). Returns the
@@ -2119,6 +2282,171 @@ mod tests {
         } else {
             panic!("expected split");
         }
+    }
+
+    // ── tn-fi1k: layout-leaf removal & append helpers ─────────────────
+
+    #[test]
+    fn remove_layout_leaf_lone_match_returns_none() {
+        let tree = LayoutSnapshot::Leaf { pane_id: 5 };
+        assert!(remove_layout_leaf(tree, 5).is_none());
+    }
+
+    #[test]
+    fn remove_layout_leaf_lone_miss_preserves_tree() {
+        let tree = LayoutSnapshot::Leaf { pane_id: 5 };
+        let out = remove_layout_leaf(tree, 7);
+        assert!(matches!(out, Some(LayoutSnapshot::Leaf { pane_id: 5 })));
+    }
+
+    #[test]
+    fn remove_layout_leaf_split_promotes_sibling() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+        };
+        let out = remove_layout_leaf(tree, 1).unwrap();
+        // Removing one side of a 2-leaf split must collapse to the sibling.
+        assert!(matches!(out, LayoutSnapshot::Leaf { pane_id: 2 }));
+    }
+
+    #[test]
+    fn remove_layout_leaf_nested_collapses_correctly() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        // 1 | (2 | 3)
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+            }),
+        };
+        // Remove the deeply nested leaf 3 → outer split keeps left leaf 1
+        // and collapses the right split into its surviving child (leaf 2).
+        let out = remove_layout_leaf(tree, 3).unwrap();
+        if let LayoutSnapshot::Split { first, second, .. } = out {
+            assert!(matches!(*first, LayoutSnapshot::Leaf { pane_id: 1 }));
+            assert!(matches!(*second, LayoutSnapshot::Leaf { pane_id: 2 }));
+        } else {
+            panic!("expected split");
+        }
+    }
+
+    #[test]
+    fn append_layout_leaf_into_empty() {
+        let out = append_layout_leaf(None, 42);
+        assert!(matches!(out, LayoutSnapshot::Leaf { pane_id: 42 }));
+    }
+
+    #[test]
+    fn append_layout_leaf_into_existing_creates_split() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        let prev = Some(LayoutSnapshot::Leaf { pane_id: 1 });
+        let out = append_layout_leaf(prev, 2);
+        if let LayoutSnapshot::Split {
+            direction,
+            first,
+            second,
+            ..
+        } = out
+        {
+            assert_eq!(direction, LayoutSplitDirection::Horizontal);
+            assert!(matches!(*first, LayoutSnapshot::Leaf { pane_id: 1 }));
+            assert!(matches!(*second, LayoutSnapshot::Leaf { pane_id: 2 }));
+        } else {
+            panic!("expected split");
+        }
+    }
+
+    #[test]
+    fn append_layout_leaf_idempotent_for_same_lone_pane() {
+        let prev = Some(LayoutSnapshot::Leaf { pane_id: 7 });
+        let out = append_layout_leaf(prev, 7);
+        assert!(matches!(out, LayoutSnapshot::Leaf { pane_id: 7 }));
+    }
+
+    #[test]
+    fn move_pane_unknown_returns_error() {
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let err = mgr.move_pane(404, 2).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    #[ignore] // Requires a real TTY
+    fn move_pane_updates_workspace_state() {
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let session_id = mgr.create_session(Some("move-test".into())).unwrap();
+        let pane_a = mgr.sessions.get(&session_id).unwrap().windows[0].panes[0].id;
+        let pane_b = mgr.split_pane(pane_a, false).unwrap();
+
+        // Seed the daemon with a single workspace owning both panes.
+        mgr.set_workspace_state(
+            session_id,
+            vec![WorkspaceInfo {
+                id: 1,
+                name: "main".into(),
+                order: 0,
+                pane_ids: vec![pane_a, pane_b],
+                focused_pane: Some(pane_b),
+                layout: Some(LayoutSnapshot::Split {
+                    direction: LayoutSplitDirection::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(LayoutSnapshot::Leaf { pane_id: pane_a }),
+                    second: Box::new(LayoutSnapshot::Leaf { pane_id: pane_b }),
+                }),
+            }],
+            1,
+        )
+        .unwrap();
+
+        // Move pane_b into a brand-new workspace 3.
+        let (src, tgt) = mgr.move_pane(pane_b, 3).unwrap();
+        assert_eq!(src, 1);
+        assert_eq!(tgt, 3);
+
+        let (ws, _) = mgr.get_workspace_state(session_id).unwrap();
+        // Workspace 1 should now own only pane_a, with the layout collapsed.
+        let ws1 = ws.iter().find(|w| w.id == 1).unwrap();
+        assert_eq!(ws1.pane_ids, vec![pane_a]);
+        assert!(matches!(
+            ws1.layout.as_ref().unwrap(),
+            LayoutSnapshot::Leaf { pane_id } if *pane_id == pane_a
+        ));
+        // Workspace 3 must have been auto-created with pane_b as the only leaf.
+        let ws3 = ws.iter().find(|w| w.id == 3).unwrap();
+        assert_eq!(ws3.pane_ids, vec![pane_b]);
+        assert_eq!(ws3.focused_pane, Some(pane_b));
+        assert!(matches!(
+            ws3.layout.as_ref().unwrap(),
+            LayoutSnapshot::Leaf { pane_id } if *pane_id == pane_b
+        ));
+    }
+
+    #[test]
+    #[ignore] // Requires a real TTY
+    fn move_pane_noop_same_workspace() {
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let session_id = mgr.create_session(Some("noop-test".into())).unwrap();
+        let pane_a = mgr.sessions.get(&session_id).unwrap().windows[0].panes[0].id;
+
+        let (src, tgt) = mgr.move_pane(pane_a, 1).unwrap();
+        assert_eq!(src, 1);
+        assert_eq!(tgt, 1);
+        let (ws, _) = mgr.get_workspace_state(session_id).unwrap();
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].pane_ids, vec![pane_a]);
     }
 
     #[test]
