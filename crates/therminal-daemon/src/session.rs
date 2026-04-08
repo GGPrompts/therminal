@@ -775,6 +775,13 @@ impl Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
+        // Best-effort cleanup of the daemon-pane-*.json file the per-pane
+        // state inference engine wrote into /tmp/<agent>-state. Without this,
+        // restarting the daemon leaves stale state files lying around that
+        // ClaudeStatePoller has to filter at boot. (tn-qfi0)
+        if let Ok(inference) = self.inference.lock() {
+            inference.cleanup();
+        }
         // The PTY master drop will close the PTY, causing the reader thread
         // to get EOF and exit. We don't join here to avoid blocking.
         debug!(pane_id = %self.id, "pane dropped");
