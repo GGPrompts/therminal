@@ -19,7 +19,7 @@ use therminal_protocol::daemon::{DaemonEvent, EventKind, IpcRequest, IpcResponse
 use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
 use therminal_terminal::pty_runtime::TermSize;
 use therminal_terminal::region_index::RegionIndex;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, warn};
 
 use super::PaneId;
 use super::PaneListener;
@@ -259,53 +259,96 @@ pub(crate) fn build_remote_pane_state(
             warn!(error = %e, "remote pane forwarder Subscribe failed");
             return;
         }
-        // tn-wlu6 instrumentation: hex-dump the first chunks after subscribe
-        // so we can see whether stale OSC 633 bytes arrive (and from where).
-        // Window: 2 seconds from subscribe. Gated by tracing target so it
-        // only fires with RUST_LOG=therminal_app::pane::remote_spawn=trace.
-        let trace_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut trace_chunk_idx: usize = 0;
-        trace!(
-            remote_pane_id,
-            "tn-wlu6: forwarder subscribed, begin 2s trace window"
-        );
+
+        // tn-wlu6 mitigation: when the GUI attaches to a daemon pane that
+        // already hosts a running TUI (e.g. Bubble Tea, htop), the TUI's
+        // ongoing redraw loop is mid-frame. The first chunks the GUI
+        // receives are partial repaints — frames the TUI emits BEFORE its
+        // next clear-screen. The local Term is fresh and empty, so it
+        // ingests these partial frames and pushes them into scrollback as
+        // each subsequent frame "appends" to the screen, producing 2-3
+        // screens of phantom scrollback (see beads tn-wlu6 for the trace).
+        //
+        // Heuristic: during a short post-subscribe window, buffer incoming
+        // chunks instead of forwarding immediately. If we observe an
+        // ESC[2J (clear screen) within the window, drop everything before
+        // it and start forwarding from the clear onward — that's the
+        // first frame the TUI emits cleanly. If the window expires
+        // without ever seeing ESC[2J (plain shells, non-TUI panes),
+        // forward the buffered chunks as-is so we don't lose any output.
+        //
+        // This is a narrow, GUI-side mitigation. The principled fix
+        // (snapshot daemon Term state on attach including mode flags for
+        // mouse capture) lives in tn-zamd and is intentionally out of
+        // scope here.
+        const PRE_CLEAR_BUFFER_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+        const ESC_2J: &[u8] = &[0x1b, 0x5b, 0x32, 0x4a];
+
+        let buffer_deadline = std::time::Instant::now() + PRE_CLEAR_BUFFER_WINDOW;
+        let mut pre_clear_buffer: Vec<Vec<u8>> = Vec::new();
+        let mut buffering = true;
+
+        // Helper: forward bytes into the worker, returns false if the
+        // worker channel is gone (forwarder should exit).
+        let send_bytes = |bytes: Vec<u8>| -> bool { byte_tx.send(bytes).is_ok() };
+
         loop {
             if shutdown_for_forwarder.load(Ordering::Acquire) {
                 break;
             }
-            match sub_client.recv_event().await {
+
+            // While buffering, race the recv against the buffer deadline so
+            // we flush even if no new bytes arrive (e.g. plain shell idle).
+            let event = if buffering {
+                let now = std::time::Instant::now();
+                if now >= buffer_deadline {
+                    debug!(
+                        remote_pane_id,
+                        chunks = pre_clear_buffer.len(),
+                        "tn-wlu6: pre-clear window expired without ESC[2J, flushing buffer"
+                    );
+                    for chunk in pre_clear_buffer.drain(..) {
+                        if !send_bytes(chunk) {
+                            return;
+                        }
+                    }
+                    buffering = false;
+                    sub_client.recv_event().await
+                } else {
+                    let remaining = buffer_deadline - now;
+                    match tokio::time::timeout(remaining, sub_client.recv_event()).await {
+                        Ok(ev) => ev,
+                        Err(_) => continue, // deadline hit; loop top will flush
+                    }
+                }
+            } else {
+                sub_client.recv_event().await
+            };
+
+            match event {
                 Some(DaemonEvent::PaneOutput { pane_id, data, .. })
                     if pane_id == remote_pane_id =>
                 {
-                    if std::time::Instant::now() < trace_deadline {
-                        let preview_len = data.len().min(256);
-                        let hex: String = data[..preview_len]
-                            .iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let ascii: String = data[..preview_len]
-                            .iter()
-                            .map(|&b| {
-                                if (0x20..=0x7e).contains(&b) {
-                                    b as char
-                                } else {
-                                    '.'
-                                }
-                            })
-                            .collect();
-                        trace!(
-                            remote_pane_id,
-                            chunk_idx = trace_chunk_idx,
-                            len = data.len(),
-                            preview_len,
-                            hex = %hex,
-                            ascii = %ascii,
-                            "tn-wlu6: PaneOutput chunk"
-                        );
-                        trace_chunk_idx += 1;
-                    }
-                    if byte_tx.send(data).is_err() {
+                    if buffering {
+                        // Scan this chunk for ESC[2J. If present, drop the
+                        // buffered prefix and forward from the clear onward.
+                        if let Some(pos) = find_subsequence(&data, ESC_2J) {
+                            debug!(
+                                remote_pane_id,
+                                dropped_chunks = pre_clear_buffer.len(),
+                                clear_offset = pos,
+                                "tn-wlu6: ESC[2J found, dropping pre-clear buffer"
+                            );
+                            pre_clear_buffer.clear();
+                            buffering = false;
+                            // Forward from the clear-screen byte onward.
+                            if !send_bytes(data[pos..].to_vec()) {
+                                break;
+                            }
+                        } else {
+                            pre_clear_buffer.push(data);
+                        }
+                    } else if !send_bytes(data) {
                         break;
                     }
                 }
@@ -427,4 +470,17 @@ fn run_remote_worker(
     info!("remote pty worker exiting");
     on_exit();
     let _ = PaneId::default; // silence unused import in some cfgs
+}
+
+/// Find the first occurrence of `needle` in `haystack`. Returns the byte
+/// offset of the start of the match, or None if not found. Used by the
+/// tn-wlu6 pre-clear-buffer mitigation to scan for ESC[2J in incoming
+/// PaneOutput chunks.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
