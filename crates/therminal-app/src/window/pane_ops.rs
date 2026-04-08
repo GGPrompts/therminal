@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use alacritty_terminal::term::TermMode;
 use tracing::{debug, info, warn};
 
 use crate::pane::{
@@ -493,6 +492,30 @@ fn validate_inherited_cwd(cwd: Option<String>) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Normalize clipboard text for paste-into-PTY.
+///
+/// Collapses `\r\n` and bare `\r` to `\n`. The PTY/TUI side expects line
+/// breaks as a single LF; CR variants are common in clipboards that
+/// originate on Windows (and on WSL2 via `win32yank` or the WSLg
+/// clipboard bridge). Without normalization, a TUI sees the CR and treats
+/// it as a submit, splitting a single paste into multiple lines.
+fn normalize_paste_text(input: &str) -> String {
+    // Single-pass: emit `\n` for `\r\n` and bare `\r`, otherwise pass-through.
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Read the source pane's tracked cwd (populated from OSC 7 by the shell
@@ -1266,18 +1289,36 @@ impl App {
         }
     }
 
-    /// Paste clipboard contents to the focused pane's PTY (with bracketed paste support).
+    /// Paste clipboard contents to the focused pane's PTY.
+    ///
+    /// Always wraps the payload with the bracketed-paste envelope
+    /// (`\e[200~` ... `\e[201~`) regardless of the locally-tracked
+    /// `TermMode::BRACKETED_PASTE` flag. The local flag is unreliable in
+    /// daemon-client mode (tn-b77d): the GUI's `Term` is bootstrapped from
+    /// a one-shot snapshot and never sees subsequent `\e[?2004h` mode-set
+    /// sequences emitted by TUIs after attach. Modern TUIs (Claude Code,
+    /// vim, helix, less, micro, fish) handle the envelope correctly even
+    /// when they didn't request it; legacy line editors that don't
+    /// recognize the markers display them as harmless garbage at worst,
+    /// which is strictly better than the current bug where every embedded
+    /// `\n` is interpreted as Enter and submits per line.
+    ///
+    /// Clipboard text is also normalized: `\r\n` and bare `\r` collapse to
+    /// `\n` to avoid TUIs treating CR as a submit (common when pasting
+    /// from Windows-origin clipboards on WSL2).
+    ///
+    /// See tn-5akk (the paste symptom) and tn-b77d (the underlying
+    /// mode-flag drift in tn-382v Phase B).
     pub(crate) fn paste_clipboard(&mut self) {
-        let text = crate::clipboard::paste_from_clipboard();
-        if text.is_empty() {
+        let raw = crate::clipboard::paste_from_clipboard();
+        if raw.is_empty() {
             return;
         }
+        let text = normalize_paste_text(&raw);
         let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
         };
-        let mode = self.pane_term_mode(focused);
-        let bracketed = mode.contains(TermMode::BRACKETED_PASTE);
         let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
@@ -1286,13 +1327,13 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        if bracketed && let Err(e) = pane.write_input(b"\x1b[200~") {
+        if let Err(e) = pane.write_input(b"\x1b[200~") {
             tracing::warn!("paste write failed: {e}");
         }
         if let Err(e) = pane.write_input(text.as_bytes()) {
             tracing::warn!("paste write failed: {e}");
         }
-        if bracketed && let Err(e) = pane.write_input(b"\x1b[201~") {
+        if let Err(e) = pane.write_input(b"\x1b[201~") {
             tracing::warn!("paste write failed: {e}");
         }
     }
@@ -2531,6 +2572,57 @@ mod tests {
 
     fn chain(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── Paste text normalization (tn-5akk) ─────────────────────────────
+
+    #[test]
+    fn normalize_paste_text_passthrough_lf_only() {
+        assert_eq!(normalize_paste_text("a\nb\nc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn normalize_paste_text_collapses_crlf_to_lf() {
+        assert_eq!(normalize_paste_text("a\r\nb\r\nc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn normalize_paste_text_collapses_bare_cr_to_lf() {
+        // Classic-Mac style line endings — uncommon but seen in some
+        // clipboard sources. Treat as a newline so a TUI doesn't see CR
+        // and submit.
+        assert_eq!(normalize_paste_text("a\rb\rc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn normalize_paste_text_mixed_endings() {
+        assert_eq!(
+            normalize_paste_text("line1\r\nline2\nline3\rline4"),
+            "line1\nline2\nline3\nline4"
+        );
+    }
+
+    #[test]
+    fn normalize_paste_text_preserves_trailing_newline() {
+        // Don't strip trailing newlines — that's a behavior change beyond
+        // CR normalization, and the bracketed-paste envelope makes the
+        // trailing newline harmless to most TUIs.
+        assert_eq!(normalize_paste_text("hello\r\n"), "hello\n");
+    }
+
+    #[test]
+    fn normalize_paste_text_empty_input() {
+        assert_eq!(normalize_paste_text(""), "");
+    }
+
+    #[test]
+    fn normalize_paste_text_no_line_endings() {
+        assert_eq!(normalize_paste_text("hello world"), "hello world");
+    }
+
+    #[test]
+    fn normalize_paste_text_preserves_unicode() {
+        assert_eq!(normalize_paste_text("héllo\r\n世界\rok"), "héllo\n世界\nok");
     }
 
     // ── Inherited cwd validation (split paths) ─────────────────────────
