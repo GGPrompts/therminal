@@ -187,6 +187,14 @@ pub enum IpcRequest {
         pane_id: PaneId,
         target_workspace_id: WorkspaceId,
     },
+    /// List all panes across all sessions, optionally filtered to one
+    /// session. Used by the `therminal pane list` CLI subcommand
+    /// (tn-k13n) so cache-sensitive callers can avoid the JSON-RPC /
+    /// MCP framing overhead of `terminal.panes.list`. `session_id = None`
+    /// means "all sessions".
+    ListPanes { session_id: Option<SessionId> },
+    /// List detected agents across all panes (tn-k13n CLI subcommand).
+    ListAgents,
 }
 
 /// Typed IPC responses.
@@ -283,8 +291,45 @@ pub enum IpcResponse {
         pane_id: PaneId,
         tags: HashMap<String, String>,
     },
+    /// Pane summaries returned by `IpcRequest::ListPanes`.
+    Panes { panes: Vec<PaneSummary> },
+    /// Agent summaries returned by `IpcRequest::ListAgents`.
+    Agents { agents: Vec<AgentSummary> },
     /// Generic error response.
     Error { message: String },
+}
+
+/// Lightweight pane summary returned by `IpcRequest::ListPanes`.
+///
+/// Mirrors the fields exposed by the `terminal.panes.list` MCP tool. Wire
+/// fields are positional (rmp-serde uses array encoding for IpcMessage),
+/// so we deliberately do NOT use `skip_serializing_if` here — that would
+/// silently drop array slots and break round-trip decoding when other
+/// optional fields follow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSummary {
+    pub pane_id: PaneId,
+    pub session_id: SessionId,
+    pub cols: u16,
+    pub rows: u16,
+    pub cwd: Option<String>,
+    pub last_exit_code: Option<i32>,
+    pub agent_name: Option<String>,
+    pub tags: HashMap<String, String>,
+}
+
+/// Lightweight agent summary returned by `IpcRequest::ListAgents`.
+///
+/// Mirrors the fields exposed by the `terminal.agents.list` MCP tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub pane_id: PaneId,
+    pub name: String,
+    pub agent_type: String,
+    pub status: String,
+    pub current_tool: Option<String>,
+    pub detected_at: u64,
+    pub pid: Option<u32>,
 }
 
 // ── PaneStateSnapshot (tn-zamd) ──────────────────────────────────────────
@@ -1166,6 +1211,93 @@ mod tests {
         let msg = IpcMessage::Response {
             request_id: 99,
             payload: IpcResponse::PaneSwapped { a: 10, b: 20 },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn ipc_list_panes_request_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 100,
+            payload: IpcRequest::ListPanes {
+                session_id: Some(1),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+
+        let msg_all = IpcMessage::Request {
+            request_id: 101,
+            payload: IpcRequest::ListPanes { session_id: None },
+        };
+        let encoded = encode_ipc(&msg_all).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg_all, decoded);
+    }
+
+    #[test]
+    fn ipc_panes_response_round_trip() {
+        let mut tags = HashMap::new();
+        tags.insert("worker".to_string(), "alice".to_string());
+        let panes = vec![
+            PaneSummary {
+                pane_id: 1,
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+                cwd: Some("/tmp".to_string()),
+                last_exit_code: Some(0),
+                agent_name: Some("claude".to_string()),
+                tags: tags.clone(),
+            },
+            PaneSummary {
+                pane_id: 2,
+                session_id: 1,
+                cols: 100,
+                rows: 30,
+                cwd: None,
+                last_exit_code: None,
+                agent_name: None,
+                tags: HashMap::new(),
+            },
+        ];
+        let msg = IpcMessage::Response {
+            request_id: 100,
+            payload: IpcResponse::Panes { panes },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn ipc_list_agents_request_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 200,
+            payload: IpcRequest::ListAgents,
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn ipc_agents_response_round_trip() {
+        let agents = vec![AgentSummary {
+            pane_id: 1,
+            name: "claude".to_string(),
+            agent_type: "claude".to_string(),
+            status: "active".to_string(),
+            current_tool: None,
+            detected_at: 1234567890,
+            pid: Some(99),
+        }];
+        let msg = IpcMessage::Response {
+            request_id: 200,
+            payload: IpcResponse::Agents { agents },
         };
         let encoded = encode_ipc(&msg).unwrap();
         let decoded = decode_ipc(&encoded[4..]).unwrap();

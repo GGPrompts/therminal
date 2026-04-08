@@ -605,6 +605,56 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::ListPanes { session_id } => {
+            use therminal_protocol::daemon::PaneSummary;
+            let mgr = session_mgr.lock().await;
+            let mut panes = Vec::new();
+            for (sid, session) in mgr.iter_sessions() {
+                if let Some(filter_id) = session_id
+                    && *sid != *filter_id
+                {
+                    continue;
+                }
+                for window in &session.windows {
+                    for pane in &window.panes {
+                        let cwd = {
+                            let c = pane.cwd();
+                            if c.is_empty() { None } else { Some(c) }
+                        };
+                        let agent_name = mgr.agent_registry().get(pane.id).map(|e| e.name.clone());
+                        panes.push(PaneSummary {
+                            pane_id: pane.id,
+                            session_id: *sid,
+                            cols: pane.cols(),
+                            rows: pane.rows(),
+                            cwd,
+                            last_exit_code: pane.last_exit_code(),
+                            agent_name,
+                            tags: pane.tags(),
+                        });
+                    }
+                }
+            }
+            IpcResponse::Panes { panes }
+        }
+        IpcRequest::ListAgents => {
+            use therminal_protocol::daemon::AgentSummary;
+            let mgr = session_mgr.lock().await;
+            let agents = mgr
+                .list_agents()
+                .into_iter()
+                .map(|e| AgentSummary {
+                    pane_id: e.pane_id,
+                    name: e.name,
+                    agent_type: e.agent_type.as_str().to_string(),
+                    status: e.status.as_str().to_string(),
+                    current_tool: e.status.tool_name().map(String::from),
+                    detected_at: e.detected_at,
+                    pid: e.pid,
+                })
+                .collect();
+            IpcResponse::Agents { agents }
+        }
         IpcRequest::SetWorkspaceState {
             session_id,
             workspaces,

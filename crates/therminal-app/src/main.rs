@@ -1,3 +1,4 @@
+mod cli;
 mod clipboard;
 mod color_mapping;
 mod daemon_spawn;
@@ -46,6 +47,23 @@ enum Command {
     ///
     ///   { "command": "therminal", "args": ["mcp"] }
     Mcp,
+    /// Pane operations (list, create, destroy, send, peek, tag, swap, …).
+    #[command(subcommand)]
+    Pane(cli::pane::PaneCmd),
+    /// Session operations (list, create, destroy).
+    #[command(subcommand)]
+    Session(cli::session::SessionCmd),
+    /// Workspace operations (list).
+    #[command(subcommand)]
+    Workspace(cli::workspace::WorkspaceCmd),
+    /// Agent registry queries.
+    #[command(subcommand)]
+    Agents(cli::agents::AgentsCmd),
+    /// Stream daemon events to stdout (one JSON line per event).
+    Events(cli::events::EventsArgs),
+    /// Semantic queries (commands, hotspots).
+    #[command(subcommand)]
+    Semantic(cli::semantic::SemanticCmd),
 }
 
 fn main() -> Result<()> {
@@ -75,14 +93,26 @@ fn main() -> Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default))
     };
 
-    if let Some(Command::Mcp) = cli.command {
-        // MCP stdio bridge — logs to stderr only (stdout is the MCP protocol).
+    // Subcommands always log to stderr at warn level by default so the
+    // structured stdout (TSV / JSON / MCP framing) stays clean.
+    if let Some(cmd) = cli.command {
         tracing_subscriber::fmt()
             .with_env_filter(make_filter(if cli.verbose { "debug" } else { "warn" }))
             .with_writer(std::io::stderr)
             .init();
-
-        return mcp_stdio::run();
+        return match cmd {
+            // MCP stdio bridge — stdout is the MCP protocol, see mcp_stdio.rs.
+            Command::Mcp => mcp_stdio::run(),
+            // tn-k13n cache-friendly CLI surface. Each subcommand routes
+            // through the daemon-client (auto-spawning the daemon if needed)
+            // and writes terse TSV (or `--json`) to stdout.
+            Command::Pane(c) => cli::runtime::with_runtime(|ctx| cli::pane::run(ctx, c)),
+            Command::Session(c) => cli::runtime::with_runtime(|ctx| cli::session::run(ctx, c)),
+            Command::Workspace(c) => cli::runtime::with_runtime(|ctx| cli::workspace::run(ctx, c)),
+            Command::Agents(c) => cli::runtime::with_runtime(|ctx| cli::agents::run(ctx, c)),
+            Command::Events(c) => cli::runtime::with_runtime(|ctx| cli::events::run(ctx, c)),
+            Command::Semantic(c) => cli::runtime::with_runtime(|ctx| cli::semantic::run(ctx, c)),
+        };
     }
 
     tracing_subscriber::fmt()
