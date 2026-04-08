@@ -637,6 +637,23 @@ impl App {
         }
     }
 
+    /// Get the focused pane's OSC 7 cwd, if any (tn-vm2j).
+    ///
+    /// Used by the hotspot click handlers to resolve shell-relative
+    /// paths against the pane's shell cwd instead of therminal's
+    /// process cwd. Returns an owned `String` because the borrow on
+    /// the workspace layout can't outlive the method call — the
+    /// click handlers then call `&mut self` methods on `App`, and
+    /// the underlying cwd lives behind a `Mutex` inside `PaneStatus`
+    /// that must be unlocked before those calls.
+    pub(crate) fn focused_pane_cwd(&self) -> Option<String> {
+        let id = self.focused_pane()?;
+        let layout = self.get_layout()?;
+        let pane = layout.find_pane(id)?;
+        let status = pane.status.lock().ok()?;
+        status.cwd.clone()
+    }
+
     /// Compute the content area rect from GPU dimensions and config flags.
     /// Returns `None` if the GPU state is not yet initialized.
     pub(crate) fn compute_layout_rect(&self) -> Option<Rect> {

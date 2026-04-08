@@ -683,6 +683,90 @@ pub fn expand_tilde<'a>(path: &'a str, home_dir: Option<&str>) -> std::borrow::C
     Cow::Borrowed(path)
 }
 
+/// Join a relative `path` against `cwd` into an absolute path.
+///
+/// Leaves absolute, `~`-prefixed, and `cwd.is_none()` paths unchanged.
+/// Handles `./`, `../`, and bare relative prefixes. Normalizes leading
+/// `../` segments against `cwd` but does NOT touch the filesystem.
+/// Preserves any trailing `:line[:col]` suffix verbatim.
+///
+/// Used by the click handlers to resolve shell-relative hotspots (like
+/// `./src/main.rs:42`) against the focused pane's OSC 7 cwd, since
+/// therminal's own process cwd is almost never what the user's shell
+/// has `cd`'d to.
+///
+/// - `/foo/bar` → unchanged (already absolute)
+/// - `~/foo` → unchanged (caller should call [`expand_tilde`] first)
+/// - `cwd.is_none()` → unchanged (no basis to resolve against)
+/// - `./foo` + cwd `/home/x` → `/home/x/foo`
+/// - `../foo` + cwd `/home/x/y` → `/home/x/foo`
+/// - `foo/bar.rs` + cwd `/home/x` → `/home/x/foo/bar.rs`
+///
+/// Returns a `Cow` so no-op branches are allocation-free.
+pub fn resolve_relative_to_cwd<'a>(path: &'a str, cwd: Option<&str>) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+
+    // Already absolute — nothing to do.
+    if path.starts_with('/') {
+        return Cow::Borrowed(path);
+    }
+    // Caller is responsible for `~` expansion first; we leave it alone.
+    if path.starts_with('~') {
+        return Cow::Borrowed(path);
+    }
+    // Empty path is a no-op.
+    if path.is_empty() {
+        return Cow::Borrowed(path);
+    }
+    // Without a cwd we can't resolve anything.
+    let Some(cwd) = cwd else {
+        return Cow::Borrowed(path);
+    };
+
+    // Split off a trailing `:line[:col]` suffix so we only operate on
+    // the path prefix, then re-attach it verbatim at the end.
+    let prefix = strip_line_col_suffix(path);
+    let suffix = &path[prefix.len()..];
+
+    // Strip a leading `./` — it's noise for the join.
+    let mut rel = prefix.strip_prefix("./").unwrap_or(prefix);
+
+    // Pop one `cwd` segment per leading `../`. We trim the trailing
+    // slash first so `/home/x/y/` and `/home/x/y` behave identically.
+    // When `base` runs out of segments we pin at the empty string and
+    // the final join re-adds a single leading `/`, so `../../` above
+    // root stays at root instead of emitting `//foo`.
+    let mut base: &str = cwd.trim_end_matches('/');
+    while let Some(rest) = rel.strip_prefix("../") {
+        base = match base.rsplit_once('/') {
+            Some((parent, _)) => parent,
+            None => "",
+        };
+        rel = rest;
+    }
+    // A bare `..` (no trailing slash) pops one more segment from base.
+    if rel == ".." {
+        base = match base.rsplit_once('/') {
+            Some((parent, _)) => parent,
+            None => "",
+        };
+        rel = "";
+    } else if rel == "." {
+        // A bare `.` resolves to `base` itself.
+        rel = "";
+    }
+
+    // Glue. Handle the root edge case so we don't emit `//foo` or a
+    // trailing slash for an empty relative part.
+    let joined = match (base.is_empty(), rel.is_empty()) {
+        (true, true) => "/".to_string() + suffix,
+        (true, false) => format!("/{rel}{suffix}"),
+        (false, true) => format!("{base}{suffix}"),
+        (false, false) => format!("{base}/{rel}{suffix}"),
+    };
+    Cow::Owned(joined)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1616,5 +1700,109 @@ mod tests {
         assert_eq!(out, "/usr/local/bin");
         let out2 = expand_tilde("./src/main.rs", Some("/home/marci"));
         assert_eq!(out2, "./src/main.rs");
+    }
+
+    // ── resolve_relative_to_cwd ────────────────────────────────────────
+
+    #[test]
+    fn resolve_relative_leaves_absolute_path_alone() {
+        // Rule: path starts with `/` → unchanged.
+        let out = resolve_relative_to_cwd("/usr/local/bin", Some("/home/x"));
+        assert_eq!(out, "/usr/local/bin");
+    }
+
+    #[test]
+    fn resolve_relative_leaves_tilde_path_alone() {
+        // Rule: path starts with `~` → unchanged (caller must
+        // `expand_tilde` first).
+        let out = resolve_relative_to_cwd("~/foo", Some("/home/x"));
+        assert_eq!(out, "~/foo");
+    }
+
+    #[test]
+    fn resolve_relative_no_cwd_is_noop() {
+        // Rule: `cwd.is_none()` → unchanged (no basis to resolve).
+        let out = resolve_relative_to_cwd("./foo", None);
+        assert_eq!(out, "./foo");
+    }
+
+    #[test]
+    fn resolve_relative_dot_slash_prefix() {
+        // Rule: `./foo` + cwd `/home/x` → `/home/x/foo`.
+        let out = resolve_relative_to_cwd("./foo", Some("/home/x"));
+        assert_eq!(out, "/home/x/foo");
+    }
+
+    #[test]
+    fn resolve_relative_preserves_line_col_suffix() {
+        // Rule: `./foo/bar.rs:42` + cwd `/home/x` →
+        // `/home/x/foo/bar.rs:42`.
+        let out = resolve_relative_to_cwd("./foo/bar.rs:42", Some("/home/x"));
+        assert_eq!(out, "/home/x/foo/bar.rs:42");
+    }
+
+    #[test]
+    fn resolve_relative_preserves_line_col_col_suffix() {
+        // `:line:col` shape also passes through unchanged.
+        let out = resolve_relative_to_cwd("./src/main.rs:42:5", Some("/home/x"));
+        assert_eq!(out, "/home/x/src/main.rs:42:5");
+    }
+
+    #[test]
+    fn resolve_relative_single_dotdot() {
+        // Rule: `../foo` + cwd `/home/x/y` → `/home/x/foo`.
+        let out = resolve_relative_to_cwd("../foo", Some("/home/x/y"));
+        assert_eq!(out, "/home/x/foo");
+    }
+
+    #[test]
+    fn resolve_relative_double_dotdot() {
+        // Rule: `../../foo` + cwd `/home/x/y/z` → `/home/x/foo`.
+        let out = resolve_relative_to_cwd("../../foo", Some("/home/x/y/z"));
+        assert_eq!(out, "/home/x/foo");
+    }
+
+    #[test]
+    fn resolve_relative_bare_path() {
+        // Rule: `foo/bar.rs` + cwd `/home/x` → `/home/x/foo/bar.rs`.
+        let out = resolve_relative_to_cwd("foo/bar.rs", Some("/home/x"));
+        assert_eq!(out, "/home/x/foo/bar.rs");
+    }
+
+    #[test]
+    fn resolve_relative_bare_path_with_line_col() {
+        let out = resolve_relative_to_cwd("foo/bar.rs:42", Some("/home/x"));
+        assert_eq!(out, "/home/x/foo/bar.rs:42");
+    }
+
+    #[test]
+    fn resolve_relative_cwd_trailing_slash_not_doubled() {
+        // Rule: cwd with trailing slash (`/home/x/`) → don't double-slash.
+        let out = resolve_relative_to_cwd("./foo", Some("/home/x/"));
+        assert_eq!(out, "/home/x/foo");
+        // Same rule via the bare-relative branch.
+        let out2 = resolve_relative_to_cwd("foo", Some("/home/x/"));
+        assert_eq!(out2, "/home/x/foo");
+    }
+
+    #[test]
+    fn resolve_relative_dotdot_above_root_stays_at_root() {
+        // Defensive: `../foo` from cwd `/` should not produce `//foo`.
+        let out = resolve_relative_to_cwd("../foo", Some("/"));
+        assert_eq!(out, "/foo");
+    }
+
+    #[test]
+    fn resolve_relative_bare_dot() {
+        // Bare `.` resolves to `cwd` itself.
+        let out = resolve_relative_to_cwd(".", Some("/home/x"));
+        assert_eq!(out, "/home/x");
+    }
+
+    #[test]
+    fn resolve_relative_bare_dotdot() {
+        // Bare `..` pops one segment.
+        let out = resolve_relative_to_cwd("..", Some("/home/x/y"));
+        assert_eq!(out, "/home/x");
     }
 }

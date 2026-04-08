@@ -25,7 +25,7 @@ use std::process::Command;
 
 use tracing::{debug, info, warn};
 
-use therminal_terminal::hotspot_detection::expand_tilde;
+use therminal_terminal::hotspot_detection::{expand_tilde, resolve_relative_to_cwd};
 
 use crate::pane::SplitDirection;
 
@@ -158,7 +158,9 @@ where
         }
         if which_fn(head) {
             let parts: Vec<String> = cmd.split_whitespace().map(String::from).collect();
-            let (cmd_token, extra_args) = parts.split_first().unwrap();
+            let Some((cmd_token, extra_args)) = parts.split_first() else {
+                continue;
+            };
             return FolderOpenerPlan::Spawn {
                 cmd: cmd_token.to_string(),
                 args: extra_args.to_vec(),
@@ -181,7 +183,12 @@ impl App {
         // so an un-expanded path would land us in `/~/…` (nonexistent).
         let home = std::env::var("HOME").ok();
         let expanded = expand_tilde(path, home.as_deref());
-        let path = expanded.as_ref();
+        // tn-vm2j: join relative paths against the focused pane's
+        // OSC 7 shell cwd before building the `cd` line. Absolute and
+        // tilde-expanded paths pass through unchanged.
+        let cwd = self.focused_pane_cwd();
+        let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
+        let path = resolved.as_ref();
         let command = self.config.hotspots.folder_pane_command.clone();
         let plan = plan_folder_pane_open(path, &command, which_on_path);
 
@@ -235,7 +242,14 @@ impl App {
         // a literal directory name instead of `$HOME`.
         let home = std::env::var("HOME").ok();
         let expanded = expand_tilde(path, home.as_deref());
-        let path = expanded.as_ref();
+        // tn-vm2j: join relative paths against the focused pane's
+        // OSC 7 shell cwd before handing off. Most file managers
+        // refuse to open relative paths or treat them as relative to
+        // their own cwd (which is therminal's process cwd, almost
+        // never what the user meant).
+        let cwd = self.focused_pane_cwd();
+        let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
+        let path = resolved.as_ref();
         let chain = self.config.hotspots.folder_opener.clone();
         let plan = plan_folder_opener(&chain, which_on_path, |var| {
             std::env::var(var).ok().filter(|s| !s.is_empty())
@@ -445,6 +459,34 @@ mod tests {
                 let s = String::from_utf8(bytes).unwrap();
                 // POSIX-safe escape: '...'\''...' (close, escaped quote, reopen).
                 assert!(s.contains(r#"'/tmp/it'\''s-fine'"#));
+            }
+            other => panic!("expected SpawnCommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_uses_absolute_path_after_relative_resolution() {
+        // tn-vm2j: the click handler now joins relative paths against
+        // the focused pane's OSC 7 cwd before calling the planner.
+        // Verify the planner (which stays pure) receives the already-
+        // resolved absolute path and emits an absolute `cd` line.
+        let raw = "some/subdir";
+        let cwd = Some("/home/me/project");
+        let resolved = therminal_terminal::hotspot_detection::resolve_relative_to_cwd(raw, cwd);
+        assert_eq!(resolved, "/home/me/project/some/subdir");
+        let plan = plan_folder_pane_open(resolved.as_ref(), &argv(&["tfe", "{path}"]), |head| {
+            head == "tfe"
+        });
+        match plan {
+            FolderPaneOpenPlan::SpawnCommand { bytes, .. } => {
+                let s = String::from_utf8(bytes).unwrap();
+                assert!(
+                    s.starts_with("cd '/home/me/project/some/subdir'"),
+                    "cd line should be absolute, got {s:?}"
+                );
+                // And the un-resolved relative path must NOT leak into
+                // the exec line.
+                assert!(!s.contains("'some/subdir'"));
             }
             other => panic!("expected SpawnCommand, got {other:?}"),
         }

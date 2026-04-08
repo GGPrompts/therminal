@@ -1352,7 +1352,16 @@ impl App {
         let home = std::env::var("HOME").ok();
         let expanded =
             therminal_terminal::hotspot_detection::expand_tilde(path_with_loc, home.as_deref());
-        let path_with_loc = expanded.as_ref();
+        // tn-vm2j: join relative paths against the focused pane's
+        // OSC 7 shell cwd. A raw `./src/main.rs:42` from shell output
+        // would otherwise stat as "not a regular file" and silently
+        // fail the editor hand-off.
+        let cwd = self.focused_pane_cwd();
+        let resolved = therminal_terminal::hotspot_detection::resolve_relative_to_cwd(
+            expanded.as_ref(),
+            cwd.as_deref(),
+        );
+        let path_with_loc = resolved.as_ref();
 
         let chain = self.config.hotspots.editor_chain.clone();
         let outcome = plan_open_in_editor(

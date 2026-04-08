@@ -868,7 +868,14 @@ impl Session {
         window.add_pane(pane);
         self.windows.push(window);
         // Return a reference to the newly created pane
-        Ok(self.windows.last().unwrap().pane(pane_id).unwrap())
+        self.windows
+            .last()
+            .and_then(|w| w.pane(pane_id))
+            .ok_or_else(|| {
+                therminal_terminal::pty::PtyError::Integration(format!(
+                    "pane {pane_id} vanished immediately after creation"
+                ))
+            })
     }
 
     /// Take a snapshot of the entire session for attach.
@@ -1692,7 +1699,10 @@ impl SessionManager {
         // window pixels, but the existing per-pane (cols, rows) plus
         // the layout ratios are enough to cascade up.
         let (cascade_dims, affected_workspace) = {
-            let session = self.sessions.get(&session_id).unwrap();
+            let session = self
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| format!("session vanished: {session_id}"))?;
             let ws_with_layout = session
                 .workspace_state
                 .iter()
@@ -1721,7 +1731,10 @@ impl SessionManager {
             }
         };
 
-        let session = self.sessions.get_mut(&session_id).unwrap();
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session vanished: {session_id}"))?;
         for window in &mut session.windows {
             if let Some(pos) = window.panes.iter().position(|p| p.id == pane_id) {
                 window.panes.remove(pos);
