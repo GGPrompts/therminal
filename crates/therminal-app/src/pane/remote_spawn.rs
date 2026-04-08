@@ -242,6 +242,17 @@ pub(crate) fn build_remote_pane_state(
         .map_err(|e| anyhow::anyhow!("failed to spawn remote pty worker: {e}"))?;
 
     // ── 4. Spawn the tokio forwarder: subscribe to PaneOutput events ──
+    //
+    // tn-zamd: when the main thread successfully captures a structured
+    // `PaneStateSnapshot` from the daemon, it sets `snapshot_applied` so
+    // the forwarder drops any bytes buffered since subscribe (they're
+    // stale relative to the snapshot we just painted onto the local Term)
+    // and starts forwarding live bytes. If the snapshot RPC fails, the
+    // flag stays false and the tn-wlu6 ESC[2J heuristic below remains
+    // in charge.
+    let snapshot_applied = Arc::new(AtomicBool::new(false));
+    let byte_tx_for_main = byte_tx.clone();
+    let snapshot_applied_for_forwarder = Arc::clone(&snapshot_applied);
     let shutdown_for_forwarder = Arc::clone(&shutdown);
     let forwarder_socket = daemon_socket.clone();
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
@@ -296,6 +307,18 @@ pub(crate) fn build_remote_pane_state(
         loop {
             if shutdown_for_forwarder.load(Ordering::Acquire) {
                 break;
+            }
+
+            // tn-zamd: if the main thread just finished applying a
+            // structured snapshot, drop buffered stale bytes and go live.
+            if buffering && snapshot_applied_for_forwarder.load(Ordering::Acquire) {
+                debug!(
+                    remote_pane_id,
+                    dropped_chunks = pre_clear_buffer.len(),
+                    "tn-zamd: snapshot applied, dropping pre-snapshot buffer"
+                );
+                pre_clear_buffer.clear();
+                buffering = false;
             }
 
             // While buffering, race the recv against the buffer deadline so
@@ -362,6 +385,63 @@ pub(crate) fn build_remote_pane_state(
             }
         }
     });
+
+    // ── 4b. tn-zamd: capture daemon-side pane state and replay it ──────
+    //
+    // Subscribe-then-capture ordering means any bytes that flow into the
+    // daemon Term between Subscribe and CapturePaneState end up in the
+    // subscription queue AND are reflected in the captured grid. That's
+    // fine for mode flags and cursor (idempotent) and acceptable for
+    // grid contents in V1. The forwarder drops its pre-snapshot buffer
+    // once `snapshot_applied` is set, so post-capture live bytes resume
+    // normally.
+    //
+    // Runs inline (blocking on the tokio handle) so the pane is fully
+    // initialized before this function returns. Capture failure is
+    // non-fatal: we log and fall through, leaving the tn-wlu6 heuristic
+    // to handle the local Term startup.
+    {
+        let capture_client = Arc::clone(&daemon_client);
+        let capture_res = tokio_handle.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                capture_client.capture_pane_state(remote_pane_id),
+            )
+            .await
+        });
+        match capture_res {
+            Ok(Ok(snap)) => {
+                let bytes = snap.to_replay_bytes();
+                debug!(
+                    remote_pane_id,
+                    modes = ?snap.modes,
+                    cols = snap.cols,
+                    rows = snap.rows,
+                    replay_bytes = bytes.len(),
+                    "tn-zamd: applying captured pane state to local Term"
+                );
+                // Feed the synthesized bytes directly into the worker
+                // thread, ahead of any live bytes the forwarder has
+                // buffered (which we're about to drop).
+                if byte_tx_for_main.send(bytes).is_err() {
+                    warn!(
+                        remote_pane_id,
+                        "tn-zamd: worker channel closed before snapshot replay"
+                    );
+                }
+                snapshot_applied.store(true, Ordering::Release);
+            }
+            Ok(Err(e)) => {
+                warn!(remote_pane_id, error = %e, "tn-zamd: CapturePaneState failed; falling back to tn-wlu6 heuristic");
+            }
+            Err(_) => {
+                warn!(
+                    remote_pane_id,
+                    "tn-zamd: CapturePaneState timed out; falling back to tn-wlu6 heuristic"
+                );
+            }
+        }
+    }
 
     // ── 5. Spawn the tokio writer task: drain input_tx → SendKeys ──────
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();

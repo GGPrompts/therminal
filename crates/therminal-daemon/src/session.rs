@@ -4,8 +4,9 @@
 //! Each pane owns a PTY + headless `alacritty_terminal::Term` running
 //! in a dedicated reader thread via the shared `PtyPaneCore`.
 //!
-//! Attach/detach sends a state snapshot (grid + cursor + scrollback),
-//! not a byte replay.
+//! Attach sends a structured `PaneStateSnapshot` (mode flags, cursor,
+//! visible grid) that the GUI replays via synthesized escape sequences
+//! onto a freshly-constructed local `Term`. See tn-zamd.
 
 use std::collections::HashMap;
 use std::io::Write as IoWrite;
@@ -635,6 +636,58 @@ impl Pane {
         }
     }
 
+    /// Capture a structured state snapshot for tn-zamd replay.
+    ///
+    /// Reads TermMode bits, cursor position, dimensions, and the visible
+    /// grid. The lock is held only for the copy into owned types and
+    /// released before returning.
+    pub fn snapshot_state(&self) -> therminal_protocol::daemon::PaneStateSnapshot {
+        use alacritty_terminal::term::TermMode;
+        use therminal_protocol::daemon::{PaneModeFlags, PaneStateSnapshot};
+
+        let term = self.term.lock();
+        let mode = *term.mode();
+        let cols = term.columns();
+        let rows = term.screen_lines();
+        let grid = term.grid();
+        let cursor_point = grid.cursor.point;
+
+        let mut grid_chars = Vec::with_capacity(rows);
+        for line_idx in 0..rows {
+            let line = alacritty_terminal::index::Line(line_idx as i32);
+            let mut row = String::with_capacity(cols);
+            for col_idx in 0..cols {
+                let col = alacritty_terminal::index::Column(col_idx);
+                row.push(grid[line][col].c);
+            }
+            grid_chars.push(row);
+        }
+
+        let modes = PaneModeFlags {
+            show_cursor: mode.contains(TermMode::SHOW_CURSOR),
+            app_cursor: mode.contains(TermMode::APP_CURSOR),
+            alt_screen: mode.contains(TermMode::ALT_SCREEN),
+            mouse_report_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+            mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
+            sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+            focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
+            app_keypad: mode.contains(TermMode::APP_KEYPAD),
+            line_wrap: mode.contains(TermMode::LINE_WRAP),
+        };
+
+        PaneStateSnapshot {
+            version: PaneStateSnapshot::CURRENT_VERSION,
+            cols: cols as u16,
+            rows: rows as u16,
+            modes,
+            cursor_col: cursor_point.column.0 as u16,
+            cursor_line: (cursor_point.line.0.max(0) as usize).min(rows.saturating_sub(1)) as u16,
+            grid_chars,
+        }
+    }
+
     /// Resize the pane's PTY and terminal.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if let Err(e) = therminal_terminal::pty::resize(self._pty_master.as_ref(), cols, rows) {
@@ -972,6 +1025,22 @@ impl SessionManager {
             if let Some(pane) = session.find_pane_mut(pane_id) {
                 pane.resize(cols, rows);
                 return Ok(());
+            }
+        }
+        Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Capture structured pane state (mode flags, cursor, visible grid)
+    /// for tn-zamd replay on attach. See `Pane::snapshot_state`.
+    pub fn capture_pane_state(
+        &self,
+        pane_id: PaneId,
+    ) -> Result<therminal_protocol::daemon::PaneStateSnapshot, String> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Ok(pane.snapshot_state());
+                }
             }
         }
         Err(format!("pane not found: {pane_id}"))
@@ -1581,6 +1650,105 @@ mod tests {
         let tx = make_event_tx();
         let mut mgr = SessionManager::new(tx);
         assert!(!mgr.destroy_session(999999));
+    }
+
+    /// tn-zamd: feed a raw Term with DECSET 1000 + ?25l + a cursor move,
+    /// synthesize a PaneStateSnapshot, replay it onto a fresh Term, and
+    /// assert the mode bits match. No PTY required.
+    #[test]
+    fn pane_state_snapshot_replays_mode_flags() {
+        use alacritty_terminal::term::TermMode;
+        use alacritty_terminal::term::{Config as TermConfig, Term};
+        use alacritty_terminal::vte::ansi;
+        use therminal_protocol::daemon::{PaneModeFlags, PaneStateSnapshot};
+
+        let size = TermSize {
+            columns: 20,
+            screen_lines: 5,
+        };
+        let mut term_a: Term<HeadlessListener> =
+            Term::new(TermConfig::default(), &size, HeadlessListener);
+        let mut proc = ansi::Processor::<ansi::StdSyncHandler>::new();
+
+        // Enable SGR mouse + click reporting + hide cursor + bracketed paste.
+        let input: &[u8] = b"\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[3;5HHI";
+        proc.advance(&mut term_a, input);
+
+        // Build a snapshot by hand from term_a (mirrors Pane::snapshot_state).
+        let mode = *term_a.mode();
+        let grid = term_a.grid();
+        let cursor_point = grid.cursor.point;
+        let rows = term_a.screen_lines();
+        let cols = term_a.columns();
+        let mut grid_chars = Vec::with_capacity(rows);
+        for line_idx in 0..rows {
+            let line = alacritty_terminal::index::Line(line_idx as i32);
+            let mut row = String::with_capacity(cols);
+            for col_idx in 0..cols {
+                let col = alacritty_terminal::index::Column(col_idx);
+                row.push(grid[line][col].c);
+            }
+            grid_chars.push(row);
+        }
+        let snap = PaneStateSnapshot {
+            version: 1,
+            cols: cols as u16,
+            rows: rows as u16,
+            modes: PaneModeFlags {
+                show_cursor: mode.contains(TermMode::SHOW_CURSOR),
+                app_cursor: mode.contains(TermMode::APP_CURSOR),
+                alt_screen: mode.contains(TermMode::ALT_SCREEN),
+                mouse_report_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+                mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
+                mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
+                sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+                bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+                focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
+                app_keypad: mode.contains(TermMode::APP_KEYPAD),
+                line_wrap: mode.contains(TermMode::LINE_WRAP),
+            },
+            cursor_col: cursor_point.column.0 as u16,
+            cursor_line: (cursor_point.line.0.max(0) as u16).min(rows as u16 - 1),
+            grid_chars,
+        };
+
+        // Sanity: our captured snapshot shows the relevant flags set.
+        // Mouse protocols are mutually exclusive in alacritty; only the
+        // last enabled (?1002 = MOUSE_DRAG) survives.
+        assert!(!snap.modes.show_cursor);
+        assert!(!snap.modes.mouse_report_click);
+        assert!(snap.modes.mouse_drag);
+        assert!(snap.modes.sgr_mouse);
+        assert!(snap.modes.bracketed_paste);
+
+        // Replay onto a fresh Term.
+        let mut term_b: Term<HeadlessListener> =
+            Term::new(TermConfig::default(), &size, HeadlessListener);
+        let mut proc_b = ansi::Processor::<ansi::StdSyncHandler>::new();
+        let bytes = snap.to_replay_bytes();
+        proc_b.advance(&mut term_b, &bytes);
+
+        let mode_b = *term_b.mode();
+        assert!(
+            !mode_b.contains(TermMode::SHOW_CURSOR),
+            "cursor should be hidden after replay"
+        );
+        assert!(
+            !mode_b.contains(TermMode::MOUSE_REPORT_CLICK),
+            "1000 should not be set (mutex with 1002)"
+        );
+        assert!(
+            mode_b.contains(TermMode::MOUSE_DRAG),
+            "1002 should be replayed"
+        );
+        assert!(
+            mode_b.contains(TermMode::SGR_MOUSE),
+            "1006 should be replayed"
+        );
+        assert!(
+            mode_b.contains(TermMode::BRACKETED_PASTE),
+            "2004 should be replayed"
+        );
     }
 
     #[test]

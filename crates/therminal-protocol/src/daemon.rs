@@ -146,6 +146,11 @@ pub enum IpcRequest {
         cols: u16,
         rows: u16,
     },
+    /// Capture a full structured snapshot of a pane's terminal state —
+    /// mode flags, cursor, dimensions, and visible grid contents — so a
+    /// freshly-attached GUI client can replay it onto a local `Term`
+    /// before going live with `PaneOutput` events. See tn-zamd.
+    CapturePaneState { pane_id: PaneId },
 }
 
 /// Typed IPC responses.
@@ -224,8 +229,73 @@ pub enum IpcResponse {
         cols: u16,
         rows: u16,
     },
+    /// Structured pane state snapshot (response to `CapturePaneState`).
+    PaneStateCaptured { snapshot: PaneStateSnapshot },
     /// Generic error response.
     Error { message: String },
+}
+
+// ── PaneStateSnapshot (tn-zamd) ──────────────────────────────────────────
+
+/// Versioned structured snapshot of a pane's terminal state.
+///
+/// Captured daemon-side from the alacritty `Term` and replayed GUI-side
+/// onto a freshly-constructed local `Term` by synthesizing DECSET / cursor
+/// position / grid paint escape sequences before live `PaneOutput`
+/// forwarding begins. See tn-zamd for context.
+///
+/// `version` lets us add fields (e.g. colors, scrollback, keyboard
+/// protocol state) without breaking wire compat with older clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneStateSnapshot {
+    /// Snapshot schema version. Currently 1.
+    pub version: u32,
+    /// Grid columns at capture time.
+    pub cols: u16,
+    /// Grid rows at capture time.
+    pub rows: u16,
+    /// DEC private mode flags to replay as DECSET/DECRST sequences.
+    pub modes: PaneModeFlags,
+    /// Cursor column (0-based).
+    pub cursor_col: u16,
+    /// Cursor line within the visible viewport (0-based).
+    pub cursor_line: u16,
+    /// Visible grid contents: `rows` rows of `cols` `char`s each.
+    /// Attributes are not captured in v1 — only the glyphs. Future
+    /// versions may add `fg`/`bg`/`flags` per cell.
+    pub grid_chars: Vec<String>,
+}
+
+/// DEC private mode flags captured from the daemon-side alacritty `Term`.
+///
+/// Each field mirrors a TermMode bit that affects input routing or
+/// visible output (cursor visibility, mouse modes, bracketed paste, alt
+/// screen, application cursor/keypad). Replayed by synthesizing the
+/// matching DECSET/DECRST escape sequences on the client side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneModeFlags {
+    /// DECTCEM (`?25`) — cursor visibility.
+    pub show_cursor: bool,
+    /// `?1` — DECCKM application cursor keys.
+    pub app_cursor: bool,
+    /// `?1049` — alternate screen buffer with save/restore.
+    pub alt_screen: bool,
+    /// `?1000` — mouse button click reporting.
+    pub mouse_report_click: bool,
+    /// `?1002` — mouse button + drag reporting.
+    pub mouse_drag: bool,
+    /// `?1003` — any mouse motion reporting.
+    pub mouse_motion: bool,
+    /// `?1006` — SGR mouse encoding.
+    pub sgr_mouse: bool,
+    /// `?2004` — bracketed paste.
+    pub bracketed_paste: bool,
+    /// `?1004` — focus in/out reporting.
+    pub focus_in_out: bool,
+    /// Numeric keypad application mode (`ESC =`).
+    pub app_keypad: bool,
+    /// `?7` — line wrap.
+    pub line_wrap: bool,
 }
 
 /// Daemon events pushed to subscribed clients.
@@ -414,6 +484,75 @@ pub struct PersistedSession {
 pub struct PersistedState {
     /// All sessions that were active when state was last saved.
     pub sessions: Vec<PersistedSession>,
+}
+
+impl PaneStateSnapshot {
+    /// Current snapshot schema version.
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Synthesize a stream of VT escape sequences that, when fed through
+    /// an alacritty `Term`, recreates the captured state: mode flags,
+    /// cleared screen, grid contents, and cursor position.
+    ///
+    /// This is the tn-zamd replay path. Emitting escape sequences rather
+    /// than poking at `TermMode` bits directly lets the local `Term`'s
+    /// existing DECSET/DECRST handling apply the state, which means any
+    /// new flag added to [`PaneModeFlags`] Just Works as long as the
+    /// caller updates this method.
+    pub fn to_replay_bytes(&self) -> Vec<u8> {
+        let mut out: Vec<u8> =
+            Vec::with_capacity(64 + self.grid_chars.iter().map(|r| r.len() + 8).sum::<usize>());
+
+        // Helper: emit DECSET (h) or DECRST (l) for a numeric param.
+        let emit_mode = |buf: &mut Vec<u8>, param: &str, on: bool| {
+            buf.extend_from_slice(b"\x1b[?");
+            buf.extend_from_slice(param.as_bytes());
+            buf.push(if on { b'h' } else { b'l' });
+        };
+
+        let m = &self.modes;
+        // Cursor visibility.
+        emit_mode(&mut out, "25", m.show_cursor);
+        // App cursor keys.
+        emit_mode(&mut out, "1", m.app_cursor);
+        // Line wrap.
+        emit_mode(&mut out, "7", m.line_wrap);
+        // Focus in/out.
+        emit_mode(&mut out, "1004", m.focus_in_out);
+        // Bracketed paste.
+        emit_mode(&mut out, "2004", m.bracketed_paste);
+        // Mouse modes — order matters minimally, but emitting all is safe.
+        emit_mode(&mut out, "1000", m.mouse_report_click);
+        emit_mode(&mut out, "1002", m.mouse_drag);
+        emit_mode(&mut out, "1003", m.mouse_motion);
+        emit_mode(&mut out, "1006", m.sgr_mouse);
+        // Alt screen (after mouse so the screen we paint into is correct).
+        emit_mode(&mut out, "1049", m.alt_screen);
+        // Application keypad (ESC = / ESC >).
+        if m.app_keypad {
+            out.extend_from_slice(b"\x1b=");
+        } else {
+            out.extend_from_slice(b"\x1b>");
+        }
+
+        // Clear screen + home.
+        out.extend_from_slice(b"\x1b[2J\x1b[H");
+
+        // Paint grid rows. Use CUP (ESC[<row>;<col>H) per row, 1-based.
+        // Trailing spaces on each row are preserved verbatim.
+        for (i, row) in self.grid_chars.iter().enumerate() {
+            let line_no = i + 1;
+            out.extend_from_slice(format!("\x1b[{line_no};1H").as_bytes());
+            out.extend_from_slice(row.as_bytes());
+        }
+
+        // Final cursor position (1-based).
+        let cl = self.cursor_line as usize + 1;
+        let cc = self.cursor_col as usize + 1;
+        out.extend_from_slice(format!("\x1b[{cl};{cc}H").as_bytes());
+
+        out
+    }
 }
 
 // ── Framing helpers ───────────────────────────────────────────────────────
@@ -753,6 +892,63 @@ mod tests {
             }
         }
         walk(&fixture_snapshot());
+    }
+
+    #[test]
+    fn pane_state_snapshot_msgpack_round_trip() {
+        let snap = PaneStateSnapshot {
+            version: PaneStateSnapshot::CURRENT_VERSION,
+            cols: 80,
+            rows: 24,
+            modes: PaneModeFlags {
+                show_cursor: false,
+                mouse_report_click: true,
+                mouse_drag: true,
+                sgr_mouse: true,
+                bracketed_paste: true,
+                line_wrap: true,
+                ..Default::default()
+            },
+            cursor_col: 10,
+            cursor_line: 5,
+            grid_chars: vec!["hello".into(); 24],
+        };
+        let msg = IpcMessage::Response {
+            request_id: 42,
+            payload: IpcResponse::PaneStateCaptured {
+                snapshot: snap.clone(),
+            },
+        };
+        let bytes = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&bytes[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn pane_state_snapshot_replay_bytes_contain_decset() {
+        let snap = PaneStateSnapshot {
+            version: 1,
+            cols: 5,
+            rows: 2,
+            modes: PaneModeFlags {
+                show_cursor: false,
+                mouse_report_click: true,
+                sgr_mouse: true,
+                ..Default::default()
+            },
+            cursor_col: 0,
+            cursor_line: 0,
+            grid_chars: vec!["hello".into(), "world".into()],
+        };
+        let bytes = snap.to_replay_bytes();
+        // Hide cursor.
+        assert!(bytes.windows(6).any(|w| w == b"\x1b[?25l"));
+        // Mouse click on.
+        assert!(bytes.windows(8).any(|w| w == b"\x1b[?1000h"));
+        // SGR mouse on.
+        assert!(bytes.windows(8).any(|w| w == b"\x1b[?1006h"));
+        // Clear screen.
+        assert!(bytes.windows(4).any(|w| w == b"\x1b[2J"));
     }
 
     #[test]

@@ -550,6 +550,13 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::CapturePaneState { pane_id } => {
+            let mgr = session_mgr.lock().await;
+            match mgr.capture_pane_state(*pane_id) {
+                Ok(snapshot) => IpcResponse::PaneStateCaptured { snapshot },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
         IpcRequest::SelectPane { pane_id } => {
             let mgr = session_mgr.lock().await;
             match mgr.select_pane(*pane_id) {

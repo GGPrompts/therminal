@@ -234,6 +234,23 @@ impl DaemonClient {
         self.send_request(IpcRequest::GetState).await
     }
 
+    /// Capture a structured `PaneStateSnapshot` for tn-zamd reattach
+    /// replay. Returns an error if the pane does not exist or the daemon
+    /// returns a non-snapshot response.
+    pub async fn capture_pane_state(
+        &self,
+        pane_id: therminal_protocol::PaneId,
+    ) -> Result<therminal_protocol::daemon::PaneStateSnapshot> {
+        let resp = self
+            .send_request(IpcRequest::CapturePaneState { pane_id })
+            .await?;
+        match resp {
+            IpcResponse::PaneStateCaptured { snapshot } => Ok(snapshot),
+            IpcResponse::Error { message } => anyhow::bail!("CapturePaneState: {message}"),
+            other => anyhow::bail!("unexpected response to CapturePaneState: {other:?}"),
+        }
+    }
+
     /// Subscribe to daemon events with an optional filter.
     ///
     /// After calling this, events matching the filter will be available
