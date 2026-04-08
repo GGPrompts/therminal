@@ -92,3 +92,74 @@ pub enum ClaudeStatus {
     ToolUse,
     AwaitingInput,
 }
+
+// ── Unified event bus types ───────────────────────────────────────────────────
+//
+// These types define the wire shape for the unified event bus described in
+// `docs/event-bus-spec.md`. They are protocol types only — no ring buffer,
+// MCP handler, or publisher logic lives here. Implementation is tracked in
+// tn-xula.
+
+/// Which integration surface emitted a [`TerminalEvent`].
+///
+/// Matches the three-surface taxonomy in the root `CLAUDE.md`:
+/// core capabilities, harness crates, and pattern packs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceClass {
+    /// A harness crate (`crates/therminal-harness-*/`): Claude Code, Codex, etc.
+    Harness,
+    /// A pattern pack (`plugins/`): TOML regex-match patterns.
+    Pattern,
+    /// A core capability: shell integration, agent detection, cadence analysis, etc.
+    Core,
+}
+
+/// A single event on the unified therminal event bus.
+///
+/// All three integration surfaces (harness crates, pattern packs, core
+/// capabilities) publish events with this shape. Subscribers receive events
+/// via the `therminal://events` MCP resource; see `docs/event-bus-spec.md`
+/// for the full filter grammar and subscription semantics.
+///
+/// ## Body size caps
+///
+/// The `body` field should stay under 4 KB (recommended). The bus enforces a
+/// hard cap of 64 KB; events that exceed it are replaced by a
+/// `bus.body_too_large` error event emitted by the `core` source class.
+///
+/// ## Trust and redaction
+///
+/// Events are low-trust by default. If `body` contains `"secret": true`, the
+/// bus replaces `body` with `{"redacted": true}` for low-trust subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalEvent {
+    /// Which integration surface produced this event.
+    pub source_class: SourceClass,
+
+    /// Identifier of the specific publisher within `source_class`.
+    ///
+    /// Convention: lowercase `[a-z0-9_-]+`. Examples: `claude`, `codex`,
+    /// `cargo-errors`, `shell-integration`.
+    pub source_id: String,
+
+    /// Event kind string; see `docs/event-bus-kinds.md` for the cross-source
+    /// vocabulary. Source-specific kinds use dot-namespacing: `claude.thinking_started`.
+    pub kind: String,
+
+    /// Pane the event is scoped to, if applicable. `None` for session-scoped events.
+    pub pane_id: Option<u64>,
+
+    /// Wall-clock timestamp in milliseconds since Unix epoch, set by the publisher.
+    pub ts_ms: u64,
+
+    /// Monotonic bus position assigned by the ring buffer (not by the publisher).
+    ///
+    /// Starts at 1 and increments per accepted event. Resets to 1 on daemon
+    /// restart. Use as an opaque token for `since=<cursor>` resumption.
+    pub cursor: u64,
+
+    /// Source-defined payload. Must be a JSON object (`{}`), not a bare value.
+    /// May include `"secret": true` to trigger body redaction for low-trust subscribers.
+    pub body: serde_json::Value,
+}
