@@ -58,6 +58,37 @@ pub struct TextHotspot {
     /// detection (the regex pass) does not touch the filesystem and
     /// always emits `is_dir = false`.
     pub is_dir: bool,
+    /// Optional provenance tag for pattern-pack-sourced hotspots (tn-yrjd).
+    ///
+    /// `None` for built-in hotspots emitted by the regex detectors above.
+    /// `Some(PatternHotspotSource)` when the hotspot was synthesised from
+    /// a `PatternEngine` match via [`hotspots_from_pattern_matches`]. The
+    /// click handler uses this to short-circuit the standard pipeline
+    /// (resolve-against-cwd plus editor-fallback chain) when the pattern
+    /// already resolved a target URL.
+    pub pattern_source: Option<PatternHotspotSource>,
+}
+
+/// Provenance data attached to a pattern-pack-sourced hotspot.
+///
+/// Carries everything the click handler needs to route the action without
+/// doing its own filesystem dance: pack+rule identity (for debug logs and
+/// emit_event routing), the raw on_click kind, the resolved target (URL
+/// or file path), and the tooltip label.
+#[derive(Clone, Debug)]
+pub struct PatternHotspotSource {
+    /// Originating pack — matches `PatternMatch::pack_name`.
+    pub pack_name: String,
+    /// Originating pattern rule name.
+    pub rule_name: String,
+    /// `"open_editor"`, `"open_url"`, or `"emit_event"`.
+    pub on_click: String,
+    /// Resolved `target` template (tilde- and capture-expanded).
+    pub target: Option<String>,
+    /// Resolved `label` template. Used as the tooltip on hover.
+    pub label: Option<String>,
+    /// The `kind` field declared on the pattern (defaults to `"pattern"`).
+    pub declared_kind: String,
 }
 
 // ── Compiled regexes ─────────────────────────────────────────────────────
@@ -403,6 +434,7 @@ pub fn detect_hotspots_from_text_with_wrap(
                     start_col: sc,
                     end_col: ec,
                     is_dir: false,
+                    pattern_source: None,
                 });
             }
         };
@@ -505,6 +537,7 @@ pub fn detect_hotspots_from_text_with_wrap(
                         start_col: sc,
                         end_col: ec,
                         is_dir: false,
+                        pattern_source: None,
                     });
                 }
             }
@@ -765,6 +798,84 @@ pub fn resolve_relative_to_cwd<'a>(path: &'a str, cwd: Option<&str>) -> std::bor
         (false, false) => format!("{base}/{rel}{suffix}"),
     };
     Cow::Owned(joined)
+}
+
+// ── Pattern-engine bridge ───────────────────────────────────────────────
+//
+// Convert `PatternEngine` hotspot-action matches into `TextHotspot`s so
+// pattern-sourced hotspots coexist with the built-in file/URL/error
+// detectors in the same registry. The caller supplies the row index and
+// a UTF-8-safe function for mapping byte offsets within `line` to
+// character columns (the GUI already has one of these for its grid —
+// see `grid_renderer::byte_to_col`). For callers that don't need grid-
+// accurate columns (the daemon / MCP `semantic.get_hotspots` tool), we
+// also provide `hotspots_from_pattern_matches_simple` which approximates
+// columns as byte offsets — fine for ASCII-only outputs.
+
+use crate::semantic_patterns::{PatternMatch, ResolvedAction};
+
+/// Produce a `TextHotspot` per pattern match whose action is
+/// `Hotspot(...)`. Non-hotspot actions are skipped (the caller routes
+/// them separately). `row` is the absolute row index of the line the
+/// matches came from, and `byte_to_col` translates match byte offsets to
+/// character columns (usually via a grid-aware mapping).
+///
+/// The resulting hotspot's `kind` mirrors the closest built-in variant
+/// the pattern's `on_click` maps to, so the existing click dispatcher
+/// can route it without caring about the pattern-pack origin:
+///
+/// - `open_editor` → [`HotspotKind::FilePath`]
+/// - `open_url` → [`HotspotKind::Url`]
+/// - `emit_event` → [`HotspotKind::FilePath`] (neutral default — the
+///   `pattern_source` field is what the handler branches on)
+pub fn hotspots_from_pattern_matches<F>(
+    matches: &[PatternMatch],
+    row: usize,
+    mut byte_to_col: F,
+) -> Vec<TextHotspot>
+where
+    F: FnMut(usize) -> usize,
+{
+    use crate::semantic_patterns::HotspotOnClick;
+
+    let mut out = Vec::new();
+    for m in matches {
+        let ResolvedAction::Hotspot(ref h) = m.action else {
+            continue;
+        };
+        let kind = match h.on_click {
+            HotspotOnClick::OpenUrl => HotspotKind::Url,
+            HotspotOnClick::OpenEditor | HotspotOnClick::EmitEvent => HotspotKind::FilePath,
+        };
+        let start_col = byte_to_col(m.byte_start);
+        let end_col = byte_to_col(m.byte_end);
+        out.push(TextHotspot {
+            kind,
+            text: m.matched_text.clone(),
+            row,
+            start_col,
+            end_col,
+            is_dir: false,
+            pattern_source: Some(PatternHotspotSource {
+                pack_name: m.pack_name.clone(),
+                rule_name: m.pattern_name.clone(),
+                on_click: h.on_click.as_str().to_string(),
+                target: h.target.clone(),
+                label: h.label.clone(),
+                declared_kind: h.kind.clone(),
+            }),
+        });
+    }
+    out
+}
+
+/// Byte-offset-as-column convenience wrapper for ASCII-only callers.
+/// Equivalent to `hotspots_from_pattern_matches(matches, row, |b| b)`.
+pub fn hotspots_from_pattern_matches_simple(
+    matches: &[PatternMatch],
+    row: usize,
+) -> Vec<TextHotspot> {
+    hotspots_from_pattern_matches(matches, row, |b| b)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1118,6 +1229,7 @@ mod tests {
                 start_col: 0,
                 end_col: 13,
                 is_dir: false,
+                pattern_source: None,
             },
             TextHotspot {
                 kind: HotspotKind::FilePath,
@@ -1126,6 +1238,7 @@ mod tests {
                 start_col: 0,
                 end_col: 17,
                 is_dir: false,
+                pattern_source: None,
             },
             TextHotspot {
                 kind: HotspotKind::Url,
@@ -1134,6 +1247,7 @@ mod tests {
                 start_col: 0,
                 end_col: 19,
                 is_dir: false,
+                pattern_source: None,
             },
         ];
         promote_directory_hotspots(&mut hotspots, |p| Ok(p == "/tmp/some-dir"));
@@ -1153,6 +1267,7 @@ mod tests {
             start_col: 0,
             end_col: 12,
             is_dir: false,
+            pattern_source: None,
         }];
         let mut seen = String::new();
         promote_directory_hotspots(&mut hotspots, |p| {
@@ -1176,6 +1291,7 @@ mod tests {
             start_col: 0,
             end_col: 16,
             is_dir: false,
+            pattern_source: None,
         }];
         promote_directory_hotspots(&mut hotspots, |_| Err(std::io::Error::other("nope")));
         assert!(!hotspots[0].is_dir);
@@ -1192,6 +1308,7 @@ mod tests {
             start_col: 0,
             end_col: 30,
             is_dir: false,
+            pattern_source: None,
         }];
         promote_directory_hotspots(&mut hotspots, |_| {
             Err(std::io::Error::other("cross-fs stat failure"))
@@ -1213,6 +1330,7 @@ mod tests {
             start_col: 0,
             end_col: 23,
             is_dir: false,
+            pattern_source: None,
         }];
         promote_directory_hotspots(&mut hotspots, |_| Ok(false));
         assert!(
@@ -1804,5 +1922,113 @@ mod tests {
         // Bare `..` pops one segment.
         let out = resolve_relative_to_cwd("..", Some("/home/x/y"));
         assert_eq!(out, "/home/x");
+    }
+
+    // ── Pattern-engine bridge tests ─────────────────────────────────────
+
+    #[test]
+    fn pattern_matches_convert_to_hotspots() {
+        use crate::semantic_patterns::{
+            HotspotOnClick, PatternEngine, PatternEngineConfig, ResolvedAction,
+        };
+        use std::path::PathBuf;
+
+        // Build a tiny engine with one hotspot pattern.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("t.toml"),
+            r#"
+[[pattern]]
+name = "go-to-src"
+match = '(?P<f>src/[a-z]+\.rs):(?P<l>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_editor"
+target = "{f}"
+label = "open {f}:{l}"
+kind = "pattern-demo"
+"#,
+        )
+        .unwrap();
+
+        let engine = PatternEngine::new(PatternEngineConfig {
+            enabled: true,
+            user_pattern_dir: Some(tmp.path().to_path_buf()),
+            shipped_pattern_dir: Some(PathBuf::new()),
+            ..PatternEngineConfig::new_default()
+        });
+
+        let line = "see src/lib.rs:42 here";
+        let matches = engine.process_finalized_line(1, line, None, None);
+        assert_eq!(matches.len(), 1);
+        // Sanity: action shape.
+        match &matches[0].action {
+            ResolvedAction::Hotspot(h) => assert_eq!(h.on_click, HotspotOnClick::OpenEditor),
+            _ => panic!(),
+        }
+
+        let hotspots = hotspots_from_pattern_matches_simple(&matches, 7);
+        assert_eq!(hotspots.len(), 1);
+        let h = &hotspots[0];
+        assert_eq!(h.kind, HotspotKind::FilePath);
+        assert_eq!(h.text, "src/lib.rs:42");
+        assert_eq!(h.row, 7);
+        // byte_to_col = identity for ASCII input.
+        assert_eq!(h.start_col, 4);
+        assert_eq!(h.end_col, 17);
+        let ps = h.pattern_source.as_ref().expect("pattern source");
+        assert_eq!(ps.pack_name, "t");
+        assert_eq!(ps.rule_name, "go-to-src");
+        assert_eq!(ps.on_click, "open_editor");
+        assert_eq!(ps.target.as_deref(), Some("src/lib.rs"));
+        assert_eq!(ps.label.as_deref(), Some("open src/lib.rs:42"));
+        assert_eq!(ps.declared_kind, "pattern-demo");
+    }
+
+    #[test]
+    fn pattern_url_click_produces_url_hotspot() {
+        use crate::semantic_patterns::{PatternEngine, PatternEngineConfig};
+        use std::path::PathBuf;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("t.toml"),
+            r#"
+[[pattern]]
+name = "gh-issue"
+match = 'GH-(?P<n>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_url"
+target = "https://github.com/example/repo/issues/{n}"
+label = "GH-{n}"
+"#,
+        )
+        .unwrap();
+
+        let engine = PatternEngine::new(PatternEngineConfig {
+            enabled: true,
+            user_pattern_dir: Some(tmp.path().to_path_buf()),
+            shipped_pattern_dir: Some(PathBuf::new()),
+            ..PatternEngineConfig::new_default()
+        });
+
+        let matches = engine.process_finalized_line(1, "closes GH-42", None, None);
+        let hotspots = hotspots_from_pattern_matches_simple(&matches, 0);
+        assert_eq!(hotspots.len(), 1);
+        assert_eq!(hotspots[0].kind, HotspotKind::Url);
+        assert_eq!(
+            hotspots[0]
+                .pattern_source
+                .as_ref()
+                .unwrap()
+                .target
+                .as_deref(),
+            Some("https://github.com/example/repo/issues/42")
+        );
     }
 }

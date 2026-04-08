@@ -1,0 +1,42 @@
+pack_name = "glossary"
+pack_description = "Emit lookup events for common technical acronyms and jargon"
+
+# Minimal glossary: when one of these tokens appears in a finalized line,
+# emit an event carrying the matched term plus a canned short definition
+# via the `extra` map. External consumers (a tooltip overlay, a chat-op
+# notifier, etc.) subscribe to `therminal://events?source_class=pattern`
+# and render the definition however they like. This is the simplest
+# possible `emit_event` demo — two captures, no widget, no click.
+
+[[pattern]]
+name = "osc"
+description = "Operating System Command (ANSI escape family)"
+match = '\b(?P<term>OSC)\b'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.definition = "Operating System Command — ANSI escape sequence family (ESC ] code;data BEL)"
+
+[[pattern]]
+name = "pty"
+description = "Pseudo-Terminal — the kernel device backing a shell session"
+match = '\b(?P<term>PTY)\b'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.definition = "Pseudo-Terminal — kernel device pair (master/slave) that backs a shell session"
+
+[[pattern]]
+name = "mcp"
+description = "Model Context Protocol — the AI-agent tool protocol therminal speaks"
+match = '\b(?P<term>MCP)\b'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.definition = "Model Context Protocol — the standard agents use to discover and call tool servers"

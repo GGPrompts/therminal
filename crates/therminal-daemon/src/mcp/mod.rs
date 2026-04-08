@@ -41,6 +41,7 @@ use crate::trust::{
     AgentIdentity, RateLimiter, TrustCheckResult, check_resource_access, check_tool_access,
 };
 use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
+use therminal_terminal::semantic_patterns::PatternEngine;
 
 pub(super) mod deser_compat;
 pub mod resources;
@@ -936,6 +937,9 @@ pub struct TherminalMcpServer {
     /// `therminal://agents/events`.
     pub(super) agent_event_buffer:
         Arc<std::sync::Mutex<std::collections::VecDeque<TaggedAgentLifecycleEvent>>>,
+    /// Shared pattern engine (tn-yrjd). `None` when the daemon is built
+    /// without pattern support (tests, headless smoke).
+    pub(super) pattern_engine: Option<Arc<PatternEngine>>,
 }
 
 pub(super) const CLAUDE_EVENT_BUFFER_CAP: usize = 256;
@@ -954,6 +958,7 @@ impl TherminalMcpServer {
         rate_limiter: Arc<RateLimiter>,
         claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
         agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+        pattern_engine: Option<Arc<PatternEngine>>,
     ) -> Self {
         Self {
             session_mgr,
@@ -968,6 +973,7 @@ impl TherminalMcpServer {
             agent_event_buffer: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::with_capacity(AGENT_EVENT_BUFFER_CAP),
             )),
+            pattern_engine,
         }
     }
 
@@ -1344,6 +1350,7 @@ impl ServerHandler for TherminalMcpServer {
                 let params: FindWithCapacityParam = parse_args(args)?;
                 self.handle_find_with_capacity(params).await
             }
+            "terminal.patterns.stats" => self.handle_patterns_stats().await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -1378,7 +1385,7 @@ pub(crate) mod tests {
         let session_mgr = Arc::new(tokio::sync::Mutex::new(SessionManager::new(event_tx)));
         let trust_config = Arc::new(trust_config);
         let rate_limiter = Arc::new(RateLimiter::new(100));
-        TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None)
+        TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None, None)
     }
 
     /// Build an `AgentIdentity` with the given name.
@@ -1972,7 +1979,8 @@ pub(crate) mod tests {
         let trust_config = Arc::new(trusted_config());
         // Allow only 1 destructive call per minute.
         let rate_limiter = Arc::new(RateLimiter::new(1));
-        let server = TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None);
+        let server =
+            TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None, None);
         let agent = agent("trusted-bot");
 
         // First call allowed.
@@ -2058,13 +2066,12 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 26 tools must be returned. Bumped from
-    /// 24 to 26 in tn-sp3n with `terminal.panes.get_summary` and
-    /// `terminal.panes.peek`.
+    /// Lock in the count: exactly 27 tools must be returned. Bumped from
+    /// 26 to 27 in tn-yrjd with `terminal.patterns.stats`.
     #[test]
-    fn tool_definitions_returns_26_tools() {
+    fn tool_definitions_returns_27_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 26, "expected exactly 26 tool definitions");
+        assert_eq!(tools.len(), 27, "expected exactly 27 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -2100,6 +2107,7 @@ pub(crate) mod tests {
             "terminal.agents.get_status",
             "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
+            "terminal.patterns.stats",
         ];
         for name in &expected {
             assert!(names.contains(name), "missing tool definition: {name}");
@@ -2170,6 +2178,7 @@ pub(crate) mod tests {
             rate_limiter,
             None,
             Some(tx.clone()),
+            None,
         );
 
         // Manually drive the same buffer-fill loop the subscribe handler uses,

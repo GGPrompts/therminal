@@ -13,6 +13,7 @@ pub mod process_detector;
 pub mod pty;
 pub mod pty_runtime;
 pub mod region_index;
+pub mod semantic_patterns;
 pub mod state_inference;
 pub mod terminal;
 

@@ -309,6 +309,113 @@ async fn start_daemon(
     }
     let agent_events_tx_for_mcp = Some(agent_events_tx);
 
+    // Build the semantic pattern engine (tn-yrjd) from the loaded
+    // `[patterns]` config. Every field declared on `PatternsConfig` is
+    // mapped here — that's the "no dead config" discipline from the
+    // project CLAUDE.md. The engine loads user packs from
+    // `app_config.patterns.directory` (or `<config_dir>/patterns` when
+    // unset) plus shipped example packs resolved via
+    // `THERMINAL_RESOURCES_DIR` / runtime layout.
+    let pattern_engine = Arc::new(therminal_terminal::semantic_patterns::PatternEngine::new(
+        therminal_terminal::semantic_patterns::PatternEngineConfig {
+            enabled: app_config.patterns.enabled,
+            user_pattern_dir: app_config.patterns.directory.clone(),
+            shipped_pattern_dir: None,
+            max_patterns: app_config.patterns.max_patterns,
+            slow_pattern_threshold_us: app_config.patterns.slow_pattern_threshold_us,
+            slow_strike_limit: app_config.patterns.slow_strike_limit,
+        },
+    ));
+    let pattern_engine_for_mcp = Some(Arc::clone(&pattern_engine));
+
+    // Hot-reload pattern packs on filesystem change (tn-yrjd). Uses the
+    // same `notify` crate the `therminal.toml` watcher runs under, but
+    // lives entirely in the daemon — the user pattern directory is a
+    // daemon concern, not a GUI concern. We watch the resolved user
+    // pattern directory (the configured override or the default
+    // `<config_dir>/patterns`), ignore read errors, and spawn a tiny
+    // tokio task that debounces events by 500ms and calls
+    // `engine.reload()` on the next quiet moment. Missing directories
+    // are not an error — users who have never touched packs still get a
+    // working engine.
+    let pattern_watch_dir = app_config
+        .patterns
+        .directory
+        .clone()
+        .unwrap_or_else(|| therminal_runtime::paths::config_dir().join("patterns"));
+    if pattern_watch_dir.exists() {
+        let engine_for_watch = Arc::clone(&pattern_engine);
+        let (notify_tx, mut notify_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        // Keep the watcher alive for the lifetime of the daemon by leaking
+        // it into a static — the alternative is to stash the handle on the
+        // Lifecycle which is more plumbing than this one use case merits.
+        // `notify::recommended_watcher` returns a `Box<dyn Watcher>` held
+        // by the spawned task.
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                use notify::EventKind;
+                if matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) {
+                    let _ = notify_tx.send(());
+                }
+            }
+        }) {
+            Ok(mut watcher) => {
+                if let Err(e) = notify::Watcher::watch(
+                    &mut watcher,
+                    &pattern_watch_dir,
+                    notify::RecursiveMode::NonRecursive,
+                ) {
+                    warn!(
+                        path = %pattern_watch_dir.display(),
+                        error = %e,
+                        "failed to start pattern pack watcher"
+                    );
+                } else {
+                    info!(
+                        path = %pattern_watch_dir.display(),
+                        "pattern pack watcher started"
+                    );
+                    tokio::spawn(async move {
+                        // Move the watcher into the task so it stays alive
+                        // for the duration of the daemon. Dropping it stops
+                        // the watch.
+                        let _watcher = watcher;
+                        loop {
+                            // Wait for the first event.
+                            if notify_rx.recv().await.is_none() {
+                                break;
+                            }
+                            // Debounce: drain any events that arrive within
+                            // 500ms before reloading.
+                            loop {
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(500),
+                                    notify_rx.recv(),
+                                )
+                                .await
+                                {
+                                    Ok(Some(())) => continue,
+                                    Ok(None) => return,
+                                    Err(_) => break,
+                                }
+                            }
+                            info!("pattern pack watcher: reloading");
+                            engine_for_watch.reload();
+                        }
+                    });
+                }
+            }
+            Err(e) => warn!(
+                path = %pattern_watch_dir.display(),
+                error = %e,
+                "failed to construct pattern pack watcher — hot-reload disabled"
+            ),
+        }
+    }
+
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = app_config.mcp.clone();
@@ -324,6 +431,7 @@ async fn start_daemon(
             mcp_rl,
             claude_events_tx,
             agent_events_tx_for_mcp,
+            pattern_engine_for_mcp,
             mcp_shutdown_clone,
         )
         .await

@@ -1,0 +1,34 @@
+pack_name = "cargo-errors"
+pack_description = "Clickable hotspots for Rust compiler errors and warnings"
+
+# Make Rust compiler error locations (the `--> file.rs:42:5` line that
+# follows `error[E0123]: ...`) click-to-open in the user's editor. The
+# regex is intentionally narrow: it requires the `error[Ecode]:` marker
+# to avoid matching every `-->` arrow that appears elsewhere in logs.
+[[pattern]]
+name = "compile-error"
+description = "Jump to Rust compiler error location"
+match = 'error\[(?P<code>E\d+)\]: (?P<msg>[^\n]+?) --> (?P<file>[^:\s]+):(?P<line>\d+):(?P<col>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_editor"
+target = "{file}"
+label = "{code}: {msg} ({file}:{line}:{col})"
+kind = "error"
+
+# Same treatment for `warning: ... --> file.rs:42:5` lines. Separate
+# pattern because the `warning:` shape has no `[code]` attribute.
+[[pattern]]
+name = "compile-warning"
+description = "Jump to Rust compiler warning location"
+match = 'warning: (?P<msg>[^\n]+?) --> (?P<file>[^:\s]+):(?P<line>\d+):(?P<col>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_editor"
+target = "{file}"
+label = "warning: {msg} ({file}:{line}:{col})"
+kind = "warning"

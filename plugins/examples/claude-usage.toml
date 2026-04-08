@@ -1,0 +1,40 @@
+pack_name = "claude-usage"
+pack_description = "Live context-usage gauge widget from Claude Code statusline output"
+
+# Claude Code's statusline prints its current context-window usage as
+# `Context: NN%` — we turn that into a line-right gauge widget so users
+# can see at a glance how full the context is without reading text. The
+# pattern is harness-scoped to claude so it doesn't fire on bash output
+# that happens to contain "Context: 42%" as plain prose.
+[[pattern]]
+name = "context-gauge"
+description = "Gauge widget showing Claude Code's current context usage"
+match = 'Context:\s+(?P<pct>\d{1,3})%'
+scope = "finalized_line"
+action = "widget"
+applies_to = "claude"
+
+[pattern.widget]
+kind = "gauge"
+anchor = "line_right"
+value = "{pct}"
+max = "100"
+# The engine picks a color per capture value; `default` is the fallback
+# when no specific capture value matches. Users who want a red bar
+# above 90% should add a separate prompt_boundary pattern with a badge.
+color.default = "#4a9eff"
+
+# A second rule emits an event on the same line so orchestrators can
+# subscribe to context-usage telemetry without polling. Two patterns per
+# SPEC §2.3's "one pattern, one action" rule.
+[[pattern]]
+name = "context-event"
+description = "Publish a context-usage event for orchestrator consumption"
+match = 'Context:\s+(?P<pct>\d{1,3})%'
+scope = "finalized_line"
+action = "emit_event"
+applies_to = "claude"
+
+[pattern.emit_event]
+extra.metric = "context_pct"
+extra.value = "{pct}"

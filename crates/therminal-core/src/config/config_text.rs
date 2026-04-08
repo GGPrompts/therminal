@@ -10,7 +10,7 @@ use super::{TherminalConfig, TrustTier};
 /// [`super::check_config_template_status`] to detect when a user's
 /// `therminal.toml` predates the current template — without polluting the
 /// parsed config struct.
-pub const CONFIG_TEMPLATE_VERSION: u32 = 1;
+pub const CONFIG_TEMPLATE_VERSION: u32 = 2;
 
 /// Return the fully-commented default config as a TOML string.
 ///
@@ -321,6 +321,27 @@ pub(super) fn default_config_text() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("# folder_opener = [{folder_opener_toml}]\n"));
+    out.push('\n');
+
+    // ── [patterns] ──────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [patterns] — Semantic pattern-matching engine (tn-yrjd).\n");
+    out.push_str("# Pattern packs are TOML files loaded from `directory` (default\n");
+    out.push_str("# `~/.config/therminal/patterns/`). See `docs/pattern-packs-authoring.md`\n");
+    out.push_str("# for the rule schema; shipped examples live in `plugins/examples/`.\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[patterns]\n");
+    out.push_str(&format!("# enabled = {}\n", d.patterns.enabled));
+    out.push_str("# directory = \"\"  # empty = ~/.config/therminal/patterns\n");
+    out.push_str(&format!("# max_patterns = {}\n", d.patterns.max_patterns));
+    out.push_str(&format!(
+        "# slow_pattern_threshold_us = {}  # disable a pattern after 3 matches slower than this\n",
+        d.patterns.slow_pattern_threshold_us
+    ));
+    out.push_str(&format!(
+        "# slow_strike_limit = {}\n",
+        d.patterns.slow_strike_limit
+    ));
     out.push('\n');
 
     out

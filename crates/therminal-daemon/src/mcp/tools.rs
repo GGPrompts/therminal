@@ -1225,6 +1225,32 @@ impl TherminalMcpServer {
 
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
+
+    /// Handle `terminal.patterns.stats` (tn-yrjd).
+    ///
+    /// Returns the full `EngineStats` snapshot the pattern engine
+    /// maintains: per-pattern match counts / avg-cost / status, per-pack
+    /// aggregates, and global cap-reached state. When no engine is wired
+    /// (tests or when `patterns.enabled = false` but the engine hasn't
+    /// been constructed) we return an empty stats object instead of a
+    /// tool-call error so downstream consumers have a stable shape.
+    pub(super) async fn handle_patterns_stats(&self) -> Result<CallToolResult, ErrorData> {
+        let stats = match &self.pattern_engine {
+            Some(engine) => engine.stats().with_cap_limit(engine.config().max_patterns),
+            None => therminal_terminal::semantic_patterns::EngineStats {
+                packs: Vec::new(),
+                global: therminal_terminal::semantic_patterns::GlobalStats {
+                    total_loaded: 0,
+                    total_active: 0,
+                    total_disabled: 0,
+                    cap_reached: false,
+                    cap_limit: 0,
+                    pack_load_errors: Vec::new(),
+                },
+            },
+        };
+        Ok(CallToolResult::success(vec![json_content(&stats)?]))
+    }
 }
 
 // ── Tool definitions ────────────────────────────────────────────────────
@@ -1360,6 +1386,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.agents.find_with_capacity",
             "Return all detected agents whose REMAINING context-window capacity is at least `threshold_percent` (0.0 - 100.0). `remaining_percent = 100.0 - context_percent`. Agents whose capacity is unknown (no PaneCapacityCache entry) are INCLUDED — treated as 'potentially has capacity' so callers don't accidentally exclude fresh panes. Results are sorted by `remaining_percent` descending; agents with unknown capacity sort last.",
             schema_for_type::<FindWithCapacityParam>(),
+        ),
+        Tool::new(
+            "terminal.patterns.stats",
+            "Return match statistics for every loaded semantic pattern pack (tn-yrjd). Output shape matches `docs/pattern-performance-model.md` §6.3: per-pattern match_count/miss_count/avg_match_ms/slow_count/status, per-pack active/disabled/error counts plus load_errors, and global total_loaded/total_active/total_disabled/cap_reached/cap_limit plus pack_load_errors. Read-only (Observer tier).",
+            schema_for_type::<EmptyParams>(),
         ),
     ]
 }

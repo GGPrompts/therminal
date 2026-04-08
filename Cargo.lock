@@ -3563,9 +3563,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tempfile",
  "therminal-protocol",
  "therminal-runtime",
  "thiserror 2.0.18",
+ "toml",
  "tracing",
 ]
 

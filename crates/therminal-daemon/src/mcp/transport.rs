@@ -24,6 +24,7 @@ use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
 use crate::session::SessionManager;
 use crate::trust::RateLimiter;
 use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
+use therminal_terminal::semantic_patterns::PatternEngine;
 
 use super::TherminalMcpServer;
 
@@ -36,6 +37,7 @@ use super::TherminalMcpServer;
 /// Each accepted connection is served independently. The server runs until
 /// the `shutdown` notify is triggered. Trust enforcement uses the provided
 /// `TrustConfig` to gate tool access per agent.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_mcp_server(
     config: therminal_core::config::McpConfig,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
@@ -43,6 +45,7 @@ pub async fn start_mcp_server(
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+    pattern_engine: Option<Arc<PatternEngine>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if !config.enabled {
@@ -61,6 +64,7 @@ pub async fn start_mcp_server(
             rate_limiter,
             claude_events,
             agent_events,
+            pattern_engine,
             shutdown,
         )
         .await?;
@@ -75,6 +79,7 @@ pub async fn start_mcp_server(
             rate_limiter,
             claude_events,
             agent_events,
+            pattern_engine,
             shutdown,
         )
         .await?;
@@ -87,6 +92,7 @@ pub async fn start_mcp_server(
 ///
 /// Accepts anything that can be split into an async reader + writer (Unix
 /// socket halves, named-pipe halves, etc.).
+#[allow(clippy::too_many_arguments)]
 fn spawn_mcp_connection<R, W>(
     reader: R,
     writer: W,
@@ -95,6 +101,7 @@ fn spawn_mcp_connection<R, W>(
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+    pattern_engine: Option<Arc<PatternEngine>>,
 ) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
@@ -106,6 +113,7 @@ fn spawn_mcp_connection<R, W>(
             rate_limiter,
             claude_events,
             agent_events,
+            pattern_engine,
         );
         match server.serve((reader, writer)).await {
             Ok(running) => {
@@ -122,6 +130,7 @@ fn spawn_mcp_connection<R, W>(
 
 /// Unix implementation: listen on a Unix domain socket.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn start_mcp_server_unix(
     socket_path: &Path,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
@@ -129,6 +138,7 @@ async fn start_mcp_server_unix(
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+    pattern_engine: Option<Arc<PatternEngine>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     // Clean stale socket
@@ -171,6 +181,7 @@ async fn start_mcp_server_unix(
                             Arc::clone(&rate_limiter),
                             claude_events.clone(),
                             agent_events.clone(),
+                            pattern_engine.clone(),
                         );
                     }
                     Err(e) => {
@@ -201,6 +212,7 @@ async fn start_mcp_server_unix(
 ///   3. Hand the connected instance off to a handler.
 ///   4. Immediately create a new pipe instance for the next client.
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 async fn start_mcp_server_windows(
     socket_path: &Path,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
@@ -208,6 +220,7 @@ async fn start_mcp_server_windows(
     rate_limiter: Arc<RateLimiter>,
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+    pattern_engine: Option<Arc<PatternEngine>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -237,6 +250,7 @@ async fn start_mcp_server_windows(
                             Arc::clone(&rate_limiter),
                             claude_events.clone(),
                             agent_events.clone(),
+                            pattern_engine.clone(),
                         );
 
                         // Create a new pipe instance for the next client.

@@ -15,9 +15,13 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
+toml = { workspace = true }
 portable-pty = { workspace = true }
 anyhow = { workspace = true }
 sysinfo = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

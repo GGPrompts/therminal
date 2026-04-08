@@ -195,6 +195,8 @@ pub struct TherminalConfig {
     pub notifications: NotificationConfig,
     /// Hotspot (clickable file/URL) settings.
     pub hotspots: HotspotsConfig,
+    /// Semantic pattern-matching engine settings (tn-yrjd).
+    pub patterns: PatternsConfig,
     /// Result of the template-version scan performed by [`Self::load_from`].
     ///
     /// Computed in-process and never round-tripped through TOML
@@ -948,6 +950,57 @@ pub struct HotspotsConfig {
     /// the last resort, which delegates to `xdg-open` / `open` / `explorer`
     /// depending on the platform.
     pub folder_opener: Vec<String>,
+}
+
+// ── Section: Patterns ───────────────────────────────────────────────────
+
+/// Semantic pattern-matching engine settings (tn-yrjd).
+///
+/// Controls the pattern-pack surface from
+/// `docs/pattern-matching-spec.md`. Every field declared here is wired to
+/// code in `therminal-daemon::ensure` → `PatternEngine::new`; fields that
+/// would otherwise be dead config are kept to the `directory` /
+/// `max_patterns` / `slow_pattern_threshold_us` / `slow_strike_limit`
+/// tuple defined by the performance-model doc §7.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PatternsConfig {
+    /// Master enable toggle for the pattern engine. When `false`, packs
+    /// still load so `terminal.patterns.stats` can report them, but the
+    /// runtime `process_*` calls return empty vecs. Default: `true`.
+    pub enabled: bool,
+    /// Override the user pattern-pack directory. When unset (the default)
+    /// the engine falls back to `<config_dir>/patterns` — i.e.
+    /// `~/.config/therminal/patterns/` on Linux.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_pathbuf"
+    )]
+    pub directory: Option<PathBuf>,
+    /// Global cap on the total number of loaded patterns across all packs
+    /// combined. SPEC §4.1 default: 500. Set low to catch accidental DoS
+    /// from runaway pack generation.
+    pub max_patterns: usize,
+    /// A pattern match that takes more than this many microseconds on a
+    /// single input is logged as slow and counted against its strike
+    /// limit. SPEC §3.1 default: 1000 (1 ms).
+    pub slow_pattern_threshold_us: u64,
+    /// Number of consecutive slow strikes before a pattern is disabled
+    /// for the remainder of the daemon session. SPEC §3.2 default: 3.
+    pub slow_strike_limit: u32,
+}
+
+impl Default for PatternsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            directory: None,
+            max_patterns: 500,
+            slow_pattern_threshold_us: 1000,
+            slow_strike_limit: 3,
+        }
+    }
 }
 
 impl Default for HotspotsConfig {
