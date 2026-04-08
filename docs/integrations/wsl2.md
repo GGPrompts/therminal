@@ -25,11 +25,17 @@ MCP IPC endpoint and forwards JSON-RPC bidirectionally over stdin/stdout.
    - `resources/` to `%APPDATA%\therminal\resources` (shell integration scripts)
    See the [Windows Native Build section in the top-level CLAUDE.md](../../CLAUDE.md).
 
-2. **Running daemon** — you must launch `therminal-daemon.exe` on Windows
-   *before* the bridge or the GUI can connect. The daemon is a separate
-   binary from `therminal.exe` (auto-spawn from the GUI is tracked as
-   tn-6q3v). It listens on a Windows named pipe: `\\.\pipe\therminal-mcp`
-   by default. Typical launch:
+2. **Running daemon** — `therminal.exe` auto-spawns `therminal-daemon.exe`
+   at startup if it isn't already running (tn-txs8). The daemon is a
+   separate binary that lives next to `therminal.exe` on disk; the GUI
+   resolves it from the same directory as the running `therminal.exe`,
+   then `PATH`, then the optional `[daemon] binary_path` config override.
+   It listens on a Windows named pipe: `\\.\pipe\therminal-mcp` by default.
+
+   For the WSL → Windows MCP bridge specifically, the `therminal mcp`
+   subprocess does **not** auto-spawn the daemon — it's pure stdio
+   plumbing. Either launch the GUI first (which will spawn the daemon as
+   a side effect), or launch the daemon manually:
    ```powershell
    Start-Process "$env:USERPROFILE\Desktop\therminal-daemon.exe"
    ```
@@ -111,11 +117,12 @@ routing — happens inside the Windows daemon.
 - **Path format in tool calls**: Prefer `/mnt/c/...` or WSL paths in tool
   arguments if the tool is reading files. Windows-style `C:\Users\...`
   paths only work if the tool is invoking Windows APIs directly.
-- **Daemon not running**: Every tool call will fail fast with
-  `failed to connect to daemon MCP named pipe`. Launch
-  `therminal-daemon.exe` first — it is a separate process from
-  `therminal.exe` and neither the GUI nor the stdio bridge will start it
-  for you (auto-spawn is tracked as tn-6q3v).
+- **Daemon not running**: The `therminal mcp` stdio bridge will fail fast
+  with `failed to connect to daemon MCP named pipe`. The GUI auto-spawns
+  the daemon on startup, but the stdio bridge does not — launch
+  `therminal.exe` (which spawns the daemon), or start
+  `therminal-daemon.exe` manually before pointing Claude Code at the
+  bridge.
 - **Trust tier defaults**: New MCP clients are assigned the default trust
   tier from `[trust]` in `therminal.toml`. Until you bump Claude Code's
   tier, write-level tools (input injection, pane spawn) may be denied.
@@ -129,8 +136,9 @@ routing — happens inside the Windows daemon.
 
 ### `failed to connect to daemon MCP named pipe at \\.\pipe\therminal-mcp`
 
-The daemon is not running. Launch `therminal.exe` on Windows. Confirm the
-named pipe exists from PowerShell:
+The daemon is not running. Launching `therminal.exe` will auto-spawn it;
+alternatively start `therminal-daemon.exe` directly. Confirm the named
+pipe exists from PowerShell:
 
 ```powershell
 Get-ChildItem \\.\pipe\ | Where-Object Name -like 'therminal*'
