@@ -81,6 +81,10 @@ pub struct PtyPaneCore<L: EventListener> {
     term: Arc<FairMutex<Term<L>>>,
     pty_writer: Box<dyn IoWrite + Send>,
     pty_master: Box<dyn MasterPty + Send>,
+    /// PID of the spawned shell child, captured before the child handle
+    /// was moved into the watcher thread. `None` if portable-pty did not
+    /// expose a process id (e.g. some Windows backends).
+    child_pid: Option<u32>,
     /// Kept alive so we can join on shutdown if needed in the future.
     #[allow(dead_code)]
     reader_handle: Option<thread::JoinHandle<()>>,
@@ -124,6 +128,11 @@ impl<L: EventListener> PtyPaneCore<L> {
         let (pty_master, mut child) =
             pty::spawn_shell_with_options(cols as u16, rows as u16, spawn_options)?;
 
+        // Capture the child PID before moving `child` into the watcher
+        // thread. Used by the daemon-side `ProcessDetector` ticker to
+        // walk the process tree below the spawned shell.
+        let child_pid = child.process_id();
+
         let pty_reader = pty_master
             .try_clone_reader()
             .map_err(|e| PtyError::Open(anyhow::anyhow!("failed to clone PTY reader: {e}")))?;
@@ -160,8 +169,16 @@ impl<L: EventListener> PtyPaneCore<L> {
             term,
             pty_writer,
             pty_master,
+            child_pid,
             reader_handle: Some(reader_handle),
         })
+    }
+
+    /// PID of the spawned shell child, if portable-pty exposed one.
+    /// Used by the daemon's process-tree agent detector to scan below
+    /// the shell.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
     }
 
     /// Write bytes to the PTY (forward keystrokes).

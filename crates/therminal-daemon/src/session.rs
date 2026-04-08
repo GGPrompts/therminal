@@ -318,6 +318,13 @@ pub struct Pane {
     /// (issue ids, branch names, conductor worker ids, ...). Therminal
     /// does not interpret these — see tn-bbvf.
     tags: HashMap<String, String>,
+    /// PID of the spawned shell child. Used by the daemon-side
+    /// `ProcessDetector` ticker (tn-pehl) to scan the process tree below
+    /// the shell and populate the central `AgentRegistry` even when no
+    /// GUI is attached. `None` for handoff-restored panes (the shell PID
+    /// is not transmitted with the SCM_RIGHTS FD payload) and on backends
+    /// where portable-pty does not surface a process id.
+    shell_pid: Option<u32>,
 }
 
 impl Pane {
@@ -371,6 +378,7 @@ impl Pane {
         )?;
 
         let term = Arc::clone(core.term());
+        let shell_pid = core.child_pid();
         let pty_writer = core.take_writer();
         let pty_master = core.take_pty_master();
 
@@ -388,6 +396,7 @@ impl Pane {
             command_tracker,
             event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),
             tags: HashMap::new(),
+            shell_pid,
         })
     }
 
@@ -486,6 +495,10 @@ impl Pane {
             command_tracker,
             event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),
             tags: HashMap::new(),
+            // Handoff payloads do not include the shell PID; the new
+            // daemon will not run process-tree detection on this pane
+            // until the next session restart. tn-pehl follow-up.
+            shell_pid: None,
         })
     }
 
@@ -585,6 +598,13 @@ impl Pane {
     /// Get the shell command used when this pane was spawned.
     pub fn shell(&self) -> &str {
         &self.shell
+    }
+
+    /// PID of the spawned shell child, if known. Used by the daemon-side
+    /// `ProcessDetector` ticker (tn-pehl) to walk the process tree below
+    /// the shell. Returns `None` for handoff-restored panes.
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
     }
 
     /// Snapshot of the pane's opaque key/value tags (tn-bbvf).
@@ -1452,6 +1472,22 @@ impl SessionManager {
     /// Return the ID of the first (default) session, if any.
     pub fn default_session_id(&self) -> Option<SessionId> {
         self.sessions.keys().next().copied()
+    }
+
+    /// Snapshot of `(pane_id, shell_pid)` pairs for every live pane across
+    /// all sessions. Returned as plain owned values so callers (notably
+    /// the daemon-side process-detector ticker — tn-pehl) can drop the
+    /// `SessionManager` lock before performing the scan.
+    pub fn pane_shell_pids(&self) -> Vec<(PaneId, Option<u32>)> {
+        let mut out = Vec::new();
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                for pane in &window.panes {
+                    out.push((pane.id, pane.shell_pid()));
+                }
+            }
+        }
+        out
     }
 
     // ── Agent registry ─────────────────────────────────────────────────

@@ -277,6 +277,16 @@ async fn start_daemon(
     let claude_events_tx =
         crate::claude_pipeline::spawn(lifecycle.shutdown_notify(), Some(capacity_observer));
 
+    // Spawn the daemon-side process-tree agent detector ticker (tn-pehl).
+    // Walks each pane's shell PID every 3 seconds and feeds detected
+    // agents into the central `AgentRegistry`. Without this, the daemon's
+    // `terminal.agents.list` MCP tool returns `[]` for any session that
+    // wasn't created by an attached GUI — see process_detector_task.rs.
+    let _process_detector_task = crate::process_detector_task::spawn_process_detector_task(
+        server.session_manager(),
+        lifecycle.shutdown_notify(),
+    );
+
     // Wire the AgentRegistry's lifecycle events into a tokio broadcast channel
     // for the MCP `therminal://agents/events` resource. The registry takes a
     // type-erased callback so therminal-terminal stays free of a tokio dep.

@@ -42,6 +42,7 @@ pub mod lifecycle;
 pub mod mcp;
 pub mod pane_capacity;
 pub mod persistence;
+pub mod process_detector_task;
 pub mod server;
 pub mod session;
 pub mod trust;
