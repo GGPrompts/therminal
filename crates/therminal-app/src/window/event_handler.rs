@@ -340,6 +340,12 @@ impl App {
             self.last_resize_at = Some(now);
             self.pending_resize = None;
             self.resize(new_size);
+            // tn-ou30: the first authoritative `Resized` arrives shortly
+            // after window creation. If the local-mode initial pane spawn
+            // was deferred (Windows DPI/DWM-reshape race), spawn it now —
+            // *after* `self.resize` has committed the new surface dims so
+            // `compute_layout_rect` returns the real rect.
+            self.ensure_initial_local_pane_spawned();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -367,9 +373,21 @@ impl App {
             self.resize(size);
         }
 
+        // tn-ou30: fallback for platforms that do not synthesize an early
+        // `WindowEvent::Resized` after window creation. By the time we
+        // enter the first redraw, `gpu.config.{width,height}` reflect the
+        // real surface dimensions (set in `init_gpu` from
+        // `window.inner_size()`), so spawning here is safe even if no
+        // resize event has fired yet. On the typical Windows path the
+        // first `Resized` already covered this; this call is then a
+        // no-op (the flag was cleared there).
+        self.ensure_initial_local_pane_spawned();
+
         // workspaces == None means all panes are gone and no restore
-        // is pending — exit the window.
-        if self.workspaces.is_none() {
+        // is pending — exit the window. Gate on `initial_pane_pending`
+        // (tn-ou30) so we don't exit during the brief window between
+        // `init_gpu` returning and the deferred initial spawn landing.
+        if self.workspaces.is_none() && !self.initial_pane_pending {
             event_loop.exit();
             return;
         }

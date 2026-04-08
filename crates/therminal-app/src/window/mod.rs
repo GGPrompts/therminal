@@ -288,6 +288,26 @@ pub struct App {
     /// the remote-spawn / attach path (tn-pgz6, tn-ytw2). When `None` the
     /// `publish_workspace_state()` helper short-circuits.
     pub(crate) daemon_session_id: Option<therminal_protocol::SessionId>,
+
+    /// tn-ou30: deferred local-mode initial pane spawn.
+    ///
+    /// On Windows native builds the size reported by `Window::inner_size()`
+    /// immediately after `create_window()` does not always match the size
+    /// the OS settles on once the window is shown — DPI snapping, taskbar
+    /// reservation, and DWM reshape can all change the surface dimensions
+    /// before the first frame. The fresh shell would then emit its first
+    /// prompt against a stale row count, which alacritty's resize cannot
+    /// retroactively fix (the prompt has already landed at the wrong row).
+    ///
+    /// To avoid this, the local fresh-spawn branch in `init_gpu` defers
+    /// the actual `spawn_pane` call. It stores window/gpu/grid_renderer
+    /// and sets this flag to `true`. The first authoritative size — either
+    /// the first `WindowEvent::Resized` or, as a fallback, the first
+    /// `RedrawRequested` — calls `ensure_initial_local_pane_spawned()`,
+    /// which builds the pane against the current GPU surface dims and
+    /// clears the flag. Remote attach / remote fresh-spawn paths still
+    /// spawn synchronously inside `init_gpu` and never set this flag.
+    pub(crate) initial_pane_pending: bool,
 }
 
 /// Rewrite a `LayoutSnapshot` tree, translating every leaf pane id from

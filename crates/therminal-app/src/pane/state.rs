@@ -108,9 +108,84 @@ pub fn grid_size_for_rect_with_header(
     renderer: &GridRenderer,
     header_h: f32,
 ) -> (usize, usize) {
-    let usable_w = rect.width() - renderer.padding_x() * 2.0;
-    let usable_h = rect.height() - renderer.padding_y() * 2.0 - header_h;
-    let cols = (usable_w / renderer.cell_width).floor().max(2.0) as usize;
-    let rows = (usable_h / renderer.cell_height).floor().max(1.0) as usize;
+    grid_size_from_metrics(
+        rect,
+        renderer.padding_x(),
+        renderer.padding_y(),
+        header_h,
+        renderer.cell_width,
+        renderer.cell_height,
+    )
+}
+
+/// Pure math helper: compute (cols, rows) from a rect plus raw cell metrics.
+///
+/// Extracted from `grid_size_for_rect_with_header` so unit tests can lock the
+/// invariant "given rect R, the result reflects R" without needing a live
+/// `GridRenderer` (which requires a GPU device). This is the low-level
+/// function the deferred-spawn fix relies on: at first-Resized time, we feed
+/// it the current authoritative surface rect, not a stale `inner_size()`
+/// reading from window creation. See tn-ou30.
+pub fn grid_size_from_metrics(
+    rect: Rect,
+    padding_x: f32,
+    padding_y: f32,
+    header_h: f32,
+    cell_width: f32,
+    cell_height: f32,
+) -> (usize, usize) {
+    let usable_w = rect.width() - padding_x * 2.0;
+    let usable_h = rect.height() - padding_y * 2.0 - header_h;
+    let cols = (usable_w / cell_width).floor().max(2.0) as usize;
+    let rows = (usable_h / cell_height).floor().max(1.0) as usize;
     (cols, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tn-ou30 invariant: given a rect, `grid_size_from_metrics` derives
+    /// (cols, rows) from THAT rect, not some other one. If init_gpu's
+    /// deferred spawn ever regresses to using stale dimensions, this test
+    /// documents what "use the current rect" means.
+    #[test]
+    fn grid_size_tracks_input_rect_dimensions() {
+        // 1920x1080 surface, 24px tab bar, 24px status bar, 8px padding,
+        // 10x20 cells, no header.
+        let rect = Rect::new(0.0, 24.0, 1920.0, 1080.0 - 24.0 - 24.0);
+        let (cols, rows) = grid_size_from_metrics(rect, 8.0, 8.0, 0.0, 10.0, 20.0);
+        // usable_w = 1920 - 16 = 1904; cols = floor(1904/10) = 190
+        // usable_h = 1032 - 16 = 1016; rows = floor(1016/20) = 50
+        assert_eq!(cols, 190);
+        assert_eq!(rows, 50);
+    }
+
+    #[test]
+    fn grid_size_changes_when_rect_changes() {
+        // The same metrics applied to a smaller rect must yield smaller dims.
+        // This is the crux of the tn-ou30 fix: the deferred-spawn path must
+        // pick up the *new* rect after the first Resized, not the rect that
+        // was implied by the (stale) winit `inner_size()` at create time.
+        let small = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let large = Rect::new(0.0, 0.0, 1920.0, 1200.0);
+        let (small_cols, small_rows) = grid_size_from_metrics(small, 0.0, 0.0, 0.0, 10.0, 20.0);
+        let (large_cols, large_rows) = grid_size_from_metrics(large, 0.0, 0.0, 0.0, 10.0, 20.0);
+        assert!(large_cols > small_cols);
+        assert!(large_rows > small_rows);
+        assert_eq!(small_cols, 80);
+        assert_eq!(small_rows, 30);
+        assert_eq!(large_cols, 192);
+        assert_eq!(large_rows, 60);
+    }
+
+    #[test]
+    fn grid_size_clamps_to_minimum_dims() {
+        // Pathologically tiny rect: cols clamps to 2, rows clamps to 1.
+        // No panic, no zero divides.
+        let tiny = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let (cols, rows) = grid_size_from_metrics(tiny, 8.0, 8.0, 0.0, 10.0, 20.0);
+        assert_eq!(cols, 2);
+        assert_eq!(rows, 1);
+    }
 }

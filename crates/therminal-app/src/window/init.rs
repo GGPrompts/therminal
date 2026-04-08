@@ -201,6 +201,7 @@ impl App {
             daemon_runtime: None,
             pane_id_map: super::PaneIdMap::default(),
             daemon_session_id: None,
+            initial_pane_pending: false,
         }
     }
 
@@ -324,6 +325,13 @@ impl App {
             config.width as f32,
             config.height as f32 - status_bar_h - tab_bar_h,
         );
+        // tn-ou30: `scrollback`, `interceptor_cfg`, `proxy` are still used
+        // by the remote attach + remote fresh-spawn paths below. The local
+        // fresh-spawn path (after both remote branches fall through) is
+        // deferred via `initial_pane_pending`, so it rederives them inside
+        // `ensure_initial_local_pane_spawned`. `scan_interval_secs`,
+        // `spawn_options`, and `registry` were only used by the (now
+        // deferred) local path, so they have been removed here.
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
             osc_633: self.config.terminal.osc_633,
@@ -333,10 +341,7 @@ impl App {
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
-        let scan_interval_secs = self.config.trust.agent_scan_interval;
-        let spawn_options = self.build_spawn_options();
         let proxy = self.event_proxy.clone();
-        let registry = Some(Arc::clone(&self.agent_registry));
 
         // ── tn-5ps8: gate on `mcp.attach_mode` ─────────────────────────
         // Reads the new config field. `Local` is the default and matches
@@ -499,9 +504,82 @@ impl App {
             }
         }
 
+        // tn-ou30: defer the local fresh-spawn pane until the first
+        // authoritative window size lands. On Windows native builds, the
+        // dimensions reported by `Window::inner_size()` immediately after
+        // `create_window()` can disagree with the size the OS settles on
+        // before the first frame (DPI snapping, taskbar reservation, DWM
+        // reshape). Spawning the shell against those stale dims causes the
+        // first prompt to land at the wrong row — alacritty's resize on
+        // the first real `Resized` event cannot retroactively move it,
+        // and the user sees a prompt rendered mid-screen with empty
+        // scrollback above and a phantom cursor at row 0.
+        //
+        // We commit the GPU/renderer state now (so the first redraw can
+        // clear the surface) and stash the pending flag. The actual
+        // `spawn_pane` call happens in `ensure_initial_local_pane_spawned`,
+        // invoked from `handle_resized` (the first authoritative size) and
+        // from `handle_redraw_requested` as a fallback for platforms that
+        // do not synthesize an initial `Resized` event.
+        self.window = Some(window);
+        self.gpu = Some(GpuState {
+            surface,
+            device,
+            queue,
+            config,
+        });
+        self.grid_renderer = Some(grid_renderer);
+        self.initial_pane_pending = true;
+        info!("local-mode initial pane deferred until first authoritative resize (tn-ou30)");
+    }
+
+    /// tn-ou30: spawn the deferred local-mode initial pane against the
+    /// current GPU surface dimensions.
+    ///
+    /// No-op unless `initial_pane_pending` is true. Called from
+    /// `handle_resized` (preferred path: first authoritative size) and from
+    /// `handle_redraw_requested` (fallback for platforms that do not fire
+    /// an early `Resized`). Idempotent — clears the flag on success and on
+    /// the first failure so we don't spin forever.
+    pub(super) fn ensure_initial_local_pane_spawned(&mut self) {
+        if !self.initial_pane_pending {
+            return;
+        }
+
+        let Some(full_rect) = self.compute_layout_rect() else {
+            // GPU not yet committed — keep the flag set and try again on
+            // the next resize/redraw.
+            return;
+        };
+        // Don't spawn against degenerate rects; wait for the next event.
+        if full_rect.width() <= 0.0 || full_rect.height() <= 0.0 {
+            return;
+        }
+        let Some(renderer) = self.grid_renderer.as_ref() else {
+            return;
+        };
+
+        // Clear the flag eagerly so an unrecoverable failure (e.g. shell
+        // spawn returning an error) doesn't loop forever on every redraw.
+        self.initial_pane_pending = false;
+
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
+            osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
+        };
+        let scan_interval_secs = self.config.trust.agent_scan_interval;
+        let spawn_options = self.build_spawn_options();
+        let proxy = self.event_proxy.clone();
+        let registry = Some(Arc::clone(&self.agent_registry));
+
         let pane = match crate::pane::spawn_pane(
             full_rect,
-            &grid_renderer,
+            renderer,
             scrollback,
             interceptor_cfg,
             scan_interval_secs,
@@ -534,28 +612,19 @@ impl App {
         ) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to spawn initial pane");
+                tracing::warn!(error = %e, "failed to spawn deferred initial pane");
                 return;
             }
         };
         let pane_id = pane.id;
         let layout = LayoutNode::Leaf(pane);
         let wm = WorkspaceManager::new(layout, Some(pane_id));
-
-        let init_width = config.width;
-        let init_height = config.height;
-
-        self.window = Some(window);
-        self.gpu = Some(GpuState {
-            surface,
-            device,
-            queue,
-            config,
-        });
-        self.grid_renderer = Some(grid_renderer);
         self.workspaces = Some(wm);
 
         // Resize initial pane with correct header height (0 for single pane).
+        // This is the load-bearing call: it locks the PTY's grid dimensions
+        // to the *current* surface size, not the size winit reported when
+        // the window was created.
         if let Some(wm) = self.workspaces.as_mut()
             && let Some(renderer) = self.grid_renderer.as_ref()
         {
@@ -563,12 +632,17 @@ impl App {
                 .resize_all_panes(renderer, self.config.general.show_pane_headers);
         }
 
-        let (cols, rows) = self
-            .grid_renderer
-            .as_ref()
-            .map(|r| r.grid_size(init_width, init_height))
-            .unwrap_or((80, 24));
-        info!("Initial pane {pane_id}: {cols}x{rows}");
+        if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_ref(), self.gpu.as_ref()) {
+            let (cols, rows) = renderer.grid_size(gpu.config.width, gpu.config.height);
+            info!(
+                pane_id,
+                cols, rows, "initial local pane spawned (deferred, tn-ou30)"
+            );
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 
     /// tn-ytw2 Phase A: try to attach to an existing daemon session and
