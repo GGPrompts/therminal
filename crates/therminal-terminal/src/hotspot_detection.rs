@@ -63,15 +63,21 @@ pub struct TextHotspot {
 // ── Compiled regexes ─────────────────────────────────────────────────────
 
 /// File path with optional `:line` or `:line:col`.
-/// Matches EITHER paths with a leading prefix (`./`, `../`, `/`) OR
-/// any path whose final segment ends in a known source/config/doc
+/// Matches EITHER paths with a leading prefix (`./`, `../`, `/`, `~/`, `~user/`)
+/// OR any path whose final segment ends in a known source/config/doc
 /// extension from a curated whitelist. This avoids false positives on
 /// plain `word.word` tokens (e.g. `2.0`, `1.5x`, `Loaded.files`).
+///
+/// `~` is kept in the match (it's later expanded to `$HOME` by
+/// [`expand_tilde`] when the click handler resolves the path). The
+/// `~user/` form is included because POSIX tools print it in shell
+/// output; the `user` segment matches the same `[A-Za-z0-9_-]+` charset
+/// as a path segment and must be followed by `/`.
 pub static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Keep extension list in sync with the module docs / tests.
     const EXT: &str = r"rs|ts|tsx|jsx|js|mjs|cjs|py|md|toml|json|yaml|yml|html|css|scss|sh|bash|zsh|fish|ps1|go|java|kt|swift|c|h|cpp|hpp|rb|php|lua|sql|xml|lock|txt|log|env|gitignore|dockerfile";
     let pat = format!(
-        r"(?:(?:\.{{1,2}}/|/)(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-.]+(?:\.(?:{ext}))?|(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]+\.(?:{ext}))(?::\d+(?::\d+)?)?",
+        r"(?:(?:\.{{1,2}}/|/|~(?:[A-Za-z0-9_\-]+)?/)(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-.]+(?:\.(?:{ext}))?|(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]+\.(?:{ext}))(?::\d+(?::\d+)?)?",
         ext = EXT
     );
     Regex::new(&pat).unwrap()
@@ -369,12 +375,18 @@ pub fn promote_directory_hotspots<F>(hotspots: &mut [TextHotspot], mut is_dir_fn
 where
     F: FnMut(&str) -> std::io::Result<bool>,
 {
+    // Resolve `$HOME` once per call so tilde-prefixed hotspots stat
+    // against the real filesystem instead of a literal `~/...`. The
+    // `~user/...` form is left un-expanded here and falls through to
+    // the heuristic (see [`expand_tilde`]).
+    let home = std::env::var("HOME").ok();
     for h in hotspots.iter_mut() {
         if h.kind != HotspotKind::FilePath {
             continue;
         }
         let path = strip_line_col_suffix(&h.text);
-        match is_dir_fn(path) {
+        let expanded = expand_tilde(path, home.as_deref());
+        match is_dir_fn(expanded.as_ref()) {
             Ok(true) => h.is_dir = true,
             Ok(false) => {} // filesystem says no — trust it
             Err(_) => {
@@ -382,7 +394,7 @@ where
                 // host can't see, e.g. WSL paths on a Windows therminal
                 // build). Fall through to a pure heuristic so the user can
                 // still get the folder context menu.
-                if classify_path_as_directory_heuristic(path) {
+                if classify_path_as_directory_heuristic(expanded.as_ref()) {
                     h.is_dir = true;
                 }
             }
@@ -449,6 +461,39 @@ pub fn strip_line_col_suffix(text: &str) -> &str {
     } else {
         text
     }
+}
+
+/// Expand a leading `~/` or `~user/` prefix into an absolute path.
+///
+/// Pure: `home_dir` is passed in (typically `std::env::var("HOME")`)
+/// so tests can stub it without touching the environment. Only the
+/// leading prefix is inspected, so callers can pass a raw hotspot
+/// string with or without a trailing `:line[:col]` suffix.
+///
+/// - `~/foo/bar` with home=`/home/marci` → `/home/marci/foo/bar`
+/// - `~` with home=`/home/marci` → `/home/marci`
+/// - `~alice/foo` → unchanged. We don't call `getpwnam`, and shell
+///   output showing `~alice/foo` is overwhelmingly informational;
+///   the click handler will still attempt the literal path and
+///   toast on failure.
+/// - anything without a leading `~` → unchanged
+///
+/// Returns a `Cow` so the no-op case doesn't allocate.
+pub fn expand_tilde<'a>(path: &'a str, home_dir: Option<&str>) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    if path == "~" {
+        if let Some(home) = home_dir {
+            return Cow::Owned(home.to_string());
+        }
+        return Cow::Borrowed(path);
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home_dir
+    {
+        let trimmed = home.trim_end_matches('/');
+        return Cow::Owned(format!("{trimmed}/{rest}"));
+    }
+    Cow::Borrowed(path)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -960,5 +1005,109 @@ mod tests {
         assert!(!classify_path_as_directory_heuristic("Makefile"));
         assert!(!classify_path_as_directory_heuristic("README"));
         assert!(!classify_path_as_directory_heuristic("Dockerfile"));
+    }
+
+    // ── Tilde prefix ──────────────────────────────────────────────────
+
+    #[test]
+    fn detects_tilde_directory_path() {
+        // The full-issue fixture: `~/projects/therminal` printed by a
+        // shell prompt. Before the tilde fix, the regex would match only
+        // `/projects/therminal`, so the click handler would `cd` into a
+        // nonexistent absolute path.
+        let hotspots = detect(&["cwd: ~/projects/therminal right now"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1, "expected exactly one path match, got {fp:?}");
+        assert_eq!(fp[0].text, "~/projects/therminal");
+    }
+
+    #[test]
+    fn detects_tilde_file_path_with_line_col() {
+        let hotspots = detect(&["edit ~/.config/therminal/therminal.toml:12:4 please"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "~/.config/therminal/therminal.toml:12:4");
+    }
+
+    #[test]
+    fn detects_tilde_user_path() {
+        // POSIX `~user/…` form.
+        let hotspots = detect(&["see ~alice/src/main.rs here"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1);
+        assert_eq!(fp[0].text, "~alice/src/main.rs");
+    }
+
+    #[test]
+    fn tilde_without_slash_is_not_a_path() {
+        // A bare `~` in prose must not match (e.g. "approx ~5 seconds").
+        // The regex requires `~/` or `~user/` — so "~5" never matches.
+        let hotspots = detect(&["roughly ~5 seconds later"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert!(fp.is_empty(), "bare `~5` should not match, got {fp:?}");
+    }
+
+    #[test]
+    fn expand_tilde_home_slash() {
+        let out = expand_tilde("~/projects/therminal", Some("/home/marci"));
+        assert_eq!(out, "/home/marci/projects/therminal");
+    }
+
+    #[test]
+    fn expand_tilde_home_slash_trailing_slash_in_home() {
+        // `$HOME=/home/marci/` (with trailing slash) must not double up.
+        let out = expand_tilde("~/foo", Some("/home/marci/"));
+        assert_eq!(out, "/home/marci/foo");
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde() {
+        let out = expand_tilde("~", Some("/home/marci"));
+        assert_eq!(out, "/home/marci");
+    }
+
+    #[test]
+    fn expand_tilde_preserves_line_col_suffix() {
+        // `expand_tilde` only touches the leading prefix, so a
+        // `:line:col` suffix passes through unchanged.
+        let out = expand_tilde("~/foo.rs:42:5", Some("/home/marci"));
+        assert_eq!(out, "/home/marci/foo.rs:42:5");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_user_form_alone() {
+        // `~alice/foo` needs `getpwnam` to resolve, which we don't do.
+        // The function returns the path unchanged so the caller can try
+        // the literal path and toast on failure.
+        let out = expand_tilde("~alice/foo", Some("/home/marci"));
+        assert_eq!(out, "~alice/foo");
+    }
+
+    #[test]
+    fn expand_tilde_without_home_is_noop() {
+        // No `$HOME` set → unchanged, rather than producing `/foo`
+        // which would be wrong.
+        let out = expand_tilde("~/foo", None);
+        assert_eq!(out, "~/foo");
+    }
+
+    #[test]
+    fn expand_tilde_ignores_non_tilde() {
+        let out = expand_tilde("/usr/local/bin", Some("/home/marci"));
+        assert_eq!(out, "/usr/local/bin");
+        let out2 = expand_tilde("./src/main.rs", Some("/home/marci"));
+        assert_eq!(out2, "./src/main.rs");
     }
 }

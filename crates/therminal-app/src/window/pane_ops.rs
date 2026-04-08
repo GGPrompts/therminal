@@ -1346,6 +1346,14 @@ impl App {
     pub(crate) fn open_in_editor(&mut self, path_with_loc: &str) {
         use std::process::Command;
 
+        // Expand `~/…` before the pre-flight stat in `plan_open_in_editor`
+        // — otherwise `~/foo.rs:42` stat's as a literal `~/foo.rs` and
+        // the hotspot silently fails the "is a regular file" check.
+        let home = std::env::var("HOME").ok();
+        let expanded =
+            therminal_terminal::hotspot_detection::expand_tilde(path_with_loc, home.as_deref());
+        let path_with_loc = expanded.as_ref();
+
         let chain = self.config.hotspots.editor_chain.clone();
         let outcome = plan_open_in_editor(
             path_with_loc,

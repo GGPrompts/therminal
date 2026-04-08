@@ -25,6 +25,8 @@ use std::process::Command;
 
 use tracing::{debug, info, warn};
 
+use therminal_terminal::hotspot_detection::expand_tilde;
+
 use crate::pane::SplitDirection;
 
 use super::App;
@@ -174,6 +176,12 @@ impl App {
     /// when the binary is missing. Falls all the way through to the
     /// file-manager chain when `folder_pane_command` is empty.
     pub(crate) fn open_folder_in_pane(&mut self, path: &str) {
+        // Expand `~/…` / `~` before building the `cd` line. The shell
+        // we're `exec`-ing into can't expand `~` inside single quotes,
+        // so an un-expanded path would land us in `/~/…` (nonexistent).
+        let home = std::env::var("HOME").ok();
+        let expanded = expand_tilde(path, home.as_deref());
+        let path = expanded.as_ref();
         let command = self.config.hotspots.folder_pane_command.clone();
         let plan = plan_folder_pane_open(path, &command, which_on_path);
 
@@ -222,6 +230,12 @@ impl App {
     /// `folder_opener` chain. Final fallback is `open::that(path)` so
     /// the platform default (xdg-open / open / explorer) wins.
     pub(crate) fn open_folder_in_file_manager(&mut self, path: &str) {
+        // Expand `~/…` before handing the path to any external tool —
+        // most file managers (Explorer, Finder, Nautilus) treat `~` as
+        // a literal directory name instead of `$HOME`.
+        let home = std::env::var("HOME").ok();
+        let expanded = expand_tilde(path, home.as_deref());
+        let path = expanded.as_ref();
         let chain = self.config.hotspots.folder_opener.clone();
         let plan = plan_folder_opener(&chain, which_on_path, |var| {
             std::env::var(var).ok().filter(|s| !s.is_empty())
