@@ -319,8 +319,17 @@ fn is_valid_session_id(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Resolve the user's home directory via the `dirs` crate, which handles
+/// `$HOME` on Unix and `%USERPROFILE%` on Windows native. Falls back to
+/// `/home/builder` only when no platform home can be determined — which
+/// is a near-impossible state on a real user machine and indicates either
+/// a broken environment or a CI sandbox with neither env var set.
+///
+/// Prior to tn-ix8c this function read `$HOME` directly, which is typically
+/// unset on Windows native, so the subagent JSONL tailer silently watched
+/// `/home/builder/.claude/projects/` (nonexistent) and emitted no events.
 fn home_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/builder".into()))
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/builder"))
 }
 
 // ── Top-level session registry ──────────────────────────────────────────────
