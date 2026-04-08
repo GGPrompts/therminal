@@ -116,6 +116,11 @@ pub enum IpcRequest {
     KillPane { pane_id: PaneId },
     /// Select (focus) a specific pane.
     SelectPane { pane_id: PaneId },
+    /// Swap the positions of two panes within the same session's layout tree.
+    ///
+    /// Both panes must currently belong to the same session; the daemon
+    /// rejects cross-session swaps with `IpcResponse::Error`.
+    SwapPane { a: PaneId, b: PaneId },
     /// Request handoff with FD passing (Unix only).
     ///
     /// The daemon responds with `HandoffReady` containing a temporary socket
@@ -222,6 +227,8 @@ pub enum IpcResponse {
     PaneKilled { pane_id: PaneId },
     /// Pane selected (focused).
     PaneSelected { pane_id: PaneId },
+    /// Two panes swapped positions in the layout tree.
+    PaneSwapped { a: PaneId, b: PaneId },
     /// Handoff ready: the old daemon has prepared FDs for transfer.
     ///
     /// The new daemon should connect to `handoff_socket` to receive the
@@ -1090,5 +1097,27 @@ mod tests {
         let parsed: WorkspaceInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(info, parsed);
         assert!(parsed.layout.is_some());
+    }
+
+    #[test]
+    fn ipc_swap_pane_request_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 99,
+            payload: IpcRequest::SwapPane { a: 10, b: 20 },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn ipc_pane_swapped_response_round_trip() {
+        let msg = IpcMessage::Response {
+            request_id: 99,
+            payload: IpcResponse::PaneSwapped { a: 10, b: 20 },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
     }
 }

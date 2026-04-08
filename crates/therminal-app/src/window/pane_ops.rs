@@ -915,17 +915,87 @@ impl App {
             Some(id) => id,
             None => return,
         };
+        // Resolve target via the layout (read-only).
+        let target_id = match self.get_layout() {
+            Some(l) => match l.adjacent_pane(focused, direction) {
+                Some(t) => t,
+                None => return,
+            },
+            None => return,
+        };
+
+        if self.is_daemon_mode() && !self.swap_pane_remote(focused, target_id) {
+            // Daemon rejected/failed — leave the local layout untouched.
+            return;
+        }
+
         let layout = match self.get_layout_mut() {
             Some(l) => l,
             None => return,
         };
-
-        if let Some(target_id) = layout.adjacent_pane(focused, direction)
-            && layout.swap_pane(focused, target_id)
-        {
+        if layout.swap_pane(focused, target_id) {
             // Focus stays on the original pane ID (it moved to the new position).
             self.request_redraw();
             self.publish_workspace_state();
+        }
+    }
+
+    /// Phase B swap path: ask the daemon to swap two panes in its stored
+    /// layout snapshot BEFORE the GUI mutates its local LayoutNode tree.
+    /// Returns `true` on success; on failure logs loud and leaves both
+    /// daemon and local state untouched (rollback semantics).
+    pub(crate) fn swap_pane_remote(&mut self, a_local: PaneId, b_local: PaneId) -> bool {
+        let a_daemon = match self.pane_id_map.daemon_for_local(a_local) {
+            Some(d) => d,
+            None => {
+                debug!(
+                    a_local,
+                    "swap_pane_remote: no daemon id mapping for a — proceeding with local swap only"
+                );
+                return true;
+            }
+        };
+        let b_daemon = match self.pane_id_map.daemon_for_local(b_local) {
+            Some(d) => d,
+            None => {
+                debug!(
+                    b_local,
+                    "swap_pane_remote: no daemon id mapping for b — proceeding with local swap only"
+                );
+                return true;
+            }
+        };
+        match self.daemon_rpc_blocking(IpcRequest::SwapPane {
+            a: a_daemon,
+            b: b_daemon,
+        }) {
+            Ok(IpcResponse::PaneSwapped { .. }) => true,
+            Ok(IpcResponse::Error { message }) => {
+                warn!(
+                    a_local,
+                    b_local, message, "swap_pane_remote: daemon error — NOT mutating local layout"
+                );
+                self.show_toast(format!("swap failed: {message}"));
+                false
+            }
+            Ok(other) => {
+                warn!(
+                    a_local,
+                    b_local,
+                    ?other,
+                    "swap_pane_remote: unexpected response — NOT mutating local layout"
+                );
+                false
+            }
+            Err(e) => {
+                warn!(
+                    a_local,
+                    b_local, error = %e,
+                    "swap_pane_remote: RPC failed — NOT mutating local layout"
+                );
+                self.show_toast("daemon swap failed");
+                false
+            }
         }
     }
 

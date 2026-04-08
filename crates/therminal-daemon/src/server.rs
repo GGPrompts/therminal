@@ -577,6 +577,13 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::SwapPane { a, b } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.swap_panes(*a, *b) {
+                Ok(()) => IpcResponse::PaneSwapped { a: *a, b: *b },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
         IpcRequest::SelectPane { pane_id } => {
             let mgr = session_mgr.lock().await;
             match mgr.select_pane(*pane_id) {

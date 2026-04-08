@@ -879,6 +879,23 @@ pub struct SessionManager {
     pane_capacity: Arc<crate::pane_capacity::PaneCapacityCache>,
 }
 
+/// Swap two pane IDs wherever they appear as leaves in a `LayoutSnapshot`.
+fn swap_layout_leaves(node: &mut LayoutSnapshot, a: PaneId, b: PaneId) {
+    match node {
+        LayoutSnapshot::Leaf { pane_id } => {
+            if *pane_id == a {
+                *pane_id = b;
+            } else if *pane_id == b {
+                *pane_id = a;
+            }
+        }
+        LayoutSnapshot::Split { first, second, .. } => {
+            swap_layout_leaves(first, a, b);
+            swap_layout_leaves(second, a, b);
+        }
+    }
+}
+
 impl SessionManager {
     /// Create a new empty session manager.
     pub fn new(event_tx: broadcast::Sender<DaemonEvent>) -> Self {
@@ -1284,6 +1301,52 @@ impl SessionManager {
             }
         }
         Err(format!("pane not found: {pane_id}"))
+    }
+
+    /// Swap two panes' positions in the layout tree of their session.
+    ///
+    /// Both panes must currently belong to the same session — cross-session
+    /// swaps are not expressible in the wire protocol and are rejected here.
+    /// Updates `WorkspaceInfo::pane_ids` ordering and rewrites any
+    /// `LayoutSnapshot::Leaf` nodes referencing either pane within all of
+    /// the session's workspaces, so a follow-up `set_workspace_state` from
+    /// the GUI will be a no-op.
+    pub fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<(), String> {
+        if a == b {
+            return Ok(());
+        }
+        let session_a = self
+            .session_for_pane(a)
+            .ok_or_else(|| format!("pane not found: {a}"))?;
+        let session_b = self
+            .session_for_pane(b)
+            .ok_or_else(|| format!("pane not found: {b}"))?;
+        if session_a != session_b {
+            return Err(format!(
+                "cross-session swap not supported: pane {a} in session {session_a}, pane {b} in session {session_b}"
+            ));
+        }
+
+        let session = self
+            .sessions
+            .get_mut(&session_a)
+            .ok_or_else(|| "session disappeared under concurrent request".to_string())?;
+
+        for ws in session.workspace_state.iter_mut() {
+            for pid in ws.pane_ids.iter_mut() {
+                if *pid == a {
+                    *pid = b;
+                } else if *pid == b {
+                    *pid = a;
+                }
+            }
+            if let Some(layout) = ws.layout.as_mut() {
+                swap_layout_leaves(layout, a, b);
+            }
+        }
+
+        self.mark_dirty();
+        Ok(())
     }
 
     /// Merge opaque key/value tags into a pane (tn-bbvf). Returns the
@@ -1965,6 +2028,80 @@ mod tests {
         let mut mgr = SessionManager::new(tx);
         mgr.shutdown(); // Should not panic
         assert_eq!(mgr.session_count(), 0);
+    }
+
+    #[test]
+    fn swap_layout_leaves_basic() {
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        let mut tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+            }),
+        };
+        swap_layout_leaves(&mut tree, 1, 3);
+        // After swap: first leaf is 3, deepest second is 1.
+        if let LayoutSnapshot::Split { first, second, .. } = &tree {
+            assert!(matches!(**first, LayoutSnapshot::Leaf { pane_id: 3 }));
+            if let LayoutSnapshot::Split { second: inner2, .. } = &**second {
+                assert!(matches!(**inner2, LayoutSnapshot::Leaf { pane_id: 1 }));
+            } else {
+                panic!("expected split");
+            }
+        } else {
+            panic!("expected split");
+        }
+    }
+
+    #[test]
+    fn swap_panes_unknown_returns_error() {
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let err = mgr.swap_panes(404, 405).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    #[ignore] // Requires a real TTY
+    fn swap_panes_updates_layout_snapshot() {
+        use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
+        let tx = make_event_tx();
+        let mut mgr = SessionManager::new(tx);
+        let session_id = mgr.create_session(Some("swap-test".into())).unwrap();
+        // Find the existing pane id, then split to get two.
+        let pane_a = mgr.sessions.get(&session_id).unwrap().windows[0].panes[0].id;
+        let pane_b = mgr.split_pane(pane_a, false).unwrap();
+
+        // Install a layout snapshot with both leaves.
+        let workspaces = vec![WorkspaceInfo {
+            id: 1,
+            name: "main".into(),
+            order: 0,
+            pane_ids: vec![pane_a, pane_b],
+            focused_pane: Some(pane_a),
+            layout: Some(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: pane_a }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: pane_b }),
+            }),
+        }];
+        mgr.set_workspace_state(session_id, workspaces, 1).unwrap();
+
+        mgr.swap_panes(pane_a, pane_b).unwrap();
+        let (got_ws, _) = mgr.get_workspace_state(session_id).unwrap();
+        assert_eq!(got_ws[0].pane_ids, vec![pane_b, pane_a]);
+        if let Some(LayoutSnapshot::Split { first, second, .. }) = got_ws[0].layout.as_ref() {
+            assert!(matches!(**first, LayoutSnapshot::Leaf { pane_id } if pane_id == pane_b));
+            assert!(matches!(**second, LayoutSnapshot::Leaf { pane_id } if pane_id == pane_a));
+        } else {
+            panic!("expected split layout");
+        }
     }
 
     #[test]
