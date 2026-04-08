@@ -3399,6 +3399,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "glyphon",
+ "libc",
  "notify-rust",
  "open",
  "pollster",

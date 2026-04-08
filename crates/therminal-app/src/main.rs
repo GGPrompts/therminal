@@ -1,5 +1,6 @@
 mod clipboard;
 mod color_mapping;
+mod daemon_spawn;
 mod grid_renderer;
 mod mcp_stdio;
 mod menu;
@@ -93,25 +94,63 @@ fn main() -> Result<()> {
     // Open a persistent connection to therminal-daemon before window
     // creation. This is the first wiring step toward making the GUI a
     // daemon client (epic tn-382v); local PTY rendering is unaffected.
+    let config_for_daemon = TherminalConfig::load();
     let (daemon_client, daemon_runtime) = match connect_daemon() {
         Ok((client, handle)) => (Some(client), Some(handle)),
         Err(e) => {
-            let socket_hint = if cfg!(windows) {
-                r"\\.\pipe\therminal-daemon (start therminal-daemon.exe)".to_string()
+            // tn-txs8 (folds tn-6q3v): if the failure looks like "no daemon
+            // running", try to auto-spawn `therminal-daemon` next to the
+            // current exe / on PATH / via [daemon] binary_path, then retry.
+            if daemon_spawn::is_not_running_error(&e) {
+                tracing::info!(
+                    error = %e,
+                    "no daemon detected on socket — attempting auto-spawn"
+                );
+                let binary_override = config_for_daemon.daemon.binary_path.as_deref();
+                match daemon_spawn::auto_spawn(binary_override) {
+                    Ok(path) => {
+                        tracing::info!(
+                            binary = %path.display(),
+                            "spawned therminal-daemon, retrying connect"
+                        );
+                        match daemon_spawn::retry_connect(connect_daemon) {
+                            Ok((client, handle)) => (Some(client), Some(handle)),
+                            Err(retry_err) => {
+                                tracing::error!(
+                                    error = %retry_err,
+                                    "auto-spawned daemon never came up — giving up"
+                                );
+                                eprintln!(
+                                    "therminal: auto-spawned daemon never became reachable\n  cause: {retry_err:#}"
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(spawn_err) => {
+                        tracing::error!(error = %spawn_err, "auto-spawn failed");
+                        eprintln!("therminal: {spawn_err:#}");
+                        std::process::exit(1);
+                    }
+                }
             } else {
-                therminal_runtime::paths::socket_path("daemon")
-                    .display()
-                    .to_string()
-            };
-            tracing::error!(
-                error = %e,
-                socket = %socket_hint,
-                "failed to connect to therminal-daemon — start it and retry"
-            );
-            eprintln!(
-                "therminal: could not connect to daemon at {socket_hint}\n  cause: {e:#}\n  hint:  start `therminal-daemon` and try again"
-            );
-            std::process::exit(1);
+                let socket_hint = if cfg!(windows) {
+                    r"\\.\pipe\therminal-daemon (start therminal-daemon.exe)".to_string()
+                } else {
+                    therminal_runtime::paths::socket_path("daemon")
+                        .display()
+                        .to_string()
+                };
+                tracing::error!(
+                    error = %e,
+                    socket = %socket_hint,
+                    "failed to connect to therminal-daemon — start it and retry"
+                );
+                eprintln!(
+                    "therminal: could not connect to daemon at {socket_hint}\n  cause: {e:#}\n  hint:  start `therminal-daemon` and try again"
+                );
+                std::process::exit(1);
+            }
         }
     };
 

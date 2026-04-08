@@ -226,6 +226,16 @@ pub(super) fn default_config_text() -> String {
     ));
     out.push('\n');
 
+    // ── [daemon] ─────────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [daemon] — therminal-daemon discovery and auto-spawn (tn-txs8).\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[daemon]\n");
+    out.push_str(
+        "# binary_path = \"\"  # explicit path to therminal-daemon; empty = auto-detect\n",
+    );
+    out.push('\n');
+
     // ── [bell] ──────────────────────────────────────────────────────────
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("# [bell] — BEL character handling.\n");

@@ -55,6 +55,8 @@ pub struct TherminalConfig {
     pub terminal: TerminalConfig,
     /// MCP server settings.
     pub mcp: McpConfig,
+    /// Daemon auto-spawn settings.
+    pub daemon: DaemonConfig,
     /// Bell behavior settings.
     pub bell: BellConfig,
     /// Notification settings.
@@ -632,6 +634,41 @@ impl Default for McpConfig {
             attach_mode: AttachMode::default(),
         }
     }
+}
+
+// ── Section: Daemon ─────────────────────────────────────────────────────
+
+/// Daemon spawn / discovery settings.
+///
+/// The GUI is a daemon client by default (tn-beez). When the daemon is not
+/// already running, the GUI auto-spawns it (tn-txs8). `binary_path` lets
+/// users override the resolution chain when their `therminal-daemon` is
+/// installed somewhere unusual.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Explicit absolute path to the `therminal-daemon` binary. When set,
+    /// the GUI's auto-spawn helper uses this path verbatim instead of the
+    /// "next to current exe" / `PATH` resolution chain. `None` (the default
+    /// — represented by an empty string in TOML for round-tripping) means
+    /// "auto-detect".
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_pathbuf"
+    )]
+    pub binary_path: Option<std::path::PathBuf>,
+}
+
+fn deserialize_optional_pathbuf<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::path::PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|s| if s.is_empty() { None } else { Some(s.into()) }))
 }
 
 // ── Section: Bell ───────────────────────────────────────────────────────
