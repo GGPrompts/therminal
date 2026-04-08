@@ -94,13 +94,49 @@ cargo test --workspace
 
 The core architectural decision: **"Does this need bytes-in-flight, or can it work from stored state?"**
 
-If it needs the live PTY stream or GPU surface, it belongs in the terminal. If it works from stored/structured data, it's an external tool that connects via MCP, CLI, or daemon IPC.
+If it needs the live PTY stream or GPU surface, it belongs in the terminal. If it works from stored/structured data, it's an external tool that connects via MCP, CLI, or daemon IPC. Cooperative file reads are acceptable when stored state contains signals that stream inference cannot recover (e.g., session titles, subagent lineage).
 
-**Therminal is the platform, not the monolith.** It stays fast and focused on its privileged position — the live PTY stream and GPU surface — while the ecosystem grows around the MCP interface.
+**Therminal is the platform, not the monolith.** It stays fast and focused on its privileged position — the live PTY stream and GPU surface — while the ecosystem grows around the MCP interface and the three integration surfaces described below.
 
-### Harness integrations: documented, not built-in
+## Integration Taxonomy
 
-There is **no plugin system** and no harness-specific code paths for Claude Code, Codex, Aider, etc. The MCP server is the stable contract — any harness that speaks MCP can drive therminal. Per-harness setup (config snippets, trust tier recommendations, known quirks) lives in `docs/integrations/`. If a harness needs something therminal doesn't expose, the answer is to extend the MCP surface, not to special-case the harness.
+Three surfaces, mutually exclusive. When a planning question arises, apply the tripwire first, then pick the surface.
+
+### 1. Core capabilities
+
+Generic features that apply to any pane regardless of what's running in it. File path / URL / error hotspots, editor fallback chain, `folder_pane_command`, `folder_opener`, keybindings, themes, agent detection, cadence analysis. Lives in `crates/therminal-terminal/` and `crates/therminal-core/`. Users customize via `therminal.toml`, not by writing code. The live PTY stream remains core's exclusive domain.
+
+### 2. Harness crates (`crates/therminal-harness-*/`)
+
+First-class support for specific AI coding harnesses and their private formats. Each harness crate owns its OSC marker grammar (if any), parsers, typed events, and its own `CLAUDE.md`. Core provides a `SequenceInterceptor::register_osc_handler` hook; harness crates claim OSC codes via a central registry in `therminal-terminal` to avoid collisions. A harness crate is dormant when its process is absent from the pane's process map — zero overhead otherwise.
+
+**Target harnesses for first-class support: Claude Code, Codex, Copilot CLI, OpenCode.** Any other harness requires a deliberate decision and a filed issue before a crate is created. The MCP server remains the stable contract for harnesses without a crate — any harness that speaks MCP can drive therminal today without waiting for a dedicated crate. Per-harness setup docs (config snippets, trust tier recommendations, known quirks) live in `docs/integrations/`.
+
+### 3. Pattern packs (`plugins/`)
+
+TOML files of regex patterns + actions (highlight, widget, emit-event) that match against terminal text output. For user-written customizations, uncooperative sources (cargo output, Python tracebacks, logs), and anything not worth a full harness crate. Sharable as copy-paste. AI-authored from the `therminal-plugin` skill with only the skill's docs in context.
+
+### The tripwire
+
+| Question | Surface |
+|---|---|
+| Does the source cooperate and emit structured data you control? | harness crate |
+| Is the source uncooperative and you need to parse its text output? | pattern pack |
+| Does the feature apply to any pane regardless of source? | core capability |
+
+### Event bus
+
+All three surfaces publish to `therminal://events` with a common envelope:
+
+```
+{ source_class, source_id, kind, pane_id, ts, cursor, body }
+```
+
+- `source_class` ∈ `{harness, pattern, core}`
+- `source_id`: harness name (`claude`, `codex`, `copilot`, `opencode`), pack name (`cargo-errors`), or core subsystem name
+- `kind`: recommended cross-surface vocabulary (`tool_call`, `agent_state`, `progress`, `error`, `waiting`, `done`), plus source-specific kinds
+
+Orchestrators filter by any combination. Adversarial-review use cases subscribe to `source_class=harness` to observe all harness events regardless of origin. The OSC handler registry, pattern engine, and event bus each have their own P1 spec issue (tn-fp42, tn-3vzi, tn-bu1s); this taxonomy is the shared frame those specs build on.
 
 ## Task Tracking
 
