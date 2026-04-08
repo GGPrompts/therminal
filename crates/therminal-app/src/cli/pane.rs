@@ -48,10 +48,10 @@ pub enum PaneCmd {
         #[arg(long)]
         raw: bool,
     },
-    /// Print a pane's visible grid (or its last N rows).
+    /// Print the last N non-empty rows of a pane's visible grid (default 10, cap 50).
     Peek {
         pane_id: u64,
-        /// Limit to the last N non-empty rows.
+        /// Limit to the last N non-empty rows (default 10, max 50).
         #[arg(long)]
         last: Option<usize>,
         /// Trim trailing whitespace per row.
@@ -269,9 +269,12 @@ fn peek(
         lines
     };
 
-    if let Some(n) = last {
-        // Drop fully empty trailing rows so `--last 5` returns five rows of
-        // *content*, not five empty padding rows. Then keep the tail.
+    // Default to 10 non-empty lines (matches MCP terminal.panes.peek default).
+    // Cap at 50 to mirror the server-side cap the MCP tool applies.
+    let n = last.unwrap_or(10).min(50);
+    {
+        // Drop fully empty trailing rows so the result contains content lines,
+        // not blank padding rows. Then keep the last `n` non-empty lines.
         while matches!(processed.last(), Some(s) if s.is_empty()) {
             processed.pop();
         }
