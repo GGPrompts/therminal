@@ -36,9 +36,13 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(if cli.verbose { "debug" } else { "info" })
-        .init();
+    // Tracing filter precedence: RUST_LOG (if set) > --verbose > default.
+    // Without honoring RUST_LOG, targeted debugging like
+    // `RUST_LOG=therminal_daemon::server=trace` is silently ignored.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(if cli.verbose { "debug" } else { "info" }));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     if cli.help_control {
         println!("{}", therminal_daemon::control::protocol_reference());

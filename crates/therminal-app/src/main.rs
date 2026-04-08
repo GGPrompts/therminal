@@ -63,10 +63,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Tracing filter precedence: RUST_LOG (if set) > --verbose > default.
+    // Honoring RUST_LOG is critical for targeted debugging — e.g.
+    // `RUST_LOG=therminal_app::pane::remote_spawn=trace` to enable the
+    // tn-wlu6 hex-dump instrumentation without flooding the rest of the
+    // output. Without this, the env filter is hardcoded and RUST_LOG
+    // is silently ignored.
+    use tracing_subscriber::EnvFilter;
+    let make_filter = |default: &str| -> EnvFilter {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default))
+    };
+
     if let Some(Command::Mcp) = cli.command {
         // MCP stdio bridge — logs to stderr only (stdout is the MCP protocol).
         tracing_subscriber::fmt()
-            .with_env_filter(if cli.verbose { "debug" } else { "warn" })
+            .with_env_filter(make_filter(if cli.verbose { "debug" } else { "warn" }))
             .with_writer(std::io::stderr)
             .init();
 
@@ -74,7 +85,7 @@ fn main() -> Result<()> {
     }
 
     tracing_subscriber::fmt()
-        .with_env_filter(if cli.verbose { "debug" } else { "info" })
+        .with_env_filter(make_filter(if cli.verbose { "debug" } else { "info" }))
         .init();
 
     tracing::info!("therminal starting");
