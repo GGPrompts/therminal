@@ -32,6 +32,18 @@ pub(crate) fn is_click_within_tolerance(press: (f64, f64), release: (f64, f64)) 
     (dx * dx + dy * dy) <= CLICK_JITTER_TOLERANCE_SQ
 }
 
+/// Pure helper: convert a viewport row (0..screen_lines) into the absolute
+/// `Line` value used by alacritty's selection / `Term` APIs. When the user
+/// has scrolled up by `display_offset` rows, the row at the top of the
+/// viewport corresponds to absolute `Line(-display_offset)`, so a viewport
+/// row R maps to `Line(R as i32 - display_offset as i32)`.
+///
+/// Selections that ignore `display_offset` drift downward by one row per
+/// scrolled line, which is the bug fixed in tn-gfkr.
+pub(crate) fn viewport_row_to_absolute_line(row: usize, display_offset: usize) -> i32 {
+    row as i32 - display_offset as i32
+}
+
 // ── Hover cursor (hyperlink / hotspot) state machine ──────────────────
 
 /// Pure decision for the hyperlink/hotspot hover cursor state machine.
@@ -241,6 +253,14 @@ impl App {
     // ── Selection helpers ──────────────────────────────────────────────
 
     /// Start a new selection on the given pane at the specified grid position.
+    ///
+    /// `(col, row)` is in **viewport** coordinates (0..screen_lines), as
+    /// returned by `pixel_to_grid_for_pane`. Alacritty's `Selection` expects
+    /// **absolute** grid coordinates, where `Line(0)` is the top of the
+    /// viewport when `display_offset == 0` and rows pushed into history sit
+    /// at negative line numbers. We subtract `display_offset` so the
+    /// selection still anchors to the right cell after the user has scrolled
+    /// up — otherwise the selection drifts down by one row per scrolled line.
     pub(crate) fn start_selection(
         &mut self,
         pane_id: PaneId,
@@ -258,16 +278,22 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let point = Point::new(Line(row as i32), Column(col));
-        let selection = Selection::new(ty, point, side);
         if let Some(term) = pane.backend.term() {
-            term.lock().selection = Some(selection);
+            let mut term_guard = term.lock();
+            let display_offset = term_guard.grid().display_offset();
+            let line = Line(viewport_row_to_absolute_line(row, display_offset));
+            let point = Point::new(line, Column(col));
+            let selection = Selection::new(ty, point, side);
+            term_guard.selection = Some(selection);
         }
         self.selection_in_progress = true;
         self.selection_pane = Some(pane_id);
     }
 
     /// Update the current in-progress selection to a new grid position.
+    ///
+    /// See `start_selection` for the viewport-to-absolute coordinate
+    /// conversion rationale.
     pub(crate) fn update_selection(&mut self, pane_id: PaneId, col: usize, row: usize) {
         // Compute side before borrowing layout mutably.
         let side = self.pixel_to_side(self.cursor_position.map(|(x, _)| x).unwrap_or(0.0), pane_id);
@@ -279,9 +305,11 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let point = Point::new(Line(row as i32), Column(col));
         if let Some(term) = pane.backend.term() {
             let mut term_guard = term.lock();
+            let display_offset = term_guard.grid().display_offset();
+            let line = Line(viewport_row_to_absolute_line(row, display_offset));
+            let point = Point::new(line, Column(col));
             if let Some(ref mut selection) = term_guard.selection {
                 selection.update(point, side);
             }
@@ -1281,5 +1309,63 @@ mod click_tolerance_tests {
     fn drag_past_tolerance_is_not_click() {
         // dx=5, dy=0 -> 25 > 16.
         assert!(!is_click_within_tolerance((100.0, 100.0), (105.0, 100.0)));
+    }
+}
+
+#[cfg(test)]
+mod selection_coords_tests {
+    //! Regression tests for tn-gfkr: viewport-row → absolute-line conversion
+    //! used by the mouse selection start/update path. The renderer composites
+    //! cells using `point.line.0 + display_offset`, which means the alacritty
+    //! `Selection` stores its anchors in **absolute** grid coordinates where
+    //! lines pushed into history have negative `Line` values. The mouse path
+    //! must mirror that, otherwise the highlighted region drifts down by one
+    //! row per scrolled line.
+    use super::*;
+
+    #[test]
+    fn no_scroll_is_identity() {
+        // display_offset == 0 → viewport row R is absolute Line(R).
+        assert_eq!(viewport_row_to_absolute_line(0, 0), 0);
+        assert_eq!(viewport_row_to_absolute_line(5, 0), 5);
+        assert_eq!(viewport_row_to_absolute_line(23, 0), 23);
+    }
+
+    #[test]
+    fn scrolled_back_yields_negative_lines() {
+        // The user scrolled up 10 rows. The cell at the top of the viewport
+        // (row 0) is now 10 rows into history → absolute Line(-10). The cell
+        // at row 23 is at absolute Line(13).
+        assert_eq!(viewport_row_to_absolute_line(0, 10), -10);
+        assert_eq!(viewport_row_to_absolute_line(5, 10), -5);
+        assert_eq!(viewport_row_to_absolute_line(10, 10), 0);
+        assert_eq!(viewport_row_to_absolute_line(23, 10), 13);
+    }
+
+    #[test]
+    fn drift_grows_linearly_with_scroll() {
+        // The bug pre-fix: a click on viewport row 5 was passed as Line(5)
+        // regardless of scroll. After fix, the absolute line should differ
+        // from the viewport row by exactly -display_offset for *every* row.
+        for row in 0..=24 {
+            for offset in 0..=1000 {
+                let line = viewport_row_to_absolute_line(row, offset);
+                assert_eq!(line, row as i32 - offset as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn round_trip_with_renderer_offset_lands_on_same_row() {
+        // The renderer reverses the conversion as
+        //     viewport_line = point.line.0 + display_offset
+        // so the round trip must always recover the original viewport row.
+        for row in 0..50 {
+            for offset in 0..50 {
+                let line = viewport_row_to_absolute_line(row, offset);
+                let recovered = line + offset as i32;
+                assert_eq!(recovered, row as i32);
+            }
+        }
     }
 }
