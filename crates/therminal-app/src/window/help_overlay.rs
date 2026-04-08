@@ -146,33 +146,9 @@ pub(crate) fn draw_help_overlay(
     let column_gap = 32.0_f32;
     let hint_h = row_h;
 
-    // Group bindings by section, then collapse contiguous numeric families
-    // (e.g. Alt+1..Alt+9 for SwitchWorkspace) into a single placeholder row.
-    let mut sections: BTreeMap<u8, (String, Vec<(String, String)>)> = BTreeMap::new();
-    let mut seen_groups: HashSet<(u8, String, String)> = HashSet::new();
-    for binding in &keybindings.bindings {
-        let section_name = binding.action.section().to_string();
-        let order = section_order(&section_name);
-        let entry = sections
-            .entry(order)
-            .or_insert_with(|| (section_name, Vec::new()));
-        let shortcut = format_shortcut(&binding.key);
-        let description = binding.action.description().to_string();
-
-        if let Some(sig) = numeric_group_signature(&shortcut, &binding.action) {
-            let key = (order, sig.0.clone(), sig.1);
-            if !seen_groups.insert(key) {
-                continue;
-            }
-            let placeholder_shortcut = format!("{}(1-9)", sig.0);
-            entry.1.push((placeholder_shortcut, description));
-        } else {
-            entry.1.push((shortcut, description));
-        }
-    }
-
-    // Categories as an ordered Vec for layout planning.
-    let categories: Vec<(String, Vec<(String, String)>)> = sections.values().cloned().collect();
+    // Group bindings into sections, collapsing numeric families and
+    // deduplicating rows that render identically.
+    let categories: Vec<(String, Vec<(String, String)>)> = build_help_categories(keybindings);
     let cat_heights: Vec<f32> = categories
         .iter()
         .map(|(_, b)| header_row_h + b.len() as f32 * row_h)
@@ -514,6 +490,59 @@ pub(crate) fn draw_help_overlay(
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+/// Build the ordered category list shown in the help overlay.
+///
+/// Responsibilities:
+///   1. Group bindings by section in fixed order (`section_order`).
+///   2. Collapse contiguous numeric families (e.g. `Alt+1..Alt+9` for
+///      `SwitchWorkspace`) into a single `Alt+(1-9)` placeholder row.
+///   3. Deduplicate rows that render identically — some actions are
+///      intentionally bound to two physical keys for cross-platform layout
+///      reasons (e.g. `ctrl+shift+/` and `ctrl+shift+?` both map to
+///      `ShowHelp`, and `format_shortcut` normalizes `/` → `?` so both
+///      produce the same label). See tn-ftlo.
+///
+/// Pure + testable: does not touch the renderer, GPU, or any global state.
+pub(crate) fn build_help_categories(
+    keybindings: &KeybindingsConfig,
+) -> Vec<(String, Vec<(String, String)>)> {
+    let mut sections: BTreeMap<u8, (String, Vec<(String, String)>)> = BTreeMap::new();
+    let mut seen_numeric_groups: HashSet<(u8, String, String)> = HashSet::new();
+    // Per-section set of (formatted_shortcut, description) rows we've
+    // already emitted, so a dual binding like ctrl+shift+/ and ctrl+shift+?
+    // does not produce two identical lines.
+    let mut seen_rows: HashSet<(u8, String, String)> = HashSet::new();
+
+    for binding in &keybindings.bindings {
+        let section_name = binding.action.section().to_string();
+        let order = section_order(&section_name);
+        let entry = sections
+            .entry(order)
+            .or_insert_with(|| (section_name, Vec::new()));
+        let shortcut = format_shortcut(&binding.key);
+        let description = binding.action.description().to_string();
+
+        let (row_shortcut, row_description) =
+            if let Some(sig) = numeric_group_signature(&shortcut, &binding.action) {
+                let key = (order, sig.0.clone(), sig.1);
+                if !seen_numeric_groups.insert(key) {
+                    continue;
+                }
+                (format!("{}(1-9)", sig.0), description)
+            } else {
+                (shortcut, description)
+            };
+
+        let row_key = (order, row_shortcut.clone(), row_description.clone());
+        if !seen_rows.insert(row_key) {
+            continue;
+        }
+        entry.1.push((row_shortcut, row_description));
+    }
+
+    sections.values().cloned().collect()
+}
+
 /// If this binding belongs to a numeric key family (shortcut ends in a
 /// single digit, action Debug repr has a trailing digit component), return
 /// `(modifier_prefix, action_family)` where:
@@ -699,5 +728,66 @@ mod tests {
         // Even with a tiny cap, we can't split a single category.
         let plan = plan_help_layout(&heights, 10.0);
         assert!(matches!(plan, HelpLayoutPlan::SingleColumn { .. }));
+    }
+
+    /// Regression for tn-ftlo: the default keybindings intentionally
+    /// register both `ctrl+shift+/` and `ctrl+shift+?` for `ShowHelp` so the
+    /// same physical key works across keyboard layouts. Both normalize to
+    /// the same displayed label ("Ctrl+Shift+?"), so the help overlay used
+    /// to render two identical rows. `build_help_categories` now dedupes on
+    /// (formatted_shortcut, description) per section.
+    #[test]
+    fn dual_binding_same_label_renders_once() {
+        use therminal_core::config::{KeyAction, Keybinding, KeybindingsConfig};
+        let kb = KeybindingsConfig {
+            bindings: vec![
+                Keybinding {
+                    key: "ctrl+shift+/".to_string(),
+                    action: KeyAction::ShowHelp,
+                },
+                Keybinding {
+                    key: "ctrl+shift+?".to_string(),
+                    action: KeyAction::ShowHelp,
+                },
+            ],
+        };
+        let cats = build_help_categories(&kb);
+        // Exactly one section ("General") with exactly one row.
+        assert_eq!(cats.len(), 1, "expected one section, got {cats:?}");
+        let (section, rows) = &cats[0];
+        assert_eq!(section, "General");
+        assert_eq!(
+            rows.len(),
+            1,
+            "ctrl+shift+/ and ctrl+shift+? should collapse to one row, got {rows:?}"
+        );
+        assert_eq!(rows[0].0, "Ctrl+Shift+?");
+    }
+
+    /// Two bindings that render with the same shortcut but different
+    /// descriptions must still produce two rows — dedup is on the full
+    /// (shortcut, description) pair, not on shortcut alone.
+    #[test]
+    fn same_shortcut_different_actions_both_shown() {
+        use therminal_core::config::{KeyAction, Keybinding, KeybindingsConfig};
+        // Both ShowHelp and Copy happen to live in the "General" section;
+        // binding them to the same key would be unusual but we want to
+        // guarantee the dedup does not hide one of them if it happens.
+        let kb = KeybindingsConfig {
+            bindings: vec![
+                Keybinding {
+                    key: "ctrl+shift+/".to_string(),
+                    action: KeyAction::ShowHelp,
+                },
+                Keybinding {
+                    key: "ctrl+shift+/".to_string(),
+                    action: KeyAction::Copy,
+                },
+            ],
+        };
+        let cats = build_help_categories(&kb);
+        assert_eq!(cats.len(), 1);
+        let (_, rows) = &cats[0];
+        assert_eq!(rows.len(), 2, "distinct actions must not be collapsed");
     }
 }
