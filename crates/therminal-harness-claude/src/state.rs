@@ -96,7 +96,19 @@ pub struct ToolDetails {
 ///
 /// Ported from `thermal-protocol::SessionStateV1`. All optional fields use
 /// `#[serde(default)]` so older/newer writers missing fields don't fail.
+///
+/// # `session_id` vs `claude_session_id`
+///
+/// The widely-used community `state-tracker.sh` hook writes *both*
+/// `session_id` (a 12-char md5(pwd) stable-per-workdir key) and
+/// `claude_session_id` (the real Claude Code session UUID that matches the
+/// JSONL file stem under `~/.claude/projects/`). Therminal needs the UUID
+/// to locate JSONLs and discover subagents, so the custom deserializer
+/// below prefers `claude_session_id` when present and falls back to
+/// `session_id` for older writers that only populate the one field.
+/// See tn-r2a3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ClaudeSessionStateRepr")]
 pub struct ClaudeSessionState {
     #[serde(default)]
     pub session_id: String,
@@ -151,6 +163,97 @@ pub struct ClaudeSessionState {
 
 fn default_subagent_count() -> Option<u32> {
     Some(0)
+}
+
+/// Private staging struct that mirrors [`ClaudeSessionState`] but also
+/// accepts a `claude_session_id` field. The [`From`] impl below picks
+/// `claude_session_id` over `session_id` when both are present, so writers
+/// like the community `state-tracker.sh` (which stash the UUID in
+/// `claude_session_id` and an md5(pwd) stable key in `session_id`) work
+/// out of the box. See tn-r2a3.
+#[derive(Deserialize)]
+struct ClaudeSessionStateRepr {
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    claude_session_id: Option<String>,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    agent_type: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    status: ClaudeStatus,
+    #[serde(default)]
+    current_tool: Option<String>,
+    #[serde(default = "default_subagent_count")]
+    subagent_count: Option<u32>,
+    #[serde(default)]
+    context_percent: Option<f64>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    last_updated: Option<String>,
+    #[serde(default)]
+    details: Option<ToolDetails>,
+    #[serde(default)]
+    hook_type: Option<String>,
+    #[serde(default)]
+    tmux_pane: Option<String>,
+    #[serde(default)]
+    pid: Option<i64>,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    last_command: Option<String>,
+    #[serde(default)]
+    last_exit_code: Option<i32>,
+    #[serde(default)]
+    last_command_started_at: Option<String>,
+    #[serde(default)]
+    last_command_duration_ms: Option<u64>,
+    #[serde(default)]
+    consecutive_failures: Option<u32>,
+}
+
+impl From<ClaudeSessionStateRepr> for ClaudeSessionState {
+    fn from(r: ClaudeSessionStateRepr) -> Self {
+        // Prefer `claude_session_id` (real Claude Code UUID) over `session_id`
+        // (which some writers use for a stable-per-workdir key instead).
+        let session_id = r
+            .claude_session_id
+            .filter(|s| !s.is_empty())
+            .unwrap_or(r.session_id);
+        Self {
+            session_id,
+            parent_session_id: r.parent_session_id,
+            agent_id: r.agent_id,
+            agent_type: r.agent_type,
+            model: r.model,
+            status: r.status,
+            current_tool: r.current_tool,
+            subagent_count: r.subagent_count,
+            context_percent: r.context_percent,
+            working_dir: r.working_dir,
+            last_updated: r.last_updated,
+            details: r.details,
+            hook_type: r.hook_type,
+            tmux_pane: r.tmux_pane,
+            pid: r.pid,
+            workspace: r.workspace,
+            source: r.source,
+            last_command: r.last_command,
+            last_exit_code: r.last_exit_code,
+            last_command_started_at: r.last_command_started_at,
+            last_command_duration_ms: r.last_command_duration_ms,
+            consecutive_failures: r.consecutive_failures,
+        }
+    }
 }
 
 impl Default for ClaudeSessionState {
@@ -841,6 +944,41 @@ mod tests {
         let json = r#"{"session_id": "orphan"}"#;
         let s = parse(json);
         assert!(s.parent_session_id.is_none());
+    }
+
+    #[test]
+    fn session_prefers_claude_session_id_over_session_id() {
+        // state-tracker.sh schema: `session_id` is the md5(pwd) stable key,
+        // `claude_session_id` is the real Claude Code UUID. We want the UUID.
+        // See tn-r2a3.
+        let json = r#"{
+            "session_id": "946a34ea4138",
+            "claude_session_id": "6498af57-2c8b-4a0c-8735-abcdef012345"
+        }"#;
+        let s = parse(json);
+        assert_eq!(s.session_id, "6498af57-2c8b-4a0c-8735-abcdef012345");
+    }
+
+    #[test]
+    fn session_falls_back_to_session_id_when_claude_session_id_absent() {
+        // Backward compat: older/simpler writers only emit `session_id`
+        // and put the UUID directly in it.
+        let json = r#"{"session_id": "6498af57-2c8b-4a0c-8735-abcdef012345"}"#;
+        let s = parse(json);
+        assert_eq!(s.session_id, "6498af57-2c8b-4a0c-8735-abcdef012345");
+    }
+
+    #[test]
+    fn session_ignores_empty_claude_session_id() {
+        // If `claude_session_id` is an empty string, fall back to session_id
+        // rather than clobbering it with "". Defensive against writers that
+        // always emit the key even when they don't know the UUID yet.
+        let json = r#"{
+            "session_id": "fallback-uuid",
+            "claude_session_id": ""
+        }"#;
+        let s = parse(json);
+        assert_eq!(s.session_id, "fallback-uuid");
     }
 
     #[test]

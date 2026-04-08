@@ -606,6 +606,10 @@ impl App {
                                     w.set_minimized(true);
                                 }
                             }
+                            chrome::CsdAction::Settings => {
+                                let config_file = therminal_core::config::config_path();
+                                self.open_in_editor(&config_file.to_string_lossy());
+                            }
                         }
                         return;
                     }

@@ -11,6 +11,7 @@ use super::text_cache::{cached_buf, ensure_shaped};
 /// Actions triggered by CSD window control buttons.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CsdAction {
+    Settings,
     Minimize,
     Maximize,
     Close,
@@ -30,6 +31,7 @@ pub(crate) fn csd_button_hit_test(px: f32, bar_h: f32, surface_width: f32) -> Op
     let close_x = surface_width - CSD_BTN_W;
     let max_x = close_x - CSD_BTN_W;
     let min_x = max_x - CSD_BTN_W;
+    let settings_x = min_x - CSD_BTN_W;
 
     if px >= close_x {
         Some(CsdAction::Close)
@@ -37,6 +39,8 @@ pub(crate) fn csd_button_hit_test(px: f32, bar_h: f32, surface_width: f32) -> Op
         Some(CsdAction::Maximize)
     } else if px >= min_x {
         Some(CsdAction::Minimize)
+    } else if px >= settings_x {
+        Some(CsdAction::Settings)
     } else {
         None
     }
@@ -63,6 +67,7 @@ pub(crate) fn draw_csd_buttons(
     let close_x = sw - CSD_BTN_W;
     let max_x = close_x - CSD_BTN_W;
     let min_x = max_x - CSD_BTN_W;
+    let settings_x = min_x - CSD_BTN_W;
 
     let mut verts: Vec<ColorVertex> = Vec::new();
 
@@ -73,6 +78,8 @@ pub(crate) fn draw_csd_buttons(
             Some(1)
         } else if hx >= min_x {
             Some(2)
+        } else if hx >= settings_x {
+            Some(3)
         } else {
             None
         }
@@ -103,6 +110,17 @@ pub(crate) fn draw_csd_buttons(
     if hovered == Some(2) {
         verts.extend_from_slice(&pixel_rect_to_ndc(
             min_x,
+            0.0,
+            CSD_BTN_W,
+            bar_h,
+            sw,
+            sh,
+            CSD_HOVER_COLOR,
+        ));
+    }
+    if hovered == Some(3) {
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            settings_x,
             0.0,
             CSD_BTN_W,
             bar_h,
@@ -163,6 +181,20 @@ pub(crate) fn draw_csd_buttons(
 
     let family = renderer.font_config.family.clone();
 
+    let settings_label = "\u{2699}";
+    let settings_slot = "csd_settings";
+    ensure_shaped(
+        settings_slot,
+        settings_label,
+        metrics,
+        CSD_BTN_W,
+        bar_h,
+        settings_label,
+        Attrs::new().family(Family::Name(&family)).color(icon_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+
     let min_label = "\u{2500}";
     let min_slot = "csd_min";
     ensure_shaped(
@@ -220,6 +252,7 @@ pub(crate) fn draw_csd_buttons(
         btn_x + ((CSD_BTN_W - tw) / 2.0).max(0.0)
     };
 
+    let settings_cx = center_x(settings_slot, settings_x);
     let min_cx = center_x(min_slot, min_x);
     let max_cx = center_x(max_slot, max_x);
     let close_cx = center_x(close_slot, close_x);
@@ -232,7 +265,18 @@ pub(crate) fn draw_csd_buttons(
         },
     );
 
-    let mut areas: Vec<TextArea<'_>> = Vec::with_capacity(3);
+    let mut areas: Vec<TextArea<'_>> = Vec::with_capacity(4);
+    if let Some(buf) = cached_buf(&renderer.overlay_cache, settings_slot) {
+        areas.push(TextArea {
+            buffer: buf,
+            left: settings_cx,
+            top: 0.0,
+            scale: 1.0,
+            bounds,
+            default_color: icon_color,
+            custom_glyphs: &[],
+        });
+    }
     if let Some(buf) = cached_buf(&renderer.overlay_cache, min_slot) {
         areas.push(TextArea {
             buffer: buf,
@@ -311,11 +355,12 @@ mod tests {
     use super::*;
 
     // CSD_BTN_W = 46.0 (CSD_BUTTON_WIDTH from pane::geometry)
-    // Three buttons right-to-left: Close, Maximize, Minimize
+    // Four buttons right-to-left: Close, Maximize, Minimize, Settings
     // surface_width = 600
-    //   close_x  = 600 - 46 = 554
-    //   max_x    = 554 - 46 = 508
-    //   min_x    = 508 - 46 = 462
+    //   close_x     = 600 - 46 = 554
+    //   max_x       = 554 - 46 = 508
+    //   min_x       = 508 - 46 = 462
+    //   settings_x  = 462 - 46 = 416
 
     const SW: f32 = 600.0;
     const BTN_W: f32 = crate::pane::CSD_BUTTON_WIDTH;
@@ -328,6 +373,9 @@ mod tests {
     }
     fn min_x() -> f32 {
         max_x() - BTN_W
+    }
+    fn settings_x() -> f32 {
+        min_x() - BTN_W
     }
 
     #[test]
@@ -374,9 +422,41 @@ mod tests {
     }
 
     #[test]
-    fn csd_hit_test_left_of_minimize_is_none() {
-        let px = min_x() - 1.0;
+    fn csd_hit_test_settings_in_leftmost_button() {
+        let px = settings_x() + BTN_W / 2.0; // center of the settings button
+        assert!(matches!(
+            csd_button_hit_test(px, 30.0, SW),
+            Some(CsdAction::Settings)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_settings_at_exact_left_edge() {
+        // Exactly at settings_x → Settings.
+        assert!(matches!(
+            csd_button_hit_test(settings_x(), 30.0, SW),
+            Some(CsdAction::Settings)
+        ));
+    }
+
+    #[test]
+    fn csd_hit_test_left_of_settings_is_none() {
+        let px = settings_x() - 1.0;
         assert!(csd_button_hit_test(px, 30.0, SW).is_none());
+    }
+
+    #[test]
+    fn csd_hit_test_at_exact_boundary_minimize_vs_settings() {
+        // Exactly at min_x → Minimize.
+        assert!(matches!(
+            csd_button_hit_test(min_x(), 30.0, SW),
+            Some(CsdAction::Minimize)
+        ));
+        // One pixel left → Settings.
+        assert!(matches!(
+            csd_button_hit_test(min_x() - 1.0, 30.0, SW),
+            Some(CsdAction::Settings)
+        ));
     }
 
     #[test]
@@ -412,5 +492,33 @@ mod tests {
             csd_button_hit_test(min_x(), 30.0, SW),
             Some(CsdAction::Minimize)
         ));
+    }
+
+    #[test]
+    fn csd_hit_test_four_buttons_at_narrow_width() {
+        // At a narrow surface width, all four buttons still resolve right-to-left.
+        let sw = 400.0;
+        let close_x = sw - BTN_W;
+        let max_x = close_x - BTN_W;
+        let min_x = max_x - BTN_W;
+        let settings_x = min_x - BTN_W;
+
+        assert!(matches!(
+            csd_button_hit_test(close_x + 1.0, 30.0, sw),
+            Some(CsdAction::Close)
+        ));
+        assert!(matches!(
+            csd_button_hit_test(max_x + 1.0, 30.0, sw),
+            Some(CsdAction::Maximize)
+        ));
+        assert!(matches!(
+            csd_button_hit_test(min_x + 1.0, 30.0, sw),
+            Some(CsdAction::Minimize)
+        ));
+        assert!(matches!(
+            csd_button_hit_test(settings_x + 1.0, 30.0, sw),
+            Some(CsdAction::Settings)
+        ));
+        assert!(csd_button_hit_test(settings_x - 1.0, 30.0, sw).is_none());
     }
 }

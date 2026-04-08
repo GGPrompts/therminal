@@ -373,6 +373,14 @@ pub fn format_notification(event: &DaemonEvent) -> String {
                 .unwrap_or_else(|| "?".to_string());
             format!("%pane-exited {session_id} {pane_id} {code}\n")
         }
+        DaemonEvent::PaneResized {
+            session_id,
+            pane_id,
+            cols,
+            rows,
+        } => {
+            format!("%pane-resized {session_id} {pane_id} {cols} {rows}\n")
+        }
     }
 }
 

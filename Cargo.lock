@@ -3494,6 +3494,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "therminal-core",
+ "therminal-daemon-client",
  "therminal-protocol",
  "therminal-runtime",
  "time",

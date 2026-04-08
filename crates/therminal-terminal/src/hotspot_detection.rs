@@ -63,10 +63,28 @@ pub struct TextHotspot {
 // ── Compiled regexes ─────────────────────────────────────────────────────
 
 /// File path with optional `:line` or `:line:col`.
+///
 /// Matches EITHER paths with a leading prefix (`./`, `../`, `/`, `~/`, `~user/`)
 /// OR any path whose final segment ends in a known source/config/doc
 /// extension from a curated whitelist. This avoids false positives on
 /// plain `word.word` tokens (e.g. `2.0`, `1.5x`, `Loaded.files`).
+///
+/// The regex itself deliberately over-matches — the real work happens in
+/// [`is_plausible_file_path_match`], which checks the characters immediately
+/// before and after the match to reject:
+///
+/// - Multi-segment identifiers with no anchor and no extension (`a/b/c`,
+///   `foo/bar/baz`, `path-like/identifier`, `HTTP/1.1`).
+/// - Matches that live inside markdown emphasis (`*foo.rs*`, `_bar.py_`,
+///   `**baz.md**`).
+/// - Matches that are glued to surrounding word characters (`_under.rs_`,
+///   `foo.rs.backup`, `github.c` after `@`).
+///
+/// Extensions are listed longest-first so the regex engine's leftmost-first
+/// alternation semantics pick the longest match — without this, `package.json`
+/// would match as `package.js` (the `js` alternative would win, consuming
+/// only `.js` and leaving `on`). Single-letter extensions (`c`, `h`) stay at
+/// the tail because they can only match inside a properly-bounded candidate.
 ///
 /// `~` is kept in the match (it's later expanded to `$HOME` by
 /// [`expand_tilde`] when the click handler resolves the path). The
@@ -74,14 +92,176 @@ pub struct TextHotspot {
 /// output; the `user` segment matches the same `[A-Za-z0-9_-]+` charset
 /// as a path segment and must be followed by `/`.
 pub static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Keep extension list in sync with the module docs / tests.
-    const EXT: &str = r"rs|ts|tsx|jsx|js|mjs|cjs|py|md|toml|json|yaml|yml|html|css|scss|sh|bash|zsh|fish|ps1|go|java|kt|swift|c|h|cpp|hpp|rb|php|lua|sql|xml|lock|txt|log|env|gitignore|dockerfile";
+    // Extensions sorted longest-first so the alternation picks the longest
+    // match under regex's leftmost-first semantics. Multi-char extensions
+    // are applied to any stem with at least one path-word char; single-char
+    // extensions (`c`, `h`) additionally require the stem to contain at
+    // least one ASCII letter, so `see section 2.h for details` doesn't
+    // match `2.h` as a path. Keep the lists in sync with the module docs
+    // and tests.
+    //
+    // Extensions that look like common filenames (`dockerfile`,
+    // `gitignore`) are accepted as a suffix (`Foo.dockerfile`) but the
+    // bare-filename matcher only gets to see them as post-`.` text —
+    // `Dockerfile` alone is not a path for the purposes of this regex.
+    const EXT_MULTI: &str = concat!(
+        // 10-9 chars
+        r"dockerfile|gitignore|",
+        // 5 chars
+        r"swift|",
+        // 4 chars
+        r"yaml|toml|bash|fish|json|html|scss|lock|java|",
+        // 3 chars
+        r"tsx|jsx|mjs|cjs|yml|css|zsh|ps1|hpp|cpp|php|lua|sql|xml|log|env|txt|",
+        // 2 chars
+        r"rs|ts|js|py|md|sh|go|kt|rb",
+    );
+    const EXT_SINGLE: &str = r"c|h";
+    // Anchored branch: any of the known extensions may appear. Ordered
+    // multi-first so that `package.json` wins over `package.js`.
+    let ext_any = format!("{EXT_MULTI}|{EXT_SINGLE}");
     let pat = format!(
-        r"(?:(?:\.{{1,2}}/|/|~(?:[A-Za-z0-9_\-]+)?/)(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-.]+(?:\.(?:{ext}))?|(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]+\.(?:{ext}))(?::\d+(?::\d+)?)?",
-        ext = EXT
+        concat!(
+            // Branch A: anchored (./, ../, /, ~/, ~user/) — any ext OK.
+            r"(?:",
+            r"(?:\.{{1,2}}/|/|~(?:[A-Za-z0-9_\-]+)?/)",
+            r"(?:[A-Za-z0-9_\-.]+/)*",
+            r"[A-Za-z0-9_\-.]+",
+            r"(?:\.(?:{ext_any}))?",
+            r"|",
+            // Branch B: unanchored + multi-char extension. Any stem is fine.
+            r"(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]+\.(?:{ext_multi})",
+            r"|",
+            // Branch C: unanchored + single-char extension. The stem must
+            // contain at least one ASCII letter, so `2.h`, `1.c`, `9.h`
+            // (common in prose like "see section 2.h") are rejected by
+            // the regex itself instead of relying on post-filtering.
+            r"(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]*[A-Za-z][A-Za-z0-9_\-]*\.(?:{ext_single})",
+            r")",
+            // Optional :line[:col] suffix applies to all three branches.
+            r"(?::\d+(?::\d+)?)?",
+        ),
+        ext_any = ext_any,
+        ext_multi = EXT_MULTI,
+        ext_single = EXT_SINGLE,
     );
     Regex::new(&pat).unwrap()
 });
+
+/// Validate a candidate `FILE_PATH_RE` match against its surrounding context.
+///
+/// The regex itself over-matches — it will happily grab `/b/c` out of
+/// `a/b/c`, `foo.rs` out of `*foo.rs*`, and `/identifier` out of
+/// `path-like/identifier`. This function inspects the byte immediately
+/// before `start` and the byte immediately after `end` (using the
+/// `joined` text the match was found in) and returns `true` only when:
+///
+/// 1. The candidate has a leading anchor (`./`, `../`, `/`, `~/`, `~user/`),
+///    OR the last segment ends in a known file extension. This is enforced
+///    by the regex itself — anything that reaches this function already
+///    satisfies at least one of those branches.
+/// 2. The preceding character (if any) is a plausible left boundary —
+///    start of string, whitespace, or one of the opener/punctuation
+///    characters listed in [`is_left_boundary`]. This rejects matches
+///    glued to a preceding word character (`foo/bar` → reject `/bar`),
+///    preceded by `@` (`git@github.c` → reject), or preceded by `.`
+///    (`a.b.c` → reject the inner `b.c`).
+/// 3. The trailing character (if any) is a plausible right boundary —
+///    end of string, whitespace, or one of the closer/punctuation
+///    characters listed in [`is_right_boundary`]. This rejects markdown
+///    emphasis (`_foo.rs_`), words that continue past the match
+///    (`foo.rs.backup` → reject because the `.` is followed by a word
+///    char), and general word-char run-on.
+///
+/// The function operates on the raw joined text used by
+/// [`detect_hotspots_from_text_with_wrap`] so it can be applied uniformly
+/// to multi-row wrapped matches.
+fn is_plausible_file_path_match(joined: &str, start: usize, end: usize) -> bool {
+    let left_ok = match joined[..start].chars().next_back() {
+        None => true,
+        Some(c) => is_left_boundary(c),
+    };
+    if !left_ok {
+        return false;
+    }
+    let tail = &joined[end..];
+    let mut tail_chars = tail.chars();
+    let right_ok = match tail_chars.next() {
+        None => true,
+        Some('.') => {
+            // A trailing `.` is only allowed if it's end-of-sentence
+            // punctuation — i.e. NOT followed by a word char. This lets
+            // `see src/main.rs.` match while rejecting `foo.rs.bak`
+            // (where the `.` is followed by more path content).
+            match tail_chars.next() {
+                None => true,
+                Some(next) => !is_path_word_char(next),
+            }
+        }
+        Some(c) => is_right_boundary(c),
+    };
+    if !right_ok {
+        return false;
+    }
+    true
+}
+
+/// Characters allowed immediately before a file-path match.
+///
+/// Start of string is also allowed (handled by the caller). This list
+/// deliberately excludes:
+///
+/// - Word characters (`A-Za-z0-9_`) — to prevent `foo/bar` matching
+///   `/bar` and `_under.rs` matching as a path.
+/// - `.` — to prevent `a.b.c` matching the inner `b.c`.
+/// - `/`, `-`, `~` — which would indicate the candidate is a continuation
+///   of a longer token the regex didn't consume.
+/// - `@` — SCP-style URIs (`git@github.com:...`) and email addresses.
+/// - `*` — markdown emphasis (`*foo.rs*`).
+/// - `:` — to reject the right-hand side of SCP-style URIs
+///   (`user@host:/tmp/file.txt`) without also rejecting shell-prompt
+///   punctuation (`modified:   src/lib.rs` has a space between `:` and
+///   the path, so the boundary char is the space).
+fn is_left_boundary(c: char) -> bool {
+    if c.is_whitespace() {
+        return true;
+    }
+    matches!(
+        c,
+        '(' | '[' | '{' | '<' | '"' | '\'' | '`' | '=' | ',' | ';' | '!' | '?'
+    )
+}
+
+/// Characters allowed immediately after a file-path match.
+///
+/// End of string is also allowed (handled by the caller). A trailing `.`
+/// is handled specially by the caller (allowed only if followed by a
+/// non-word char). This list deliberately excludes:
+///
+/// - Word characters (`A-Za-z0-9_`) — to prevent `foo.rs.backup` matching
+///   only `foo.rs` when the user meant a longer path, and to prevent
+///   markdown `_foo.rs_` from matching.
+/// - `/`, `-`, `~` — continuations of a longer token.
+/// - `*` — markdown emphasis (`*foo.rs*`).
+/// - `@` — ambiguous, usually means "not a simple path".
+fn is_right_boundary(c: char) -> bool {
+    if c.is_whitespace() {
+        return true;
+    }
+    matches!(
+        c,
+        ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '!' | '?' | ':'
+    )
+}
+
+/// Is `c` a word char in the "part of a path segment" sense?
+///
+/// Used by [`is_plausible_file_path_match`] when deciding whether a
+/// trailing `.` counts as end-of-sentence punctuation or as a continuation
+/// into another segment.
+fn is_path_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
 
 /// Rust-style error location: `  --> src/file.rs:42:5`
 pub static RUST_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -284,8 +464,15 @@ pub fn detect_hotspots_from_text_with_wrap(
             }
         }
 
-        // File paths.
+        // File paths. The regex over-matches on purpose; the real
+        // filtering happens in `is_plausible_file_path_match`, which
+        // inspects the characters on either side of the candidate to
+        // reject `a/b/c`, markdown emphasis, SCP URIs, and similar
+        // non-path strings.
         for m in FILE_PATH_RE.find_iter(&joined) {
+            if !is_plausible_file_path_match(&joined, m.start(), m.end()) {
+                continue;
+            }
             let spans = byte_range_to_spans(m.start(), m.end());
             if spans.is_empty() || is_dominated(&claimed, &spans, true) {
                 continue;
@@ -1057,6 +1244,326 @@ mod tests {
             .filter(|h| h.kind == HotspotKind::FilePath)
             .collect();
         assert!(fp.is_empty(), "bare `~5` should not match, got {fp:?}");
+    }
+
+    // ── Corpus-based false-positive suite (tn-2qzi) ──────────────────
+    //
+    // Helper that asserts NO FilePath hotspot is produced for any line
+    // in the corpus. Error messages include the offending line so
+    // regressions are easy to localise.
+    fn assert_no_file_path(corpus: &[&str]) {
+        for line in corpus {
+            let hs = detect(&[line]);
+            let fp: Vec<_> = hs
+                .iter()
+                .filter(|h| h.kind == HotspotKind::FilePath)
+                .collect();
+            assert!(
+                fp.is_empty(),
+                "expected no file-path match in {line:?}, got {:?}",
+                fp.iter().map(|h| &h.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Helper that asserts exactly one FilePath hotspot is produced with
+    /// the given text. Keeps the positive corpus test readable.
+    fn assert_file_path_match(line: &str, expected: &str) {
+        let hs = detect(&[line]);
+        let fp: Vec<_> = hs
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(
+            fp.len(),
+            1,
+            "expected exactly one file-path match in {line:?}, got {:?}",
+            fp.iter().map(|h| &h.text).collect::<Vec<_>>()
+        );
+        assert_eq!(fp[0].text, expected, "wrong match text for {line:?}");
+    }
+
+    #[test]
+    fn corpus_rejects_bare_multi_segment_identifiers() {
+        // Pure slash-separated identifiers with no leading anchor and no
+        // known extension on the final segment. The regex's unanchored
+        // branch requires a known extension, so these must never match.
+        assert_no_file_path(&[
+            "a/b/c",
+            "foo/bar/baz",
+            "module/submodule/name",
+            "path-like/identifier",
+            "HTTP/1.1 200 OK",
+            "application/json Content-Type",
+            "audio/mpeg, video/mp4",
+            "key=value/other=thing",
+        ]);
+    }
+
+    #[test]
+    fn corpus_rejects_markdown_emphasis() {
+        // The regex would happily match the bare filename *inside* the
+        // markers — boundary validation rejects it because the
+        // surrounding char is `*` or `_`.
+        assert_no_file_path(&[
+            "this is *foo.rs* in markdown",
+            "the *bar.py* is here",
+            "see **bold.md** text",
+            "text with _under.rs_ emphasis",
+            "combining *a.rs* and *b.py* in one line",
+        ]);
+        // Sanity: backticks (inline-code style) ARE allowed as boundaries,
+        // so paths inside backticks still match.
+        assert_file_path_match("backtick `foo.rs` works fine", "foo.rs");
+    }
+
+    #[test]
+    fn corpus_rejects_log_fragments() {
+        // Real log-tail output: timestamps, module paths, numeric ratios,
+        // version strings. None of these should produce a file-path
+        // hotspot.
+        assert_no_file_path(&[
+            "INFO 2024-01-15 10:30:45 server started",
+            "[2024-01-15T10:30:45Z INFO app::module] handled request",
+            "loaded 2.0.1 config",
+            "version v1.2.3 released",
+            "size 1.5MB compressed",
+            "ratio 3:4 aspect",
+            "time 12:34:56 UTC",
+            "42 files updated, 3 deleted",
+            "Channeling energy at 100% efficiency",
+            "elapsed: 1.234s",
+            "running at 1.5x speed",
+        ]);
+    }
+
+    #[test]
+    fn corpus_rejects_scp_style_and_email_uris() {
+        // SCP-style `user@host:path` should not spawn a FilePath hotspot
+        // for the remote side. The `@` kills the left side and the `:`
+        // kills the right side.
+        assert_no_file_path(&[
+            "git@github.com:user/repo.git",
+            "user@host:/tmp/file.txt",
+            "alice@example.com sent a message",
+            "contact: ops@company.org",
+        ]);
+    }
+
+    #[test]
+    fn corpus_rejects_word_dot_word_prose() {
+        // `word.word` tokens that the v1 regex avoided, plus a few new
+        // shapes that the tightened regex must also reject: tokens where
+        // the `.ext` tail happens to be a known extension but the whole
+        // thing is clearly not a path.
+        assert_no_file_path(&[
+            "Searching for matches",
+            "Loaded config successfully",
+            "a.b.c is a common identifier",
+            "see section 2.h for details", // `2.h` — ext `h` bounded by digit, preceded by space, followed by ` for`
+            "foo.md5 checksum",            // `md5` not an ext; nothing should match
+            "debug: name.rs.backup is old", // trailing `.backup` continues past `rs`
+            "list: first.item second.thing", // no known ext on either
+        ]);
+    }
+
+    #[test]
+    fn corpus_rejects_github_dot_c_and_single_char_ext_traps() {
+        // Single-letter extensions (`c`, `h`) are the most dangerous
+        // entries in the whitelist. They may ONLY fire when both
+        // boundaries are satisfied. These strings must NOT produce
+        // hotspots.
+        assert_no_file_path(&[
+            "git@github.com wrote",
+            "host.c.example.net domain",
+            "prefix.c.suffix token",
+            "fn.h.method() in prose",
+        ]);
+    }
+
+    #[test]
+    fn corpus_positive_cargo_build_errors() {
+        // Rust errors: the actual file path with `:line:col` must match.
+        // The `-->` prefix triggers a separate ErrorLocation hotspot, so
+        // for cargo output we verify both shapes independently.
+        assert_file_path_match(
+            "error at /home/user/src/main.rs:42:5 here",
+            "/home/user/src/main.rs:42:5",
+        );
+        assert_file_path_match(
+            "at crates/therminal-app/src/window/mod.rs:120:5 boom",
+            "crates/therminal-app/src/window/mod.rs:120:5",
+        );
+    }
+
+    #[test]
+    fn corpus_positive_git_status_output() {
+        // `git status` paths are space-separated after a `modified:` /
+        // `new file:` label.
+        assert_file_path_match("modified:   src/lib.rs", "src/lib.rs");
+        assert_file_path_match(
+            "new file:   crates/therminal-terminal/src/hotspot_detection.rs",
+            "crates/therminal-terminal/src/hotspot_detection.rs",
+        );
+        // A relative path sitting inside a directory diff summary.
+        assert_file_path_match(
+            " M  crates/therminal-core/Cargo.toml",
+            "crates/therminal-core/Cargo.toml",
+        );
+    }
+
+    #[test]
+    fn corpus_positive_python_traceback() {
+        // Python error lines quote the path with `"…"`. Both quoting
+        // styles must be boundary-accepted.
+        assert_file_path_match(
+            "File \"/usr/lib/python3.11/foo.py\", line 42",
+            "/usr/lib/python3.11/foo.py",
+        );
+        assert_file_path_match("  File \"./app.py\", line 10, in main", "./app.py");
+    }
+
+    #[test]
+    fn corpus_positive_ls_like_output() {
+        // `ls -la` style paths — absolute, bare directory names with
+        // anchors.
+        assert_file_path_match("ls -la /etc/hosts", "/etc/hosts");
+        assert_file_path_match(
+            "-rw-r--r-- 1 marci users 1024 Jan 15 10:30 /home/marci/src/main.rs",
+            "/home/marci/src/main.rs",
+        );
+    }
+
+    #[test]
+    fn corpus_positive_two_paths_on_one_line() {
+        // The `package.json, tsconfig.json` case: previously the first
+        // match would snap to `.js` (wrong alternation ordering) and
+        // the boundary check would reject the truncated token, so
+        // neither path was reported. With `json` ordered before `js`
+        // AND the boundary check, both paths now match cleanly.
+        let hotspots = detect(&["package.json, tsconfig.json"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .map(|h| h.text.clone())
+            .collect();
+        assert_eq!(
+            fp,
+            vec!["package.json".to_string(), "tsconfig.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn corpus_positive_parenthesized_and_quoted_paths() {
+        // Paths wrapped in common opener/closer pairs must still match.
+        assert_file_path_match("(src/main.rs)", "src/main.rs");
+        assert_file_path_match("\"src/main.rs\"", "src/main.rs");
+        assert_file_path_match("'src/main.rs'", "src/main.rs");
+        assert_file_path_match("`src/main.rs`", "src/main.rs");
+        assert_file_path_match("[src/main.rs]", "src/main.rs");
+        assert_file_path_match("<src/main.rs>", "src/main.rs");
+    }
+
+    #[test]
+    fn corpus_positive_sentence_punctuation() {
+        // A trailing `.`, `,`, `;`, `:`, `!`, `?` counts as
+        // end-of-sentence punctuation and must not swallow the final
+        // extension character. The trailing `.` rule is special-cased
+        // to avoid collision with `foo.rs.backup` (which has a word
+        // char after the `.`).
+        assert_file_path_match("edit src/main.rs.", "src/main.rs");
+        assert_file_path_match("edit src/main.rs,", "src/main.rs");
+        assert_file_path_match("edit src/main.rs;", "src/main.rs");
+        assert_file_path_match("see src/main.rs!", "src/main.rs");
+        assert_file_path_match("is src/main.rs?", "src/main.rs");
+    }
+
+    #[test]
+    fn corpus_positive_path_followed_by_extension_run_on() {
+        // `foo.rs.backup` should NOT match only `foo.rs` — the trailing
+        // `.backup` continues into word chars, so the boundary check
+        // rejects the truncated candidate. The whole token lacks a
+        // known-extension tail so nothing matches at all.
+        assert_no_file_path(&[
+            "old: src/main.rs.backup here",
+            "cached: config.toml.bak file",
+        ]);
+    }
+
+    #[test]
+    fn corpus_positive_short_extension_with_proper_boundary() {
+        // Single-letter extensions DO match when the boundary is clean.
+        // `main.c`, `stdio.h` are the canonical C-source examples.
+        assert_file_path_match("edit main.c now", "main.c");
+        assert_file_path_match("include stdio.h for printf", "stdio.h");
+        assert_file_path_match("see ./src/vendor.h:12 details", "./src/vendor.h:12");
+    }
+
+    #[test]
+    fn corpus_positive_json_ordering_fix() {
+        // Regression lock-in for the alternation ordering fix: longer
+        // extensions must beat their shorter prefixes.
+        assert_file_path_match("open package.json", "package.json");
+        assert_file_path_match("look at app.jsx", "app.jsx");
+        assert_file_path_match("build src/app.tsx", "src/app.tsx");
+        assert_file_path_match("load config.yaml", "config.yaml");
+        assert_file_path_match("see Cargo.lock", "Cargo.lock");
+    }
+
+    #[test]
+    fn corpus_rejects_url_path_portion() {
+        // URLs are handled by URL_RE and dominate over FilePath hotspots.
+        // Even without URL dominance, the boundary check would reject
+        // the path portion because it's preceded by `:` (as in `http://`).
+        let hotspots = detect(&[
+            "visit https://example.com/foo.rs for info",
+            "see http://example.com/path/bar.toml now",
+        ]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert!(
+            fp.is_empty(),
+            "URL path portion must not produce a file-path hotspot, got {fp:?}"
+        );
+    }
+
+    #[test]
+    fn boundary_helpers_are_consistent() {
+        // Unit tests for the boundary predicates so regressions in the
+        // tables are caught immediately rather than only showing up as
+        // surprising corpus failures.
+        assert!(is_left_boundary(' '));
+        assert!(is_left_boundary('\t'));
+        assert!(is_left_boundary('('));
+        assert!(is_left_boundary('"'));
+        assert!(!is_left_boundary('a'));
+        assert!(!is_left_boundary('_'));
+        assert!(!is_left_boundary('.'));
+        assert!(!is_left_boundary('/'));
+        assert!(!is_left_boundary('@'));
+        assert!(!is_left_boundary('*'));
+        assert!(!is_left_boundary(':'));
+
+        assert!(is_right_boundary(' '));
+        assert!(is_right_boundary(','));
+        assert!(is_right_boundary(')'));
+        assert!(is_right_boundary(':'));
+        assert!(!is_right_boundary('a'));
+        assert!(!is_right_boundary('_'));
+        assert!(!is_right_boundary('/'));
+        assert!(!is_right_boundary('*'));
+        assert!(!is_right_boundary('@'));
+
+        assert!(is_path_word_char('a'));
+        assert!(is_path_word_char('Z'));
+        assert!(is_path_word_char('0'));
+        assert!(is_path_word_char('_'));
+        assert!(is_path_word_char('-'));
+        assert!(!is_path_word_char(' '));
+        assert!(!is_path_word_char('.'));
+        assert!(!is_path_word_char('/'));
     }
 
     #[test]

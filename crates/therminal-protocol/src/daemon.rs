@@ -428,6 +428,21 @@ pub enum DaemonEvent {
         pane_id: PaneId,
         exit_code: Option<i32>,
     },
+    /// A pane's cell dimensions changed on the daemon side (tn-ju04).
+    ///
+    /// Broadcast after the daemon authoritatively resizes a pane's PTY
+    /// and `Term`, including the cascading resizes triggered by
+    /// `SplitPane` and `KillPane` handlers. Subscribed clients should
+    /// re-read per-pane geometry (e.g. via `GetPaneGeometry` or
+    /// `ListPanes`) to stay in sync. The GUI's own `ResizePane` round
+    /// trips also emit this event so CLI watchers see layout changes
+    /// regardless of which surface drove them.
+    PaneResized {
+        session_id: SessionId,
+        pane_id: PaneId,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -439,6 +454,10 @@ pub enum EventKind {
     PaneOutput,
     WorkspaceChanged,
     PaneExited,
+    /// tn-ju04: a pane's cell dimensions changed. Emitted after
+    /// authoritative daemon-side resizes from `ResizePane`, `SplitPane`,
+    /// and `KillPane` cascade paths.
+    PaneResized,
 }
 
 impl DaemonEvent {
@@ -451,6 +470,7 @@ impl DaemonEvent {
             DaemonEvent::PaneOutput { .. } => EventKind::PaneOutput,
             DaemonEvent::WorkspaceChanged { .. } => EventKind::WorkspaceChanged,
             DaemonEvent::PaneExited { .. } => EventKind::PaneExited,
+            DaemonEvent::PaneResized { .. } => EventKind::PaneResized,
         }
     }
 }

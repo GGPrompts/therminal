@@ -126,7 +126,8 @@ impl From<TaggedAgentEventDe> for TaggedAgentEvent {
         TaggedAgentEvent { event, source }
     }
 }
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use therminal_daemon_client::ipc_transport::{IpcClientStream, connect_client};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
 const CLAUDE_EVENTS_URI: &str = "therminal://claude/events";
 
@@ -377,18 +378,22 @@ struct JsonRpcResponse {
     error: Option<Value>,
 }
 
-#[cfg(unix)]
-async fn open_stream() -> Result<tokio::net::UnixStream> {
+/// Connect to the daemon's MCP socket, returning a cross-platform stream.
+///
+/// Uses `therminal_daemon_client::ipc_transport::connect_client` so the same
+/// code path works on Unix domain sockets and Windows named pipes. `claude-events`
+/// speaks newline-delimited JSON-RPC directly over the raw stream — the
+/// MessagePack `IpcMessage` envelope that `DaemonClient` wraps around the
+/// daemon *control* socket does not apply here.
+async fn open_stream() -> Result<IpcClientStream> {
     let config = therminal_core::config::TherminalConfig::load();
     let socket_path = config.mcp.resolved_socket_path();
-    tokio::net::UnixStream::connect(&socket_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to daemon MCP socket at {}. Is the therminal daemon running?",
-                socket_path.display()
-            )
-        })
+    connect_client(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon MCP socket at {}. Is the therminal daemon running?",
+            socket_path.display()
+        )
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -398,92 +403,86 @@ async fn main() -> Result<()> {
         None => return Ok(()),
     };
 
-    #[cfg(not(unix))]
-    {
-        return Err(anyhow!(
-            "claude-events currently supports Unix sockets only; Windows named pipe support is a TODO"
-        ));
-    }
+    let stream = open_stream().await?;
+    // tokio::io::split is cross-platform — UnixStream::into_split yields
+    // Unix-only owned halves, while named pipes need io::split. Both sides
+    // implement AsyncRead / AsyncWrite so BufReader::lines and write_all
+    // work identically.
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half).lines();
 
-    #[cfg(unix)]
-    {
-        let stream = open_stream().await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half).lines();
+    // ---- handshake ----
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "claude-events", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    send_json(&mut write_half, &init).await?;
+    let _init_resp = read_response(&mut reader, 1).await?;
 
-        // ---- handshake ----
-        let init = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "claude-events", "version": env!("CARGO_PKG_VERSION") }
+    // notifications/initialized
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    });
+    send_json(&mut write_half, &initialized).await?;
+
+    // resources/subscribe
+    let sub = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/subscribe",
+        "params": { "uri": CLAUDE_EVENTS_URI }
+    });
+    send_json(&mut write_half, &sub).await?;
+    let _sub_resp = read_response(&mut reader, 2).await?;
+
+    // initial drain
+    drain_and_print(&cli, &mut write_half, &mut reader, 3).await?;
+
+    // ---- loop on notifications ----
+    let mut next_id: u64 = 4;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nclaude-events: shutting down");
+                return Ok(());
             }
-        });
-        send_json(&mut write_half, &init).await?;
-        let _init_resp = read_response(&mut reader, 1).await?;
-
-        // notifications/initialized
-        let initialized = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        });
-        send_json(&mut write_half, &initialized).await?;
-
-        // resources/subscribe
-        let sub = json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "resources/subscribe",
-            "params": { "uri": CLAUDE_EVENTS_URI }
-        });
-        send_json(&mut write_half, &sub).await?;
-        let _sub_resp = read_response(&mut reader, 2).await?;
-
-        // initial drain
-        drain_and_print(&cli, &mut write_half, &mut reader, 3).await?;
-
-        // ---- loop on notifications ----
-        let mut next_id: u64 = 4;
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\nclaude-events: shutting down");
-                    return Ok(());
+            line = reader.next_line() => {
+                let line = match line {
+                    Ok(Some(l)) => l,
+                    Ok(None) => {
+                        eprintln!("claude-events: daemon closed connection");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if line.trim().is_empty() {
+                    continue;
                 }
-                line = reader.next_line() => {
-                    let line = match line {
-                        Ok(Some(l)) => l,
-                        Ok(None) => {
-                            eprintln!("claude-events: daemon closed connection");
-                            return Ok(());
-                        }
-                        Err(e) => return Err(e.into()),
-                    };
-                    if line.trim().is_empty() {
+                let msg: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("claude-events: failed to parse server message: {e}");
                         continue;
                     }
-                    let msg: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("claude-events: failed to parse server message: {e}");
-                            continue;
-                        }
-                    };
-                    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-                    if method == "notifications/resources/updated" {
-                        let uri = msg
-                            .get("params")
-                            .and_then(|p| p.get("uri"))
-                            .and_then(|u| u.as_str())
-                            .unwrap_or("");
-                        if uri == CLAUDE_EVENTS_URI {
-                            drain_and_print(&cli, &mut write_half, &mut reader, next_id).await?;
-                            next_id += 1;
-                        }
+                };
+                let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                if method == "notifications/resources/updated" {
+                    let uri = msg
+                        .get("params")
+                        .and_then(|p| p.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    if uri == CLAUDE_EVENTS_URI {
+                        drain_and_print(&cli, &mut write_half, &mut reader, next_id).await?;
+                        next_id += 1;
                     }
                 }
             }
@@ -491,8 +490,7 @@ async fn main() -> Result<()> {
     }
 }
 
-#[cfg(unix)]
-async fn send_json(write_half: &mut tokio::net::unix::OwnedWriteHalf, value: &Value) -> Result<()> {
+async fn send_json(write_half: &mut WriteHalf<IpcClientStream>, value: &Value) -> Result<()> {
     let mut buf = serde_json::to_vec(value)?;
     buf.push(b'\n');
     write_half.write_all(&buf).await?;
@@ -500,9 +498,8 @@ async fn send_json(write_half: &mut tokio::net::unix::OwnedWriteHalf, value: &Va
     Ok(())
 }
 
-#[cfg(unix)]
 async fn read_response(
-    reader: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    reader: &mut tokio::io::Lines<BufReader<ReadHalf<IpcClientStream>>>,
     expect_id: u64,
 ) -> Result<JsonRpcResponse> {
     loop {
@@ -530,11 +527,10 @@ async fn read_response(
     }
 }
 
-#[cfg(unix)]
 async fn drain_and_print(
     cli: &Cli,
-    write_half: &mut tokio::net::unix::OwnedWriteHalf,
-    reader: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    write_half: &mut WriteHalf<IpcClientStream>,
+    reader: &mut tokio::io::Lines<BufReader<ReadHalf<IpcClientStream>>>,
     id: u64,
 ) -> Result<()> {
     let read_req = json!({

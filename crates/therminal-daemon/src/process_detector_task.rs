@@ -143,7 +143,39 @@ pub async fn tick_once(
 
     // Re-acquire the lock and push results into the central registry.
     let mut mgr = session_mgr.lock().await;
+    apply_scan_results(&mut mgr, results);
+}
+
+/// Apply a batch of scan results to the `SessionManager`'s central
+/// `AgentRegistry`. Split out from [`tick_once`] so it can be unit-tested
+/// without spawning real PTYs.
+///
+/// Each result is a `(pane_id, detected_agents)` tuple produced by
+/// `ProcessDetector::scan()`. For every entry we:
+///
+/// 1. Verify the pane is still live (tn-l78s). A pane may have been closed
+///    in the window between the `pane_shell_pids()` snapshot and the
+///    re-acquisition of the `SessionManager` lock; skipping absent panes
+///    prevents us from leaving a stale `AgentRegistry` entry for a
+///    vanished pane that would linger until the next 3s tick.
+/// 2. Register / re-register / unregister based on the `(scan_result,
+///    existing_entry)` pair.
+pub(crate) fn apply_scan_results(
+    mgr: &mut SessionManager,
+    results: Vec<(
+        PaneId,
+        Vec<therminal_terminal::process_detector::DetectedAgent>,
+    )>,
+) {
     for (pane_id, agents) in results {
+        // tn-l78s: a pane may have been closed in the window between the
+        // snapshot and re-acquisition of the lock. Skip any pane that is
+        // no longer present in the SessionManager so we don't leave a
+        // stale `AgentRegistry` entry for a vanished pane.
+        if mgr.session_for_pane(pane_id).is_none() {
+            continue;
+        }
+
         let registry_entry = mgr.agent_registry().get(pane_id).cloned();
         match (agents.first(), registry_entry) {
             (Some(agent), None) => {
@@ -266,6 +298,43 @@ mod tests {
             "detectors should be pruned for vanished panes"
         );
         assert!(mgr.lock().await.list_agents().is_empty());
+    }
+
+    /// tn-l78s regression: `apply_scan_results` must skip panes that
+    /// vanished from `SessionManager` in the window between snapshot and
+    /// re-acquisition. Feeds a fabricated scan result for a pane id that
+    /// is not in the manager and asserts that no `AgentRegistry` entry is
+    /// left behind. Without the `session_for_pane` guard, `register_agent`
+    /// would happily stash the entry and it would only be pruned on the
+    /// next tick.
+    #[tokio::test]
+    async fn apply_scan_results_skips_vanished_pane() {
+        use therminal_terminal::process_detector::DetectedAgent;
+        use therminal_terminal::state_inference::AgentType;
+
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut mgr = SessionManager::new(tx);
+
+        // Fabricate a result that looks like a mid-tick scan caught a
+        // claude-code process for pane id 999. Pane 999 does not exist
+        // in the (empty) SessionManager — this simulates the race where
+        // the pane was closed between snapshot and re-lock.
+        let results = vec![(
+            999 as PaneId,
+            vec![DetectedAgent {
+                agent_type: AgentType::Claude,
+                pid: 12345,
+                name: "claude".to_string(),
+            }],
+        )];
+
+        apply_scan_results(&mut mgr, results);
+
+        // No agent should have been registered for the vanished pane.
+        assert!(
+            mgr.list_agents().is_empty(),
+            "register_agent must be skipped for panes absent from SessionManager"
+        );
     }
 
     /// `pane_shell_pids` snapshot returns an empty vec for an empty

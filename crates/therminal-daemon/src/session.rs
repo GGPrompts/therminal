@@ -1001,6 +1001,161 @@ fn append_layout_leaf(layout: Option<LayoutSnapshot>, pane_id: PaneId) -> Layout
     }
 }
 
+/// Replace the leaf for `source` with a new `Split` node whose first
+/// child is `source` and second child is `new_leaf`, returning the new
+/// tree. Used by the daemon-side split path (tn-ju04) to keep the stored
+/// `workspace_state.layout` in step with `window.panes` after a
+/// daemon-driven `SplitPane` (MCP / CLI).
+///
+/// If `source` is not found anywhere in `node`, the tree is returned
+/// unchanged — the caller's workspace state will be corrected by the next
+/// GUI `SetWorkspaceState` publish.
+fn split_layout_leaf(
+    node: LayoutSnapshot,
+    source: PaneId,
+    new_leaf: PaneId,
+    direction: therminal_protocol::daemon::LayoutSplitDirection,
+) -> LayoutSnapshot {
+    match node {
+        LayoutSnapshot::Leaf { pane_id } if pane_id == source => LayoutSnapshot::Split {
+            direction,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: source }),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id: new_leaf }),
+        },
+        LayoutSnapshot::Leaf { pane_id } => LayoutSnapshot::Leaf { pane_id },
+        LayoutSnapshot::Split {
+            direction: d,
+            ratio,
+            first,
+            second,
+        } => LayoutSnapshot::Split {
+            direction: d,
+            ratio,
+            first: Box::new(split_layout_leaf(*first, source, new_leaf, direction)),
+            second: Box::new(split_layout_leaf(*second, source, new_leaf, direction)),
+        },
+    }
+}
+
+/// A leaf's computed cell dimensions inside a `LayoutSnapshot`. Produced
+/// by [`layout_leaf_dims`] and consumed by the daemon-side resize
+/// cascade (tn-ju04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LeafDims {
+    pane_id: PaneId,
+    cols: u16,
+    rows: u16,
+}
+
+/// Reconstruct the total cell rect of a `LayoutSnapshot` from the live
+/// dimensions of its leaves. For each `Split`, children are combined
+/// along the split axis (plus a 1-cell separator the GUI renders) and
+/// max-ed along the orthogonal axis.
+///
+/// `leaf_dims` returns `(cols, rows)` for a given `pane_id`; leaves with
+/// no current dimensions (because the pane was just removed from the
+/// window) are treated as `(0, 0)` so the remaining siblings still
+/// contribute their share.
+///
+/// Used by the daemon-side `KillPane` path (tn-ju04) to recover the
+/// pre-kill parent rect before removing the dead leaf, so the surviving
+/// siblings can be cascaded back up to reclaim the freed cells.
+fn reconstruct_layout_rect<F>(node: &LayoutSnapshot, mut leaf_dims: F) -> Option<(u16, u16)>
+where
+    F: FnMut(PaneId) -> Option<(u16, u16)>,
+{
+    fn walk<F: FnMut(PaneId) -> Option<(u16, u16)>>(
+        node: &LayoutSnapshot,
+        leaf_dims: &mut F,
+    ) -> (u16, u16) {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        match node {
+            LayoutSnapshot::Leaf { pane_id } => leaf_dims(*pane_id).unwrap_or((0, 0)),
+            LayoutSnapshot::Split {
+                direction,
+                first,
+                second,
+                ..
+            } => {
+                let (fc, fr) = walk(first, leaf_dims);
+                let (sc, sr) = walk(second, leaf_dims);
+                match direction {
+                    LayoutSplitDirection::Horizontal => {
+                        // Side-by-side: sum cols (+1 separator), max rows.
+                        let cols = fc.saturating_add(sc).saturating_add(1);
+                        let rows = fr.max(sr);
+                        (cols, rows)
+                    }
+                    LayoutSplitDirection::Vertical => {
+                        // Stacked: max cols, sum rows (+1 separator).
+                        let cols = fc.max(sc);
+                        let rows = fr.saturating_add(sr).saturating_add(1);
+                        (cols, rows)
+                    }
+                }
+            }
+        }
+    }
+    let (cols, rows) = walk(node, &mut leaf_dims);
+    if cols == 0 || rows == 0 {
+        None
+    } else {
+        Some((cols, rows))
+    }
+}
+
+/// Recursively walk `node` assuming a parent rect of `(cols, rows)`
+/// cells, splitting by `ratio` at each `Split` node, and return one
+/// `LeafDims` per leaf. Sibling gap (the 1-cell separator the GUI uses)
+/// is modelled by subtracting 1 from the split axis before ratioing, so
+/// 80 cols split 50/50 yields 39 + 40 + 1 gap rather than 40 + 40 = 81.
+///
+/// Used by the daemon-side `SplitPane` and `KillPane` paths so cascade
+/// resizes match what the GUI would compute from the same layout tree.
+fn layout_leaf_dims(node: &LayoutSnapshot, cols: u16, rows: u16) -> Vec<LeafDims> {
+    use therminal_protocol::daemon::LayoutSplitDirection;
+    let mut out = Vec::new();
+    match node {
+        LayoutSnapshot::Leaf { pane_id } => {
+            out.push(LeafDims {
+                pane_id: *pane_id,
+                cols,
+                rows,
+            });
+        }
+        LayoutSnapshot::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let ratio = ratio.clamp(0.05, 0.95);
+            match direction {
+                LayoutSplitDirection::Horizontal => {
+                    // Side-by-side: split cols; rows unchanged; reserve 1
+                    // cell for the separator (matches GUI SEPARATOR_GAP
+                    // projected onto the cell grid).
+                    let usable = cols.saturating_sub(1);
+                    let first_cols = ((usable as f32) * ratio).round().max(1.0) as u16;
+                    let second_cols = usable.saturating_sub(first_cols).max(1);
+                    out.extend(layout_leaf_dims(first, first_cols, rows));
+                    out.extend(layout_leaf_dims(second, second_cols, rows));
+                }
+                LayoutSplitDirection::Vertical => {
+                    // Stacked: split rows; cols unchanged.
+                    let usable = rows.saturating_sub(1);
+                    let first_rows = ((usable as f32) * ratio).round().max(1.0) as u16;
+                    let second_rows = usable.saturating_sub(first_rows).max(1);
+                    out.extend(layout_leaf_dims(first, cols, first_rows));
+                    out.extend(layout_leaf_dims(second, cols, second_rows));
+                }
+            }
+        }
+    }
+    out
+}
+
 impl SessionManager {
     /// Create a new empty session manager.
     pub fn new(event_tx: broadcast::Sender<DaemonEvent>) -> Self {
@@ -1178,14 +1333,31 @@ impl SessionManager {
     }
 
     /// Resize a pane's PTY by pane ID (searches all sessions).
+    ///
+    /// tn-ju04: also broadcasts `DaemonEvent::PaneResized` so CLI /
+    /// subscription watchers re-read geometry whenever the GUI (or MCP)
+    /// drives a resize.
     pub fn resize_pane(&mut self, pane_id: PaneId, cols: u16, rows: u16) -> Result<(), String> {
+        let mut found_session: Option<SessionId> = None;
         for session in self.sessions.values_mut() {
             if let Some(pane) = session.find_pane_mut(pane_id) {
                 pane.resize(cols, rows);
-                return Ok(());
+                found_session = Some(session.id);
+                break;
             }
         }
-        Err(format!("pane not found: {pane_id}"))
+        match found_session {
+            Some(session_id) => {
+                let _ = self.event_tx.send(DaemonEvent::PaneResized {
+                    session_id,
+                    pane_id,
+                    cols,
+                    rows,
+                });
+                Ok(())
+            }
+            None => Err(format!("pane not found: {pane_id}")),
+        }
     }
 
     /// Capture structured pane state (mode flags, cursor, visible grid)
@@ -1317,23 +1489,43 @@ impl SessionManager {
     }
 
     /// Split a pane: creates a new sibling pane in the same window.
-    /// Returns the new pane's ID. The `_horizontal` flag is accepted for
-    /// future layout use but currently has no effect on the headless daemon.
-    pub fn split_pane(&mut self, pane_id: PaneId, _horizontal: bool) -> Result<PaneId, String> {
+    /// Returns the new pane's ID. `horizontal=true` splits cols
+    /// (side-by-side), `horizontal=false` splits rows (stacked).
+    pub fn split_pane(&mut self, pane_id: PaneId, horizontal: bool) -> Result<PaneId, String> {
         self.split_pane_with_options(
             pane_id,
-            _horizontal,
+            horizontal,
             &therminal_terminal::pty::SpawnOptions::default(),
         )
     }
 
     /// Split a pane with custom spawn options for the new pane's PTY.
+    ///
+    /// tn-ju04: after creating the new pane, this method also
+    ///
+    /// 1. Halves the source pane's current dimensions along the split
+    ///    axis and spawns the new pane at that size (instead of the
+    ///    stale `default_cols`/`default_rows` constants).
+    /// 2. Resizes the source pane's PTY + `Term` to the halved size.
+    /// 3. Updates the stored `workspace_state.layout` so MCP consumers
+    ///    (and the GUI on next attach) see the new leaf.
+    /// 4. Broadcasts `DaemonEvent::PaneResized` for both affected panes
+    ///    so subscribed clients re-read geometry.
+    ///
+    /// The GUI still publishes a fresh `SetWorkspaceState` after every
+    /// split it drives, which overwrites the layout tree we compute
+    /// here — that is fine. This path is what keeps CLI / MCP driven
+    /// splits sane (and what prevents TUIs from drawing past their
+    /// render area immediately after a GUI split, before the GUI's
+    /// follow-up `ResizePane` lands).
     pub fn split_pane_with_options(
         &mut self,
         pane_id: PaneId,
-        _horizontal: bool,
+        horizontal: bool,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
     ) -> Result<PaneId, String> {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+
         // Find which session and window this pane belongs to.
         let session_id = self
             .sessions
@@ -1359,9 +1551,34 @@ impl SessionManager {
             .find(|w| w.panes.iter().any(|p| p.id == pane_id))
             .ok_or_else(|| "session/window disappeared under concurrent request".to_string())?;
 
+        // tn-ju04: halve the source pane's current dimensions along the
+        // split axis so both children inherit roughly half the parent's
+        // cells. One cell is reserved for the visual separator gap the
+        // GUI draws between siblings, keeping the daemon's arithmetic in
+        // step with `layout_leaf_dims`.
+        let (src_cols, src_rows) = {
+            let src = window
+                .panes
+                .iter()
+                .find(|p| p.id == pane_id)
+                .ok_or_else(|| format!("pane not found: {pane_id}"))?;
+            (src.cols(), src.rows())
+        };
+        let (first_cols, first_rows, second_cols, second_rows) = if horizontal {
+            let usable = src_cols.saturating_sub(1);
+            let first = (usable / 2).max(1);
+            let second = usable.saturating_sub(first).max(1);
+            (first, src_rows, second, src_rows)
+        } else {
+            let usable = src_rows.saturating_sub(1);
+            let first = (usable / 2).max(1);
+            let second = usable.saturating_sub(first).max(1);
+            (src_cols, first, src_cols, second)
+        };
+
         let new_pane = Pane::spawn(
-            self.default_cols,
-            self.default_rows,
+            second_cols,
+            second_rows,
             self.event_tx.clone(),
             session_id,
             spawn_options,
@@ -1370,6 +1587,73 @@ impl SessionManager {
 
         let new_id = new_pane.id;
         window.add_pane(new_pane);
+
+        // Resize the source pane to its post-split halved geometry. The
+        // new pane is already sized via `Pane::spawn` above. Broadcast
+        // PaneResized for both so watchers re-read.
+        if let Some(src) = window.panes.iter_mut().find(|p| p.id == pane_id)
+            && (src.cols() != first_cols || src.rows() != first_rows)
+        {
+            src.resize(first_cols, first_rows);
+        }
+        let _ = self.event_tx.send(DaemonEvent::PaneResized {
+            session_id,
+            pane_id,
+            cols: first_cols,
+            rows: first_rows,
+        });
+        let _ = self.event_tx.send(DaemonEvent::PaneResized {
+            session_id,
+            pane_id: new_id,
+            cols: second_cols,
+            rows: second_rows,
+        });
+
+        // tn-ju04: reflect the new leaf in the stored workspace layout
+        // so MCP `terminal.workspaces.get_layout` and CLI split paths
+        // agree with `terminal.panes.list`. The GUI's next
+        // `SetWorkspaceState` publish overwrites this, so we only need a
+        // best-effort patch that keeps things consistent in the meantime.
+        let direction = if horizontal {
+            LayoutSplitDirection::Horizontal
+        } else {
+            LayoutSplitDirection::Vertical
+        };
+        // Re-borrow session as immutable-through-mutable; `window` went
+        // out of scope above along with the mutable borrow of `session`.
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            // Find the workspace currently containing `pane_id`, or fall
+            // back to the active workspace if the layout tree is
+            // missing / stale. We prefer the workspace whose layout
+            // actually references the source so concurrent workspaces
+            // don't have unrelated layouts clobbered.
+            let target_idx = session
+                .workspace_state
+                .iter()
+                .position(|ws| ws.pane_ids.contains(&pane_id));
+            if let Some(idx) = target_idx {
+                let ws = &mut session.workspace_state[idx];
+                if !ws.pane_ids.contains(&new_id) {
+                    ws.pane_ids.push(new_id);
+                }
+                ws.layout = Some(match ws.layout.take() {
+                    Some(existing) => split_layout_leaf(existing, pane_id, new_id, direction),
+                    None => LayoutSnapshot::Split {
+                        direction,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Leaf { pane_id }),
+                        second: Box::new(LayoutSnapshot::Leaf { pane_id: new_id }),
+                    },
+                });
+                ws.focused_pane = Some(new_id);
+                let active_workspace = session.active_workspace;
+                let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+                    session_id,
+                    active_workspace,
+                });
+            }
+        }
+
         self.mark_dirty();
         Ok(new_id)
     }
@@ -1377,6 +1661,14 @@ impl SessionManager {
     /// Kill (destroy) a single pane by ID. Removes it from its window.
     /// If the window becomes empty, removes the window. If the session
     /// becomes empty, destroys the session.
+    ///
+    /// tn-ju04: after removal, any siblings left behind in the stored
+    /// `workspace_state.layout` are resized up to reclaim the dead
+    /// pane's cells. For each surviving pane whose dimensions changed,
+    /// the PTY + `Term` are resized and a `PaneResized` event is
+    /// broadcast. Without this cascade, killing a pane via MCP / CLI
+    /// leaves TUIs in sibling panes still believing they have the
+    /// pre-kill cell count.
     pub fn kill_pane(&mut self, pane_id: PaneId) -> Result<(), String> {
         // Unregister any agent tracked for this pane.
         self.agent_registry.unregister(pane_id);
@@ -1392,6 +1684,43 @@ impl SessionManager {
             .map(|s| s.id)
             .ok_or_else(|| format!("pane not found: {pane_id}"))?;
 
+        // tn-ju04: before mutating state, capture the parent rect of the
+        // layout subtree that owns `pane_id` so siblings can be resized
+        // after removal. We sum the current cell dimensions of every
+        // leaf the layout references as a best-effort reconstruction of
+        // the total window size — the daemon has no direct notion of
+        // window pixels, but the existing per-pane (cols, rows) plus
+        // the layout ratios are enough to cascade up.
+        let (cascade_dims, affected_workspace) = {
+            let session = self.sessions.get(&session_id).unwrap();
+            let ws_with_layout = session
+                .workspace_state
+                .iter()
+                .enumerate()
+                .find(|(_, ws)| ws.pane_ids.contains(&pane_id));
+            match ws_with_layout {
+                Some((idx, ws)) => {
+                    // Reconstruct the parent rect from live pane sizes.
+                    // For a single-root leaf, the parent rect is that
+                    // leaf's own size. For a split, we sum along the
+                    // split axis and take the max along the orthogonal
+                    // axis. This is invariant to ratio drift.
+                    let parent = ws.layout.as_ref().map(|layout| {
+                        reconstruct_layout_rect(layout, |id| {
+                            for w in &session.windows {
+                                if let Some(p) = w.pane(id) {
+                                    return Some((p.cols(), p.rows()));
+                                }
+                            }
+                            None
+                        })
+                    });
+                    (parent.flatten().map(|rect| (idx, rect)), Some(idx))
+                }
+                None => (None, None),
+            }
+        };
+
         let session = self.sessions.get_mut(&session_id).unwrap();
         for window in &mut session.windows {
             if let Some(pos) = window.panes.iter().position(|p| p.id == pane_id) {
@@ -1401,12 +1730,70 @@ impl SessionManager {
         }
         // Remove empty windows
         session.windows.retain(|w| !w.panes.is_empty());
+
+        // tn-ju04: patch the stored layout so the dead leaf is gone
+        // before we cascade sizes. If `workspace_state` has no layout
+        // for this pane the patch is a no-op; the GUI will resync on
+        // its next `SetWorkspaceState`.
+        if let Some(idx) = affected_workspace {
+            let ws = &mut session.workspace_state[idx];
+            ws.pane_ids.retain(|id| *id != pane_id);
+            if let Some(layout) = ws.layout.take() {
+                ws.layout = remove_layout_leaf(layout, pane_id);
+            }
+            if ws.focused_pane == Some(pane_id) {
+                ws.focused_pane = ws.pane_ids.first().copied();
+            }
+        }
+
+        // tn-ju04: cascade resizes across the surviving leaves of the
+        // affected workspace's layout. `cascade_dims` holds the pre-kill
+        // parent rect we computed above; now we re-walk the patched
+        // layout to produce the post-kill dims.
+        let mut resize_events: Vec<(PaneId, u16, u16)> = Vec::new();
+        if let Some((idx, (parent_cols, parent_rows))) = cascade_dims
+            && let Some(ws) = session.workspace_state.get(idx).cloned()
+            && let Some(layout) = ws.layout.as_ref()
+        {
+            let leaves = layout_leaf_dims(layout, parent_cols, parent_rows);
+            for leaf in leaves {
+                let Some(pane) = session
+                    .windows
+                    .iter_mut()
+                    .flat_map(|w| w.panes.iter_mut())
+                    .find(|p| p.id == leaf.pane_id)
+                else {
+                    continue;
+                };
+                if pane.cols() != leaf.cols || pane.rows() != leaf.rows {
+                    pane.resize(leaf.cols, leaf.rows);
+                    resize_events.push((leaf.pane_id, leaf.cols, leaf.rows));
+                }
+            }
+        }
+
         // If no windows left, destroy session (which also marks dirty)
         if session.windows.is_empty() {
             self.destroy_session(session_id);
         } else {
+            // Broadcast WorkspaceChanged so MCP layout queries re-read.
+            let active_workspace = session.active_workspace;
+            let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+                session_id,
+                active_workspace,
+            });
             self.mark_dirty();
         }
+
+        for (pid, cols, rows) in resize_events {
+            let _ = self.event_tx.send(DaemonEvent::PaneResized {
+                session_id,
+                pane_id: pid,
+                cols,
+                rows,
+            });
+        }
+
         Ok(())
     }
 
@@ -2585,5 +2972,227 @@ mod tests {
             }
             other => panic!("expected WorkspaceChanged, got: {other:?}"),
         }
+    }
+
+    // ── tn-ju04: layout-aware resize cascade helpers ───────────────────
+
+    #[test]
+    fn layout_leaf_dims_single_leaf_returns_full_rect() {
+        let tree = LayoutSnapshot::Leaf { pane_id: 7 };
+        let dims = layout_leaf_dims(&tree, 80, 24);
+        assert_eq!(dims.len(), 1);
+        assert_eq!(dims[0].pane_id, 7);
+        assert_eq!(dims[0].cols, 80);
+        assert_eq!(dims[0].rows, 24);
+    }
+
+    #[test]
+    fn layout_leaf_dims_horizontal_split_halves_cols() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+        };
+        let dims = layout_leaf_dims(&tree, 81, 24);
+        assert_eq!(dims.len(), 2);
+        // 81 total - 1 separator = 80 usable; 40 + 40 halves.
+        assert_eq!(
+            dims[0],
+            LeafDims {
+                pane_id: 1,
+                cols: 40,
+                rows: 24
+            }
+        );
+        assert_eq!(
+            dims[1],
+            LeafDims {
+                pane_id: 2,
+                cols: 40,
+                rows: 24
+            }
+        );
+    }
+
+    #[test]
+    fn layout_leaf_dims_vertical_split_halves_rows() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+        };
+        let dims = layout_leaf_dims(&tree, 80, 25);
+        assert_eq!(dims.len(), 2);
+        // 25 rows - 1 separator = 24 usable; 12 + 12 halves.
+        assert_eq!(
+            dims[0],
+            LeafDims {
+                pane_id: 1,
+                cols: 80,
+                rows: 12
+            }
+        );
+        assert_eq!(
+            dims[1],
+            LeafDims {
+                pane_id: 2,
+                cols: 80,
+                rows: 12
+            }
+        );
+    }
+
+    #[test]
+    fn layout_leaf_dims_nested_quad_layout() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        // Simulated 2x2: horizontal split, each side is a vertical split.
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+            }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 4 }),
+            }),
+        };
+        let dims = layout_leaf_dims(&tree, 81, 25);
+        assert_eq!(dims.len(), 4);
+        // Outer horizontal split: 81 -> (40 + 1 + 40)
+        // Each side vertical split: 25 -> (12 + 1 + 12)
+        for leaf in &dims {
+            assert_eq!(leaf.cols, 40, "leaf {} cols", leaf.pane_id);
+            assert_eq!(leaf.rows, 12, "leaf {} rows", leaf.pane_id);
+        }
+    }
+
+    #[test]
+    fn split_layout_leaf_replaces_leaf_with_split_node() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        let tree = LayoutSnapshot::Leaf { pane_id: 1 };
+        let out = split_layout_leaf(tree, 1, 2, LayoutSplitDirection::Horizontal);
+        if let LayoutSnapshot::Split {
+            direction,
+            first,
+            second,
+            ..
+        } = out
+        {
+            assert_eq!(direction, LayoutSplitDirection::Horizontal);
+            assert!(matches!(*first, LayoutSnapshot::Leaf { pane_id: 1 }));
+            assert!(matches!(*second, LayoutSnapshot::Leaf { pane_id: 2 }));
+        } else {
+            panic!("expected split");
+        }
+    }
+
+    #[test]
+    fn split_layout_leaf_ignores_unrelated_leaves() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        // Deep-nested tree: split leaf 3, leave leaves 1 + 2 untouched.
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+            }),
+        };
+        let out = split_layout_leaf(tree, 3, 99, LayoutSplitDirection::Vertical);
+        // Walk and assert: leaf 3 should now be a vertical split [3, 99].
+        fn find_leaf(node: &LayoutSnapshot, target: PaneId) -> Option<&LayoutSnapshot> {
+            match node {
+                LayoutSnapshot::Leaf { pane_id } if *pane_id == target => Some(node),
+                LayoutSnapshot::Leaf { .. } => None,
+                LayoutSnapshot::Split { first, second, .. } => {
+                    find_leaf(first, target).or_else(|| find_leaf(second, target))
+                }
+            }
+        }
+        assert!(find_leaf(&out, 1).is_some());
+        assert!(find_leaf(&out, 2).is_some());
+        assert!(find_leaf(&out, 99).is_some());
+        // Leaf 3 is still a leaf inside the new split (first child).
+        assert!(find_leaf(&out, 3).is_some());
+    }
+
+    #[test]
+    fn reconstruct_layout_rect_from_leaf_dims() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        // Two siblings 40x24 side-by-side -> reconstructed 81x24 (with 1-cell gap).
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+        };
+        let got = reconstruct_layout_rect(&tree, |id| match id {
+            1 => Some((40, 24)),
+            2 => Some((40, 24)),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(got, (81, 24));
+    }
+
+    #[test]
+    fn reconstruct_layout_rect_vertical_stack() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+        };
+        let got = reconstruct_layout_rect(&tree, |id| match id {
+            1 => Some((80, 12)),
+            2 => Some((80, 12)),
+            _ => None,
+        })
+        .unwrap();
+        // 12 + 12 + 1 separator = 25 rows, 80 cols unchanged.
+        assert_eq!(got, (80, 25));
+    }
+
+    #[test]
+    fn layout_leaf_dims_roundtrips_through_reconstruction() {
+        use therminal_protocol::daemon::LayoutSplitDirection;
+        // Feed a tree + parent rect into `layout_leaf_dims`, then round-trip
+        // through `reconstruct_layout_rect` using the computed dims; the
+        // result should match the input within a 1-cell tolerance (the
+        // reconstruction sums separators deterministically so the values
+        // should be exact in this fixture).
+        let tree = LayoutSnapshot::Split {
+            direction: LayoutSplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutSnapshot::Leaf { pane_id: 1 }),
+            second: Box::new(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id: 2 }),
+                second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
+            }),
+        };
+        let leaves = layout_leaf_dims(&tree, 81, 25);
+        // Build a lookup map.
+        let lookup: HashMap<PaneId, (u16, u16)> = leaves
+            .iter()
+            .map(|l| (l.pane_id, (l.cols, l.rows)))
+            .collect();
+        let rebuilt = reconstruct_layout_rect(&tree, |id| lookup.get(&id).copied()).unwrap();
+        assert_eq!(rebuilt, (81, 25));
     }
 }

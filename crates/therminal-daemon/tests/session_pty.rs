@@ -255,6 +255,153 @@ fn split_and_kill_pane() {
     mgr.shutdown();
 }
 
+// ── tn-ju04: split cascades resize across both children ────────────────
+
+/// After `split_pane(source, horizontal=true)`, both the source pane and
+/// the new pane should carry roughly half the source's pre-split cols
+/// (minus the 1-cell separator) and the same row count.
+///
+/// Regression for tn-ju04 where the new pane was spawned at 80x24 and
+/// the source pane kept its full width, so TUIs drew past the split.
+#[test]
+#[ignore] // Requires a real PTY
+fn split_pane_horizontal_halves_cols_on_both_sides() {
+    let (mut mgr, _rx) = make_manager();
+
+    let session_id = mgr.create_session(None).expect("failed to create session");
+    let pane_id = mgr.attach(session_id).unwrap().panes[0].pane_id;
+
+    // Force the source pane to a known non-default size so the halving
+    // math is observable (default_cols=80 halved is still 40 so this
+    // also serves as a guard against the halving being a no-op).
+    mgr.resize_pane(pane_id, 120, 30)
+        .expect("initial resize should succeed");
+
+    let new_pane_id = mgr
+        .split_pane(pane_id, true)
+        .expect("horizontal split should succeed");
+
+    let src_snap = mgr.capture_pane(pane_id).unwrap();
+    let new_snap = mgr.capture_pane(new_pane_id).unwrap();
+
+    // 120 cols - 1 separator = 119; halved: 59 + 60 (or 60 + 59).
+    // Rows are unchanged by a horizontal split.
+    assert_eq!(src_snap.rows, 30, "source rows");
+    assert_eq!(new_snap.rows, 30, "new rows");
+    assert!(
+        src_snap.cols < 120,
+        "source cols must shrink after split, got {}",
+        src_snap.cols
+    );
+    assert!(
+        new_snap.cols < 120,
+        "new cols must be below full width, got {}",
+        new_snap.cols
+    );
+    // Each half is at least 55 cells (≈119/2 with some tolerance for rounding).
+    assert!(
+        src_snap.cols >= 55,
+        "source cols too narrow: {}",
+        src_snap.cols
+    );
+    assert!(
+        new_snap.cols >= 55,
+        "new cols too narrow: {}",
+        new_snap.cols
+    );
+
+    mgr.shutdown();
+}
+
+/// After `split_pane(source, horizontal=false)` (stacked), rows are
+/// halved and cols stay unchanged.
+#[test]
+#[ignore] // Requires a real PTY
+fn split_pane_vertical_halves_rows_on_both_sides() {
+    let (mut mgr, _rx) = make_manager();
+
+    let session_id = mgr.create_session(None).expect("failed to create session");
+    let pane_id = mgr.attach(session_id).unwrap().panes[0].pane_id;
+
+    mgr.resize_pane(pane_id, 100, 40)
+        .expect("initial resize should succeed");
+
+    let new_pane_id = mgr
+        .split_pane(pane_id, false)
+        .expect("vertical split should succeed");
+
+    let src_snap = mgr.capture_pane(pane_id).unwrap();
+    let new_snap = mgr.capture_pane(new_pane_id).unwrap();
+
+    assert_eq!(src_snap.cols, 100, "source cols");
+    assert_eq!(new_snap.cols, 100, "new cols");
+    assert!(src_snap.rows < 40, "source rows must shrink");
+    assert!(new_snap.rows < 40, "new rows must shrink");
+    assert!(
+        src_snap.rows >= 15,
+        "source rows too short: {}",
+        src_snap.rows
+    );
+    assert!(new_snap.rows >= 15, "new rows too short: {}", new_snap.rows);
+
+    mgr.shutdown();
+}
+
+/// After `kill_pane(sibling)` on a horizontal split, the surviving
+/// sibling should reclaim the dead pane's cols and end up wider than it
+/// was before.
+#[test]
+#[ignore] // Requires a real PTY
+fn kill_pane_cascades_resize_to_sibling() {
+    use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection, WorkspaceInfo};
+
+    let (mut mgr, _rx) = make_manager();
+
+    let session_id = mgr.create_session(None).expect("failed to create session");
+    let pane_id = mgr.attach(session_id).unwrap().panes[0].pane_id;
+
+    mgr.resize_pane(pane_id, 120, 30).unwrap();
+
+    let new_pane_id = mgr.split_pane(pane_id, true).unwrap();
+
+    // Seed workspace_state with a layout the kill cascade can walk.
+    // (The daemon side of `split_pane` already does this, but we set it
+    // explicitly so the test is independent of that side effect.)
+    mgr.set_workspace_state(
+        session_id,
+        vec![WorkspaceInfo {
+            id: 1,
+            name: "1".into(),
+            order: 0,
+            pane_ids: vec![pane_id, new_pane_id],
+            focused_pane: Some(pane_id),
+            layout: Some(LayoutSnapshot::Split {
+                direction: LayoutSplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutSnapshot::Leaf { pane_id }),
+                second: Box::new(LayoutSnapshot::Leaf {
+                    pane_id: new_pane_id,
+                }),
+            }),
+        }],
+        1,
+    )
+    .unwrap();
+
+    let survivor_before = mgr.capture_pane(pane_id).unwrap().cols;
+    mgr.kill_pane(new_pane_id).unwrap();
+    let survivor_after = mgr.capture_pane(pane_id).unwrap().cols;
+
+    assert!(
+        survivor_after > survivor_before,
+        "sibling did not grow on kill: before={} after={}",
+        survivor_before,
+        survivor_after
+    );
+
+    mgr.shutdown();
+}
+
 // ── Test: multiple sessions are independent ─────────────────────────────
 
 #[test]
