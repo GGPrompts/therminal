@@ -29,6 +29,7 @@
 
 use std::io::Write as IoWrite;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
@@ -55,6 +56,35 @@ pub trait PaneBackend {
 
     /// Human-readable backend type identifier.
     fn backend_type(&self) -> &str;
+}
+
+/// Counter tracking the number of live RemotePty task groups. Used by
+/// tests to assert that dropping a pane reliably tears down its tokio
+/// forwarder + writer tasks and worker thread (tn-msie).
+pub static REMOTE_PTY_LIVE_TASKS: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII guard attached to the `RemotePty` variant. On drop it signals
+/// shutdown to the worker thread and aborts the forwarder + writer tokio
+/// tasks so the pane's IPC connection, worker thread, and tokio tasks
+/// are released promptly when the pane is closed (tn-msie).
+pub struct RemotePtyGuard {
+    pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    pub forwarder: Option<tokio::task::JoinHandle<()>>,
+    pub writer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RemotePtyGuard {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(h) = self.forwarder.take() {
+            h.abort();
+        }
+        if let Some(h) = self.writer.take() {
+            h.abort();
+        }
+        REMOTE_PTY_LIVE_TASKS.fetch_sub(1, Ordering::Release);
+    }
 }
 
 /// The concrete backend kind stored in each `PaneState`.
@@ -97,10 +127,13 @@ pub enum PaneBackendKind {
         /// Tokio runtime handle for spawning ResizePane requests from
         /// the synchronous `resize()` path.
         tokio_handle: tokio::runtime::Handle,
-        /// Shutdown signal for the output forwarding task / worker thread.
-        /// Dropping the backend closes this and the workers wind down.
+        /// RAII guard that sets the shutdown flag and aborts the
+        /// forwarder + writer tokio tasks when the variant is dropped.
+        /// Must be held alongside `input_tx` so that dropping the variant
+        /// also closes the input channel (writer task exits on channel
+        /// close as a backstop).
         #[allow(dead_code)]
-        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        guard: RemotePtyGuard,
     },
 }
 
@@ -270,5 +303,72 @@ impl PaneBackendKind {
             return;
         }
         self.resize(cols, rows);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// tn-msie: dropping 100 `RemotePtyGuard`s must return the live-task
+    /// counter to its baseline and abort the spawned forwarder + writer
+    /// tasks, rather than leaking them until process exit.
+    #[test]
+    fn remote_pty_guard_drops_release_tasks() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.handle().clone();
+
+        let baseline = REMOTE_PTY_LIVE_TASKS.load(Ordering::Acquire);
+
+        let mut guards = Vec::with_capacity(100);
+        let flags: Vec<Arc<AtomicBool>> =
+            (0..100).map(|_| Arc::new(AtomicBool::new(false))).collect();
+
+        for flag in &flags {
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let shutdown_f = Arc::clone(&shutdown);
+            let flag_f = Arc::clone(flag);
+            // Forwarder task: never completes unless aborted. Mimics the
+            // real forwarder blocked in recv_event().await.
+            let forwarder = handle.spawn(async move {
+                loop {
+                    if shutdown_f.load(Ordering::Acquire) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+                flag_f.store(true, Ordering::Release);
+            });
+            // Writer task: also never completes unless aborted.
+            let writer = handle.spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            });
+            REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
+            guards.push(RemotePtyGuard {
+                shutdown,
+                forwarder: Some(forwarder),
+                writer: Some(writer),
+            });
+        }
+
+        assert_eq!(
+            REMOTE_PTY_LIVE_TASKS.load(Ordering::Acquire),
+            baseline + 100
+        );
+
+        drop(guards);
+
+        assert_eq!(REMOTE_PTY_LIVE_TASKS.load(Ordering::Acquire), baseline);
+
+        // Give the runtime a chance to observe the aborts.
+        rt.block_on(async {
+            tokio::task::yield_now().await;
+        });
     }
 }

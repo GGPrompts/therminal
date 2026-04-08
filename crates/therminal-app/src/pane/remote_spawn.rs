@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use super::PaneId;
 use super::PaneListener;
-use super::backend::PaneBackendKind;
+use super::backend::{PaneBackendKind, REMOTE_PTY_LIVE_TASKS, RemotePtyGuard};
 use super::spawn::PaneCallbacks;
 use super::state::{PaneState, PaneStatus, grid_size_for_rect};
 use crate::grid_renderer::GridRenderer;
@@ -244,7 +244,8 @@ pub(crate) fn build_remote_pane_state(
     // ── 4. Spawn the tokio forwarder: subscribe to PaneOutput events ──
     let shutdown_for_forwarder = Arc::clone(&shutdown);
     let forwarder_socket = daemon_socket.clone();
-    tokio_handle.spawn(async move {
+    REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
+    let forwarder_handle = tokio_handle.spawn(async move {
         let sub_client = match DaemonClient::connect(&forwarder_socket).await {
             Ok(c) => c,
             Err(e) => {
@@ -365,7 +366,7 @@ pub(crate) fn build_remote_pane_state(
     // ── 5. Spawn the tokio writer task: drain input_tx → SendKeys ──────
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let writer_client = Arc::clone(&daemon_client);
-    tokio_handle.spawn(async move {
+    let writer_handle = tokio_handle.spawn(async move {
         while let Some(bytes) = input_rx.recv().await {
             if let Err(e) = writer_client
                 .send_request(IpcRequest::SendKeys {
@@ -390,7 +391,11 @@ pub(crate) fn build_remote_pane_state(
             input_tx,
             daemon_client,
             tokio_handle,
-            shutdown,
+            guard: RemotePtyGuard {
+                shutdown,
+                forwarder: Some(forwarder_handle),
+                writer: Some(writer_handle),
+            },
         },
     })
 }
