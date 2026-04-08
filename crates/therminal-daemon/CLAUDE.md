@@ -77,7 +77,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (24 tools):
+Tools exposed (26 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -88,7 +88,9 @@ Tools exposed (24 tools):
 | `terminal.panes.list` | Observer | List all panes with dimensions, session membership, title, plus optional `cwd` (from OSC 7 / spawn), `last_exit_code` (from OSC 633 D), and `agent_name` (from `AgentRegistry`). Optional fields are omitted when unknown to preserve wire compatibility. |
 | `terminal.panes.create` | Writer | Create a pane (split from existing or add to session) |
 | `terminal.panes.destroy` | Admin | Destroy a pane and its PTY |
-| `terminal.panes.get_content` | Observer | Read visible grid snapshot with cursor position |
+| `terminal.panes.get_content` | Observer | Read the visible grid snapshot with cursor position. **tn-sp3n behavior change:** trailing whitespace is now trimmed from every row by default — empty rows on a sparse pane are returned as `""` instead of `cols`-wide padding (typical 70-90% byte savings). Optional params: `trim_trailing_whitespace=false` restores the historical fixed-width grid, `compact=true` drops fully-blank rows, and `rows=N` returns only the last N visible / non-empty rows. The response now includes a stable `content_hash` (hex-encoded `DefaultHasher` over the full grid + cursor) so subscribers can short-circuit on unchanged screens. |
+| `terminal.panes.get_summary` | Observer | (tn-sp3n) Lightweight (~100 bytes) status snapshot for one pane: `pane_id`, `cursor_col`, `cursor_line`, `content_hash`, `last_command` + `last_exit_code` (from `CommandTracker`), `hotspot_count`, `agent_name` + `agent_status` (from `AgentRegistry`), `timestamp_secs`. Designed for conductor polling — answers "is this pane idle, working, or done?" without pulling any grid content. Compare `content_hash` against the previous tick to decide whether to follow up with `get_content` / `peek`. |
+| `terminal.panes.peek` | Observer | (tn-sp3n) Cheap "what just happened?" snapshot: returns the last N non-empty trimmed lines from a pane (`lines` param defaults to 10, capped server-side at 50) plus the same `content_hash` as `get_content` and a Unix timestamp. ~500 bytes for a typical mostly-empty pane; ideal when `get_summary` says the screen changed and you want a quick look without paying for the full grid. |
 | `terminal.panes.get_geometry` | Observer | Get pane dimensions and split feasibility |
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
 | `terminal.panes.tag` | Writer | Merge opaque key/value tags into a pane's metadata (tn-bbvf). Tags are arbitrary strings — therminal does not interpret them. Existing keys are overwritten; other keys are left untouched. Tags persist across daemon restarts via `sessions.json`. |
@@ -114,8 +116,8 @@ The server also exposes MCP Resources for pane content access:
 
 | Resource URI | Category | Description |
 |-------------|----------|-------------|
-| `terminal://pane/{id}/content` | Observer | Current visible grid snapshot (plain text) |
-| `terminal://pane/{id}/output` | Observer | Live PTY output stream (subscribe for updates) |
+| `terminal://pane/{id}/content` | Observer | Current visible grid snapshot as plain text. **tn-sp3n:** trailing whitespace is trimmed from every row (the resource protocol carries no params, so this is unconditional — callers needing the historical fixed-width grid should use `terminal.panes.get_content` with `trim_trailing_whitespace=false`). |
+| `terminal://pane/{id}/output` | Observer | Live PTY output stream (subscribe for updates). Same trim-on-read behavior as `content`. |
 | `terminal://pane/{id}/scrollback` | Observer | Historical scrollback above the visible grid (plain text, oldest first, capped at 10,000 lines, no subscriptions) |
 | `therminal://claude/events` | Observer | Live Claude Code session events (subscribe-only, JSON `TaggedAgentEvent`s, per-connection ring buffer drained by `read_resource`) |
 | `therminal://agents/events` | Observer | Live agent lifecycle events from `AgentRegistry` — `Registered` / `Unregistered` / `StatusChanged` across all panes (subscribe-only, JSON `TaggedAgentEvent { event, pane_id, timestamp_secs }`, per-connection ring buffer) |

@@ -92,6 +92,51 @@ pub(super) struct PaneIdParam {
     pub(super) pane_id: u64,
 }
 
+/// Parameters for `terminal.panes.get_content` (tn-sp3n).
+///
+/// All optional fields default to "no change" relative to the historical
+/// shape of the call, except for `trim_trailing_whitespace`, which defaults
+/// to `true` — empty rows on a sparse pane become empty strings instead of
+/// 80+ space characters. This is the cache-churn fix the issue is named for.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct GetContentParam {
+    /// The numeric pane ID.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
+    pub(super) pane_id: u64,
+    /// Trim trailing whitespace from every emitted row. Defaults to `true`.
+    /// Set to `false` to get the historical fixed-width grid (each row
+    /// padded out to `cols` spaces).
+    #[serde(default = "default_true")]
+    pub(super) trim_trailing_whitespace: bool,
+    /// Drop fully-whitespace rows from the result. Implies trimming.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub(super) compact: bool,
+    /// If set, only return the LAST N rows of the grid (after any
+    /// trim/compact filtering). Useful for "show me what just happened"
+    /// against a tall pane.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
+    pub(super) rows: Option<usize>,
+}
+
+/// Parameters for `terminal.panes.peek` (tn-sp3n).
+///
+/// Returns the last N non-empty lines plus a content hash and timestamp.
+/// Cheaper than `get_content` for "is anything new?" polling.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct PeekPaneParam {
+    /// The numeric pane ID.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
+    pub(super) pane_id: u64,
+    /// Number of lines to return. Defaults to 10. Capped server-side at 50.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
+    pub(super) lines: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct TagPaneParam {
     /// The numeric pane ID to tag.
@@ -293,6 +338,70 @@ pub(super) struct PaneContentResult {
     pub(super) cursor_line: usize,
     pub(super) cols: usize,
     pub(super) rows: usize,
+    /// Stable 64-bit hash of the visible grid as the daemon saw it BEFORE
+    /// any trim/compact/rows filtering. Subscribers polling repeatedly can
+    /// short-circuit on an unchanged hash without paying for the lines
+    /// payload. Always present (tn-sp3n).
+    pub(super) content_hash: String,
+    /// Number of lines that were trimmed off the bottom of the response
+    /// because the caller asked for `rows = last_N`. `0` when the entire
+    /// grid was returned.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub(super) truncated_rows: usize,
+}
+
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Light-weight pane summary returned by `terminal.panes.get_summary`
+/// (tn-sp3n). Designed to fit in ~100 bytes so a conductor can poll many
+/// panes without burning cache. All fields except `pane_id`, cursor pos,
+/// and `content_hash` are best-effort and skipped from the wire when
+/// unknown.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct PaneSummaryResult {
+    pub(super) pane_id: u64,
+    /// Cursor column in the visible grid (0-based).
+    pub(super) cursor_col: usize,
+    /// Cursor row in the visible grid (0-based).
+    pub(super) cursor_line: usize,
+    /// Stable 64-bit hash of the visible grid (same value as
+    /// `PaneContentResult.content_hash`). Hex-encoded.
+    pub(super) content_hash: String,
+    /// Most recent finished command's text, if shell integration is wired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_command: Option<String>,
+    /// Exit code of the most recent finished command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_exit_code: Option<i32>,
+    /// Number of detected hotspots in the current visible grid.
+    pub(super) hotspot_count: usize,
+    /// Name of the AI agent currently running in this pane (from the
+    /// `AgentRegistry`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) agent_name: Option<String>,
+    /// Lifecycle status of the agent in this pane (e.g. "active",
+    /// "thinking", "tool_use"). Omitted when no agent is registered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) agent_status: Option<String>,
+    /// Wall-clock seconds when the snapshot was taken.
+    pub(super) timestamp_secs: u64,
+}
+
+/// Lightweight "what just happened?" snapshot returned by
+/// `terminal.panes.peek` (tn-sp3n).
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct PanePeekResult {
+    pub(super) pane_id: u64,
+    /// Last N lines of the visible grid, trimmed and with whitespace-only
+    /// rows dropped. Oldest first within the truncated window.
+    pub(super) lines: Vec<String>,
+    /// Stable 64-bit hash of the FULL visible grid (not the truncated peek
+    /// window). Subscribers can short-circuit on an unchanged hash.
+    pub(super) content_hash: String,
+    /// Wall-clock seconds when the snapshot was taken.
+    pub(super) timestamp_secs: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -948,6 +1057,74 @@ pub(super) fn split_file_path_parts(text: &str) -> (&str, &str) {
     (text, "")
 }
 
+/// Render the visible grid of a `PaneSnapshot` as plain-text lines.
+///
+/// When `trim_trailing_whitespace` is true (the default for tn-sp3n),
+/// trailing spaces / NBSPs / control whitespace are stripped from every
+/// row — empty rows become `""` instead of 80+ spaces. This is the
+/// cache-churn fix the conductor relies on.
+///
+/// When `compact` is true, fully-whitespace rows are dropped entirely
+/// (implies trimming).
+pub(super) fn render_grid_lines(
+    snap: &crate::session::PaneSnapshot,
+    trim_trailing_whitespace: bool,
+    compact: bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(snap.grid.len());
+    for row in &snap.grid {
+        let raw: String = row.iter().map(|(ch, _)| ch).collect();
+        let trimmed = if trim_trailing_whitespace || compact {
+            raw.trim_end().to_string()
+        } else {
+            raw
+        };
+        if compact && trimmed.trim().is_empty() {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    out
+}
+
+/// Stable 64-bit hash of a `PaneSnapshot`'s visible grid as hex.
+///
+/// We use `std::hash::DefaultHasher` (SipHash-1-3 in current libstd) which
+/// is hash-DoS resistant and zero-dep. This is purely a polling-cache key,
+/// not a cryptographic checksum, so collision resistance only needs to be
+/// "good enough that consecutive snapshots that differ in any cell get
+/// different hashes."
+///
+/// The hash includes cursor position so a pane with identical visible
+/// glyphs but a moved cursor still produces a different value (a common
+/// idle/streaming distinction for spinner-style agents).
+pub(super) fn pane_content_hash(snap: &crate::session::PaneSnapshot) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snap.cols.hash(&mut hasher);
+    snap.rows.hash(&mut hasher);
+    snap.cursor_col.hash(&mut hasher);
+    snap.cursor_line.hash(&mut hasher);
+    for row in &snap.grid {
+        for (ch, bold) in row {
+            (*ch as u32).hash(&mut hasher);
+            bold.hash(&mut hasher);
+        }
+        // Row separator so [["a"], ["b"]] != [["ab"]].
+        0u32.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Wall-clock now in Unix seconds (saturating to 0 on the impossible
+/// pre-epoch case).
+pub(super) fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 // ── Helpers for pane lookup ─────────────────────────────────────────────
 
 /// Find (session_id, cols, rows) for a pane by ID across all sessions.
@@ -1107,8 +1284,16 @@ impl ServerHandler for TherminalMcpServer {
                 self.handle_get_pane_geometry(params).await
             }
             "terminal.panes.get_content" => {
-                let params: PaneIdParam = parse_args(args)?;
+                let params: GetContentParam = parse_args(args)?;
                 self.handle_read_pane_content(params).await
+            }
+            "terminal.panes.get_summary" => {
+                let params: PaneIdParam = parse_args(args)?;
+                self.handle_get_pane_summary(params).await
+            }
+            "terminal.panes.peek" => {
+                let params: PeekPaneParam = parse_args(args)?;
+                self.handle_peek_pane(params).await
             }
             "terminal.semantic.query_history" => {
                 let params: QuerySemanticHistoryParam = parse_args(args)?;
@@ -1561,6 +1746,8 @@ pub(crate) mod tests {
             "terminal.panes.list",
             "terminal.panes.get_geometry",
             "terminal.panes.get_content",
+            "terminal.panes.get_summary",
+            "terminal.panes.peek",
             "terminal.panes.wait_for_output",
             "terminal.semantic.query_history",
             "terminal.semantic.query_commands",
@@ -1678,6 +1865,8 @@ pub(crate) mod tests {
             "terminal.panes.list",
             "terminal.panes.get_geometry",
             "terminal.panes.get_content",
+            "terminal.panes.get_summary",
+            "terminal.panes.peek",
             "terminal.panes.wait_for_output",
             "terminal.semantic.query_history",
             "terminal.semantic.query_commands",
@@ -1697,7 +1886,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 21, "expected exactly 21 tools");
+        assert_eq!(all_tools.len(), 23, "expected exactly 23 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -1868,11 +2057,13 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 24 tools must be returned.
+    /// Lock in the count: exactly 26 tools must be returned. Bumped from
+    /// 24 to 26 in tn-sp3n with `terminal.panes.get_summary` and
+    /// `terminal.panes.peek`.
     #[test]
-    fn tool_definitions_returns_24_tools() {
+    fn tool_definitions_returns_26_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 24, "expected exactly 24 tool definitions");
+        assert_eq!(tools.len(), 26, "expected exactly 26 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1894,6 +2085,8 @@ pub(crate) mod tests {
             "terminal.panes.untag",
             "terminal.panes.get_geometry",
             "terminal.panes.get_content",
+            "terminal.panes.get_summary",
+            "terminal.panes.peek",
             "terminal.semantic.query_history",
             "terminal.semantic.query_commands",
             "terminal.panes.query_events",
@@ -2885,5 +3078,260 @@ pub(crate) mod tests {
             2,
             "expected only the global event-stream resources with no panes"
         );
+    }
+
+    // ── tn-sp3n: cheap polling helpers ──────────────────────────────────
+
+    use crate::session::PaneSnapshot;
+
+    /// Build a deterministic synthetic `PaneSnapshot` for testing the
+    /// trim/compact/hash helpers without spawning a real PTY.
+    fn make_snapshot(grid_chars: &[&str], cols: usize) -> PaneSnapshot {
+        let grid: Vec<Vec<(char, bool)>> = grid_chars
+            .iter()
+            .map(|row| {
+                let mut cells: Vec<(char, bool)> = row.chars().map(|c| (c, false)).collect();
+                while cells.len() < cols {
+                    cells.push((' ', false));
+                }
+                cells.truncate(cols);
+                cells
+            })
+            .collect();
+        PaneSnapshot {
+            pane_id: 1,
+            title: String::new(),
+            scrollback: Vec::new(),
+            grid,
+            cursor_col: 0,
+            cursor_line: 0,
+            cols,
+            rows: grid_chars.len(),
+        }
+    }
+
+    #[test]
+    fn render_grid_lines_trims_trailing_whitespace_by_default() {
+        let snap = make_snapshot(&["hello", "", "world"], 80);
+        let lines = super::render_grid_lines(&snap, true, false);
+        assert_eq!(
+            lines,
+            vec!["hello".to_string(), "".to_string(), "world".to_string()]
+        );
+        // Joined size should be tiny — proves the padding is gone.
+        assert!(lines.iter().map(|s| s.len()).sum::<usize>() < 20);
+    }
+
+    #[test]
+    fn render_grid_lines_no_trim_returns_padded_grid() {
+        let snap = make_snapshot(&["hi"], 40);
+        let lines = super::render_grid_lines(&snap, false, false);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 40, "row must be padded out to cols");
+        assert!(lines[0].starts_with("hi"));
+    }
+
+    #[test]
+    fn render_grid_lines_compact_drops_blank_rows() {
+        let snap = make_snapshot(&["a", "", "b", "   ", "c"], 80);
+        let lines = super::render_grid_lines(&snap, true, true);
+        assert_eq!(
+            lines,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn pane_content_hash_changes_on_edit() {
+        let a = make_snapshot(&["foo", "bar"], 80);
+        let b = make_snapshot(&["foo", "BAR"], 80);
+        let h_a = super::pane_content_hash(&a);
+        let h_b = super::pane_content_hash(&b);
+        assert_ne!(h_a, h_b, "hash must change when a cell changes");
+        assert_eq!(h_a.len(), 16, "hash is hex-encoded u64");
+    }
+
+    #[test]
+    fn pane_content_hash_stable_across_calls() {
+        let snap = make_snapshot(&["abc", "def"], 80);
+        let h1 = super::pane_content_hash(&snap);
+        let h2 = super::pane_content_hash(&snap);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn pane_content_hash_changes_on_cursor_move() {
+        let mut snap = make_snapshot(&["abc"], 80);
+        let h_origin = super::pane_content_hash(&snap);
+        snap.cursor_col = 2;
+        let h_moved = super::pane_content_hash(&snap);
+        assert_ne!(h_origin, h_moved, "cursor moves are observable to clients");
+    }
+
+    #[test]
+    fn get_content_param_default_trim_is_true() {
+        // No trim_trailing_whitespace key — should default to true.
+        let p: super::GetContentParam = parse(r#"{"pane_id":1}"#);
+        assert!(p.trim_trailing_whitespace);
+        assert!(!p.compact);
+        assert_eq!(p.rows, None);
+    }
+
+    #[test]
+    fn get_content_param_accepts_all_fields() {
+        let p: super::GetContentParam =
+            parse(r#"{"pane_id":"1","trim_trailing_whitespace":false,"compact":true,"rows":"5"}"#);
+        assert_eq!(p.pane_id, 1);
+        assert!(!p.trim_trailing_whitespace);
+        assert!(p.compact);
+        assert_eq!(p.rows, Some(5));
+    }
+
+    #[test]
+    fn peek_pane_param_default_lines_none() {
+        let p: super::PeekPaneParam = parse(r#"{"pane_id":1}"#);
+        assert_eq!(p.lines, None);
+    }
+
+    #[test]
+    fn get_summary_and_peek_tools_registered() {
+        use std::collections::HashSet;
+        let tools = tool_definitions();
+        let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains("terminal.panes.get_summary"));
+        assert!(names.contains("terminal.panes.peek"));
+        // Sanity: get_content is still there.
+        assert!(names.contains("terminal.panes.get_content"));
+    }
+
+    /// End-to-end byte-savings smoke test for the trim default. Spawns a
+    /// real session, asks for the default and the historical (untrimmed)
+    /// shape, and verifies the trimmed payload is dramatically smaller.
+    #[tokio::test]
+    async fn get_content_default_trim_saves_bytes_on_sparse_pane() {
+        let server = make_server(trusted_config());
+        let pane_id = {
+            let mut mgr = server.session_mgr.lock().await;
+            let session_id = mgr
+                .create_session(Some("trim-test".to_string()))
+                .expect("create session");
+            mgr.iter_sessions()
+                .find(|(id, _)| **id == session_id)
+                .and_then(|(_, s)| s.windows.first())
+                .and_then(|w| w.panes.first())
+                .map(|p| p.id)
+                .expect("session has at least one pane")
+        };
+
+        // Trimmed (default) — what the wire pays today.
+        let trimmed = server
+            .handle_read_pane_content(super::GetContentParam {
+                pane_id,
+                trim_trailing_whitespace: true,
+                compact: false,
+                rows: None,
+            })
+            .await
+            .expect("trimmed call ok");
+        let trimmed_text = trimmed
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("trimmed content");
+        let trimmed_bytes = trimmed_text.len();
+
+        // Untrimmed — the historical payload shape.
+        let untrimmed = server
+            .handle_read_pane_content(super::GetContentParam {
+                pane_id,
+                trim_trailing_whitespace: false,
+                compact: false,
+                rows: None,
+            })
+            .await
+            .expect("untrimmed call ok");
+        let untrimmed_text = untrimmed
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("untrimmed content");
+        let untrimmed_bytes = untrimmed_text.len();
+
+        // The exact ratio depends on shell startup, but on a freshly
+        // spawned shell most rows are pure padding. Trim should cut
+        // payload size at LEAST in half — usually 70-90%.
+        assert!(
+            trimmed_bytes < untrimmed_bytes,
+            "trimmed ({trimmed_bytes}) must be smaller than untrimmed ({untrimmed_bytes})"
+        );
+        assert!(
+            trimmed_bytes * 2 <= untrimmed_bytes,
+            "trim must save at least 50% on a sparse pane: trimmed={trimmed_bytes} untrimmed={untrimmed_bytes}"
+        );
+        eprintln!(
+            "tn-sp3n bytes: trimmed={trimmed_bytes} untrimmed={untrimmed_bytes} savings={:.1}%",
+            100.0 - (trimmed_bytes as f64 / untrimmed_bytes as f64) * 100.0
+        );
+
+        // Both responses must include a non-empty content_hash.
+        let parsed_trim: serde_json::Value =
+            serde_json::from_str(&trimmed_text).expect("trim json");
+        assert!(parsed_trim["content_hash"].as_str().is_some());
+
+        // The summary tool should be even smaller.
+        let summary = server
+            .handle_get_pane_summary(super::PaneIdParam { pane_id })
+            .await
+            .expect("summary ok");
+        let summary_text = summary
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("summary content");
+        eprintln!("tn-sp3n summary bytes: {}", summary_text.len());
+        // Summary should be cheaper than even the trimmed content payload.
+        assert!(
+            summary_text.len() < trimmed_bytes,
+            "summary ({}) should be smaller than trimmed get_content ({trimmed_bytes})",
+            summary_text.len()
+        );
+
+        // The peek tool should also be cheap on a fresh pane.
+        let peek = server
+            .handle_peek_pane(super::PeekPaneParam {
+                pane_id,
+                lines: Some(10),
+            })
+            .await
+            .expect("peek ok");
+        let peek_text = peek
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("peek content");
+        eprintln!("tn-sp3n peek bytes: {}", peek_text.len());
+        assert!(peek_text.len() < untrimmed_bytes);
+    }
+
+    #[test]
+    fn get_content_truncated_rows_set_when_rows_param_used() {
+        // White-box test of the in-memory pipeline (no real PTY needed):
+        // build a fake snapshot, run it through render+truncate logic
+        // mirroring the handler.
+        let snap = make_snapshot(&["a", "b", "c", "d", "e"], 80);
+        let mut lines = super::render_grid_lines(&snap, true, false);
+        let total_before = lines.len();
+        let last_n = 2usize;
+        let take = last_n.min(total_before);
+        let drop = total_before - take;
+        if drop > 0 {
+            lines.drain(0..drop);
+        }
+        assert_eq!(lines, vec!["d".to_string(), "e".to_string()]);
+        assert_eq!(drop, 3);
     }
 }

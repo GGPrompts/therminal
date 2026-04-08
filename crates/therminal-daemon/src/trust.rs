@@ -45,6 +45,8 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.list"
         | "terminal.panes.get_geometry"
         | "terminal.panes.get_content"
+        | "terminal.panes.get_summary"
+        | "terminal.panes.peek"
         | "terminal.panes.wait_for_output"
         | "terminal.panes.query_events"
         | "terminal.semantic.query_history"

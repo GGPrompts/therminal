@@ -12,17 +12,18 @@ use tracing::debug;
 use super::{
     AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentStatusResult,
     CadenceSampleResult, CommandInfo, CreateSessionParam, DestroyPaneResult, EmptyParams,
-    EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetHotspotsParam, GetHotspotsResult,
-    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
-    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
-    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
-    PaneContentResult, PaneIdParam, PaneInfo, PaneTagsResult, QueryCommandsParam,
-    QueryCommandsResult, QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam,
-    QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
-    SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
-    TagPaneParam, TherminalMcpServer, UntagPaneParam, WaitForOutputParam, WaitForOutputResult,
-    WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult, build_content_preview,
-    find_first_pane_in_session, find_pane_info, json_content,
+    EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetContentParam, GetHotspotsParam,
+    GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam,
+    GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult,
+    ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
+    MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, PanePeekResult, PaneSummaryResult,
+    PaneTagsResult, PeekPaneParam, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
+    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
+    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
+    SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam, TherminalMcpServer,
+    UntagPaneParam, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
+    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
+    json_content, now_unix_secs, pane_content_hash, render_grid_lines,
 };
 
 impl TherminalMcpServer {
@@ -736,16 +737,34 @@ impl TherminalMcpServer {
 
     pub(super) async fn handle_read_pane_content(
         &self,
-        params: PaneIdParam,
+        params: GetContentParam,
     ) -> Result<CallToolResult, ErrorData> {
         let mgr = self.session_mgr.lock().await;
         match mgr.capture_pane(params.pane_id) {
             Ok(snap) => {
-                let lines: Vec<String> = snap
-                    .grid
-                    .iter()
-                    .map(|row| row.iter().map(|(ch, _)| ch).collect())
-                    .collect();
+                // Compute the content hash from the FULL untrimmed grid so
+                // it stays stable regardless of which trim/compact/rows
+                // options the caller picks.
+                let content_hash = pane_content_hash(&snap);
+
+                let mut lines =
+                    render_grid_lines(&snap, params.trim_trailing_whitespace, params.compact);
+
+                // Apply `rows = last_N` AFTER trim/compact filtering so the
+                // semantics are "last N visible / non-empty rows", not
+                // "last N grid rows including blank padding".
+                let truncated_rows = if let Some(last_n) = params.rows {
+                    let total = lines.len();
+                    let take = last_n.min(total);
+                    let drop = total - take;
+                    if drop > 0 {
+                        lines.drain(0..drop);
+                    }
+                    drop
+                } else {
+                    0
+                };
+
                 let result = PaneContentResult {
                     pane_id: snap.pane_id,
                     lines,
@@ -753,6 +772,8 @@ impl TherminalMcpServer {
                     cursor_line: snap.cursor_line,
                     cols: snap.cols,
                     rows: snap.rows,
+                    content_hash,
+                    truncated_rows,
                 };
                 Ok(CallToolResult::success(vec![json_content(&result)?]))
             }
@@ -760,6 +781,113 @@ impl TherminalMcpServer {
                 "read_pane_content failed: {e}"
             ))])),
         }
+    }
+
+    /// Return a tiny status snapshot for a pane (~100 bytes) — designed
+    /// for conductor polling. See tn-sp3n.
+    pub(super) async fn handle_get_pane_summary(
+        &self,
+        params: PaneIdParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        use therminal_terminal::hotspot_detection::detect_hotspots_from_text;
+
+        let mgr = self.session_mgr.lock().await;
+
+        // Capture the pane so the cursor / hash come from a single
+        // consistent grid view.
+        let snap = match mgr.capture_pane(params.pane_id) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "get_pane_summary failed: {e}"
+                ))]));
+            }
+        };
+
+        let content_hash = pane_content_hash(&snap);
+
+        // Most-recent finished command (newest entry from the per-pane
+        // CommandTracker, if any).
+        let (last_command, last_exit_code) = match mgr.pane_command_blocks(params.pane_id) {
+            Some(blocks) => match blocks.into_iter().last() {
+                Some(b) => (b.command, b.exit_code),
+                None => (None, None),
+            },
+            None => (None, None),
+        };
+
+        // Agent registry lookup (cheap — single hashmap probe).
+        let registry_entry = mgr.agent_registry().get(params.pane_id);
+        let agent_name = registry_entry.as_ref().map(|e| e.name.clone());
+        let agent_status = registry_entry
+            .as_ref()
+            .map(|e| e.status.as_str().to_string());
+
+        drop(mgr);
+
+        // Hotspot count from the visible grid. Use trimmed lines so
+        // padding spaces don't pollute regex matches; we don't return the
+        // hotspots themselves here (callers who need them call
+        // `terminal.semantic.get_hotspots`).
+        let trimmed = render_grid_lines(&snap, true, false);
+        let hotspots = detect_hotspots_from_text(&trimmed);
+        let hotspot_count = hotspots.len();
+
+        let result = PaneSummaryResult {
+            pane_id: params.pane_id,
+            cursor_col: snap.cursor_col,
+            cursor_line: snap.cursor_line,
+            content_hash,
+            last_command,
+            last_exit_code,
+            hotspot_count,
+            agent_name,
+            agent_status,
+            timestamp_secs: now_unix_secs(),
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return the last N non-empty lines of a pane plus a content hash and
+    /// timestamp. Cheaper than `get_content` for "show me what just
+    /// happened" polling. See tn-sp3n.
+    pub(super) async fn handle_peek_pane(
+        &self,
+        params: PeekPaneParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Cap requested lines at 50 — anything bigger should use
+        // `get_content { rows: N }` instead.
+        let requested = params.lines.unwrap_or(10).min(50);
+
+        let mgr = self.session_mgr.lock().await;
+        let snap = match mgr.capture_pane(params.pane_id) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "peek_pane failed: {e}"
+                ))]));
+            }
+        };
+        drop(mgr);
+
+        let content_hash = pane_content_hash(&snap);
+
+        // Trim + compact so blank padding doesn't waste the window.
+        let mut lines = render_grid_lines(&snap, true, true);
+        let total = lines.len();
+        let take = requested.min(total);
+        let drop_n = total - take;
+        if drop_n > 0 {
+            lines.drain(0..drop_n);
+        }
+
+        let result = PanePeekResult {
+            pane_id: params.pane_id,
+            lines,
+            content_hash,
+            timestamp_secs: now_unix_secs(),
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
     pub(super) async fn handle_query_semantic_history(
@@ -1160,8 +1288,18 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "terminal.panes.get_content",
-            "Read the current visible content of a terminal pane (grid snapshot with cursor position)",
+            "Read the current visible content of a terminal pane. By default, trailing whitespace is trimmed from every row (so blank rows on a sparse pane become empty strings) and a stable `content_hash` is returned alongside the lines so polling clients can short-circuit on unchanged screens. Optional params: `trim_trailing_whitespace=false` to get the historical fixed-width grid, `compact=true` to drop fully-blank rows, and `rows=N` to return only the last N visible / non-empty rows. Cursor position and grid dimensions are always included.",
+            schema_for_type::<GetContentParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.get_summary",
+            "Lightweight (~100 bytes) status snapshot for a pane: cursor position, content_hash, last finished command + exit code, hotspot count, agent name + status. Designed for conductor polling — answers 'is this pane idle, working, or done?' without pulling any grid content. Compare the returned `content_hash` against the previous tick to decide whether you need a follow-up `get_content` / `peek` call.",
             schema_for_type::<PaneIdParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.peek",
+            "Cheap 'what just happened?' snapshot: returns the last N non-empty trimmed lines from a pane (default 10, capped at 50) plus the same `content_hash` as `get_content` and a Unix timestamp. ~500 bytes for a typical mostly-empty pane. Use this when `get_summary` says the screen changed and you want a quick look without paying for the full grid.",
+            schema_for_type::<PeekPaneParam>(),
         ),
         Tool::new(
             "terminal.semantic.query_history",

@@ -24,7 +24,7 @@ use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycle
 
 use super::{
     AGENT_EVENT_BUFFER_CAP, AGENT_EVENTS_URI, CLAUDE_EVENT_BUFFER_CAP, CLAUDE_EVENTS_URI,
-    TherminalMcpServer, extract_agent_identity,
+    TherminalMcpServer, extract_agent_identity, render_grid_lines,
 };
 
 impl TherminalMcpServer {
@@ -231,11 +231,14 @@ impl TherminalMcpServer {
                         None,
                     )
                 })?;
-                let lines: Vec<String> = snap
-                    .grid
-                    .iter()
-                    .map(|row| row.iter().map(|(ch, _)| ch).collect())
-                    .collect();
+                // tn-sp3n: trim trailing whitespace by default so an empty
+                // row becomes "" instead of N spaces. Cuts wire size on a
+                // mostly-blank pane by 70-90%. The MCP resource protocol
+                // doesn't take params, so trimming is unconditional here —
+                // callers who need the historical fixed-width grid should
+                // use the `terminal.panes.get_content` tool with
+                // `trim_trailing_whitespace=false`.
+                let lines = render_grid_lines(&snap, true, false);
                 let text = lines.join("\n");
                 Ok(ReadResourceResult::new(vec![
                     ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain"),
@@ -252,11 +255,8 @@ impl TherminalMcpServer {
                         None,
                     )
                 })?;
-                let lines: Vec<String> = snap
-                    .grid
-                    .iter()
-                    .map(|row| row.iter().map(|(ch, _)| ch).collect())
-                    .collect();
+                // Trim by default — same rationale as the `content` arm.
+                let lines = render_grid_lines(&snap, true, false);
                 let text = lines.join("\n");
                 Ok(ReadResourceResult::new(vec![
                     ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain"),
