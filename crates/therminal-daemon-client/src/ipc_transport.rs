@@ -161,10 +161,32 @@ pub async fn connect_client(socket_path: &Path) -> std::io::Result<IpcClientStre
 
         let name = socket_path.to_string_lossy();
         // Named pipes do not "queue" connections like Unix sockets — if all
-        // server instances are busy, ClientOptions::open returns ERROR_PIPE_BUSY.
-        // The standard pattern is to retry briefly. For our usage (one-shot
-        // ping, one persistent client) the simple immediate-open path is
-        // sufficient; callers that need retry can wrap this.
+        // server instances are busy (the daemon is already serving a client
+        // and has not yet armed the next pipe instance), ClientOptions::open
+        // returns ERROR_PIPE_BUSY (231). The standard pattern is to retry
+        // briefly with a short sleep.
+        //
+        // tn-6tfn: this race fired during GUI reattach to a multi-pane
+        // session. Each remote pane opens its own dedicated subscription
+        // connection (remote_spawn.rs) and the second connect happened
+        // before the daemon's accept loop re-armed the next pipe instance.
+        // Without retry, the second pane's forwarder failed to connect, the
+        // worker exited, and the pane was closed before any bytes streamed.
+        const ERROR_PIPE_BUSY: i32 = 231;
+        const MAX_RETRIES: u32 = 20; // ~1s total at 50ms each
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+        for _ in 0..MAX_RETRIES {
+            match ClientOptions::new().open(&*name) {
+                Ok(stream) => return Ok(stream),
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Final attempt — propagate whatever error we get on the last try.
         ClientOptions::new().open(&*name)
     }
 }
