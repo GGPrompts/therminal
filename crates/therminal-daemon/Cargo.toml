@@ -10,15 +10,12 @@ repository.workspace = true
 name = "therminal-daemon"
 path = "src/main.rs"
 
-[[bin]]
-name = "claude-events"
-path = "src/bin/claude-events.rs"
-
 [dependencies]
 therminal-protocol = { workspace = true }
 therminal-daemon-client = { workspace = true }
 therminal-terminal = { workspace = true }
 therminal-runtime = { workspace = true }
+therminal-harness-claude = { workspace = true }
 therminal-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

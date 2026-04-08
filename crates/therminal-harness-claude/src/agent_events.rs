@@ -1,7 +1,7 @@
 //! Structured JSON output event types for AI agent sessions.
 //!
 //! `AgentEvent` variants are produced by the JSONL tailer
-//! via `claude_session_log::parse_session_event` and consumed by overlay widgets.
+//! via `session_log::parse_session_event` and consumed by overlay widgets.
 
 use serde::Serialize;
 

@@ -235,11 +235,13 @@ async fn start_daemon(
     // capacity cache (resolving pane_id via the AgentRegistry under the
     // session-manager mutex). We must not block the pipeline tick on the
     // tokio mutex, hence the channel hop.
-    let (capacity_update_tx, mut capacity_update_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::claude_state::ClaudeStateUpdate>();
-    let capacity_observer: crate::claude_pipeline::StateUpdateObserver = Arc::new(move |update| {
-        let _ = capacity_update_tx.send(update.clone());
-    });
+    let (capacity_update_tx, mut capacity_update_rx) = tokio::sync::mpsc::unbounded_channel::<
+        therminal_harness_claude::state::ClaudeStateUpdate,
+    >();
+    let capacity_observer: therminal_harness_claude::pipeline::StateUpdateObserver =
+        Arc::new(move |update| {
+            let _ = capacity_update_tx.send(update.clone());
+        });
 
     {
         let session_mgr = server.session_manager();
@@ -251,7 +253,7 @@ async fn start_daemon(
         tokio::spawn(async move {
             while let Some(update) = capacity_update_rx.recv().await {
                 match update {
-                    crate::claude_state::ClaudeStateUpdate::Upserted(state) => {
+                    therminal_harness_claude::state::ClaudeStateUpdate::Upserted(state) => {
                         let mgr = session_mgr_for_task.lock().await;
                         let pane_id = crate::pane_capacity::resolve_pane_id_from_state(
                             &state,
@@ -262,7 +264,7 @@ async fn start_daemon(
                             cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
                         }
                     }
-                    crate::claude_state::ClaudeStateUpdate::Removed { path: _ } => {
+                    therminal_harness_claude::state::ClaudeStateUpdate::Removed { path: _ } => {
                         // The poller does not surface session_id on removal, only
                         // the path. Best-effort: derive session_id from the file
                         // stem and let the cache drop any matching entry.
@@ -274,8 +276,11 @@ async fn start_daemon(
         });
     }
 
-    let claude_events_tx =
-        crate::claude_pipeline::spawn(lifecycle.shutdown_notify(), Some(capacity_observer));
+    let claude_harness = therminal_harness_claude::ClaudeHarness::start(
+        lifecycle.shutdown_notify(),
+        Some(capacity_observer),
+    );
+    let claude_events_tx = claude_harness.into_event_stream();
 
     // Spawn the daemon-side process-tree agent detector ticker (tn-pehl).
     // Walks each pane's shell PID every 3 seconds and feeds detected

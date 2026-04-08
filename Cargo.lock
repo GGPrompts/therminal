@@ -3460,6 +3460,7 @@ dependencies = [
  "tempfile",
  "therminal-core",
  "therminal-daemon-client",
+ "therminal-harness-claude",
  "therminal-protocol",
  "therminal-runtime",
  "therminal-terminal",
@@ -3477,6 +3478,24 @@ dependencies = [
  "rmp-serde",
  "tempfile",
  "therminal-protocol",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "therminal-harness-claude"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "therminal-core",
+ "therminal-protocol",
+ "therminal-runtime",
+ "time",
  "tokio",
  "tracing",
 ]

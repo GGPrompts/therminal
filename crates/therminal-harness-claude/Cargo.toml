@@ -1,0 +1,29 @@
+[package]
+name = "therminal-harness-claude"
+description = "First-class Claude Code integration for Therminal (JSONL tailer, state watcher, event stream)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "claude-events"
+path = "src/bin/claude-events.rs"
+
+[dependencies]
+therminal-protocol = { workspace = true }
+therminal-runtime = { workspace = true }
+therminal-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+notify = { workspace = true }
+time = { workspace = true }
+anyhow = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -8,16 +8,17 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 
 ## Architecture
 
-Cargo workspace with six crates. Each crate has its own `CLAUDE.md` with deep architecture docs.
+Cargo workspace with seven crates. Each crate has its own `CLAUDE.md` with deep architecture docs.
 
 ```
 crates/
-├── therminal-protocol/    # Wire types, MCP schema, semantic events
-├── therminal-terminal/    # PTY, OSC parsing, state inference, agent detection, region index
-├── therminal-core/        # Color palette, wgpu context, text renderer, TOML config, hot-reload
-├── therminal-runtime/     # Cross-platform paths, runtime dir management
-├── therminal-daemon/      # Session manager, event bus, multiplexer, MCP server, trust enforcement
-└── therminal-app/         # winit window, grid renderer, mouse input, PTY wiring
+├── therminal-protocol/       # Wire types, MCP schema, semantic events
+├── therminal-terminal/       # PTY, OSC parsing, state inference, agent detection, region index
+├── therminal-core/           # Color palette, wgpu context, text renderer, TOML config, hot-reload
+├── therminal-runtime/        # Cross-platform paths, runtime dir management
+├── therminal-daemon/         # Session manager, event bus, multiplexer, MCP server, trust enforcement
+├── therminal-harness-claude/ # First-class Claude Code integration (JSONL tailer + state watcher + event stream)
+└── therminal-app/            # winit window, grid renderer, mouse input, PTY wiring
 vendor/
 ├── alacritty_terminal/    # Vendored v0.25.1
 └── vte/                   # Vendored with SequenceInterceptor trait

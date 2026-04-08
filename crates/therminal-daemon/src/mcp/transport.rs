@@ -19,7 +19,8 @@ use tracing::{debug, error, info};
 
 use therminal_core::config::TrustConfig;
 
-use crate::claude_jsonl_tailer::TaggedAgentEvent;
+use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
+
 use crate::session::SessionManager;
 use crate::trust::RateLimiter;
 use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;

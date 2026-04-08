@@ -28,8 +28,8 @@ use std::sync::mpsc::{self, Sender};
 use tracing::{debug, trace, warn};
 
 use crate::agent_events::AgentEvent;
-use crate::claude_session_log::{self, SessionEventType};
-use crate::claude_state::{ClaudeSessionState, ClaudeStateUpdate};
+use crate::session_log::{self, SessionEventType};
+use crate::state::{ClaudeSessionState, ClaudeStateUpdate};
 
 /// Identifies which JSONL stream a [`TaggedAgentEvent`] originated from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -210,7 +210,7 @@ impl SessionJsonlTailer {
                 continue;
             }
 
-            let session_events = claude_session_log::parse_session_event(trimmed);
+            let session_events = session_log::parse_session_event(trimmed);
 
             for se in session_events {
                 if let Some(agent_event) = session_event_to_agent_event(&se) {
@@ -242,7 +242,7 @@ impl SessionJsonlTailer {
 // ── Conversion ──────────────────────────────────────────────────────────────
 
 /// Convert a `SessionEvent` to an `AgentEvent`.
-fn session_event_to_agent_event(se: &claude_session_log::SessionEvent) -> Option<AgentEvent> {
+fn session_event_to_agent_event(se: &session_log::SessionEvent) -> Option<AgentEvent> {
     match se.event_type {
         SessionEventType::UserMessage => Some(AgentEvent::UserMessage {
             content: se.content.clone(),
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn session_event_conversion_user() {
-        let se = claude_session_log::SessionEvent {
+        let se = session_log::SessionEvent {
             timestamp: String::new(),
             event_type: SessionEventType::UserMessage,
             content: "hello".into(),
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn session_event_conversion_tool_use() {
-        let se = claude_session_log::SessionEvent {
+        let se = session_log::SessionEvent {
             timestamp: String::new(),
             event_type: SessionEventType::ToolUse,
             content: r#"{"command": "ls"}"#.into(),
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn session_event_conversion_tool_result() {
-        let se = claude_session_log::SessionEvent {
+        let se = session_log::SessionEvent {
             timestamp: String::new(),
             event_type: SessionEventType::ToolResult,
             content: "ok".into(),
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn session_event_conversion_system_is_none() {
-        let se = claude_session_log::SessionEvent {
+        let se = session_log::SessionEvent {
             timestamp: String::new(),
             event_type: SessionEventType::SystemMessage,
             content: "system info".into(),

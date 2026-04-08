@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use therminal_daemon::agent_events::AgentEvent;
-use therminal_daemon::claude_jsonl_tailer::{EventSource, TaggedAgentEvent};
+use therminal_harness_claude::agent_events::AgentEvent;
+use therminal_harness_claude::jsonl_tailer::{EventSource, TaggedAgentEvent};
 
 /// Local mirror of [`TaggedAgentEvent`] that derives `Deserialize`. The
 /// upstream type is `Serialize`-only because nothing else in the daemon

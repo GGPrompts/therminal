@@ -19,7 +19,7 @@ use rmcp::model::{
 use rmcp::service::{RequestContext, RoleServer};
 use tracing::{debug, info};
 
-use crate::claude_jsonl_tailer::TaggedAgentEvent;
+use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
 use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
 
 use super::{

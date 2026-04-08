@@ -7,9 +7,9 @@
 //!
 //! Consumed by the MCP resource subscription `therminal://claude/events`.
 //!
-//! [`ClaudeStatePoller`]: crate::claude_state::ClaudeStatePoller
-//! [`ClaudeJsonlRegistry`]: crate::claude_jsonl_tailer::ClaudeJsonlRegistry
-//! [`TaggedAgentEvent`]: crate::claude_jsonl_tailer::TaggedAgentEvent
+//! [`ClaudeStatePoller`]: crate::state::ClaudeStatePoller
+//! [`ClaudeJsonlRegistry`]: crate::jsonl_tailer::ClaudeJsonlRegistry
+//! [`TaggedAgentEvent`]: crate::jsonl_tailer::TaggedAgentEvent
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,8 +17,8 @@ use std::time::Duration;
 use tokio::sync::{Notify, broadcast};
 use tracing::{debug, warn};
 
-use crate::claude_jsonl_tailer::{ClaudeJsonlRegistry, TaggedAgentEvent};
-use crate::claude_state::{ClaudeStatePoller, ClaudeStateUpdate};
+use crate::jsonl_tailer::{ClaudeJsonlRegistry, TaggedAgentEvent};
+use crate::state::{ClaudeStatePoller, ClaudeStateUpdate};
 
 /// Optional observer invoked for every drained `ClaudeStateUpdate` *before*
 /// it is forwarded to the JSONL registry. Used by `ensure.rs` to populate
@@ -127,8 +127,8 @@ pub fn spawn_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude_jsonl_tailer::EventSource;
-    use crate::claude_state::ClaudeStatePoller;
+    use crate::jsonl_tailer::EventSource;
+    use crate::state::ClaudeStatePoller;
     use tempfile::tempdir;
 
     #[tokio::test]

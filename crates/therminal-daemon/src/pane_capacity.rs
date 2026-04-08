@@ -19,7 +19,7 @@ use therminal_protocol::PaneId;
 use therminal_terminal::agent_registry::AgentRegistry;
 use therminal_terminal::state_inference::AgentType;
 
-use crate::claude_state::ClaudeSessionState;
+use therminal_harness_claude::state::ClaudeSessionState;
 
 /// One pane's most recently observed agent capacity snapshot.
 #[derive(Debug, Clone, Serialize)]

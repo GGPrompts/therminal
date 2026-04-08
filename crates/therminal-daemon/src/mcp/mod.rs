@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 
 use therminal_core::config::TrustConfig;
 
-use crate::claude_jsonl_tailer::TaggedAgentEvent;
+use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
+
 use crate::session::SessionManager;
 use crate::trust::{
     AgentIdentity, RateLimiter, TrustCheckResult, check_resource_access, check_tool_access,

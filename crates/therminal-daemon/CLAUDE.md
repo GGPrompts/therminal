@@ -132,55 +132,7 @@ The server also exposes MCP Resources for pane content access:
 
 ## Claude Code Session Observability
 
-The daemon also runs a Claude Code session observability pipeline — a standalone data flow independent of the process-tree `AgentRegistry`. Where `AgentRegistry` answers "is an agent process running in this pane?", this pipeline answers "what is that agent *doing* right now, and which subagents has it spawned?".
-
-**Data flow**:
-
-```
-/tmp/claude-code-state/*.json      (written by Claude Code hooks)
-          │
-          ▼
-ClaudeStatePoller  (src/claude_state.rs)
-  notify-based file watcher → ClaudeSessionState updates
-  (includes parent_session_id: Option<String> for subagent tracking)
-          │
-          ▼
-ClaudeJsonlRegistry  (src/claude_jsonl_tailer.rs)
-  ├─ SessionJsonlTailer per top-level session
-  │    byte-offset incremental reader over
-  │    ~/.claude/projects/{hash}/{sid}.jsonl
-  │
-  └─ Per-subagent SessionJsonlTailer (discovered by polling
-     ~/.claude/projects/{hash}/{parent-sid}/subagents/agent-*.jsonl
-     on each tick, read from offset 0 to capture full lifecycle)
-          │
-          ▼ TaggedAgentEvent { event: AgentEvent, source: EventSource }
-          ▼
-ClaudePipeline  (src/claude_pipeline.rs)
-  150ms tick driving poll_all, tokio::sync::broadcast fan-out
-          │
-          ▼
-therminal://claude/events  (MCP resource, src/mcp.rs)
-  subscription-based, per-connection ring buffer, Observer-tier trust
-```
-
-**Key types** (see source files for details):
-
-- `AgentEvent` in `src/agent_events.rs` — `UserMessage`, `AssistantMessage`, `ToolUse`, `ToolResult`, `Thinking`, `Progress`, `SystemMessage`. Derive `Serialize`.
-- `SessionEvent` / `SessionEventType` in `src/claude_session_log.rs` — parser for Claude Code's nested JSONL envelope (assistant `message.content` arrays with `text`/`tool_use`/`thinking` blocks). `parse_session_event` is a pure function.
-- `TaggedAgentEvent` and `EventSource::{TopLevel { session_id }, Subagent { parent_session_id, agent_id }}` in `src/claude_jsonl_tailer.rs`. Consumers use `EventSource` to reconstruct the session tree — no server-side filtering required.
-
-**Top-level vs subagent tailers**: Top-level tailers seek to end on session switch (skip history — only live events). Subagent tailers read from offset 0 because subagent sessions are short-lived and we want the full lifecycle. Subagent tailers are dropped when their parent session is removed.
-
-**Startup**: `ClaudePipeline::spawn()` is called from `ensure.rs` during daemon bring-up. It owns a tokio task that consumes `ClaudeStateUpdate`s from the poller, applies them to the registry, ticks `poll_all` every 150ms, and re-broadcasts `TaggedAgentEvent`s.
-
-**`therminal://claude/events` MCP resource**: Listed in `list_resources`. `read_resource` drains the per-connection ring buffer as a JSON array. `subscribe` attaches a per-connection forwarder that pushes buffered events and sends `notifications/resources/updated` as new events arrive. Trust-gated via `check_resource_access()` — Observer tier, same as pane content. Per-session URI filtering (`therminal://claude/events/{session_id}`) is intentionally deferred — consumers filter client-side on `EventSource`.
-
-**`claude-events` dev binary** (`src/bin/claude-events.rs`): Minimal raw JSON-RPC client that connects to the daemon's MCP socket, subscribes to `therminal://claude/events`, and prints styled lines per event. Flags: `--filter top|sub|all`, `--session <sid>`, `--verbose`, `--no-color`, `--json`. Run via `cargo run -p therminal-daemon --bin claude-events`. README documents user-facing flags; the binary itself is also the reference implementation for consuming the subscription protocol.
-
-**Scope boundary**: This pipeline is deliberately separate from `AgentRegistry`. The two compose but do not merge — `AgentRegistry` stays in `therminal-terminal` and tags panes by process tree; this pipeline lives in the daemon and exposes per-event session detail. A future overlay widget (tracked as `tn-x85k`) will render both via the same MCP consumer path.
-
-Key files: `src/claude_state.rs`, `src/agent_events.rs`, `src/claude_session_log.rs`, `src/claude_jsonl_tailer.rs`, `src/claude_pipeline.rs`, `src/bin/claude-events.rs`, and the `therminal://claude/events` resource handling in `src/mcp.rs`.
+Claude integration lives in `crates/therminal-harness-claude/` — see its `CLAUDE.md` for the JSONL tailer, state watcher, event pipeline, and the `claude-events` dev binary. The daemon instantiates [`ClaudeHarness`](../therminal-harness-claude/src/lib.rs) at startup from `ensure.rs` and hands the resulting broadcast sender to the MCP server for the `therminal://claude/events` resource. The per-pane capacity cache in `src/pane_capacity.rs` consumes `ClaudeStateUpdate`s via the harness's `StateUpdateObserver` hook to resolve `pane_id`s through the `AgentRegistry`.
 
 ## MCP Tool Naming
 
