@@ -2,6 +2,16 @@
 
 use super::{TherminalConfig, TrustTier};
 
+/// Version of the default config template. Bump this whenever a new
+/// section or documented default is added to [`default_config_text`].
+///
+/// The version is emitted as a comment line at the top of the generated
+/// file (`# template_version = N`) and parsed back by
+/// [`super::check_config_template_status`] to detect when a user's
+/// `therminal.toml` predates the current template — without polluting the
+/// parsed config struct.
+pub const CONFIG_TEMPLATE_VERSION: u32 = 1;
+
 /// Return the fully-commented default config as a TOML string.
 ///
 /// Every line is either a comment or a commented-out value so that the
@@ -11,6 +21,9 @@ pub(super) fn default_config_text() -> String {
     let mut out = String::new();
 
     out.push_str("# Therminal config — hot-reloaded on save\n");
+    out.push_str(&format!(
+        "# template_version = {CONFIG_TEMPLATE_VERSION}   # used by upgrade detection, do not edit manually\n"
+    ));
     out.push_str("# Uncomment and edit any value to override the default.\n");
     out.push('\n');
 

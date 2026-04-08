@@ -180,6 +180,7 @@ impl App {
                 active_workspace,
                 is_zoomed: self.zoomed_layout.is_some(),
                 focused_pane_id,
+                template_status: self.config.template_status.clone(),
             };
 
             let mut encoder = gpu

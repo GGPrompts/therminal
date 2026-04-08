@@ -4,6 +4,7 @@ use glyphon::{Attrs, Color as GlyphColor, Family, Metrics, Resolution, TextArea,
 use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::GridRenderer;
+use therminal_core::config::ConfigTemplateStatus;
 use therminal_core::palette::Color as PaletteColor;
 
 use super::colors::STATUS_BAR_BG_COLOR;
@@ -31,6 +32,10 @@ pub(crate) struct StatusBarInfo {
     /// surfaced in the footer center section so users can identify the active
     /// pane even when per-pane headers are hidden via `show_pane_headers = false`.
     pub focused_pane_id: Option<usize>,
+    /// Result of the template-version scan performed at config load time
+    /// (tn-3ge3). When non-`UpToDate`, the status bar shows a small muted
+    /// hint nudging the user to regenerate via `therminal --print-config`.
+    pub template_status: ConfigTemplateStatus,
 }
 
 /// Pixel rect (x, y, width, height) returned by chrome hit-test producers.
@@ -170,6 +175,10 @@ pub(crate) fn draw_status_bar(
         None => format!("{cols}x{rows} "),
     };
 
+    // tn-3ge3: optional template-version hint, rendered between the center
+    // and right sections in muted color. Empty string means "no hint".
+    let template_hint = compose_template_hint(&info.template_status);
+
     let exit_color = match info.last_exit_code {
         Some(0) => GlyphColor::rgba(
             PaletteColor::STATUS_OK.r,
@@ -242,6 +251,23 @@ pub(crate) fn draw_status_bar(
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
+
+    if !template_hint.is_empty() {
+        let hint_key = format!("{template_hint}|{:.0}", sw * 0.5);
+        ensure_shaped(
+            "sb_template_hint",
+            &hint_key,
+            metrics,
+            sw * 0.5,
+            bar_h,
+            &template_hint,
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(muted_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
 
     let needs_prefix_measure =
         info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
@@ -368,6 +394,33 @@ pub(crate) fn draw_status_bar(
         });
     }
 
+    // tn-3ge3: render the template-version hint immediately to the left of
+    // the right_text. Muted color, no hit-test area, zero impact when the
+    // status is UpToDate.
+    if !template_hint.is_empty() {
+        let hint_buf = cached_buf(&renderer.overlay_cache, "sb_template_hint");
+        if let Some(buf) = hint_buf {
+            let hint_w = buf
+                .layout_runs()
+                .next()
+                .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+                .unwrap_or(0.0);
+            // Small gap between the hint and the right_text so they don't
+            // visually merge into a single token.
+            let gap = font_size * 0.5;
+            let hint_x = (right_x - hint_w - gap).max(0.0);
+            text_areas.push(TextArea {
+                buffer: buf,
+                left: hint_x,
+                top: bar_y,
+                scale: 1.0,
+                bounds,
+                default_color: muted_color,
+                custom_glyphs: &[],
+            });
+        }
+    }
+
     if let Err(e) = renderer.overlay_text_renderer.prepare(
         device,
         queue,
@@ -431,6 +484,26 @@ pub(crate) fn status_bar_hit_test(
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StatusBarHit {
     AgentIndicator,
+}
+
+/// Compose the muted template-version hint shown immediately to the left of
+/// the dimensions/exit-code section. Returns the empty string when the
+/// config is up to date so the rest of the renderer can short-circuit and
+/// pay zero cost.
+///
+/// tn-3ge3 — strings deliberately point at `therminal --print-config` so
+/// users have a single deterministic next step. The detection itself is
+/// non-invasive and never modifies the user's file.
+pub(super) fn compose_template_hint(status: &ConfigTemplateStatus) -> String {
+    match status {
+        ConfigTemplateStatus::UpToDate => String::new(),
+        ConfigTemplateStatus::Unversioned => {
+            "config: outdated — therminal --print-config".to_string()
+        }
+        ConfigTemplateStatus::Outdated { found, current } => {
+            format!("config: v{found} → v{current} — therminal --print-config")
+        }
+    }
 }
 
 /// Compose the center section of the status bar from cwd and the focused
@@ -518,7 +591,29 @@ mod tests {
             active_workspace: 1,
             is_zoomed: false,
             focused_pane_id,
+            template_status: ConfigTemplateStatus::UpToDate,
         }
+    }
+
+    #[test]
+    fn template_hint_empty_when_up_to_date() {
+        let s = compose_template_hint(&ConfigTemplateStatus::UpToDate);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn template_hint_unversioned_uses_print_config_string() {
+        let s = compose_template_hint(&ConfigTemplateStatus::Unversioned);
+        assert_eq!(s, "config: outdated — therminal --print-config");
+    }
+
+    #[test]
+    fn template_hint_outdated_includes_versions() {
+        let s = compose_template_hint(&ConfigTemplateStatus::Outdated {
+            found: 1,
+            current: 3,
+        });
+        assert_eq!(s, "config: v1 → v3 — therminal --print-config");
     }
 
     #[test]
