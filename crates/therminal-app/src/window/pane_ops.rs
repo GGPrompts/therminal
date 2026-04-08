@@ -1588,6 +1588,22 @@ impl App {
                         })
                         .unwrap_or(SplitDirection::Horizontal);
 
+                    // tn-ll6l: in daemon mode, route through split_pane_remote
+                    // so the new pane carries a daemon id (visible to MCP /
+                    // persisted across daemon restart) and the
+                    // pane_id_map stays consistent for publish_workspace_state.
+                    if self.is_daemon_mode() {
+                        if let Some(new_id) = self.split_pane_remote(target_pane_id, direction) {
+                            info!(parent_pane_id, new_id, "Auto-tile daemon split complete");
+                            if let Some(ref mut debouncer) = self.auto_tile_debouncer {
+                                debouncer.register_auto_tiled(parent_pane_id, new_id);
+                            }
+                            self.relayout_and_redraw();
+                            self.publish_workspace_state();
+                        }
+                        continue;
+                    }
+
                     // Perform the split (reuses existing split_pane_by_id logic).
                     let renderer = match self.grid_renderer.as_ref() {
                         Some(r) => r,
@@ -1724,6 +1740,49 @@ impl App {
                 return;
             }
         };
+
+        // tn-ll6l: in daemon mode, route through split_pane_remote so the
+        // new pane is daemon-managed. SplitPane has no command-override, so
+        // we follow up with a SendKeys RPC carrying the `tail` command.
+        if self.is_daemon_mode() {
+            let direction = self
+                .get_layout()
+                .and_then(|l| l.find_pane(target_pane_id))
+                .map(|p| LayoutNode::auto_split_direction(p.viewport, SplitDirection::Horizontal))
+                .unwrap_or(SplitDirection::Horizontal);
+
+            let Some(new_id) = self.split_pane_remote(target_pane_id, direction) else {
+                return;
+            };
+
+            info!(
+                agent = %agent_id,
+                pane_id = new_id,
+                jsonl = %jsonl_path.display(),
+                "swarm: spawned daemon pane tailing subagent JSONL"
+            );
+
+            let cmd = format!(
+                "clear && tail --lines=+1 -F {}\n",
+                shell_quote(&jsonl_path.display().to_string()),
+            );
+            if let Some(daemon_id) = self.pane_id_map.daemon_for_local(new_id) {
+                match self.daemon_rpc_blocking(IpcRequest::SendKeys {
+                    pane_id: daemon_id,
+                    keys: cmd.into_bytes(),
+                }) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "swarm: SendKeys for tail command failed");
+                    }
+                }
+            }
+
+            self.swarm_panes.insert(agent_id, new_id);
+            self.relayout_and_redraw();
+            self.publish_workspace_state();
+            return;
+        }
 
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
