@@ -80,6 +80,13 @@ pub enum KeyAction {
     HotspotOpenInEditor(String),
     /// Open an issue/URL via `xdg-open`.
     HotspotOpenExternal(String),
+    /// Spawn a new pane running the configured `folder_pane_command`
+    /// (default: `tfe`) inside the given directory. Falls back to a plain
+    /// shell in the directory when the command's binary is missing.
+    HotspotOpenFolderInPane(String),
+    /// Reveal a directory using the configured `folder_opener` chain
+    /// (e.g. nautilus / dolphin / xdg-open / explorer / Finder).
+    HotspotOpenFolderInFileManager(String),
 }
 
 impl KeyAction {
@@ -121,6 +128,8 @@ impl KeyAction {
             KeyAction::HotspotCopy(_) => "Copy to clipboard",
             KeyAction::HotspotOpenInEditor(_) => "Open in editor",
             KeyAction::HotspotOpenExternal(_) => "Open externally",
+            KeyAction::HotspotOpenFolderInPane(_) => "Open folder in new pane",
+            KeyAction::HotspotOpenFolderInFileManager(_) => "Open folder in file manager",
         }
     }
 
@@ -157,7 +166,9 @@ impl KeyAction {
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
-            | KeyAction::HotspotOpenExternal(_) => "Hotspot",
+            | KeyAction::HotspotOpenExternal(_)
+            | KeyAction::HotspotOpenFolderInPane(_)
+            | KeyAction::HotspotOpenFolderInFileManager(_) => "Hotspot",
         }
     }
 }

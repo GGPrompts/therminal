@@ -270,6 +270,18 @@ pub(super) fn default_config_text() -> String {
     out.push_str("# editor_chain: ordered list of editor commands to try when opening a\n");
     out.push_str("# file hotspot. The first found on PATH wins. The tokens `$VISUAL` and\n");
     out.push_str("# `$EDITOR` are substituted with those env vars at launch time.\n");
+    out.push_str("#\n");
+    out.push_str("# folder_pane_command: command (argv form) spawned in a NEW pane when a\n");
+    out.push_str("# directory hotspot is clicked. The literal token `{path}` is replaced\n");
+    out.push_str("# with the clicked directory. Default is `tfe` (Terminal File Explorer);\n");
+    out.push_str("# any TUI file manager that accepts a path argument works (yazi, ranger,\n");
+    out.push_str("# nnn, lf, broot, mc, etc.). The new pane's cwd is also set to the path\n");
+    out.push_str("# so that if the binary is missing the user lands in the right shell.\n");
+    out.push_str("#\n");
+    out.push_str("# folder_opener: ordered list of \"reveal in file manager\" commands tried\n");
+    out.push_str("# by the secondary directory action. The first found on PATH wins.\n");
+    out.push_str("# `$FILE_MANAGER` is substituted from the env var. As a last resort the\n");
+    out.push_str("# platform default (xdg-open / open / explorer) is invoked.\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("[hotspots]\n");
     let chain_toml = d
@@ -280,6 +292,22 @@ pub(super) fn default_config_text() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("# editor_chain = [{chain_toml}]\n"));
+    let folder_pane_toml = d
+        .hotspots
+        .folder_pane_command
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("# folder_pane_command = [{folder_pane_toml}]\n"));
+    let folder_opener_toml = d
+        .hotspots
+        .folder_opener
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("# folder_opener = [{folder_opener_toml}]\n"));
     out.push('\n');
 
     out

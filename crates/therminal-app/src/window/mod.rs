@@ -15,6 +15,7 @@
 
 mod chrome;
 mod event_handler;
+mod folder_open;
 mod help_overlay;
 mod init;
 mod keybindings;

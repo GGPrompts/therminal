@@ -52,6 +52,12 @@ pub struct TextHotspot {
     pub start_col: usize,
     /// One-past-last column of the match (exclusive).
     pub end_col: usize,
+    /// True when the hotspot is a `FilePath` whose target stat'd as a
+    /// directory at detection time. Other hotspot kinds always set this
+    /// to `false`. Populated by [`promote_directory_hotspots`] — text-only
+    /// detection (the regex pass) does not touch the filesystem and
+    /// always emits `is_dir = false`.
+    pub is_dir: bool,
 }
 
 // ── Compiled regexes ─────────────────────────────────────────────────────
@@ -210,6 +216,7 @@ pub fn detect_hotspots_from_text_with_wrap(
                     row,
                     start_col: sc,
                     end_col: ec,
+                    is_dir: false,
                 });
             }
         };
@@ -304,6 +311,7 @@ pub fn detect_hotspots_from_text_with_wrap(
                         row: row_index,
                         start_col: sc,
                         end_col: ec,
+                        is_dir: false,
                     });
                 }
             }
@@ -332,6 +340,52 @@ pub fn detect_hotspots_from_text_with_wrap(
     }
 
     hotspots
+}
+
+// ── Directory promotion ─────────────────────────────────────────────────
+
+/// Mark `FilePath` hotspots whose target stat'd as a directory.
+///
+/// Walks `hotspots` and, for each `FilePath` entry, calls `is_dir_fn(path)`
+/// on the path portion (the part before any `:line[:col]` suffix). If the
+/// callback returns `Ok(true)`, the entry's `is_dir` flag is set so the
+/// click handler can route the hotspot through the folder-open path
+/// instead of the editor fallback chain.
+///
+/// Errors and `Ok(false)` leave the entry alone — we deliberately do not
+/// downgrade non-existent paths to non-directories here, since the click
+/// handler still needs to validate file existence separately.
+///
+/// The callback is generic so tests can stub it without touching the
+/// real filesystem. Production callers pass a closure that wraps
+/// `std::fs::metadata(p).map(|m| m.is_dir())`.
+pub fn promote_directory_hotspots<F>(hotspots: &mut [TextHotspot], mut is_dir_fn: F)
+where
+    F: FnMut(&str) -> std::io::Result<bool>,
+{
+    for h in hotspots.iter_mut() {
+        if h.kind != HotspotKind::FilePath {
+            continue;
+        }
+        let path = strip_line_col_suffix(&h.text);
+        if let Ok(true) = is_dir_fn(path) {
+            h.is_dir = true;
+        }
+    }
+}
+
+/// Strip an optional `:line[:col]` suffix from a path-like string.
+///
+/// `src/main.rs:42:5` -> `src/main.rs`. Strings without a numeric colon
+/// suffix are returned unchanged.
+pub fn strip_line_col_suffix(text: &str) -> &str {
+    if let Some(idx) = text.find(':')
+        && text[idx + 1..].starts_with(|c: char| c.is_ascii_digit())
+    {
+        &text[..idx]
+    } else {
+        text
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -655,5 +709,93 @@ mod tests {
         assert_eq!(HotspotKind::GitRef.as_str(), "git_ref");
         assert_eq!(HotspotKind::IssueRef.as_str(), "issue");
         assert_eq!(HotspotKind::Url.as_str(), "url");
+    }
+
+    #[test]
+    fn detect_defaults_is_dir_false() {
+        // The text-only detection pass never touches the filesystem, so
+        // freshly produced hotspots must always have is_dir = false.
+        let hotspots = detect(&["see /home/user/src/main.rs:1 for context"]);
+        assert!(hotspots.iter().all(|h| !h.is_dir));
+    }
+
+    #[test]
+    fn strip_line_col_suffix_handles_all_shapes() {
+        assert_eq!(strip_line_col_suffix("src/main.rs:42:5"), "src/main.rs");
+        assert_eq!(strip_line_col_suffix("src/main.rs:42"), "src/main.rs");
+        assert_eq!(strip_line_col_suffix("src/main.rs"), "src/main.rs");
+        assert_eq!(strip_line_col_suffix("/tmp"), "/tmp");
+        // Non-numeric colon suffix left alone.
+        assert_eq!(strip_line_col_suffix("foo:bar"), "foo:bar");
+    }
+
+    #[test]
+    fn promote_directory_hotspots_marks_only_filepath_dirs() {
+        let mut hotspots = vec![
+            TextHotspot {
+                kind: HotspotKind::FilePath,
+                text: "/tmp/some-dir".to_string(),
+                row: 0,
+                start_col: 0,
+                end_col: 13,
+                is_dir: false,
+            },
+            TextHotspot {
+                kind: HotspotKind::FilePath,
+                text: "/tmp/some-file.rs".to_string(),
+                row: 1,
+                start_col: 0,
+                end_col: 17,
+                is_dir: false,
+            },
+            TextHotspot {
+                kind: HotspotKind::Url,
+                text: "https://example.com".to_string(),
+                row: 2,
+                start_col: 0,
+                end_col: 19,
+                is_dir: false,
+            },
+        ];
+        promote_directory_hotspots(&mut hotspots, |p| Ok(p == "/tmp/some-dir"));
+        assert!(hotspots[0].is_dir, "directory should be promoted");
+        assert!(!hotspots[1].is_dir, "file should not be promoted");
+        assert!(!hotspots[2].is_dir, "URL must never be promoted");
+    }
+
+    #[test]
+    fn promote_directory_hotspots_strips_line_col_before_stat() {
+        // The path part of `src/dir:42:5` (a degenerate but possible
+        // hotspot text) should be the only thing handed to the stat fn.
+        let mut hotspots = vec![TextHotspot {
+            kind: HotspotKind::FilePath,
+            text: "src/dir:42:5".to_string(),
+            row: 0,
+            start_col: 0,
+            end_col: 12,
+            is_dir: false,
+        }];
+        let mut seen = String::new();
+        promote_directory_hotspots(&mut hotspots, |p| {
+            seen.clear();
+            seen.push_str(p);
+            Ok(true)
+        });
+        assert_eq!(seen, "src/dir");
+        assert!(hotspots[0].is_dir);
+    }
+
+    #[test]
+    fn promote_directory_hotspots_ignores_io_errors() {
+        let mut hotspots = vec![TextHotspot {
+            kind: HotspotKind::FilePath,
+            text: "/nope/missing".to_string(),
+            row: 0,
+            start_col: 0,
+            end_col: 13,
+            is_dir: false,
+        }];
+        promote_directory_hotspots(&mut hotspots, |_| Err(std::io::Error::other("nope")));
+        assert!(!hotspots[0].is_dir);
     }
 }

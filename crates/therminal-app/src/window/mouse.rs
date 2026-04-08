@@ -764,6 +764,7 @@ impl App {
     ) -> Option<(
         therminal_terminal::hotspot_detection::HotspotKind,
         std::sync::Arc<str>,
+        bool,
     )> {
         self.grid_renderer
             .as_ref()
@@ -772,7 +773,7 @@ impl App {
 
     /// Handle a click on a hotspot cell: open an action palette.
     fn handle_hotspot_click(&mut self, pane_id: PaneId, row: usize, col: usize) -> bool {
-        let (kind, text) = match self.hotspot_at(pane_id, row, col) {
+        let (kind, text, is_dir) = match self.hotspot_at(pane_id, row, col) {
             Some(h) => h,
             None => return false,
         };
@@ -780,8 +781,12 @@ impl App {
             Some(pos) => pos,
             None => return false,
         };
-        let menu =
-            crate::menu::build_hotspot_palette(kind, text.to_string(), (px as f32, py as f32));
+        let menu = crate::menu::build_hotspot_palette(
+            kind,
+            text.to_string(),
+            is_dir,
+            (px as f32, py as f32),
+        );
         self.active_menu = Some(menu);
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();

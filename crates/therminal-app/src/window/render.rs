@@ -13,7 +13,9 @@ use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_displ
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
-use therminal_terminal::hotspot_detection::{TextHotspot, detect_hotspots_from_text_with_wrap};
+use therminal_terminal::hotspot_detection::{
+    TextHotspot, detect_hotspots_from_text_with_wrap, promote_directory_hotspots,
+};
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 
@@ -38,12 +40,20 @@ fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
         if let Some(row_hs) = row_hotspots.get(&cell.row) {
             for h in row_hs {
                 if cell.col >= h.start_col && cell.col < h.end_col {
-                    cell.hotspot = Some((h.kind.clone(), Arc::from(h.text.as_str())));
+                    cell.hotspot = Some((h.kind.clone(), Arc::from(h.text.as_str()), h.is_dir));
                     break; // first matching hotspot wins
                 }
             }
         }
     }
+}
+
+/// Promote `FilePath` hotspots whose target stat'd as a directory using
+/// the real filesystem (tn-zqwg). Wraps `std::fs::metadata` so the click
+/// handler can route directory hotspots through `folder_pane_command`
+/// instead of the editor fallback chain.
+fn promote_directory_hotspots_from_fs(hotspots: &mut [TextHotspot]) {
+    promote_directory_hotspots(hotspots, |p| std::fs::metadata(p).map(|m| m.is_dir()));
 }
 
 /// Compute per-row "is continuation" flags from cell wrap state.
@@ -356,7 +366,8 @@ fn render_single_pane(
         // Use the full cell set for wrap state — damaged cells alone may
         // not include the previous row's last cell (where WRAPLINE lives).
         let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
-        let hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
+        let mut hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
+        promote_directory_hotspots_from_fs(&mut hotspots);
 
         // O(1) copy-back: build a HashMap from detected URLs keyed by (row, col),
         // then single-pass over `cells` to apply. Avoids O(N*M) linear search.
@@ -390,7 +401,8 @@ fn render_single_pane(
         detect_urls_in_cells(&mut cells, screen_lines);
         let row_texts = extract_row_text_from_cells(&cells, screen_lines);
         let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
-        let hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
+        let mut hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
+        promote_directory_hotspots_from_fs(&mut hotspots);
 
         // Row-indexed hotspot application: O(C + H) instead of O(H*C).
         apply_hotspots_to_cells(&mut cells, &hotspots);

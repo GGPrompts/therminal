@@ -10,7 +10,7 @@ TOML-based config with hot-reload.
 
 Location: `therminal_runtime::paths::config_dir() / "therminal.toml"` (e.g. `~/.config/therminal/therminal.toml` on Linux).
 
-Sections: `[general]` (window, scrollback, shell), `[font]` (family, size, line_height_scale), `[colors]` (hex overrides for palette), `[keybindings]` (key/action pairs), `[profiles]` (named session profiles), `[trust]` (agent trust tiers), `[mcp]` (MCP server enable/disable, socket path).
+Sections: `[general]` (window, scrollback, shell), `[font]` (family, size, line_height_scale), `[colors]` (hex overrides for palette), `[keybindings]` (key/action pairs), `[profiles]` (named session profiles), `[trust]` (agent trust tiers), `[mcp]` (MCP server enable/disable, socket path), `[hotspots]` (clickable terminal content — `editor_chain` for file hotspots, `folder_pane_command` for in-pane directory spawn defaulting to `tfe`, `folder_opener` for the "reveal in file manager" fallback chain — see tn-zqwg).
 
 All fields have sensible defaults. Missing fields fall back to defaults. Invalid TOML logs a warning and uses full defaults.
 

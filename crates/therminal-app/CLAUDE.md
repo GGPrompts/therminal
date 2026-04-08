@@ -14,6 +14,7 @@ src/
 │   ├── chrome.rs        # Status bar, tab bar, pane headers, separators
 │   ├── help_overlay.rs  # Keybinding help overlay
 │   ├── pane_ops.rs      # Split, close, swap, restore operations
+│   ├── folder_open.rs   # Directory hotspot routing (tn-zqwg)
 │   └── render.rs        # Per-frame rendering, damage tracking
 ├── pane/
 │   ├── mod.rs           # PaneListener, re-exports
@@ -91,6 +92,10 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 - **Font Size**: `Ctrl+=` increase, `Ctrl+-` decrease, `Ctrl+0` reset (clamped 8–32 pt).
 - **Help Overlay**: `Ctrl+Shift+?` toggles full-window overlay showing all keybindings by category.
 - **Context Menu**: Right-click renders a GPU-drawn floating menu with pane actions (split, close, zoom, copy, paste).
+- **Directory Hotspots** (tn-zqwg): File-path hotspots whose target stat'd as a directory get a different right-click menu — "Open in new pane", "Open in file manager", "Copy path" — and a different default click action. Detection lives in `therminal_terminal::hotspot_detection::promote_directory_hotspots`, which the renderer calls after `detect_hotspots_from_text_with_wrap` and stat's each `FilePath` hotspot. The is_dir bit is plumbed through `RenderCell.hotspot` and the renderer's `hotspot_map` so the click handler can branch. Click actions live in `window/folder_open.rs`:
+  - **Open in new pane**: spawns the configured `hotspots.folder_pane_command` (default `["tfe", "{path}"]`) by splitting the focused pane and writing `cd '/path' && clear && exec <cmd> '/path'\n` into the new PTY. The `{path}` token is substituted in every argument. If the binary's not on `PATH`, only the `cd` line is sent and a "<cmd> not found — falling back to shell in folder" toast is shown so the user lands in a working shell at the right cwd. Empty `folder_pane_command` skips straight to the file-manager chain.
+  - **Open in file manager**: walks `hotspots.folder_opener` (default `[$FILE_MANAGER, xdg-open, nautilus, dolphin, thunar]` on Linux, `[$FILE_MANAGER, open]` on macOS, `[$FILE_MANAGER, explorer]` on Windows). The first entry whose head token resolves on `PATH` wins. Final fallback is `open::that(path)`.
+  - **Pure planners**: `plan_folder_pane_open` and `plan_folder_opener` are stubbed-IO pure functions, exhaustively unit-tested for path quoting, single-quote escaping, env-var expansion, missing-binary fallback, and `{path}` substitution.
 
 ## PaneBackend Abstraction
 

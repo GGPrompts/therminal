@@ -323,16 +323,47 @@ pub(crate) fn build_tab_menu(
 /// Build an action palette for a detected hotspot.
 ///
 /// Shows contextual actions based on the hotspot kind (file path, error
-/// location, git ref, issue ref). Actions use `HotspotCopy` / `HotspotOpenInEditor`
-/// / `HotspotOpenExternal` KeyAction variants.
+/// location, git ref, issue ref). When `is_dir` is `true` and the kind is
+/// `FilePath`, the menu shows directory-specific actions (open in new pane
+/// via `folder_pane_command`, open in file manager) instead of the editor
+/// chain (tn-zqwg). Actions use `HotspotCopy` / `HotspotOpenInEditor` /
+/// `HotspotOpenExternal` / `HotspotOpenFolderInPane` /
+/// `HotspotOpenFolderInFileManager` KeyAction variants.
 pub(crate) fn build_hotspot_palette(
     kind: therminal_terminal::hotspot_detection::HotspotKind,
     text: String,
+    is_dir: bool,
     position: (f32, f32),
 ) -> ContextMenu {
     use therminal_terminal::hotspot_detection::HotspotKind;
 
     let sections = match kind {
+        HotspotKind::FilePath if is_dir => {
+            // Directory hotspot: route through the folder-open action set
+            // instead of the file editor fallback chain. The default action
+            // (top of the menu) spawns `folder_pane_command` in a new pane.
+            let path = text.clone();
+            vec![MenuSection(vec![
+                MenuItem {
+                    label: "Open in new pane",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotOpenFolderInPane(path.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Open in file manager",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotOpenFolderInFileManager(path.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Copy path",
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(path),
+                    enabled: true,
+                },
+            ])]
+        }
         HotspotKind::FilePath | HotspotKind::ErrorLocation => {
             // Parse path and optional line:col for display.
             let (path, line_suffix) = parse_file_path_parts(&text);
@@ -875,6 +906,7 @@ mod tests {
         let hotspot = build_hotspot_palette(
             HotspotKind::FilePath,
             "src/main.rs:42".to_string(),
+            false,
             (0.0, 0.0),
         );
         let hotspot_section_count = hotspot.sections.len();
@@ -883,7 +915,7 @@ mod tests {
         // Simulate the merge done in the right-click handler.
         let mut merged = pane_menu;
         let mut new_sections = hotspot.sections;
-        new_sections.extend(merged.sections.drain(..));
+        new_sections.append(&mut merged.sections);
         merged.sections = new_sections;
 
         assert_eq!(
@@ -925,5 +957,72 @@ mod tests {
             KeyAction::HotspotCopy(s) => assert_eq!(s, "7"),
             other => panic!("expected HotspotCopy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn directory_hotspot_palette_uses_folder_actions() {
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let menu = build_hotspot_palette(
+            HotspotKind::FilePath,
+            "/home/me/projects".to_string(),
+            true,
+            (0.0, 0.0),
+        );
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label).collect();
+        assert_eq!(
+            labels,
+            vec!["Open in new pane", "Open in file manager", "Copy path"]
+        );
+        // Default (top) action must be the in-pane spawn carrying the
+        // clicked path verbatim.
+        match &menu.flat_items()[0].action {
+            KeyAction::HotspotOpenFolderInPane(p) => assert_eq!(p, "/home/me/projects"),
+            other => panic!("expected HotspotOpenFolderInPane, got {other:?}"),
+        }
+        match &menu.flat_items()[1].action {
+            KeyAction::HotspotOpenFolderInFileManager(p) => assert_eq!(p, "/home/me/projects"),
+            other => panic!("expected HotspotOpenFolderInFileManager, got {other:?}"),
+        }
+        // Crucially: the editor action MUST NOT appear for directories.
+        assert!(
+            !menu
+                .flat_items()
+                .iter()
+                .any(|i| matches!(i.action, KeyAction::HotspotOpenInEditor(_))),
+            "directory menu must not contain Open in editor"
+        );
+    }
+
+    #[test]
+    fn file_hotspot_palette_unchanged_when_is_dir_false() {
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let menu = build_hotspot_palette(
+            HotspotKind::FilePath,
+            "src/main.rs:42".to_string(),
+            false,
+            (0.0, 0.0),
+        );
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"Open in editor"));
+        assert!(!labels.contains(&"Open in new pane"));
+    }
+
+    #[test]
+    fn error_location_ignores_is_dir_flag() {
+        // ErrorLocation hotspots are never directories — even if some
+        // bug-ish code path passed `is_dir = true`, we still want the
+        // editor menu so the user can jump to the offending line.
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let menu = build_hotspot_palette(
+            HotspotKind::ErrorLocation,
+            "src/lib.rs:10:5".to_string(),
+            true,
+            (0.0, 0.0),
+        );
+        assert!(
+            menu.flat_items()
+                .iter()
+                .any(|i| matches!(i.action, KeyAction::HotspotOpenInEditor(_)))
+        );
     }
 }

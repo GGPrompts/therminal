@@ -120,7 +120,9 @@ impl App {
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
-            | KeyAction::HotspotOpenExternal(_) => {}
+            | KeyAction::HotspotOpenExternal(_)
+            | KeyAction::HotspotOpenFolderInPane(_)
+            | KeyAction::HotspotOpenFolderInFileManager(_) => {}
         }
         true
     }
@@ -260,12 +262,13 @@ impl App {
         // actions are available in a single merged menu.
         if !has_selection
             && let Some((col, row)) = self.pixel_to_grid_for_pane(px as f64, py as f64, pane_id)
-            && let Some((kind, text)) = self
+            && let Some((kind, text, is_dir)) = self
                 .grid_renderer
                 .as_ref()
                 .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
         {
-            let hotspot_menu = crate::menu::build_hotspot_palette(kind, text.to_string(), (px, py));
+            let hotspot_menu =
+                crate::menu::build_hotspot_palette(kind, text.to_string(), is_dir, (px, py));
             let mut merged = hotspot_menu.sections;
             merged.append(&mut menu.sections);
             menu.sections = merged;
@@ -304,6 +307,12 @@ impl App {
                 if let Err(e) = open::that(text) {
                     info!("failed to open externally {text}: {e}");
                 }
+            }
+            KeyAction::HotspotOpenFolderInPane(ref path) => {
+                self.open_folder_in_pane(path);
+            }
+            KeyAction::HotspotOpenFolderInFileManager(ref path) => {
+                self.open_folder_in_file_manager(path);
             }
             KeyAction::NewWorkspace => self.create_new_workspace(),
             KeyAction::RenameWorkspace => {

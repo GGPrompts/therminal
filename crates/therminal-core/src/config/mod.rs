@@ -762,6 +762,34 @@ pub struct HotspotsConfig {
     ///
     /// If the entire chain fails, `open::that` is used as a last resort.
     pub editor_chain: Vec<String>,
+
+    /// Command (argv form) to spawn in a new pane when a directory hotspot
+    /// is clicked.
+    ///
+    /// The literal token `{path}` in any argument is substituted with the
+    /// clicked directory before the command is spawned. The new pane's
+    /// working directory is also set to the clicked path so that even when
+    /// the command's binary is missing the user lands in the right place.
+    ///
+    /// Default: `["tfe", "{path}"]` (Terminal File Explorer). Override with
+    /// any TUI file explorer that accepts a path argument: yazi, ranger,
+    /// nnn, lf, broot, mc, etc.
+    ///
+    /// An empty list disables the in-pane spawn entirely — clicks then
+    /// fall back to the [`folder_opener`](Self::folder_opener) chain.
+    pub folder_pane_command: Vec<String>,
+
+    /// Ordered list of "reveal in file manager" commands tried for the
+    /// secondary directory action ("Open in file manager" in the right-click
+    /// menu).
+    ///
+    /// The first entry whose executable is found on `PATH` is used. The
+    /// `$FILE_MANAGER` token is expanded from the env var at launch time
+    /// and skipped if unset. Each command receives the directory as its
+    /// last argument. If the entire chain fails, `open::that` is used as
+    /// the last resort, which delegates to `xdg-open` / `open` / `explorer`
+    /// depending on the platform.
+    pub folder_opener: Vec<String>,
 }
 
 impl Default for HotspotsConfig {
@@ -774,8 +802,23 @@ impl Default for HotspotsConfig {
         } else {
             vec!["$VISUAL", "$EDITOR", "code", "nvim", "vim", "nano"]
         };
+
+        // Cross-platform external folder-open chain. The platform `open`
+        // crate covers the last-resort fallback (xdg-open / open / explorer);
+        // these explicit entries let the user override with a preferred
+        // file manager and gracefully degrade to xdg-open's default.
+        let folder_opener: Vec<&str> = if cfg!(target_os = "macos") {
+            vec!["$FILE_MANAGER", "open"]
+        } else if cfg!(target_os = "windows") {
+            vec!["$FILE_MANAGER", "explorer"]
+        } else {
+            vec!["$FILE_MANAGER", "xdg-open", "nautilus", "dolphin", "thunar"]
+        };
+
         Self {
             editor_chain: chain.into_iter().map(String::from).collect(),
+            folder_pane_command: vec!["tfe".to_string(), "{path}".to_string()],
+            folder_opener: folder_opener.into_iter().map(String::from).collect(),
         }
     }
 }
@@ -817,6 +860,46 @@ mod tests {
         // Env tokens are included so unset-$EDITOR users still get a chain.
         assert!(d.editor_chain.iter().any(|s| s == "$EDITOR"));
         assert!(d.editor_chain.iter().any(|s| s == "$VISUAL"));
+    }
+
+    #[test]
+    fn hotspots_default_folder_pane_command_is_tfe() {
+        let d = HotspotsConfig::default();
+        assert_eq!(
+            d.folder_pane_command,
+            vec!["tfe".to_string(), "{path}".to_string()]
+        );
+    }
+
+    #[test]
+    fn hotspots_default_folder_opener_includes_file_manager_token() {
+        let d = HotspotsConfig::default();
+        assert!(
+            d.folder_opener.iter().any(|s| s == "$FILE_MANAGER"),
+            "folder_opener default chain must include $FILE_MANAGER"
+        );
+        // Platform sanity: at least one extra fallback is provided.
+        assert!(
+            d.folder_opener.len() >= 2,
+            "folder_opener default chain must contain at least one fallback"
+        );
+    }
+
+    #[test]
+    fn hotspots_folder_fields_round_trip() {
+        let mut config = TherminalConfig::default();
+        config.hotspots.folder_pane_command = vec!["yazi".to_string(), "{path}".to_string()];
+        config.hotspots.folder_opener = vec!["nautilus".to_string(), "xdg-open".to_string()];
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            decoded.hotspots.folder_pane_command,
+            vec!["yazi".to_string(), "{path}".to_string()]
+        );
+        assert_eq!(
+            decoded.hotspots.folder_opener,
+            vec!["nautilus".to_string(), "xdg-open".to_string()]
+        );
     }
 
     #[test]

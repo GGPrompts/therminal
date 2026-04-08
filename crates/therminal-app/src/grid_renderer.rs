@@ -155,9 +155,26 @@ pub struct RenderCell {
     pub hyperlink: Option<Arc<str>>,
     /// Source of the hyperlink (OSC 8 vs regex), controls underline style.
     pub hyperlink_source: Option<HyperlinkSource>,
-    /// Hotspot annotation for this cell: (kind, full matched text).
-    pub hotspot: Option<(therminal_terminal::hotspot_detection::HotspotKind, Arc<str>)>,
+    /// Hotspot annotation for this cell: (kind, full matched text, is_dir).
+    ///
+    /// `is_dir` is `true` only when the hotspot is a `FilePath` whose target
+    /// stat'd as a directory at detection time (set by
+    /// `promote_directory_hotspots`). The click handler uses it to route
+    /// directory hotspots through `folder_pane_command` instead of the
+    /// editor fallback chain (tn-zqwg).
+    pub hotspot: Option<HotspotInfo>,
 }
+
+/// Per-cell hotspot annotation: kind + full matched text + is_dir flag.
+///
+/// Stored on each `RenderCell` and surfaced via the renderer's
+/// `hotspot_map` so the click handler can branch on whether the target
+/// is a directory.
+pub type HotspotInfo = (
+    therminal_terminal::hotspot_detection::HotspotKind,
+    Arc<str>,
+    bool,
+);
 
 /// Build the full rendered text for a terminal cell.
 pub(crate) fn cell_display_text(c: char, zerowidth: Option<&[char]>) -> String {
@@ -323,12 +340,11 @@ pub struct GridRenderer {
     /// Rebuilt each frame from cell hyperlinks (OSC 8) and regex URL detection.
     pub hyperlink_map: HashMap<(PaneId, usize, usize), Arc<str>>,
 
-    /// Hotspot map: (pane_id, row, col) -> (HotspotKind, matched text).
+    /// Hotspot map: (pane_id, row, col) -> (HotspotKind, matched text, is_dir).
     /// Rebuilt each frame from detected hotspots (file paths, errors, git refs, etc.).
-    pub hotspot_map: HashMap<
-        (PaneId, usize, usize),
-        (therminal_terminal::hotspot_detection::HotspotKind, Arc<str>),
-    >,
+    /// `is_dir` is `true` for `FilePath` hotspots that resolved to a directory
+    /// when promoted via `promote_directory_hotspots` (tn-zqwg).
+    pub hotspot_map: HashMap<(PaneId, usize, usize), HotspotInfo>,
 
     /// The pane currently being rendered. Set before each pane's render pass
     /// so that hotspot/hyperlink map entries are keyed to the correct pane.
@@ -1065,12 +1081,12 @@ impl GridRenderer {
                     // Re-insert from fresh cell data.
                     if let Some(row) = cached_row {
                         for cell in &row.cells {
-                            if let Some((ref kind, ref full_text)) = cell.hotspot
+                            if let Some((ref kind, ref full_text, is_dir)) = cell.hotspot
                                 && cell.hyperlink.is_none()
                             {
                                 self.hotspot_map.insert(
                                     (pane_id, cell.row, cell.col),
-                                    (kind.clone(), Arc::clone(full_text)),
+                                    (kind.clone(), Arc::clone(full_text), is_dir),
                                 );
                             }
                         }
