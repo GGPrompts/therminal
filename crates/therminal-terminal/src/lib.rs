@@ -8,9 +8,12 @@ pub mod hotspot_detection;
 pub mod input;
 pub mod interceptor;
 pub mod osc633;
+pub mod osc_registry;
 pub mod process_detector;
 pub mod pty;
 pub mod pty_runtime;
 pub mod region_index;
 pub mod state_inference;
 pub mod terminal;
+
+pub use osc_registry::{HarnessEvent, OscRegistrationError};
