@@ -82,8 +82,14 @@ impl TherminalConfig {
     pub fn load_from(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(contents) => match toml::from_str::<TherminalConfig>(&contents) {
-                Ok(config) => {
+                Ok(mut config) => {
                     info!(?path, "loaded config");
+                    // F8 (tn-97j6): detect whether the user's TOML actually
+                    // mentions `attach_mode` so we can distinguish explicit
+                    // setting from the default-flip to Remote.
+                    config.mcp.attach_mode_explicit = contents
+                        .lines()
+                        .any(|l| l.trim_start().starts_with("attach_mode"));
                     config.validate_paths();
                     config
                 }
@@ -598,6 +604,13 @@ pub struct McpConfig {
     /// available for one release while remote mode bakes in.
     #[serde(default)]
     pub attach_mode: AttachMode,
+    /// F8 (tn-97j6): tracks whether `attach_mode` was explicitly set in
+    /// the user's config file or filled in from `AttachMode::default()`.
+    /// `#[serde(skip)]` so it never round-trips through TOML — `load_from`
+    /// post-processes the raw text to set this. Used by the GUI init log
+    /// to call out the silent default-flip from Local → Remote.
+    #[serde(skip)]
+    pub attach_mode_explicit: bool,
 }
 
 /// Strategy used by the GUI to obtain PTY-backed panes.
@@ -632,6 +645,7 @@ impl Default for McpConfig {
             enabled: true,
             socket_path: String::new(),
             attach_mode: AttachMode::default(),
+            attach_mode_explicit: false,
         }
     }
 }

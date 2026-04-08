@@ -347,6 +347,14 @@ impl App {
         let attach_mode = self.config.mcp.attach_mode;
         let use_remote = matches!(attach_mode, therminal_core::config::AttachMode::Remote)
             && self.daemon_client.is_some();
+        // F8 (tn-97j6): AttachMode::Remote is now the default. Make the
+        // silent default-flip discoverable in logs when the user has not
+        // explicitly opted in via [mcp].attach_mode.
+        if use_remote && !self.config.mcp.attach_mode_explicit {
+            tracing::info!(
+                "mcp.attach_mode = remote (default since tn-beez); set [mcp] attach_mode = \"local\" in therminal.toml to opt out"
+            );
+        }
         if matches!(attach_mode, therminal_core::config::AttachMode::Remote)
             && self.daemon_client.is_none()
         {
@@ -404,7 +412,13 @@ impl App {
                     info!("no existing daemon sessions; falling through to fresh-session spawn");
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "attach to existing session failed; falling through to fresh-session spawn");
+                    // F10 (tn-97j6): the most common cause here is the
+                    // expected ListSessions→GetWorkspaces TOCTOU race (the
+                    // session was destroyed between the two RPCs). The error
+                    // path is correct either way — fall through to a fresh
+                    // session — but log at info! so an expected race doesn't
+                    // produce a scary warn.
+                    tracing::info!(error = %e, "attach to existing session failed (likely ListSessions→GetWorkspaces session-gone race); falling through to fresh-session spawn");
                 }
             }
         }
@@ -439,6 +453,10 @@ impl App {
                     });
                 }),
             };
+            // F11 (tn-97j6): if try_attach_existing_session stashed a
+            // session id (empty-workspace daemon session), reuse it instead
+            // of creating a fresh one and orphaning the empty one.
+            let reuse_session_id = self.daemon_session_id;
             match crate::pane::remote_spawn::spawn_remote_pane(
                 local_id,
                 full_rect,
@@ -449,6 +467,7 @@ impl App {
                 handle,
                 socket,
                 callbacks,
+                reuse_session_id,
             ) {
                 Ok((pane, daemon_session_id, daemon_pane_id)) => {
                     let pane_id = pane.id;
@@ -629,13 +648,16 @@ impl App {
             other => anyhow::bail!("unexpected response to GetWorkspaces: {other:?}"),
         };
         if workspaces_info.is_empty() {
-            // Daemon session exists but has never published workspace_state
-            // (pre-tn-k3yo persisted session). Bail to fresh-session spawn:
-            // we have no manifest of which panes belong to this session.
-            tracing::warn!(
+            // F11 (tn-97j6): daemon session exists but has never published
+            // workspace_state (pre-tn-k3yo persisted session). Previously we
+            // returned Ok(false), which made the caller call CreateSession
+            // and orphan the original empty session. Stash the session id on
+            // self so the fresh-session spawn path reuses it instead.
+            tracing::info!(
                 session_id,
-                "existing daemon session has empty workspace state; cannot reconstruct — falling back to fresh-session spawn"
+                "existing daemon session has empty workspace state; will reuse session id for fresh-pane spawn (F11)"
             );
+            self.daemon_session_id = Some(session_id);
             return Ok(false);
         }
         // Stable order by `order` field.

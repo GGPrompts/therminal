@@ -788,7 +788,17 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        self.publish_workspace_state();
+        // F12 (tn-97j6): if any pane is local-only (Phase B mixed mode),
+        // publish_workspace_state silently no-ops via the translation guard
+        // and the rename never reaches the daemon. Surface this to the user
+        // so they know MCP/persistence won't see the new name.
+        if !self.publish_workspace_state() {
+            tracing::warn!(
+                workspace_id = state.workspace_id,
+                "workspace rename committed locally but did not reach the daemon (mixed local/remote pane ids — Phase B incomplete)"
+            );
+            self.show_toast("rename: daemon not updated (mixed-mode panes)");
+        }
     }
 
     /// Cancel the in-progress rename without applying changes.

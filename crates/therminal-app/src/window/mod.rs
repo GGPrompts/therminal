@@ -661,16 +661,23 @@ impl App {
     /// local id without a mapping is dropped from the published list and
     /// a debug line is emitted — this should only happen transiently
     /// during pane setup.
-    pub(crate) fn publish_workspace_state(&self) {
+    /// Publish the current workspace state to the daemon. Returns `true`
+    /// if the publish was actually issued (or short-circuited because there
+    /// is no daemon — i.e. local-only mode), and `false` if the translation
+    /// guard fired and the publish was silently skipped due to mixed
+    /// local/remote pane ids. F12 (tn-97j6): callers performing user-visible
+    /// state mutations (e.g. workspace rename) check the return value so
+    /// they can warn the user when their change didn't reach the daemon.
+    pub(crate) fn publish_workspace_state(&self) -> bool {
         let Some(client) = self.daemon_client.as_ref() else {
-            return;
+            return true;
         };
         let Some(session_id) = self.daemon_session_id else {
             debug!("publish_workspace_state: no daemon_session_id yet; skipping (pre-attach)");
-            return;
+            return true;
         };
         let Some(wm) = self.workspaces.as_ref() else {
-            return;
+            return true;
         };
 
         // Translate local pane ids → daemon pane ids in the snapshot.
@@ -722,7 +729,7 @@ impl App {
             debug!(
                 "publish_workspace_state: mixed local/remote pane ids (Phase B not landed); skipping publish to avoid corrupting daemon state"
             );
-            return;
+            return false;
         }
         let active_workspace = wm.active_id() as therminal_protocol::WorkspaceId;
 
@@ -736,7 +743,7 @@ impl App {
         // `Handle::try_current()` is None on the winit event-loop thread.
         let Some(handle) = self.daemon_runtime.clone() else {
             tracing::warn!("publish_workspace_state: no daemon runtime handle");
-            return;
+            return true;
         };
         let client = Arc::clone(client);
         let result = handle.block_on(async move {
@@ -757,6 +764,7 @@ impl App {
                 tracing::warn!("publish_workspace_state: daemon request timed out (>500ms)");
             }
         }
+        true
     }
 
     /// Request a window redraw (convenience wrapper).
@@ -966,6 +974,20 @@ impl ApplicationHandler<UserEvent> for App {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /// Create the event loop, set control flow to Wait, and run the app.
+///
+/// # Daemon runtime invariant
+///
+/// F14 (tn-97j6): `daemon_runtime` MUST be a `Handle` to a tokio runtime
+/// whose lifetime exceeds the entire winit event loop — typically a
+/// runtime intentionally `Box::leak`ed (or `Arc`-held) by `main.rs`. The
+/// GUI's winit thread has no ambient tokio context, so every daemon RPC
+/// reuses this handle via `block_on` or `spawn`. If the runtime backing
+/// the handle is dropped while the event loop is still running, every
+/// subsequent daemon RPC panics. The current `main.rs::connect_daemon`
+/// satisfies this by leaking the runtime; any future caller of `run()`
+/// MUST do the same. (A type-enforcing fix — pass an
+/// `Arc<tokio::runtime::Runtime>` and store it alongside the `Handle` —
+/// is tracked as out-of-scope for tn-97j6.)
 pub fn run(
     daemon_client: Option<Arc<therminal_daemon_client::DaemonClient>>,
     daemon_runtime: Option<tokio::runtime::Handle>,

@@ -65,6 +65,11 @@ pub fn spawn_remote_pane(
     tokio_handle: tokio::runtime::Handle,
     daemon_socket: std::path::PathBuf,
     callbacks: PaneCallbacks,
+    // F11 (tn-97j6): if Some, reuse this existing daemon session instead
+    // of issuing a fresh CreateSession. Used when try_attach_existing_session
+    // discovered an empty-workspace daemon session that would otherwise be
+    // orphaned.
+    reuse_session_id: Option<therminal_protocol::SessionId>,
 ) -> Result<
     (
         PaneState,
@@ -85,25 +90,33 @@ pub fn spawn_remote_pane(
     // are wrapped in a 5s timeout so a slow/hung daemon doesn't freeze
     // GUI startup.
     let rpc_timeout = std::time::Duration::from_secs(5);
-    let create_resp = tokio_handle.block_on(async {
-        tokio::time::timeout(
-            rpc_timeout,
-            daemon_client.send_request(IpcRequest::CreateSession { name: None }),
-        )
-        .await
-    });
-    let create_resp = match create_resp {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => anyhow::bail!("daemon CreateSession timed out after {rpc_timeout:?}"),
-    };
-    let session_id = match create_resp {
-        IpcResponse::SessionCreated { session_id } => session_id,
-        IpcResponse::Error { message } => {
-            anyhow::bail!("daemon CreateSession failed: {message}");
-        }
-        other => {
-            anyhow::bail!("unexpected daemon response to CreateSession: {other:?}");
+    let session_id = if let Some(sid) = reuse_session_id {
+        info!(
+            session_id = sid,
+            "reusing existing daemon session for spawn_remote_pane (F11)"
+        );
+        sid
+    } else {
+        let create_resp = tokio_handle.block_on(async {
+            tokio::time::timeout(
+                rpc_timeout,
+                daemon_client.send_request(IpcRequest::CreateSession { name: None }),
+            )
+            .await
+        });
+        let create_resp = match create_resp {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => anyhow::bail!("daemon CreateSession timed out after {rpc_timeout:?}"),
+        };
+        match create_resp {
+            IpcResponse::SessionCreated { session_id } => session_id,
+            IpcResponse::Error { message } => {
+                anyhow::bail!("daemon CreateSession failed: {message}");
+            }
+            other => {
+                anyhow::bail!("unexpected daemon response to CreateSession: {other:?}");
+            }
         }
     };
     let workspaces_resp = tokio_handle.block_on(async {
