@@ -24,6 +24,8 @@ vendor/
 └── vte/                   # Vendored with SequenceInterceptor trait
 resources/
 └── shell-integration/     # bash, zsh, fish, PowerShell scripts
+plugins/                   # Pattern packs (TOML config, see plugins/CLAUDE.md)
+└── examples/              # Shipped example packs loaded by default
 ```
 
 ### Core Stack

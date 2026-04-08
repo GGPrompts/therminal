@@ -1,0 +1,24 @@
+pack_name = "github-urls"
+pack_description = "Clickable hotspots for GitHub issue and PR references"
+
+# Make `github.com/owner/repo#N` references clickable — opens the issue
+# or PR in the default browser. Three named captures (owner, repo, num)
+# let the label display a clean "owner/repo#N" tooltip without repeating
+# the full URL in the visible text.
+#
+# The regex anchors on `github.com/` to avoid false-positives on any
+# line that happens to contain a bare `#123` fragment. If you also want
+# bare `#N` references (in git log output, for instance), write a
+# separate pattern scoped to a specific command via `applies_to`.
+[[pattern]]
+name = "issue-or-pr"
+description = "Click to open a GitHub issue or pull request in the browser"
+match = 'github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<num>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_url"
+target = "https://github.com/{owner}/{repo}/issues/{num}"
+label = "{owner}/{repo}#{num}"
+kind = "url"

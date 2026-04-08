@@ -1,0 +1,94 @@
+pack_name = "test-results"
+pack_description = "Pass/fail badges and events for cargo test, pytest, and jest"
+
+# cargo test: "test result: ok. 5 passed; 1 failed; 0 ignored"
+# Runs at prompt_boundary so it fires once per command completion rather
+# than on every line. Command-scoped to cargo so it doesn't trigger on
+# prose that happens to contain "test result:".
+[[pattern]]
+name = "cargo-badge"
+description = "Pass/fail badge for cargo test summary"
+match = 'test result: (?P<status>FAILED|ok)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed'
+scope = "prompt_boundary"
+action = "widget"
+
+[pattern.applies_to]
+command = "cargo"
+
+[pattern.widget]
+kind = "badge"
+anchor = "line_right"
+label = "{passed} passed / {failed} failed"
+color.ok = "green"
+color.FAILED = "red"
+
+[[pattern]]
+name = "cargo-event"
+description = "Emit event with cargo test result counts"
+match = 'test result: (?P<status>FAILED|ok)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed'
+scope = "prompt_boundary"
+action = "emit_event"
+
+[pattern.applies_to]
+command = "cargo"
+
+[pattern.emit_event]
+extra.runner = "cargo"
+extra.status = "{status}"
+extra.passed = "{passed}"
+extra.failed = "{failed}"
+
+# pytest: "N passed, M failed, K warnings in Xs"
+# No command scoping — pytest output looks distinct enough that global
+# finalized_line matching is safe. Adjust with `applies_to` if needed.
+[[pattern]]
+name = "pytest-badge"
+description = "Pass/fail badge for pytest summary"
+match = '(?P<passed>\d+) passed(?:, (?P<failed>\d+) failed)?'
+scope = "finalized_line"
+action = "widget"
+
+[pattern.widget]
+kind = "badge"
+anchor = "line_right"
+label = "{passed} passed"
+color.default = "green"
+
+[[pattern]]
+name = "pytest-event"
+description = "Emit event with pytest result counts"
+match = '(?P<passed>\d+) passed(?:, (?P<failed>\d+) failed)?'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.runner = "pytest"
+extra.passed = "{passed}"
+extra.failed = "{failed}"
+
+# jest: "Tests: N failed, M passed, K total"
+[[pattern]]
+name = "jest-badge"
+description = "Pass/fail badge for jest summary"
+match = 'Tests:\s+(?:(?P<failed>\d+) failed, )?(?P<passed>\d+) passed, (?P<total>\d+) total'
+scope = "finalized_line"
+action = "widget"
+
+[pattern.widget]
+kind = "badge"
+anchor = "line_right"
+label = "{passed}/{total} passed"
+color.default = "green"
+
+[[pattern]]
+name = "jest-event"
+description = "Emit event with jest result counts"
+match = 'Tests:\s+(?:(?P<failed>\d+) failed, )?(?P<passed>\d+) passed, (?P<total>\d+) total'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.runner = "jest"
+extra.passed = "{passed}"
+extra.failed = "{failed}"
+extra.total = "{total}"
