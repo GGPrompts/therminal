@@ -1,0 +1,29 @@
+[package]
+name = "therminal-integration-tests"
+description = "End-to-end integration tests that spawn a real therminal-daemon subprocess and drive it via the native IPC client (tn-1kzt)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The crate has no library or binary of its own — it only exists to host
+# integration tests under `tests/`. Cargo still requires *some* target, so we
+# declare an empty lib that depends on the harness helpers module.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+therminal-daemon-client = { workspace = true }
+therminal-protocol = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The `therminal-daemon` crate must be built before the tests run so the
+# binary exists on disk at `target/<profile>/therminal-daemon`. Declaring it
+# here makes cargo build it as a transitive dev-dependency of the test target.
+therminal-daemon = { workspace = true }
+tracing-subscriber = { workspace = true }

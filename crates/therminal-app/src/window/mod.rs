@@ -299,6 +299,18 @@ pub struct App {
     /// `publish_workspace_state()` helper short-circuits.
     pub(crate) daemon_session_id: Option<therminal_protocol::SessionId>,
 
+    /// Pre-rasterized overlay widgets (tn-npd). Created lazily during
+    /// `init_gpu` because the render pipeline needs the surface format
+    /// and device. `None` until the GPU is up; widgets are skipped
+    /// silently on frames before then.
+    pub(crate) widget_renderer: Option<crate::widgets::WidgetRenderer>,
+
+    /// Freshness cache for rasterized widget textures (tn-npd). Owns
+    /// the `WidgetRasterizer` and the `HashMap<WidgetId, CachedWidget>`
+    /// of uploaded textures. Safe to initialize eagerly since it holds
+    /// no GPU handles until the first `upsert`.
+    pub(crate) widget_manager: crate::widgets::WidgetManager,
+
     /// tn-ou30: deferred local-mode initial pane spawn.
     ///
     /// On Windows native builds the size reported by `Window::inner_size()`

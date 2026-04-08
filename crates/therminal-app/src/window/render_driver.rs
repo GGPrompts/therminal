@@ -375,6 +375,14 @@ impl App {
             );
         }
 
+        // ── Widget pass (tn-npd) ─────────────────────────────────────────
+        // Pre-rasterized overlay widgets composite on top of the overlay
+        // pass as textured quads. Today this is only the agent status
+        // badge PoC (top-right of the window). Re-rasterization is gated
+        // on a data hash so frames where nothing changed pay only for
+        // the draw call, not the rasterization.
+        self.draw_widget_overlays(&view);
+
         output.present();
 
         self.status_bar_hit_areas = new_status_bar_hit_areas;
@@ -393,6 +401,228 @@ impl App {
         if toast_active && let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Composite pre-rasterized overlay widgets (tn-npd).
+    ///
+    /// Runs once per frame as the final pass of `App::render`, after the
+    /// grid + chrome overlay pass. Responsibilities:
+    ///
+    /// * Look up the focused pane's agent name (from `PaneStatus`) and
+    ///   live `AgentStatus` (from the shared `AgentRegistry`).
+    /// * Build a fresh `AgentBadgeSnapshot`. If no agent is present,
+    ///   fall through and draw nothing — the cached texture, if any,
+    ///   stays allocated for the next time an agent appears.
+    /// * Hand the snapshot to `WidgetManager::upsert`. When the data
+    ///   hash matches the previous frame's the manager returns the
+    ///   cached `CachedWidget` without touching the rasterizer.
+    /// * Position the badge in the top-right of the window (PoC
+    ///   hardcoded placement) and draw it via the textured-quad
+    ///   pipeline in `WidgetRenderer`.
+    /// * Draw the "name · state" label on top of the pill via the
+    ///   existing glyphon overlay text renderer. Text rendering stays
+    ///   out of the pixmap in v1 — see the scope note in
+    ///   `crate::widgets::mod::rs`.
+    fn draw_widget_overlays(&mut self, view: &wgpu::TextureView) {
+        use crate::widgets::{AgentBadgeSource, BADGE_WIDGET_ID};
+        use glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextArea, TextBounds};
+
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(widget_renderer) = self.widget_renderer.as_ref() else {
+            return;
+        };
+        let Some(renderer) = self.grid_renderer.as_mut() else {
+            return;
+        };
+
+        // ── Focused pane's agent name (from PaneStatus) ─────────────────
+        let agent_name: Option<String> = {
+            let Some(wm) = self.workspaces.as_ref() else {
+                return;
+            };
+            let layout = wm.layout();
+            let Some(fid) = wm.focused_pane() else {
+                return;
+            };
+            let Some(pane) = layout.find_pane(fid) else {
+                return;
+            };
+            pane.status.lock().ok().and_then(|s| s.agent_name.clone())
+        };
+
+        // If no agent is detected in the focused pane, draw nothing.
+        // The cached texture stays put — next time an agent appears with
+        // the same snapshot it will hit the cache cold, which is fine.
+        let Some(agent_name) = agent_name else {
+            return;
+        };
+
+        // ── Live AgentStatus from the shared registry ───────────────────
+        //
+        // We snapshot into owned values before dropping the lock so we
+        // don't hold the registry mutex across tiny-skia rasterization.
+        let status_owned = {
+            let fid_opt = self.workspaces.as_ref().and_then(|wm| wm.focused_pane());
+            let Some(fid) = fid_opt else {
+                return;
+            };
+            self.agent_registry
+                .lock()
+                .ok()
+                .and_then(|reg| reg.get(fid).map(|e| e.status.clone()))
+        };
+
+        let Some(snapshot) = AgentBadgeSource::snapshot(Some(&agent_name), status_owned.as_ref())
+        else {
+            return;
+        };
+        let (spec, width, height) = AgentBadgeSource::spec_for(&snapshot);
+
+        // ── Top-right placement (PoC) ────────────────────────────────────
+        //
+        // Inset from the right edge by 12 px and from the top edge by
+        // (tab bar height + 8). This keeps the badge clear of CSD
+        // controls / tab bar when they're visible.
+        let right_inset = 12.0_f32;
+        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+            self.config.general.show_tab_bar,
+            self.config.general.use_csd,
+        );
+        let top_inset = tab_bar_h + 8.0;
+        let x = gpu.config.width as f32 - width as f32 - right_inset;
+        let y = top_inset;
+
+        // Bail if the window is too small to fit the badge.
+        if x < 0.0 || y + height as f32 > gpu.config.height as f32 {
+            return;
+        }
+
+        // ── Upsert into the cache (re-rasterizes only on hash change) ───
+        let widget_ref = self.widget_manager.upsert(
+            widget_renderer,
+            &gpu.device,
+            &gpu.queue,
+            BADGE_WIDGET_ID,
+            &spec,
+            x,
+            y,
+        );
+        let Some(widget) = widget_ref else {
+            return;
+        };
+
+        // Clone the fields we need so we can drop the borrow on
+        // `widget_manager` before the glyphon prepare/render cycle
+        // runs — glyphon mutably borrows the grid renderer.
+        let widget_x = widget.x;
+        let widget_y = widget.y;
+        let widget_w = widget.width;
+        let widget_h = widget.height;
+
+        // Draw the pill background texture.
+        widget_renderer.draw(
+            &gpu.device,
+            &gpu.queue,
+            view,
+            gpu.config.width,
+            gpu.config.height,
+            widget,
+        );
+
+        // ── Text label on top of the pill ───────────────────────────────
+        //
+        // Uses the shared `overlay_text_renderer` (not `text_renderer`) so
+        // the badge label doesn't clobber the per-pane cell vertex buffer.
+        //
+        // The label text and colors match the badge snapshot; scale is
+        // derived from the pill height so it reads at a glance without
+        // overlapping the status dot.
+        let label = snapshot.label();
+        let font_size = (widget_h as f32) * 0.52;
+        let line_height = font_size * 1.1;
+        let metrics = Metrics::new(font_size, line_height);
+        let family = renderer.font_config.family.clone();
+        let mut buf = Buffer::new(&mut renderer.font_system, metrics);
+        buf.set_size(
+            &mut renderer.font_system,
+            Some(widget_w as f32),
+            Some(widget_h as f32),
+        );
+        let attrs = Attrs::new().family(Family::Name(&family));
+        buf.set_text(
+            &mut renderer.font_system,
+            &label,
+            &attrs,
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(&mut renderer.font_system, false);
+
+        // Text origin inside the pill: leave room for the dot.
+        let (tx_local, ty_local) = match spec.kind {
+            crate::widgets::rasterizer::WidgetKind::Pill(ref p) => p.text_origin_px(),
+        };
+        let text_area = TextArea {
+            buffer: &buf,
+            left: widget_x + tx_local,
+            top: widget_y + ty_local,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: widget_x as i32,
+                top: widget_y as i32,
+                right: (widget_x + widget_w as f32) as i32,
+                bottom: (widget_y + widget_h as f32) as i32,
+            },
+            default_color: glyphon::Color::rgba(235, 240, 250, 255),
+            custom_glyphs: &[],
+        };
+
+        // Prepare + render via the dedicated overlay text renderer so
+        // we don't clobber cell glyphs shaped earlier in the frame.
+        if let Err(e) = renderer.overlay_text_renderer.prepare(
+            &gpu.device,
+            &gpu.queue,
+            &mut renderer.font_system,
+            &mut renderer.overlay_atlas,
+            &renderer.viewport,
+            [text_area],
+            &mut renderer.swash_cache,
+        ) {
+            tracing::debug!(error = %e, "widget label prepare failed");
+            return;
+        }
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("widget_label_encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("widget_label_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let _ = renderer.overlay_text_renderer.render(
+                &renderer.overlay_atlas,
+                &renderer.viewport,
+                &mut pass,
+            );
+        }
+        gpu.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Jump the focused pane's scrollback to the previous/next semantic

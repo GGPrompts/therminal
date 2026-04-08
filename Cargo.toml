@@ -9,6 +9,7 @@ members = [
     "crates/therminal-daemon-client",
     "crates/therminal-harness-claude",
     "crates/therminal-app",
+    "crates/therminal-integration-tests",
 ]
 exclude = ["vendor"]
 
@@ -95,6 +96,11 @@ tempfile = "3"
 dirs = "6"
 libc = "0.2"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+# 2D vector rasterization (widget pre-rasterization, tn-npd).
+# Version pinned to 0.11 because that's what winit/sctk-adwaita already pulls in
+# transitively on Linux; hoisting avoids a second copy in the build graph.
+tiny-skia = "0.11"
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }

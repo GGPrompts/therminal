@@ -8,6 +8,7 @@ mod menu;
 mod overlay;
 mod pane;
 mod url_detection;
+mod widgets;
 mod window;
 
 pub use grid_renderer::{FontConfig, GridRenderer, RenderCell};

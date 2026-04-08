@@ -201,6 +201,8 @@ impl App {
             daemon_runtime: None,
             pane_id_map: super::PaneIdMap::default(),
             daemon_session_id: None,
+            widget_renderer: None,
+            widget_manager: crate::widgets::WidgetManager::new(),
             initial_pane_pending: false,
         }
     }
@@ -311,6 +313,13 @@ impl App {
             padding,
         );
         grid_renderer.apply_color_overrides(&self.config.colors);
+
+        // ── Widget pipeline (tn-npd) ─────────────────────────────────────
+        // Tiny textured-quad pipeline shared by all pre-rasterized widgets
+        // (agent status badge PoC today; context gauges, tool-call cards,
+        // thinking indicators in follow-ups). Construction is cheap — a
+        // single shader module, sampler, bind group layout, and pipeline.
+        self.widget_renderer = Some(crate::widgets::WidgetRenderer::new(&device, format));
 
         // ── First pane (fills window minus status bar and tab bar) ─────
         let status_bar_h =

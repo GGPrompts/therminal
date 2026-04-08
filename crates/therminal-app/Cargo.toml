@@ -36,6 +36,7 @@ notify-rust = { workspace = true }
 sysinfo = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tiny-skia = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
