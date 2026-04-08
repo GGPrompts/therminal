@@ -8,7 +8,9 @@ pub mod bus_types;
 pub mod daemon;
 pub mod message;
 
-pub use bus_types::{AgentId, ClaudeStatus, ParseAgentIdError, SourceClass, TaskState, TerminalEvent};
+pub use bus_types::{
+    AgentId, ClaudeStatus, ParseAgentIdError, SourceClass, TaskState, TerminalEvent,
+};
 pub use daemon::{
     DaemonEvent, DaemonState, EventKind, IpcMessage, IpcRequest, IpcResponse, PROTOCOL_VERSION,
 };
