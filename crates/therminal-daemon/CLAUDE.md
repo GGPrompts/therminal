@@ -212,6 +212,25 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 3. Add the tool name to `tool_category()` in `trust.rs` with the appropriate tier.
 4. Add the `Tool::new()` entry in `tool_definitions()` and the match arm in `call_tool()` in `mcp.rs`.
 5. Update the tool table in this file.
+6. **Numeric params must use `deser_compat::*_flexible`** (see below).
+
+### Numeric tool params: stringified-number quirk (tn-ad0g)
+
+Some MCP clients — at least one version of Claude Code on Windows — serialize numeric tool arguments as JSON strings, sending `{"pane_id":"1"}` instead of `{"pane_id":1}`. A naive `#[derive(Deserialize)]` rejects this with `-32602 invalid type: string "1", expected u64`, which surfaces as a failed tool call even though the JSON Schema we advertise is correct.
+
+As a defensive measure, every numeric field on a tool param struct in `crates/therminal-daemon/src/mcp/mod.rs` uses one of the helpers in `mcp/deser_compat.rs`:
+
+| Helper | Field type | Notes |
+|--------|------------|-------|
+| `u64_flexible` | `u64` | Accepts integer or stringified integer. Rejects negatives / fractional / garbage strings. Trims whitespace. |
+| `u64_opt_flexible` | `Option<u64>` | Same, plus `null` / missing → `None`. Empty string is rejected (not silently coerced). Pair with `#[serde(default)]`. |
+| `usize_opt_flexible` | `Option<usize>` | Wraps `u64_opt_flexible` and checks the value fits `usize`. |
+| `u64_default_flexible` | `u64` with `#[serde(default = "fn")]` | For fields like `timeout_ms` that have both a default and permissive parsing. |
+| `f32_flexible` | `f32` | Accepts number or stringified decimal. Rejects non-finite / empty. |
+
+The `JsonSchema` derive is unaffected — we still advertise `"type":"integer"` / `"type":"number"` in `inputSchema`, and a regression test (`tool_schema_still_declares_pane_id_as_integer`) locks this down. Compliant clients continue to send integers; misbehaving clients get the permissive decode as a fallback.
+
+**When adding a new tool param struct with any `u64` / `usize` / `f32` field, you MUST annotate it with the appropriate `deserialize_with = "deser_compat::…"` attribute.** Tests in `mod.rs::tests` (`pane_id_param_accepts_stringified_pane_id`, `find_with_capacity_accepts_stringified_threshold`, etc.) cover representative tools; add one for new structs if they introduce new numeric shapes.
 
 ## Trust Tier Enforcement
 

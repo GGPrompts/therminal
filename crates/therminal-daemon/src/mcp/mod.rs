@@ -41,6 +41,7 @@ use crate::trust::{
 };
 use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
 
+pub(super) mod deser_compat;
 pub mod resources;
 pub mod tools;
 pub mod transport;
@@ -65,6 +66,7 @@ pub(super) struct EmptyParams {}
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct SessionIdParam {
     /// The numeric session ID.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) session_id: u64,
 }
 
@@ -77,6 +79,7 @@ pub(super) struct CreateSessionParam {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct WriteToPaneParam {
     /// The numeric pane ID to write to.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// The text (or bytes as UTF-8) to send to the pane's PTY.
     pub(super) input: String,
@@ -85,12 +88,14 @@ pub(super) struct WriteToPaneParam {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct PaneIdParam {
     /// The numeric pane ID.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct TagPaneParam {
     /// The numeric pane ID to tag.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// Opaque key/value tags to merge into the pane's tag set. Existing
     /// keys with the same name are overwritten; keys not present here are
@@ -101,6 +106,7 @@ pub(super) struct TagPaneParam {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct UntagPaneParam {
     /// The numeric pane ID to untag.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// Tag keys to remove. If omitted, all tags on the pane are cleared.
     pub(super) keys: Option<Vec<String>>,
@@ -116,88 +122,109 @@ pub(super) struct PaneTagsResult {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ListPanesParam {
     /// Optional session ID to filter panes by. If omitted, returns panes from all sessions.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) session_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct QuerySemanticHistoryParam {
     /// The numeric pane ID to query.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// Optional region type filter. One of: Prompt, Command, Output, Error, ToolCall, Thinking, Annotation.
     pub(super) region_type: Option<String>,
     /// Optional regex pattern to match against region content preview.
     pub(super) pattern: Option<String>,
     /// Maximum number of regions to return (default 20).
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) limit: Option<usize>,
     /// Only return regions starting at or after this line number.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) since_line: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct QueryCommandsParam {
     /// The numeric pane ID to query.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// Only return command blocks whose `start_line` is at or after this
     /// line number. If omitted, returns all tracked commands up to `limit`.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) since_line: Option<usize>,
     /// Maximum number of command entries to return (default 20).
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct QueryEventsParam {
     /// The numeric pane ID to query.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// Only return events whose Unix-seconds timestamp is at or after this
     /// value. If omitted, returns all events in the buffer up to `limit`.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) since_timestamp_secs: Option<u64>,
     /// Maximum number of events to return (default 100). The underlying
     /// in-memory ring is capped at 5000 entries; values above that cap
     /// have no effect.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct GetPaneGeometryParam {
     /// The numeric pane ID.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct WaitForOutputParam {
     /// The numeric pane ID to watch.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// String or regex pattern to match against output lines.
     pub(super) pattern: String,
     /// Timeout in milliseconds (default 30000, max 120000).
-    #[serde(default = "default_timeout_ms")]
+    #[serde(
+        default = "default_timeout_ms",
+        deserialize_with = "deser_compat::u64_default_flexible"
+    )]
     pub(super) timeout_ms: u64,
     /// Only match output on or after this line number. If omitted, matches any new output.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) since_line: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct GetHotspotsParam {
     /// The numeric pane ID to scan for hotspots.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) pane_id: u64,
     /// Optional hotspot type filter. One of: file, url, git_ref, issue.
     pub(super) hotspot_type: Option<String>,
     /// Maximum number of hotspots to return (default 50).
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
     pub(super) limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct GetWorkspaceLayoutParam {
     /// The workspace slot number (1-9) to fetch the layout for.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
     pub(super) workspace_id: u64,
     /// Optional session ID. If omitted, searches across all sessions and uses
     /// the first workspace with a matching ID.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) session_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ListWorkspacesParam {
     /// Optional session ID to filter workspaces by. If omitted, returns workspaces from all sessions.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) session_id: Option<u64>,
 }
 
@@ -214,6 +241,7 @@ fn default_timeout_ms() -> u64 {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct SpawnPaneParam {
     /// Session ID to create the pane in. If omitted, uses the default (first) session.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) session_id: Option<u64>,
     /// Shell command to run. If omitted, spawns the user's default shell.
     pub(super) command: Option<String>,
@@ -222,6 +250,7 @@ pub(super) struct SpawnPaneParam {
     /// Split direction: "horizontal" or "vertical". Defaults to "vertical" when splitting.
     pub(super) split_direction: Option<String>,
     /// Pane ID to split from. If specified, the new pane is created as a sibling of this pane.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) split_from: Option<u64>,
 }
 
@@ -572,6 +601,7 @@ pub(super) struct FindWithCapacityParam {
     /// Minimum remaining context-window percent (0.0 - 100.0). An agent is
     /// included if `remaining_percent >= threshold_percent`. Agents with
     /// unknown capacity are always included.
+    #[serde(deserialize_with = "deser_compat::f32_flexible")]
     pub(super) threshold_percent: f32,
 }
 
@@ -1142,6 +1172,221 @@ pub(crate) mod tests {
             default_tier: TrustTier::Trusted,
             ..TrustConfig::default()
         }
+    }
+
+    // ── string-or-int param coercion (tn-ad0g) ─────────────────────────
+    //
+    // Regression guard: at least one MCP client (Claude Code on Windows)
+    // serializes numeric tool arguments as JSON strings, e.g.
+    //   {"pane_id":"1"}  /  {"limit":"5"}  /  {"threshold_percent":"50"}
+    //
+    // The original strict `#[derive(Deserialize)]` rejected these with
+    // `-32602 invalid type: string "1", expected u64`. The
+    // `deser_compat::*_flexible` helpers teach every tool param struct to
+    // accept either a JSON number *or* a stringified number, restoring
+    // round-trip for the affected calls.
+    //
+    // These tests feed raw JSON objects through `parse_args` — the same
+    // entry point used by `call_tool` — so they exercise the real
+    // dispatch path, not a unit test of the deserializer helpers.
+
+    fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> T {
+        let value: serde_json::Value = serde_json::from_str(raw).expect("json");
+        let map = value
+            .as_object()
+            .cloned()
+            .expect("arguments must be a JSON object");
+        super::parse_args::<T>(map).expect("parse_args should accept stringified numeric args")
+    }
+
+    #[test]
+    fn pane_id_param_accepts_stringified_pane_id() {
+        // The exact wire shape observed from Claude Code on Windows
+        // during tn-ad0g Windows verification.
+        let params: super::PaneIdParam = parse(r#"{"pane_id":"1"}"#);
+        assert_eq!(params.pane_id, 1);
+    }
+
+    #[test]
+    fn pane_id_param_accepts_native_integer() {
+        let params: super::PaneIdParam = parse(r#"{"pane_id":42}"#);
+        assert_eq!(params.pane_id, 42);
+    }
+
+    #[test]
+    fn session_id_param_accepts_stringified_id() {
+        let params: super::SessionIdParam = parse(r#"{"session_id":"3"}"#);
+        assert_eq!(params.session_id, 3);
+    }
+
+    #[test]
+    fn get_pane_geometry_accepts_stringified_pane_id() {
+        let params: super::GetPaneGeometryParam = parse(r#"{"pane_id":"7"}"#);
+        assert_eq!(params.pane_id, 7);
+    }
+
+    #[test]
+    fn get_hotspots_accepts_stringified_pane_id_and_limit() {
+        // Matches `terminal.semantic.get_hotspots { pane_id: 1 }` from the
+        // tn-ad0g bug report, plus a stringified limit for completeness.
+        let params: super::GetHotspotsParam = parse(r#"{"pane_id":"1","limit":"5"}"#);
+        assert_eq!(params.pane_id, 1);
+        assert_eq!(params.limit, Some(5));
+    }
+
+    #[test]
+    fn query_commands_accepts_stringified_pane_id_and_limit() {
+        // Matches `terminal.semantic.query_commands { pane_id: 1, limit: 5 }`
+        // from the tn-ad0g bug report.
+        let params: super::QueryCommandsParam = parse(r#"{"pane_id":"1","limit":"5"}"#);
+        assert_eq!(params.pane_id, 1);
+        assert_eq!(params.limit, Some(5));
+        assert_eq!(params.since_line, None);
+    }
+
+    #[test]
+    fn query_commands_accepts_native_ints() {
+        // Sanity: the flexible deserializer must still accept well-formed
+        // integer input. If this regresses, all MCP clients break.
+        let params: super::QueryCommandsParam = parse(r#"{"pane_id":1,"limit":5,"since_line":10}"#);
+        assert_eq!(params.pane_id, 1);
+        assert_eq!(params.limit, Some(5));
+        assert_eq!(params.since_line, Some(10));
+    }
+
+    #[test]
+    fn query_events_accepts_stringified_timestamp() {
+        let params: super::QueryEventsParam =
+            parse(r#"{"pane_id":"2","since_timestamp_secs":"1700000000","limit":"20"}"#);
+        assert_eq!(params.pane_id, 2);
+        assert_eq!(params.since_timestamp_secs, Some(1_700_000_000));
+        assert_eq!(params.limit, Some(20));
+    }
+
+    #[test]
+    fn spawn_pane_accepts_stringified_session_id() {
+        // Matches `terminal.panes.create { session_id: 1 }` from the
+        // tn-ad0g bug report. `split_from` is absent → None.
+        let params: super::SpawnPaneParam = parse(r#"{"session_id":"1"}"#);
+        assert_eq!(params.session_id, Some(1));
+        assert_eq!(params.split_from, None);
+    }
+
+    #[test]
+    fn spawn_pane_accepts_stringified_split_from() {
+        let params: super::SpawnPaneParam =
+            parse(r#"{"split_from":"5","split_direction":"horizontal"}"#);
+        assert_eq!(params.split_from, Some(5));
+        assert_eq!(params.split_direction.as_deref(), Some("horizontal"));
+    }
+
+    #[test]
+    fn list_panes_accepts_stringified_session_id() {
+        let params: super::ListPanesParam = parse(r#"{"session_id":"4"}"#);
+        assert_eq!(params.session_id, Some(4));
+    }
+
+    #[test]
+    fn list_panes_missing_session_id_is_none() {
+        let params: super::ListPanesParam = parse(r#"{}"#);
+        assert_eq!(params.session_id, None);
+    }
+
+    #[test]
+    fn wait_for_output_accepts_stringified_timeout() {
+        let params: super::WaitForOutputParam =
+            parse(r#"{"pane_id":"1","pattern":"done","timeout_ms":"5000","since_line":"10"}"#);
+        assert_eq!(params.pane_id, 1);
+        assert_eq!(params.pattern, "done");
+        assert_eq!(params.timeout_ms, 5000);
+        assert_eq!(params.since_line, Some(10));
+    }
+
+    #[test]
+    fn wait_for_output_default_timeout_when_omitted() {
+        let params: super::WaitForOutputParam = parse(r#"{"pane_id":1,"pattern":"x"}"#);
+        assert_eq!(params.timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn get_workspace_layout_accepts_stringified_ids() {
+        let params: super::GetWorkspaceLayoutParam =
+            parse(r#"{"workspace_id":"2","session_id":"3"}"#);
+        assert_eq!(params.workspace_id, 2);
+        assert_eq!(params.session_id, Some(3));
+    }
+
+    #[test]
+    fn find_with_capacity_accepts_stringified_threshold() {
+        let params: super::FindWithCapacityParam = parse(r#"{"threshold_percent":"50"}"#);
+        assert!((params.threshold_percent - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn find_with_capacity_accepts_stringified_float() {
+        let params: super::FindWithCapacityParam = parse(r#"{"threshold_percent":"37.5"}"#);
+        assert!((params.threshold_percent - 37.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tag_pane_accepts_stringified_pane_id() {
+        let params: super::TagPaneParam = parse(r#"{"pane_id":"8","tags":{"issue":"tn-1"}}"#);
+        assert_eq!(params.pane_id, 8);
+        assert_eq!(params.tags.get("issue").map(String::as_str), Some("tn-1"));
+    }
+
+    #[test]
+    fn untag_pane_accepts_stringified_pane_id() {
+        let params: super::UntagPaneParam = parse(r#"{"pane_id":"9","keys":["issue"]}"#);
+        assert_eq!(params.pane_id, 9);
+        assert_eq!(params.keys.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn write_to_pane_accepts_stringified_pane_id() {
+        let params: super::WriteToPaneParam = parse(r#"{"pane_id":"1","input":"ls\n"}"#);
+        assert_eq!(params.pane_id, 1);
+        assert_eq!(params.input, "ls\n");
+    }
+
+    /// Guard that the `deserialize_with` shim doesn't alter the JSON Schema
+    /// exposed to clients. We still advertise `integer`-typed fields; the
+    /// accepted-string behavior is a server-side permissive decode only.
+    #[test]
+    fn tool_schema_still_declares_pane_id_as_integer() {
+        use rmcp::handler::server::tool::schema_for_type;
+        // `schema_for_type::<T>()` returns `Arc<Map<String, Value>>` — the
+        // MCP `inputSchema`. Drill into `properties.pane_id.type` and
+        // assert it is `"integer"`, not `"string"`.
+        let schema = schema_for_type::<super::PaneIdParam>();
+        let json: serde_json::Value = serde_json::to_value(&*schema).expect("schema serialises");
+        let ty = json
+            .get("properties")
+            .and_then(|p| p.get("pane_id"))
+            .and_then(|f| f.get("type"))
+            .expect("pane_id.type present");
+        assert_eq!(ty, &serde_json::Value::String("integer".to_string()));
+    }
+
+    /// End-to-end: go all the way through `handle_get_pane_geometry` with
+    /// a stringified pane_id. This is the Windows-client failure mode from
+    /// tn-ad0g reproduced in a unit test. We expect a "pane not found"
+    /// tool error — NOT a transport-level `invalid parameters` error.
+    #[tokio::test]
+    async fn handle_get_pane_geometry_stringified_pane_id_round_trips() {
+        let server = make_server(trusted_config());
+        let raw: serde_json::Value = serde_json::from_str(r#"{"pane_id":"999999"}"#).unwrap();
+        let map = raw.as_object().cloned().unwrap();
+        let params: super::GetPaneGeometryParam =
+            super::parse_args(map).expect("parse_args must accept stringified pane_id");
+        let result = server
+            .handle_get_pane_geometry(params)
+            .await
+            .expect("handler ok at transport level");
+        // The pane doesn't exist, so the handler returns a tool error.
+        // The important assertion is that we got *past* parse_args —
+        // before the fix, `parse_args` itself would fail with `-32602`.
+        assert_eq!(result.is_error, Some(true));
     }
 
     // ── parse_pane_uri ──────────────────────────────────────────────────
