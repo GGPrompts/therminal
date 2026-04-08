@@ -50,12 +50,20 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 // ---------------------------------------------------------------------------
 
 /// Status of an agent session.
+///
+/// Variants must stay in sync with `InferredStatus` in
+/// `therminal-terminal::state_inference::types` — that engine is the writer
+/// for `daemon-pane-*.json` state files. If a new status is added there it
+/// must be added here too, otherwise the poller rejects its own output with
+/// an "unknown variant" serde error. See tn-hcq9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeStatus {
     #[default]
     Idle,
     Processing,
+    Streaming,
+    Thinking,
     ToolUse,
     AwaitingInput,
 }
@@ -207,7 +215,7 @@ fn agent_type_for_path(path: &Path) -> Option<String> {
 fn status_priority(status: &ClaudeStatus) -> u8 {
     match status {
         ClaudeStatus::ToolUse => 3,
-        ClaudeStatus::Processing => 2,
+        ClaudeStatus::Processing | ClaudeStatus::Streaming | ClaudeStatus::Thinking => 2,
         ClaudeStatus::AwaitingInput => 1,
         ClaudeStatus::Idle => 0,
     }
@@ -602,6 +610,24 @@ mod tests {
     fn status_awaiting_input_deserializes() {
         let s: ClaudeStatus = serde_json::from_str("\"awaiting_input\"").unwrap();
         assert_eq!(s, ClaudeStatus::AwaitingInput);
+    }
+
+    // Regression for tn-hcq9: the terminal-side state inference engine
+    // emits "streaming" and "thinking" statuses when a pane is identified as
+    // an agent session. Before this fix the daemon poller rejected those
+    // files with `unknown variant \`streaming\`` and the warnings polluted
+    // every read. These two tests lock the variants in; removing them would
+    // resurrect the regression.
+    #[test]
+    fn status_streaming_deserializes() {
+        let s: ClaudeStatus = serde_json::from_str("\"streaming\"").unwrap();
+        assert_eq!(s, ClaudeStatus::Streaming);
+    }
+
+    #[test]
+    fn status_thinking_deserializes() {
+        let s: ClaudeStatus = serde_json::from_str("\"thinking\"").unwrap();
+        assert_eq!(s, ClaudeStatus::Thinking);
     }
 
     #[test]
