@@ -37,7 +37,21 @@ impl Patterns {
                 r"(?:^>\s|esc to interrupt|waiting for (?:input|response)|^\s*\$\s*$|Press Enter|Type (?:a|your) (?:message|response))"
             ).unwrap(),
             context_percent: Regex::new(r"(\d{1,3})(?:\.\d)?%\s*(?:context|ctx)").unwrap(),
-            agent_ident_claude: Regex::new(r"(?i)claude\s*(?:code|3|4)?").unwrap(),
+            // Anchor Claude detection to product-name contexts so a bare
+            // occurrence of "claude" in pane output (e.g. a directory
+            // listing containing `CLAUDE.md`, a README mentioning the word,
+            // or a shell history line) does not false-positive as a Claude
+            // Code agent session. Matches the actual strings Claude Code
+            // writes to a TTY: startup banner ("Claude Code v1.2.3"),
+            // model line ("Claude Sonnet 4"), footer URL ("claude.ai/code"),
+            // or an explicit CLI invocation token ("claude-code"). See tn-97ag.
+            agent_ident_claude: Regex::new(
+                r"(?i)\b(?:claude\s+code(?:\s+v?\d[\w.-]*)?|claude-code\b|claude\.ai/code|claude\s+(?:opus|sonnet|haiku)\s*\d)",
+            )
+            .unwrap(),
+            // TODO(tn-97ag-followup): codex detection has the same loose
+            // substring problem — the bare word "codex" matches any text
+            // mentioning it. Tracked separately.
             agent_ident_codex: Regex::new(r"(?i)codex").unwrap(),
             // Anchor copilot detection to product-name contexts so generic TUI
             // text containing the bare word "copilot" (e.g. a Bubble Tea TUI

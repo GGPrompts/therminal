@@ -608,6 +608,58 @@ mod tests {
         }
     }
 
+    /// Regression for tn-97ag: the Claude detection regex used to match any
+    /// occurrence of the bare word "claude", so a file manager (TFE) rendering
+    /// a directory containing `CLAUDE.md` would flip the engine into "Claude
+    /// session" mode and start writing `/tmp/claude-code-state/daemon-pane-*.json`.
+    /// The identifier is now anchored to product-name contexts.
+    #[test]
+    fn file_manager_listing_claude_md_does_not_false_positive_as_claude() {
+        let file_manager_lines = [
+            "CLAUDE.md",
+            "  CLAUDE.md                    12.3 KB",
+            "drwxr-xr-x  claude/                    4096",
+            "> cd ~/projects/claude-experiments",
+            "see CLAUDE.md for project instructions",
+            "// the claude integration is deprecated",
+            "grepped: claude (2 matches)",
+        ];
+        for line in file_manager_lines {
+            let mut engine = make_engine(None);
+            engine.push_line(line.to_string());
+            engine.detect_agent_from_output();
+            assert_eq!(
+                engine.agent_type(),
+                None,
+                "file-listing line should not classify as Claude: {line}"
+            );
+        }
+    }
+
+    /// Positive companion for tn-97ag: real Claude Code banners / model lines
+    /// must still be detected. Covers the strings Claude Code actually writes
+    /// to a TTY — startup banner, model line, footer URL, CLI token.
+    #[test]
+    fn claude_code_banners_still_detect_as_claude() {
+        let banner_lines = [
+            "Claude Code v1.0.42",
+            "Claude Code",
+            "Using model: Claude Sonnet 4",
+            "Running claude-code in /home/user/repo",
+            "Visit https://claude.ai/code for docs",
+        ];
+        for line in banner_lines {
+            let mut engine = make_engine(None);
+            engine.push_line(line.to_string());
+            engine.detect_agent_from_output();
+            assert_eq!(
+                engine.agent_type(),
+                Some(AgentType::Claude),
+                "Claude banner line should classify as Claude: {line}"
+            );
+        }
+    }
+
     #[test]
     fn detect_awaiting_input_prompt() {
         let mut engine = make_engine(Some(AgentType::Claude));
