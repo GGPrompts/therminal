@@ -83,29 +83,37 @@ impl LayoutNode {
     /// suitable for crossing the IPC boundary into the daemon.
     ///
     /// Only direction, ratio, and leaf pane IDs are included; PTY state and
-    /// viewport rects are intentionally stripped. `LayoutNode::Empty` is
-    /// represented as a leaf with `pane_id = 0` since the empty placeholder
-    /// is transient and should not normally appear in a synced tree.
-    pub fn to_snapshot(&self) -> therminal_protocol::daemon::LayoutSnapshot {
+    /// viewport rects are intentionally stripped.
+    ///
+    /// F6 (tn-97j6): `LayoutNode::Empty` returns `None`. Previously Empty
+    /// serialized as `Leaf { pane_id: 0 }`, which the publish path's
+    /// translation guard rejected — silently suppressing ALL subsequent
+    /// workspace publishes. Splits whose only non-empty child is one side
+    /// collapse to that side; a fully-empty subtree returns `None`.
+    pub fn to_snapshot(&self) -> Option<therminal_protocol::daemon::LayoutSnapshot> {
         use crate::pane::SplitDirection;
         use therminal_protocol::daemon::{LayoutSnapshot, LayoutSplitDirection};
         match self {
-            LayoutNode::Leaf(pane) => LayoutSnapshot::Leaf { pane_id: pane.id },
+            LayoutNode::Leaf(pane) => Some(LayoutSnapshot::Leaf { pane_id: pane.id }),
             LayoutNode::Split {
                 direction,
                 ratio,
                 first,
                 second,
-            } => LayoutSnapshot::Split {
-                direction: match direction {
-                    SplitDirection::Horizontal => LayoutSplitDirection::Horizontal,
-                    SplitDirection::Vertical => LayoutSplitDirection::Vertical,
-                },
-                ratio: *ratio,
-                first: Box::new(first.to_snapshot()),
-                second: Box::new(second.to_snapshot()),
+            } => match (first.to_snapshot(), second.to_snapshot()) {
+                (Some(f), Some(s)) => Some(LayoutSnapshot::Split {
+                    direction: match direction {
+                        SplitDirection::Horizontal => LayoutSplitDirection::Horizontal,
+                        SplitDirection::Vertical => LayoutSplitDirection::Vertical,
+                    },
+                    ratio: *ratio,
+                    first: Box::new(f),
+                    second: Box::new(s),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
             },
-            LayoutNode::Empty => LayoutSnapshot::Leaf { pane_id: 0 },
+            LayoutNode::Empty => None,
         }
     }
 
@@ -169,7 +177,7 @@ impl LayoutNode {
         }
         // Right-leaning cascade.
         let mut iter = leaves.into_iter();
-        let mut acc = iter.next().unwrap();
+        let mut acc = iter.next().expect("checked leaves.len() >= 2");
         for next in iter {
             acc = LayoutNode::Split {
                 direction: SplitDirection::Horizontal,

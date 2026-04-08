@@ -358,7 +358,7 @@ impl WorkspaceManager {
                 order: order as u32,
                 pane_ids: ws.layout.pane_ids(),
                 focused_pane: ws.focused_pane,
-                layout: Some(ws.layout.to_snapshot()),
+                layout: ws.layout.to_snapshot(),
             })
             .collect()
     }

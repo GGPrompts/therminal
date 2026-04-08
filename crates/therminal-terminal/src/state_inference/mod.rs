@@ -448,6 +448,31 @@ mod tests {
         assert_eq!(engine.agent_type(), Some(AgentType::Copilot));
     }
 
+    /// Regression for tn-3pkv: a Bubble Tea TUI (TFE) that happens to print
+    /// the bare word "copilot" anywhere in its rendering must not be classified
+    /// as a Copilot agent session. The copilot identifier regex is anchored to
+    /// product-name contexts ("GitHub Copilot", "copilot cli", etc.).
+    #[test]
+    fn bubble_tea_tui_does_not_false_positive_as_copilot() {
+        let bubbletea_lines = [
+            "TFE  Terraform File Explorer",
+            "  workspace: prod-copilot-experiments",
+            "  [n]ew  [d]elete  [q]uit",
+            "press ? for help",
+            "see also: copilot-style autocomplete (planned)",
+        ];
+        for line in bubbletea_lines {
+            let mut engine = make_engine(None);
+            engine.push_line(line.to_string());
+            engine.detect_agent_from_output();
+            assert_eq!(
+                engine.agent_type(),
+                None,
+                "TFE/Bubble-Tea line should not classify as any agent: {line}"
+            );
+        }
+    }
+
     #[test]
     fn detect_awaiting_input_prompt() {
         let mut engine = make_engine(Some(AgentType::Claude));

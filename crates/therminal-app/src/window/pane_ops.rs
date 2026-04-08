@@ -68,6 +68,13 @@ impl App {
     /// Returns `Some(new_local_id)` on success, `None` on any failure
     /// (with a warn!-level log). Callers should NOT mutate the layout
     /// themselves — this helper owns both the RPC and the tree insert.
+    ///
+    /// F13 (tn-97j6): the remote split path intentionally bypasses
+    /// `validate_inherited_cwd` because remote split does not currently
+    /// forward cwd to the daemon at all. Any future change that wires cwd
+    /// inheritance through `IpcRequest::SplitPane` MUST reintroduce the
+    /// `validate_inherited_cwd` check here so a stale/missing dir falls
+    /// back to the spawn defaults instead of failing the daemon spawn.
     pub(crate) fn split_pane_remote(
         &mut self,
         source_local: PaneId,
@@ -169,10 +176,24 @@ impl App {
         } else {
             if let Some(e) = build_result.into_inner() {
                 warn!(error = %e, "split_pane_remote: build_remote_pane_state failed AFTER daemon split — daemon now has orphan pane");
-                // Best effort: ask daemon to kill the orphan pane we couldn't mount.
-                let _ = self.daemon_rpc_blocking(IpcRequest::KillPane {
+                // F2 (tn-97j6): best-effort kill the orphan pane we couldn't
+                // mount, and explicitly log the recovery RPC's outcome so
+                // operators see when cleanup itself fails.
+                match self.daemon_rpc_blocking(IpcRequest::KillPane {
                     pane_id: new_daemon_pane_id,
-                });
+                }) {
+                    Ok(IpcResponse::PaneKilled { .. }) => {}
+                    Ok(other) => warn!(
+                        new_daemon_pane_id,
+                        ?other,
+                        "split_pane_remote: orphan KillPane recovery returned unexpected response"
+                    ),
+                    Err(e) => warn!(
+                        new_daemon_pane_id,
+                        error = %e,
+                        "split_pane_remote: orphan KillPane recovery RPC failed — daemon orphan persists"
+                    ),
+                }
             }
             None
         }

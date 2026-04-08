@@ -267,19 +267,42 @@ pub(crate) fn build_remote_pane_state(
     let forwarder_socket = daemon_socket.clone();
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
     let forwarder_handle = tokio_handle.spawn(async move {
-        let sub_client = match DaemonClient::connect(&forwarder_socket).await {
-            Ok(c) => c,
-            Err(e) => {
+        // F5 (tn-97j6): wrap connect+subscribe in a 5s timeout so a daemon
+        // that accepts the socket but never responds to Subscribe doesn't
+        // leave the forwarder hung forever (pane would appear live but
+        // never receive bytes).
+        let connect_timeout = std::time::Duration::from_secs(5);
+        let sub_client = match tokio::time::timeout(
+            connect_timeout,
+            DaemonClient::connect(&forwarder_socket),
+        )
+        .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
                 warn!(error = %e, "remote pane forwarder failed to open subscription connection");
                 return;
             }
+            Err(_) => {
+                warn!("remote pane forwarder connect timed out after {connect_timeout:?}");
+                return;
+            }
         };
-        if let Err(e) = sub_client
-            .subscribe_events(vec![EventKind::PaneOutput, EventKind::PaneExited])
-            .await
+        match tokio::time::timeout(
+            connect_timeout,
+            sub_client.subscribe_events(vec![EventKind::PaneOutput, EventKind::PaneExited]),
+        )
+        .await
         {
-            warn!(error = %e, "remote pane forwarder Subscribe failed");
-            return;
+            Ok(Ok(_resp)) => {}
+            Ok(Err(e)) => {
+                warn!(error = %e, "remote pane forwarder Subscribe failed");
+                return;
+            }
+            Err(_) => {
+                warn!("remote pane forwarder Subscribe timed out after {connect_timeout:?}");
+                return;
+            }
         }
 
         // tn-wlu6 mitigation: when the GUI attaches to a daemon pane that
@@ -482,15 +505,32 @@ pub(crate) fn build_remote_pane_state(
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let writer_client = Arc::clone(&daemon_client);
     let writer_handle = tokio_handle.spawn(async move {
+        // F1 (tn-97j6): wrap SendKeys in a 2s timeout. Without it, a stalled
+        // daemon write would let keystrokes pile up in the unbounded input
+        // channel and the pane would go silently dead. On timeout, warn and
+        // break the loop so the pane enters an error state cleanly.
+        let send_timeout = std::time::Duration::from_secs(2);
         while let Some(bytes) = input_rx.recv().await {
-            if let Err(e) = writer_client
-                .send_request(IpcRequest::SendKeys {
+            match tokio::time::timeout(
+                send_timeout,
+                writer_client.send_request(IpcRequest::SendKeys {
                     pane_id: remote_pane_id,
                     keys: bytes,
-                })
-                .await
+                }),
+            )
+            .await
             {
-                warn!(error = %e, "remote pane SendKeys failed");
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    warn!(error = %e, "remote pane SendKeys failed");
+                }
+                Err(_) => {
+                    warn!(
+                        remote_pane_id,
+                        "remote pane SendKeys timed out after {send_timeout:?}; closing writer"
+                    );
+                    break;
+                }
             }
         }
     });

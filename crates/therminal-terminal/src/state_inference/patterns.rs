@@ -39,7 +39,14 @@ impl Patterns {
             context_percent: Regex::new(r"(\d{1,3})(?:\.\d)?%\s*(?:context|ctx)").unwrap(),
             agent_ident_claude: Regex::new(r"(?i)claude\s*(?:code|3|4)?").unwrap(),
             agent_ident_codex: Regex::new(r"(?i)codex").unwrap(),
-            agent_ident_copilot: Regex::new(r"(?i)copilot").unwrap(),
+            // Anchor copilot detection to product-name contexts so generic TUI
+            // text containing the bare word "copilot" (e.g. a Bubble Tea TUI
+            // rendering a repo description, help text, or news feed) does not
+            // false-positive as a Copilot agent session. See tn-3pkv.
+            agent_ident_copilot: Regex::new(
+                r"(?i)\b(?:github\s+copilot|copilot\s+(?:cli|chat|using|v\d|version))\b",
+            )
+            .unwrap(),
             model_pattern: Regex::new(
                 r"(?:model|using)[\s:]+([a-zA-Z0-9._-]+(?:opus|sonnet|haiku|gpt[0-9.-]+|o[134]-?[a-z]*|gemini[a-zA-Z0-9._-]*)[a-zA-Z0-9._-]*)"
             ).unwrap(),

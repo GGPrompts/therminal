@@ -137,8 +137,13 @@ fn classify_process(process: &Process) -> Option<AgentType> {
         return Some(AgentType::Aider);
     }
 
-    // Copilot: process name contains "copilot".
-    if name.contains("copilot") {
+    // Copilot: process name is exactly "copilot" or a known copilot- prefix.
+    // Audited for tn-3pkv: previously `name.contains("copilot")` which would
+    // false-positive on any binary whose name happened to contain the substring.
+    // TFE (the user-reported false positive) does not match either form, so
+    // the actual root cause for tn-3pkv lives in the output-pattern matcher,
+    // but we tighten this defensively while we're here.
+    if name == "copilot" || name.starts_with("copilot-") {
         return Some(AgentType::Copilot);
     }
 
