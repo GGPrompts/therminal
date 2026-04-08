@@ -352,9 +352,15 @@ pub fn detect_hotspots_from_text_with_wrap(
 /// click handler can route the hotspot through the folder-open path
 /// instead of the editor fallback chain.
 ///
-/// Errors and `Ok(false)` leave the entry alone — we deliberately do not
-/// downgrade non-existent paths to non-directories here, since the click
-/// handler still needs to validate file existence separately.
+/// `Ok(false)` is treated as definitive ("the filesystem says this is not
+/// a directory") and the entry is left alone. `Err(_)` — including the
+/// common cross-filesystem case where stat fails because the path doesn't
+/// exist on the host running therminal (e.g. WSL paths on a Windows
+/// build) — falls through to [`classify_path_as_directory_heuristic`],
+/// which is a pure, filesystem-free guess. Without that fallback the
+/// right-click context menu would never offer the folder actions for
+/// any directory whose stat fails, which is the entire problem on the
+/// Windows build of therminal driving WSL2 panes (tn-fqvx).
 ///
 /// The callback is generic so tests can stub it without touching the
 /// real filesystem. Production callers pass a closure that wraps
@@ -368,10 +374,67 @@ where
             continue;
         }
         let path = strip_line_col_suffix(&h.text);
-        if let Ok(true) = is_dir_fn(path) {
-            h.is_dir = true;
+        match is_dir_fn(path) {
+            Ok(true) => h.is_dir = true,
+            Ok(false) => {} // filesystem says no — trust it
+            Err(_) => {
+                // stat failed (most often: path lives on a filesystem the
+                // host can't see, e.g. WSL paths on a Windows therminal
+                // build). Fall through to a pure heuristic so the user can
+                // still get the folder context menu.
+                if classify_path_as_directory_heuristic(path) {
+                    h.is_dir = true;
+                }
+            }
         }
     }
+}
+
+/// Pure, filesystem-free heuristic for "does this path look like a directory?"
+///
+/// Used as a fallback in [`promote_directory_hotspots`] when `std::fs::metadata`
+/// fails — most commonly because the path lives on a filesystem the host
+/// process can't see (e.g. a `/home/marci/...` POSIX path opened on the
+/// Windows build of therminal pointing into WSL2). The rules, applied in
+/// order, are:
+///
+/// 1. Trailing `/` ⇒ directory. The user can always add an explicit slash
+///    to force the folder context menu.
+/// 2. Empty / root `/` ⇒ directory. The root is always a directory.
+/// 3. Bare token (no `/` separator at all) ⇒ NOT a directory. Things like
+///    `Makefile`, `Cargo.toml`, `README` are written as bare names in shell
+///    output and are overwhelmingly files, not directories. Without this
+///    rule, extensionless bare names like `Makefile` would be misclassified.
+/// 4. The last path component contains no `.` ⇒ directory. This catches
+///    the overwhelming majority of directory references in shell output
+///    (`/home/marci/projects/therminal`, `/usr/local/bin`, …) without
+///    misclassifying dotfiles like `.bashrc` (rule applied to the *last*
+///    component, and a leading dot is still a `.`).
+///
+/// Returning `true` here is best-effort: the click handler still validates
+/// the target before launching anything, and the worst case is that the
+/// user sees a "folder" menu on a path that turns out not to exist.
+pub fn classify_path_as_directory_heuristic(path: &str) -> bool {
+    // Rule 1: explicit trailing slash.
+    if path.ends_with('/') {
+        return true;
+    }
+    // Rule 2: empty / root.
+    if path.is_empty() || path == "/" {
+        return true;
+    }
+    // Rule 3: bare tokens (no separator) are treated as files. Catches
+    // extensionless names like `Makefile`, `README`, `Dockerfile` that
+    // would otherwise pass rule 4.
+    if !path.contains('/') {
+        return false;
+    }
+    // Rule 4: extensionless last component.
+    let last = path.rsplit('/').next().unwrap_or(path);
+    if last.is_empty() {
+        return true;
+    }
+    !last.contains('.')
 }
 
 /// Strip an optional `:line[:col]` suffix from a path-like string.
@@ -786,16 +849,116 @@ mod tests {
     }
 
     #[test]
-    fn promote_directory_hotspots_ignores_io_errors() {
+    fn promote_directory_hotspots_falls_through_to_heuristic_on_io_error() {
+        // When stat fails, we fall through to the pure heuristic. A path
+        // whose last component has an extension (`missing.rs`) must NOT be
+        // promoted, because the heuristic correctly classifies it as a file.
         let mut hotspots = vec![TextHotspot {
             kind: HotspotKind::FilePath,
-            text: "/nope/missing".to_string(),
+            text: "/nope/missing.rs".to_string(),
             row: 0,
             start_col: 0,
-            end_col: 13,
+            end_col: 16,
             is_dir: false,
         }];
         promote_directory_hotspots(&mut hotspots, |_| Err(std::io::Error::other("nope")));
         assert!(!hotspots[0].is_dir);
+    }
+
+    #[test]
+    fn promote_directory_hotspots_heuristic_promotes_extensionless_path_on_io_error() {
+        // The whole point of tn-fqvx: a POSIX directory path on the Windows
+        // build of therminal stat-fails, but the heuristic catches it.
+        let mut hotspots = vec![TextHotspot {
+            kind: HotspotKind::FilePath,
+            text: "/home/marci/projects/therminal".to_string(),
+            row: 0,
+            start_col: 0,
+            end_col: 30,
+            is_dir: false,
+        }];
+        promote_directory_hotspots(&mut hotspots, |_| {
+            Err(std::io::Error::other("cross-fs stat failure"))
+        });
+        assert!(
+            hotspots[0].is_dir,
+            "extensionless POSIX path must be heuristically promoted when stat fails"
+        );
+    }
+
+    #[test]
+    fn promote_directory_hotspots_trusts_ok_false() {
+        // Definitive Ok(false) from the filesystem must NOT be overridden
+        // by the heuristic.
+        let mut hotspots = vec![TextHotspot {
+            kind: HotspotKind::FilePath,
+            text: "/tmp/extensionless-file".to_string(),
+            row: 0,
+            start_col: 0,
+            end_col: 23,
+            is_dir: false,
+        }];
+        promote_directory_hotspots(&mut hotspots, |_| Ok(false));
+        assert!(
+            !hotspots[0].is_dir,
+            "Ok(false) from stat must be trusted over the heuristic"
+        );
+    }
+
+    #[test]
+    fn classify_path_as_directory_heuristic_trailing_slash() {
+        assert!(classify_path_as_directory_heuristic("/home/marci/"));
+        assert!(classify_path_as_directory_heuristic("src/"));
+        assert!(classify_path_as_directory_heuristic("./foo.rs/"));
+    }
+
+    #[test]
+    fn classify_path_as_directory_heuristic_extensionless_component() {
+        assert!(classify_path_as_directory_heuristic(
+            "/home/marci/projects/therminal"
+        ));
+        assert!(classify_path_as_directory_heuristic("/usr/bin"));
+        // Bare tokens without a separator are treated as files (rule 3)
+        // even when extensionless — `crates` and `src` alone could be
+        // either, but in shell output they tend to appear with a path.
+        assert!(!classify_path_as_directory_heuristic("crates"));
+        assert!(!classify_path_as_directory_heuristic("src"));
+        // ...but the same names with a separator stay directories.
+        assert!(classify_path_as_directory_heuristic("./crates"));
+        assert!(classify_path_as_directory_heuristic("foo/src"));
+    }
+
+    #[test]
+    fn classify_path_as_directory_heuristic_file_with_extension() {
+        assert!(!classify_path_as_directory_heuristic("/home/marci/foo.rs"));
+        assert!(!classify_path_as_directory_heuristic("Cargo.toml"));
+        assert!(!classify_path_as_directory_heuristic("src/main.rs"));
+        assert!(!classify_path_as_directory_heuristic("/etc/hosts.allow"));
+    }
+
+    #[test]
+    fn classify_path_as_directory_heuristic_dotfile_is_not_directory() {
+        // Dotfiles like .bashrc have a `.` in the last component and must
+        // be treated as files, not directories.
+        assert!(!classify_path_as_directory_heuristic(".bashrc"));
+        assert!(!classify_path_as_directory_heuristic("/home/marci/.bashrc"));
+        assert!(!classify_path_as_directory_heuristic(".gitignore"));
+    }
+
+    #[test]
+    fn classify_path_as_directory_heuristic_root_and_empty() {
+        assert!(classify_path_as_directory_heuristic("/"));
+        assert!(classify_path_as_directory_heuristic(""));
+    }
+
+    #[test]
+    fn classify_path_as_directory_heuristic_makefile_like_no_extension() {
+        // Bare tokens (no `/` separator) are treated as files even when
+        // they have no extension. This catches `Makefile`, `README`,
+        // `Dockerfile`, etc., which are overwhelmingly files in shell
+        // output.
+        assert!(!classify_path_as_directory_heuristic("Makefile"));
+        assert!(!classify_path_as_directory_heuristic("README"));
+        assert!(!classify_path_as_directory_heuristic("Dockerfile"));
     }
 }
