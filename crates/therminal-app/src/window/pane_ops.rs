@@ -1882,19 +1882,20 @@ impl App {
                 .unwrap_or(false);
 
             let replacement_state: Option<crate::pane::PaneState> = if needs_replacement {
-                // Pick an anchor that ISN'T the pane being moved.
+                // Pick an anchor that ISN'T the pane being moved. If the only
+                // daemon pane in the GUI's map IS the moving pane (single-pane
+                // workspace), fall back to a fresh CreateSession instead — we
+                // must NOT use the moving pane as its own SplitPane anchor,
+                // which would corrupt daemon layout state.
                 let anchor = self
                     .pane_id_map
                     .any_daemon_id()
                     .filter(|&d| Some(d) != self.pane_id_map.daemon_for_local(focused));
-                let anchor = match anchor.or_else(|| self.pane_id_map.any_daemon_id()) {
-                    Some(a) => a,
-                    None => {
-                        warn!("send_to_workspace: no daemon pane available for replacement anchor");
-                        return;
-                    }
+                let state_opt = match anchor {
+                    Some(a) => self.spawn_remote_pane_off_existing(a, full_rect),
+                    None => self.spawn_remote_pane_fresh_session(full_rect),
                 };
-                let Some(state) = self.spawn_remote_pane_off_existing(anchor, full_rect) else {
+                let Some(state) = state_opt else {
                     return;
                 };
                 Some(state)

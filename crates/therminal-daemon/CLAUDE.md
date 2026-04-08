@@ -192,7 +192,7 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 | `terminal.panes` | Pane I/O, state, and geometry (list, create, destroy, get_content, get_geometry, write, wait_for_output) |
 | `terminal.semantic` | Semantic region queries (query_history, get_hotspots) |
 | `terminal.workspaces` | Workspace tab introspection (list) |
-| `terminal.agents` | Agent detection and status (list) |
+| `terminal.agents` | Agent detection, status, and cadence (list, find_with_capacity, get_status, get_details, get_cadence) |
 
 ### Standard Verbs
 
