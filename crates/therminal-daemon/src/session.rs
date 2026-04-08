@@ -335,13 +335,15 @@ impl Pane {
         event_tx: broadcast::Sender<DaemonEvent>,
         session_id: SessionId,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
+        osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let id = next_pane_id();
 
         let region_index = Arc::new(Mutex::new(RegionIndex::new()));
         let command_tracker = Arc::new(Mutex::new(CommandTracker::new()));
-        let (interceptor, interceptor_rx) =
+        let (mut interceptor, interceptor_rx) =
             TherminalInterceptor::with_defaults_and_tracker(Arc::clone(&command_tracker));
+        interceptor.set_osc_registry(osc_registry);
 
         // Initialize cwd from spawn options; OSC 7 events will update it later.
         let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
@@ -413,13 +415,15 @@ impl Pane {
         raw_fd: std::os::unix::io::RawFd,
         event_tx: broadcast::Sender<DaemonEvent>,
         session_id: SessionId,
+        osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let pty_master = Box::new(FdPtyMaster::new(raw_fd));
 
         let region_index = Arc::new(Mutex::new(RegionIndex::new()));
         let command_tracker = Arc::new(Mutex::new(CommandTracker::new()));
-        let (interceptor, interceptor_rx) =
+        let (mut interceptor, interceptor_rx) =
             TherminalInterceptor::with_defaults_and_tracker(Arc::clone(&command_tracker));
+        interceptor.set_osc_registry(osc_registry);
 
         // FD handoff panes don't have spawn options; cwd will be updated by OSC 7.
         let cwd = Arc::new(Mutex::new(String::new()));
@@ -861,8 +865,16 @@ impl Session {
         cols: u16,
         rows: u16,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
+        osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
     ) -> Result<&Pane, therminal_terminal::pty::PtyError> {
-        let pane = Pane::spawn(cols, rows, self.event_tx.clone(), self.id, spawn_options)?;
+        let pane = Pane::spawn(
+            cols,
+            rows,
+            self.event_tx.clone(),
+            self.id,
+            spawn_options,
+            osc_registry,
+        )?;
         let mut window = Window::new();
         let pane_id = pane.id;
         window.add_pane(pane);
@@ -923,6 +935,14 @@ pub struct SessionManager {
     agent_registry: AgentRegistry,
     /// Per-pane agent capacity cache fed by the Claude state poller.
     pane_capacity: Arc<crate::pane_capacity::PaneCapacityCache>,
+    /// Shared OSC handler registry (tn-hkpz). Cloned into each new pane's
+    /// `TherminalInterceptor` so harness crates can claim OSC codes at
+    /// daemon startup and route sequences through typed parsers. Defaults
+    /// to an empty registry so unit tests that build a bare
+    /// `SessionManager` keep working; `ensure.rs` swaps in the shared
+    /// daemon registry via [`SessionManager::set_osc_registry`] before
+    /// any PTY is opened.
+    osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
 }
 
 /// Swap two pane IDs wherever they appear as leaves in a `LayoutSnapshot`.
@@ -1174,7 +1194,23 @@ impl SessionManager {
             persistence: None,
             agent_registry: AgentRegistry::new(),
             pane_capacity: crate::pane_capacity::PaneCapacityCache::shared(),
+            osc_registry: Arc::new(therminal_terminal::OscHandlerRegistry::new()),
         }
+    }
+
+    /// Install a shared OSC handler registry (tn-hkpz).
+    ///
+    /// Called once from `ensure.rs` after harness crates have registered
+    /// their handlers but before the first session is created. Every
+    /// subsequent pane created by this manager will see the same
+    /// registry through its `TherminalInterceptor`.
+    pub fn set_osc_registry(&mut self, registry: Arc<therminal_terminal::OscHandlerRegistry>) {
+        self.osc_registry = registry;
+    }
+
+    /// Return a clone of the shared OSC handler registry handle.
+    pub fn osc_registry(&self) -> Arc<therminal_terminal::OscHandlerRegistry> {
+        Arc::clone(&self.osc_registry)
     }
 
     /// Shared handle to the per-pane capacity cache. Cloned by `ensure.rs`
@@ -1230,7 +1266,12 @@ impl SessionManager {
     ) -> Result<SessionId, therminal_terminal::pty::PtyError> {
         let mut session = Session::new(name, self.event_tx.clone());
         let default_pane_id = session
-            .create_default_pane(self.default_cols, self.default_rows, spawn_options)?
+            .create_default_pane(
+                self.default_cols,
+                self.default_rows,
+                spawn_options,
+                Arc::clone(&self.osc_registry),
+            )?
             .id;
 
         // Seed workspace_state with a single default workspace containing the
@@ -1589,6 +1630,7 @@ impl SessionManager {
             self.event_tx.clone(),
             session_id,
             spawn_options,
+            Arc::clone(&self.osc_registry),
         )
         .map_err(|e| format!("failed to spawn pane: {e}"))?;
 
@@ -2223,6 +2265,7 @@ impl SessionManager {
                     raw_fd,
                     self.event_tx.clone(),
                     session_id,
+                    Arc::clone(&self.osc_registry),
                 ) {
                     Ok(pane) => {
                         window.add_pane(pane);
@@ -2299,7 +2342,12 @@ impl SessionManager {
             };
 
             let mut session = Session::new(persisted_session.name.clone(), self.event_tx.clone());
-            match session.create_default_pane(first_pane.cols, first_pane.rows, &spawn_opts) {
+            match session.create_default_pane(
+                first_pane.cols,
+                first_pane.rows,
+                &spawn_opts,
+                Arc::clone(&self.osc_registry),
+            ) {
                 Ok(_) => {}
                 Err(e) => {
                     warn!(
@@ -2334,6 +2382,7 @@ impl SessionManager {
                     self.event_tx.clone(),
                     session_id,
                     &opts,
+                    Arc::clone(&self.osc_registry),
                 ) {
                     Ok(mut pane) => {
                         if !pane_meta.tags.is_empty() {

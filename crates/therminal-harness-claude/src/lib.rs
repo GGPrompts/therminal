@@ -50,12 +50,14 @@
 
 pub mod agent_events;
 pub mod jsonl_tailer;
+pub mod markers;
 pub mod pipeline;
 pub mod session_log;
 pub mod state;
 
 pub use agent_events::AgentEvent;
 pub use jsonl_tailer::{ClaudeJsonlRegistry, EventSource, SessionJsonlTailer, TaggedAgentEvent};
+pub use markers::{CLAUDE_OSC_CODE, CLAUDE_OWNER, CLAUDE_STATE_KIND, activate as activate_markers};
 pub use pipeline::{BROADCAST_CAPACITY, DEFAULT_POLL_INTERVAL, StateUpdateObserver};
 pub use session_log::{SessionEvent, SessionEventType, parse_session_event};
 pub use state::{

@@ -3511,6 +3511,7 @@ dependencies = [
  "therminal-daemon-client",
  "therminal-protocol",
  "therminal-runtime",
+ "therminal-terminal",
  "time",
  "tokio",
  "tracing",

@@ -14,6 +14,7 @@ path = "src/bin/claude-events.rs"
 therminal-protocol = { workspace = true }
 therminal-runtime = { workspace = true }
 therminal-core = { workspace = true }
+therminal-terminal = { workspace = true }
 therminal-daemon-client = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -98,6 +98,7 @@ Every emitted `TaggedAgentEvent` carries an `EventSource` so consumers can rebui
 src/
 ├── lib.rs              # Crate root + ClaudeHarness facade
 ├── agent_events.rs     # AgentEvent enum (UserMessage, AssistantMessage, ToolUse, ...)
+├── markers.rs          # OSC 1341 handler + activate() (tn-hkpz)
 ├── state.rs            # ClaudeSessionState, ClaudeStatePoller, ClaudeStateUpdate
 ├── session_log.rs      # SessionEvent + parse_session_event (pure parser)
 ├── jsonl_tailer.rs     # SessionJsonlTailer, ClaudeJsonlRegistry, TaggedAgentEvent, EventSource
@@ -130,13 +131,34 @@ Submodules (`agent_events`, `state`, `session_log`, `jsonl_tailer`, `pipeline`) 
 
 `therminal://claude/events` is owned by `therminal-daemon`'s MCP router. It's a subscribe-only resource: `read_resource` drains a per-connection ring buffer as a JSON array, and `subscribe` attaches a per-connection forwarder that pushes buffered events and sends `notifications/resources/updated` as new events arrive. Trust-gated via `check_resource_access()` at Observer tier — same as pane content resources.
 
+## OSC Grammar
+
+The crate claims **OSC 1341** via the shared handler registry (tn-hkpz). The handler lives in `src/markers.rs` and is registered once at daemon startup from `ensure.rs` via `therminal_harness_claude::activate_markers(&registry)`. See `docs/osc-handler-registry.md` for the registration API and `docs/osc-code-registry.md` for the canonical table of claimed codes.
+
+Wire format:
+
+```text
+ESC ] 1341 ; key=value [ ; key=value ]* ST
+```
+
+Recognised keys (v0):
+
+| Key          | Value                                        | Meaning                                |
+|--------------|----------------------------------------------|----------------------------------------|
+| `state`      | `idle` / `processing` / `tool_use` / `awaiting_input` | Claude session status          |
+| `tool`       | string                                       | Tool name (paired with `state=tool_use`) |
+| `session_id` | string                                       | Claude session UUID                    |
+
+Unknown keys are preserved as-is in an `extra` subobject in the emitted event body for forward-compatibility. The event `kind` is always `claude.state` for v0; future grammar extensions will add additional kinds (`claude.tool_call`, `claude.thinking_started`, …) as Claude Code grows the emitter.
+
+OSC markers are **additive live signal** — the JSONL tailer and state poller remain the authoritative source for historical data and capacity metrics. Markers give sub-millisecond state-change latency without the ~150 ms poller tick.
+
 ## Scope boundary
 
 This pipeline is deliberately separate from `AgentRegistry` (which lives in `therminal-terminal` and tags panes by process tree). The two compose but do not merge: `AgentRegistry` answers "is there a Claude process in this pane?"; this crate answers "what is that Claude session doing right now, and what subagents has it spawned?". A future overlay widget (tracked as `tn-x85k`) will render both via the same MCP consumer path.
 
 Not in scope for this crate:
 
-- OSC marker grammar — Claude Code does not currently emit any Claude-specific OSC sequences. If / when it does, handlers will be registered through the central OSC registry (tn-fp42, tn-hkpz).
 - Pattern matching on rendered terminal text — that's for `plugins/` pattern packs, not this crate.
 - Other harnesses — Codex, Copilot, and OpenCode will each live in their own `therminal-harness-<name>/` crate. The `/tmp/{codex,copilot}-state/` directories are watched by this crate's poller for historical reasons; that wiring will move out of here when the corresponding harness crates land.
 

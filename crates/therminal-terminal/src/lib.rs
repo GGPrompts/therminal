@@ -17,4 +17,7 @@ pub mod semantic_patterns;
 pub mod state_inference;
 pub mod terminal;
 
-pub use osc_registry::{HarnessEvent, OscRegistrationError};
+pub use osc_registry::{
+    HarnessEvent, HarnessOscHandler, OscHandlerRegistry, OscRegistrationError, RESERVED_CODE_MAX,
+    TaggedHarnessEvent,
+};

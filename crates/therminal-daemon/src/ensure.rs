@@ -226,6 +226,30 @@ async fn start_daemon(
         app_config.trust.destructive_rate_limit,
     ));
 
+    // Build the shared OSC handler registry (tn-hkpz) and activate
+    // harness-crate claims BEFORE any PTY is opened. Harness crates
+    // register their OSC codes once here; the registry Arc is then cloned
+    // into every pane's `TherminalInterceptor` via `SessionManager::
+    // set_osc_registry`. A duplicate claim (two crates fighting for the
+    // same code) is a programming mistake and should fail the daemon
+    // startup — `.expect()` makes the failure loud.
+    //
+    // See `docs/osc-handler-registry.md` for the registration API and
+    // `docs/osc-code-registry.md` for the canonical code table.
+    let osc_registry = Arc::new(therminal_terminal::OscHandlerRegistry::new());
+    therminal_harness_claude::activate_markers(&osc_registry)
+        .expect("claude OSC marker handler failed to register — check docs/osc-code-registry.md");
+    {
+        let session_mgr = server.session_manager();
+        let mut mgr = session_mgr.lock().await;
+        mgr.set_osc_registry(Arc::clone(&osc_registry));
+    }
+    info!(
+        code = therminal_harness_claude::CLAUDE_OSC_CODE,
+        owner = therminal_harness_claude::CLAUDE_OWNER,
+        "OSC handler registry active; claude markers installed"
+    );
+
     // Spawn the Claude agent-event pipeline (file watcher → JSONL tailers →
     // broadcast). Returns None if the OS file watcher cannot be created, in
     // which case the MCP `therminal://claude/events` resource will simply

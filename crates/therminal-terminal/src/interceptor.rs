@@ -16,12 +16,19 @@
 //! | OSC 1337  | iTerm2              | Various (used by some agents)  |
 //! | OSC 7777  | Therminal           | Cooperative agent self-report   |
 //!
+//! Any other OSC code is consulted against the shared
+//! [`OscHandlerRegistry`] (see [`crate::osc_registry`]) so harness crates
+//! can claim their own codes without modifying core.
+//!
 //! [`SequenceInterceptor`]: alacritty_terminal::vte::SequenceInterceptor
 
 use std::sync::{Arc, Mutex, mpsc};
 
 use tracing::{debug, trace};
 
+use crate::osc_registry::{
+    HarnessOscHandler, OscHandlerRegistry, OscRegistrationError, TaggedHarnessEvent,
+};
 use crate::osc633::{CommandTracker, Osc633Mark};
 
 /// Events produced by the interceptor for consumption by the terminal or daemon.
@@ -103,6 +110,19 @@ pub struct TherminalInterceptor {
     /// `Arc<Mutex<...>>` so the daemon can hold a clone on its `Pane`
     /// and snapshot the tracker from a different thread.
     pub command_tracker: Arc<Mutex<CommandTracker>>,
+    /// Shared OSC handler registry. Defaults to an empty per-interceptor
+    /// registry so tests and standalone use-sites Just Work without extra
+    /// wiring; the daemon replaces this with a shared `Arc` in
+    /// [`Self::set_osc_registry`] before the first PTY is opened.
+    osc_registry: Arc<OscHandlerRegistry>,
+    /// Optional sink for [`TaggedHarnessEvent`]s produced by the OSC
+    /// handler registry. Parallel to `event_tx` so daemon-side code can
+    /// route harness events onto the (future) unified event bus without
+    /// colliding with the existing `InterceptedEvent` stream.
+    ///
+    /// `None` by default — the dispatcher drops harness events on the
+    /// floor if no sink is installed.
+    harness_event_tx: Option<mpsc::Sender<TaggedHarnessEvent>>,
 }
 
 impl TherminalInterceptor {
@@ -116,6 +136,8 @@ impl TherminalInterceptor {
                 config,
                 event_tx: tx,
                 command_tracker: Arc::new(Mutex::new(CommandTracker::new())),
+                osc_registry: Arc::new(OscHandlerRegistry::new()),
+                harness_event_tx: None,
             },
             rx,
         )
@@ -133,6 +155,8 @@ impl TherminalInterceptor {
                 config,
                 event_tx: tx,
                 command_tracker,
+                osc_registry: Arc::new(OscHandlerRegistry::new()),
+                harness_event_tx: None,
             },
             rx,
         )
@@ -150,10 +174,91 @@ impl TherminalInterceptor {
         Self::new_with_tracker(InterceptorConfig::default(), command_tracker)
     }
 
+    /// Install a shared [`OscHandlerRegistry`] into this interceptor.
+    ///
+    /// The daemon creates a single registry at startup, registers harness
+    /// handlers on it, and passes the same `Arc` into every pane's
+    /// interceptor via this method. Without this call the interceptor
+    /// dispatches through an empty per-instance registry — harness events
+    /// are silently dropped, which is the correct behaviour for tests and
+    /// stand-alone use-sites that do not run any harness crates.
+    pub fn set_osc_registry(&mut self, registry: Arc<OscHandlerRegistry>) {
+        self.osc_registry = registry;
+    }
+
+    /// Install a channel sink for [`TaggedHarnessEvent`]s produced by the
+    /// OSC handler registry.
+    ///
+    /// Daemon-side code should call this at pane-construction time so the
+    /// harness-event stream can be routed onto whatever bus/broadcast
+    /// channel the consuming layer wants. If no sink is installed the
+    /// dispatcher logs at `trace` and drops the event.
+    pub fn set_harness_event_sink(&mut self, tx: mpsc::Sender<TaggedHarnessEvent>) {
+        self.harness_event_tx = Some(tx);
+    }
+
+    /// Claim an OSC code on this interceptor's shared handler registry.
+    ///
+    /// This is the spec-mandated registration surface (see
+    /// `docs/osc-handler-registry.md` §1.1). It is a thin forward to
+    /// [`OscHandlerRegistry::register`] so harness crates can write
+    /// idiomatic code against `&mut TherminalInterceptor` without needing
+    /// to reach into the registry type directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`OscRegistrationError`] if the code is reserved,
+    /// already claimed, or if `owner` is not a valid identifier. Callers
+    /// should `.expect()` the result at daemon startup — a duplicate claim
+    /// is a programming mistake that must fail fast.
+    pub fn register_osc_handler(
+        &mut self,
+        osc_code: u16,
+        owner: &'static str,
+        handler: HarnessOscHandler,
+    ) -> Result<(), OscRegistrationError> {
+        self.osc_registry.register(osc_code, owner, handler)
+    }
+
+    /// Borrow the shared OSC handler registry. Useful for diagnostics and
+    /// introspection (owner lookup, disabled-flag checks).
+    pub fn osc_registry(&self) -> &Arc<OscHandlerRegistry> {
+        &self.osc_registry
+    }
+
+    /// Drive an OSC sequence through the interceptor without requiring
+    /// callers to import `alacritty_terminal::vte::SequenceInterceptor`.
+    ///
+    /// Equivalent to calling
+    /// `<Self as SequenceInterceptor>::intercept_osc(self, params, bell_terminated)`
+    /// and returns the same boolean (`true` = consumed, `false` = pass
+    /// through). Exposed as an inherent method so harness-crate
+    /// integration tests can feed synthetic OSC sequences through the
+    /// full interceptor pipeline without taking a direct dependency on
+    /// the vte trait.
+    pub fn dispatch_osc(&mut self, params: &[&[u8]], bell_terminated: bool) -> bool {
+        <Self as alacritty_terminal::vte::SequenceInterceptor>::intercept_osc(
+            self,
+            params,
+            bell_terminated,
+        )
+    }
+
     /// Send an event, logging if the receiver has been dropped.
     fn emit(&self, event: InterceptedEvent) {
         if self.event_tx.send(event).is_err() {
             trace!("interceptor event receiver dropped");
+        }
+    }
+
+    /// Emit a tagged harness event on the optional `harness_event_tx`
+    /// sink. Silent if no sink is installed or the receiver has been
+    /// dropped.
+    fn emit_harness(&self, tagged: TaggedHarnessEvent) {
+        if let Some(tx) = &self.harness_event_tx
+            && tx.send(tagged).is_err()
+        {
+            trace!("interceptor harness-event receiver dropped");
         }
     }
 
@@ -408,15 +513,37 @@ impl alacritty_terminal::vte::SequenceInterceptor for TherminalInterceptor {
             return false;
         }
 
-        match params[0] {
-            b"633" if self.config.osc_633 => self.handle_osc_633(params),
-            b"133" if self.config.osc_133 => self.handle_osc_133(params),
-            b"7" if self.config.osc_7 => self.handle_osc_7(params),
-            b"9" if self.config.osc_9 => self.handle_osc_9(params),
-            b"1337" if self.config.osc_1337 => self.handle_osc_1337(params),
-            b"7777" if self.config.osc_7777 => self.handle_osc_7777(params),
-            _ => false,
+        // Native handlers take precedence over the registry. The registry
+        // is only consulted for codes that none of the native arms claim,
+        // so harness crates cannot shadow core OSC handling regardless of
+        // registration order. See `docs/osc-handler-registry.md` §4.
+        let native_consumed = match params[0] {
+            b"633" if self.config.osc_633 => Some(self.handle_osc_633(params)),
+            b"133" if self.config.osc_133 => Some(self.handle_osc_133(params)),
+            b"7" if self.config.osc_7 => Some(self.handle_osc_7(params)),
+            b"9" if self.config.osc_9 => Some(self.handle_osc_9(params)),
+            b"1337" if self.config.osc_1337 => Some(self.handle_osc_1337(params)),
+            b"7777" if self.config.osc_7777 => Some(self.handle_osc_7777(params)),
+            _ => None,
+        };
+
+        if let Some(consumed) = native_consumed {
+            return consumed;
         }
+
+        // Unknown-to-core code: dispatch through the shared registry.
+        if let Some(tagged) = self.osc_registry.dispatch(params) {
+            debug!(
+                owner = tagged.source_id,
+                kind = %tagged.event.kind,
+                "harness OSC handler emitted event"
+            );
+            self.emit_harness(tagged);
+            // Consume so alacritty_terminal does not log "unhandled OSC".
+            return true;
+        }
+
+        false
     }
 }
 
@@ -928,5 +1055,171 @@ mod tests {
         let params: &[&[u8]] = &[b"7777", b"agent=test"];
         let consumed = dispatch_osc_7777(&mut interceptor, params);
         assert!(!consumed);
+    }
+
+    // -- OSC handler registry integration tests -------------------------------
+
+    #[test]
+    fn registered_osc_handler_dispatches_through_interceptor() {
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+        let (harness_tx, harness_rx) = mpsc::channel();
+        interceptor.set_harness_event_sink(harness_tx);
+
+        interceptor
+            .register_osc_handler(
+                1341,
+                "claude",
+                Box::new(|params| {
+                    let payload = params
+                        .get(1)
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    Some(crate::osc_registry::HarnessEvent {
+                        kind: "claude.test".to_string(),
+                        body: serde_json::json!({ "payload": payload }),
+                    })
+                }),
+            )
+            .expect("register 1341");
+
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            &[b"1341", b"state=thinking"],
+            true,
+        );
+        assert!(consumed, "registry handler should consume unknown OSC");
+
+        let tagged = harness_rx.try_recv().expect("harness event emitted");
+        assert_eq!(tagged.source_id, "claude");
+        assert_eq!(tagged.event.kind, "claude.test");
+        assert_eq!(
+            tagged.event.body,
+            serde_json::json!({ "payload": "state=thinking" })
+        );
+    }
+
+    #[test]
+    fn native_osc_takes_precedence_over_registry() {
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hit_clone = std::sync::Arc::clone(&hit);
+
+        // Attempt to hijack OSC 7 (a core code) via a too-clever registry
+        // claim. The reserved range rejects this — but even if we allowed
+        // it, the dispatch loop short-circuits on native codes first, so
+        // the native OSC 7 path always wins.
+        let err = interceptor
+            .register_osc_handler(
+                7,
+                "spoofer",
+                Box::new(move |_| {
+                    hit_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    None
+                }),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::osc_registry::OscRegistrationError::ReservedCode { code: 7 }
+        ));
+
+        // Dispatch OSC 7 through the interceptor — native handler runs,
+        // registry was never touched.
+        let _ = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            &[b"7", b"file://localhost/tmp"],
+            false,
+        );
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn unknown_osc_without_registered_handler_passes_through() {
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+        // Pre-existing behaviour: unknown OSC codes are not consumed.
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            &[b"1341", b"state=thinking"],
+            true,
+        );
+        assert!(!consumed);
+    }
+
+    #[test]
+    fn shared_registry_visible_through_multiple_interceptors() {
+        // Daemon-style wiring: build a shared registry, register one
+        // handler, then install it into two independent interceptors.
+        let registry = std::sync::Arc::new(crate::osc_registry::OscHandlerRegistry::new());
+        registry
+            .register(
+                1341,
+                "claude",
+                Box::new(|_| {
+                    Some(crate::osc_registry::HarnessEvent {
+                        kind: "claude.shared".to_string(),
+                        body: serde_json::json!({}),
+                    })
+                }),
+            )
+            .expect("register");
+
+        for _ in 0..2 {
+            let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+            interceptor.set_osc_registry(std::sync::Arc::clone(&registry));
+            let (tx, rx) = mpsc::channel();
+            interceptor.set_harness_event_sink(tx);
+
+            let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+                &mut interceptor,
+                &[b"1341", b"hello"],
+                true,
+            );
+            assert!(consumed);
+            let tagged = rx.try_recv().expect("harness event");
+            assert_eq!(tagged.source_id, "claude");
+            assert_eq!(tagged.event.kind, "claude.shared");
+        }
+    }
+
+    #[test]
+    fn panicking_registry_handler_does_not_crash_interceptor() {
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+        let (tx, rx) = mpsc::channel();
+        interceptor.set_harness_event_sink(tx);
+
+        interceptor
+            .register_osc_handler(1341, "buggy", Box::new(|_| panic!("oh no")))
+            .expect("register");
+
+        // First dispatch triggers a panic. The registry catches it and
+        // disables the handler, returning `None` — the interceptor then
+        // falls through to the "unknown OSC" path and returns `false`.
+        // The critical invariant this test locks down is that the panic
+        // does not escape and does not poison the interceptor: the handler
+        // is marked disabled and the pane keeps processing PTY bytes.
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            &[b"1341", b"first"],
+            true,
+        );
+        assert!(!consumed, "panicking handler should not consume the OSC");
+        assert!(
+            rx.try_recv().is_err(),
+            "no event emitted for panicking handler"
+        );
+        assert!(interceptor.osc_registry().is_disabled(1341));
+
+        // Second dispatch short-circuits inside the registry (the no-op
+        // replacement closure is never called because `is_disabled`
+        // returns early). The interceptor again falls through to "unknown
+        // OSC" and does not consume.
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            &[b"1341", b"second"],
+            true,
+        );
+        assert!(!consumed);
+        assert!(rx.try_recv().is_err());
     }
 }
