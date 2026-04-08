@@ -24,6 +24,17 @@ The daemon uses a **socket-as-lock** pattern -- successful socket bind = ownersh
 
 Key files: `ensure.rs` (entry point), `lifecycle.rs` (state machine), `server.rs` (IPC server), `client.rs` (IPC client), `handoff.rs` (version handoff).
 
+## OS-level trust boundary
+
+The daemon IPC channel (`IpcRequest` / `IpcResponse`) is **not authenticated at the protocol layer**. Any process that can open the daemon socket/pipe can issue mutating operations: `SplitPane`, `KillPane`, `ResizePane`, `SendKeys`, `DestroySession`, `SetWorkspaceState`. The MCP surface enforces trust tiers on top of this, but the native IPC path does not.
+
+Access control is therefore pushed down to the OS:
+
+- **Unix** — `IpcListener::bind` chmods the socket to `0o600` (owner read/write only) immediately after `UnixListener::bind`. If the chmod fails, the bind fails hard and unlinks the socket; we never continue on a world-accessible path. See `crates/therminal-daemon-client/src/ipc_transport.rs` and the `unix_socket_is_mode_0600` unit test.
+- **Windows** — the named pipe is created via `tokio::net::windows::named_pipe::ServerOptions::first_pipe_instance(true).create()` with the **default DACL**. In practice this inherits the creating process token and limits connections to the current user, SYSTEM, and Administrators, but we do not currently construct an explicit owner-only `SECURITY_ATTRIBUTES` via `windows-sys`. Treat the Windows pipe as reachable by any code running under the same user account. A proper owner-only SECURITY_DESCRIPTOR is tracked as a follow-up.
+
+**Rule for contributors**: when adding new destructive or privileged operations to `dispatch_ipc`, do not rely solely on "the socket is 0600" as a justification. Consider whether the operation also needs protocol-layer trust enforcement (e.g. a `TrustTier` check), especially for anything that can damage user data, exfiltrate pane content off-box, or execute commands in non-therminal contexts. OS-level access control is the *floor*, not the ceiling.
+
 ## IPC Protocol
 
 The daemon exposes a multiplexed IPC protocol over Unix domain sockets with length-prefixed MessagePack framing.

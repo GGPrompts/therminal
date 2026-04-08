@@ -77,11 +77,21 @@ impl IpcListener {
                 format!("failed to bind daemon socket: {}", socket_path.display())
             })?;
 
-            // Owner-only permissions.
+            // Owner-only permissions (rw-------). This is the OS-level trust
+            // boundary for the daemon IPC: the wire protocol itself is
+            // unauthenticated, so only the daemon's own user must be able to
+            // connect. If chmod fails we MUST NOT continue with a potentially
+            // world-accessible socket — unlink and bail.
             {
                 use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o700);
-                let _ = std::fs::set_permissions(socket_path, perms);
+                let perms = std::fs::Permissions::from_mode(0o600);
+                if let Err(e) = std::fs::set_permissions(socket_path, perms) {
+                    let _ = std::fs::remove_file(socket_path);
+                    return Err(anyhow::anyhow!(
+                        "failed to chmod 0600 daemon socket {}: {e}",
+                        socket_path.display()
+                    ));
+                }
             }
 
             Ok(Self { inner })
@@ -91,6 +101,18 @@ impl IpcListener {
         {
             use tokio::net::windows::named_pipe::ServerOptions;
 
+            // SECURITY (tn-or4c): the Windows named pipe is currently
+            // created with the default DACL. On modern Windows this inherits
+            // from the process token and in practice restricts connections
+            // to the current user + SYSTEM + Administrators, but we do NOT
+            // construct an explicit SECURITY_ATTRIBUTES here, so this is
+            // weaker than the Unix 0o600 socket. Locking it down further
+            // requires a hand-rolled SECURITY_DESCRIPTOR via windows-sys
+            // (owner-only ACE). Until that lands, the daemon IPC on Windows
+            // relies on the default token DACL as its trust boundary, and
+            // should be considered reachable by any process running as the
+            // same user. See crates/therminal-daemon/CLAUDE.md
+            // "OS-level trust boundary" for the full discussion.
             let pipe_name = socket_path.to_string_lossy().into_owned();
             let first = ServerOptions::new()
                 .first_pipe_instance(true)
@@ -205,6 +227,33 @@ pub fn cleanup_socket(socket_path: &Path) {
     #[cfg(windows)]
     {
         let _ = socket_path;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn unix_socket_is_mode_0600() {
+        let tmp = std::env::temp_dir().join(format!(
+            "therminal-ipc-perm-test-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+
+        let _listener = IpcListener::bind(&tmp).expect("bind listener");
+
+        let meta = std::fs::metadata(&tmp).expect("stat socket");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "daemon socket must be mode 0600, got {:o}",
+            mode
+        );
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
