@@ -550,6 +550,26 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::TagPane { pane_id, tags } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.tag_pane(*pane_id, tags.clone()) {
+                Ok(merged) => IpcResponse::PaneTagged {
+                    pane_id: *pane_id,
+                    tags: merged,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::UntagPane { pane_id, keys } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.untag_pane(*pane_id, keys.clone()) {
+                Ok(remaining) => IpcResponse::PaneTagged {
+                    pane_id: *pane_id,
+                    tags: remaining,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
         IpcRequest::CapturePaneState { pane_id } => {
             let mgr = session_mgr.lock().await;
             match mgr.capture_pane_state(*pane_id) {

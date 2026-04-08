@@ -5,6 +5,8 @@
 //! They are MessagePack-serialized over Unix sockets with 4-byte
 //! big-endian length-prefixed framing.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{PaneId, SessionId, WorkspaceId};
@@ -146,6 +148,21 @@ pub enum IpcRequest {
         cols: u16,
         rows: u16,
     },
+    /// Merge opaque key/value tags into a pane's metadata.
+    ///
+    /// Existing keys with the same name are overwritten; keys not present
+    /// in `tags` are left untouched. Tags are opaque strings — therminal
+    /// does not validate or interpret them. See tn-bbvf.
+    TagPane {
+        pane_id: PaneId,
+        tags: HashMap<String, String>,
+    },
+    /// Remove tags from a pane. `keys = None` clears all tags; `Some(list)`
+    /// removes only the named keys (no-op for keys that aren't set).
+    UntagPane {
+        pane_id: PaneId,
+        keys: Option<Vec<String>>,
+    },
     /// Capture a full structured snapshot of a pane's terminal state —
     /// mode flags, cursor, dimensions, and visible grid contents — so a
     /// freshly-attached GUI client can replay it onto a local `Term`
@@ -231,6 +248,12 @@ pub enum IpcResponse {
     },
     /// Structured pane state snapshot (response to `CapturePaneState`).
     PaneStateCaptured { snapshot: PaneStateSnapshot },
+    /// Tags for a pane were updated (response to `TagPane` / `UntagPane`).
+    /// Returns the full set of tags currently bound to the pane.
+    PaneTagged {
+        pane_id: PaneId,
+        tags: HashMap<String, String>,
+    },
     /// Generic error response.
     Error { message: String },
 }
@@ -462,6 +485,10 @@ pub struct PersistedPane {
     pub cols: u16,
     /// Terminal rows at time of save.
     pub rows: u16,
+    /// Opaque key/value tags attached to this pane (tn-bbvf). Survives
+    /// daemon restarts via session-state persistence.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tags: HashMap<String, String>,
 }
 
 /// Persisted metadata for a session.
@@ -968,6 +995,85 @@ mod tests {
         assert!(bytes.windows(8).any(|w| w == b"\x1b[?1006h"));
         // Clear screen.
         assert!(bytes.windows(4).any(|w| w == b"\x1b[2J"));
+    }
+
+    #[test]
+    fn tag_pane_request_round_trip() {
+        let mut tags = HashMap::new();
+        tags.insert("issue_id".to_string(), "tn-bbvf".to_string());
+        tags.insert("branch".to_string(), "feat/tags".to_string());
+        let msg = IpcMessage::Request {
+            request_id: 11,
+            payload: IpcRequest::TagPane {
+                pane_id: 7,
+                tags: tags.clone(),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn untag_pane_request_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 12,
+            payload: IpcRequest::UntagPane {
+                pane_id: 7,
+                keys: Some(vec!["issue_id".into()]),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+
+        let msg_clear = IpcMessage::Request {
+            request_id: 13,
+            payload: IpcRequest::UntagPane {
+                pane_id: 7,
+                keys: None,
+            },
+        };
+        let encoded = encode_ipc(&msg_clear).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg_clear, decoded);
+    }
+
+    #[test]
+    fn pane_tagged_response_round_trip() {
+        let mut tags = HashMap::new();
+        tags.insert("k".to_string(), "v".to_string());
+        let msg = IpcMessage::Response {
+            request_id: 14,
+            payload: IpcResponse::PaneTagged { pane_id: 7, tags },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn persisted_pane_tags_round_trip() {
+        let mut tags = HashMap::new();
+        tags.insert("issue_id".to_string(), "tn-bbvf".to_string());
+        let pane = PersistedPane {
+            cwd: "/tmp".into(),
+            shell: String::new(),
+            cols: 80,
+            rows: 24,
+            tags,
+        };
+        let json = serde_json::to_string(&pane).unwrap();
+        let parsed: PersistedPane = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.tags.get("issue_id").map(String::as_str),
+            Some("tn-bbvf")
+        );
+
+        // Legacy data without `tags` should still parse.
+        let legacy = r#"{"cwd":"/x","shell":"","cols":80,"rows":24}"#;
+        let parsed: PersistedPane = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.tags.is_empty());
     }
 
     #[test]

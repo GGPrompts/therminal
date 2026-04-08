@@ -87,6 +87,7 @@ pub fn snapshot(mgr: &SessionManager) -> PersistedState {
                     shell: pane.shell().to_owned(),
                     cols: pane.cols(),
                     rows: pane.rows(),
+                    tags: pane.tags(),
                 });
             }
         }
@@ -183,12 +184,14 @@ mod tests {
                         shell: String::new(),
                         cols: 120,
                         rows: 40,
+                        tags: Default::default(),
                     },
                     PersistedPane {
                         cwd: "/tmp".into(),
                         shell: "/bin/zsh".into(),
                         cols: 80,
                         rows: 24,
+                        tags: Default::default(),
                     },
                 ],
                 workspaces: vec![],
@@ -227,6 +230,7 @@ mod tests {
                     shell: String::new(),
                     cols: 80,
                     rows: 24,
+                    tags: Default::default(),
                 }],
                 workspaces: vec![],
                 active_workspace: 1,
@@ -267,6 +271,7 @@ mod tests {
                     shell: String::new(),
                     cols: 80,
                     rows: 24,
+                    tags: Default::default(),
                 }],
                 workspaces: vec![],
                 active_workspace: 1,
@@ -303,12 +308,14 @@ mod tests {
                         shell: "/bin/sh".into(),
                         cols: 80,
                         rows: 24,
+                        tags: Default::default(),
                     },
                     PersistedPane {
                         cwd: "/var".into(),
                         shell: String::new(),
                         cols: 120,
                         rows: 40,
+                        tags: Default::default(),
                     },
                 ],
                 workspaces: vec![],

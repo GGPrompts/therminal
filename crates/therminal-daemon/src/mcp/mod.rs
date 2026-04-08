@@ -89,6 +89,31 @@ pub(super) struct PaneIdParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct TagPaneParam {
+    /// The numeric pane ID to tag.
+    pub(super) pane_id: u64,
+    /// Opaque key/value tags to merge into the pane's tag set. Existing
+    /// keys with the same name are overwritten; keys not present here are
+    /// left untouched. Therminal does not interpret tag values.
+    pub(super) tags: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct UntagPaneParam {
+    /// The numeric pane ID to untag.
+    pub(super) pane_id: u64,
+    /// Tag keys to remove. If omitted, all tags on the pane are cleared.
+    pub(super) keys: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct PaneTagsResult {
+    pub(super) pane_id: u64,
+    /// Full tag set currently bound to the pane after the operation.
+    pub(super) tags: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ListPanesParam {
     /// Optional session ID to filter panes by. If omitted, returns panes from all sessions.
     pub(super) session_id: Option<u64>,
@@ -260,6 +285,11 @@ pub(super) struct PaneInfo {
     /// `AgentRegistry`). `None` when no agent is detected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) agent_name: Option<String>,
+    /// Opaque key/value tags bound to this pane (tn-bbvf). Empty when
+    /// no tags have been set. Set/cleared via `terminal.panes.tag` and
+    /// `terminal.panes.untag`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(super) tags: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -986,6 +1016,14 @@ impl ServerHandler for TherminalMcpServer {
                 let params: WriteToPaneParam = parse_args(args)?;
                 self.handle_write_to_pane(params).await
             }
+            "terminal.panes.tag" => {
+                let params: TagPaneParam = parse_args(args)?;
+                self.handle_tag_pane(params).await
+            }
+            "terminal.panes.untag" => {
+                let params: UntagPaneParam = parse_args(args)?;
+                self.handle_untag_pane(params).await
+            }
             "terminal.panes.get_geometry" => {
                 let params: GetPaneGeometryParam = parse_args(args)?;
                 self.handle_get_pane_geometry(params).await
@@ -1531,11 +1569,11 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 21 tools must be returned.
+    /// Lock in the count: exactly 23 tools must be returned.
     #[test]
-    fn tool_definitions_returns_21_tools() {
+    fn tool_definitions_returns_23_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 21, "expected exactly 21 tool definitions");
+        assert_eq!(tools.len(), 23, "expected exactly 23 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1553,6 +1591,8 @@ pub(crate) mod tests {
             "terminal.panes.destroy",
             "terminal.panes.list",
             "terminal.panes.write",
+            "terminal.panes.tag",
+            "terminal.panes.untag",
             "terminal.panes.get_geometry",
             "terminal.panes.get_content",
             "terminal.semantic.query_history",
@@ -1811,6 +1851,7 @@ pub(crate) mod tests {
             cwd: Some("/home/user/proj".to_string()),
             last_exit_code: Some(0),
             agent_name: Some("claude-code".to_string()),
+            tags: Default::default(),
         };
         let v = serde_json::to_value(&info).expect("serialize");
         assert_eq!(v["pane_id"], 1);
@@ -1833,6 +1874,7 @@ pub(crate) mod tests {
             cwd: None,
             last_exit_code: None,
             agent_name: None,
+            tags: Default::default(),
         };
         let v = serde_json::to_value(&info).expect("serialize");
         // None fields are skipped entirely for backward compatibility.
@@ -1859,6 +1901,7 @@ pub(crate) mod tests {
             cwd: Some("/tmp".to_string()),
             last_exit_code: Some(127),
             agent_name: None,
+            tags: Default::default(),
         };
         let v = serde_json::to_value(&info).expect("serialize");
         assert_eq!(v["last_exit_code"], 127);

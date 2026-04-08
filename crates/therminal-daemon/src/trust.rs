@@ -56,9 +56,11 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.agents.get_details"
         | "terminal.agents.get_status"
         | "terminal.agents.find_with_capacity" => Some(ToolCategory::Observer),
-        "terminal.sessions.create" | "terminal.panes.write" | "terminal.panes.create" => {
-            Some(ToolCategory::Writer)
-        }
+        "terminal.sessions.create"
+        | "terminal.panes.write"
+        | "terminal.panes.create"
+        | "terminal.panes.tag"
+        | "terminal.panes.untag" => Some(ToolCategory::Writer),
         "terminal.sessions.destroy" | "terminal.panes.destroy" => Some(ToolCategory::Admin),
         _ => None,
     }

@@ -77,7 +77,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (21 tools):
+Tools exposed (23 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -91,6 +91,8 @@ Tools exposed (21 tools):
 | `terminal.panes.get_content` | Observer | Read visible grid snapshot with cursor position |
 | `terminal.panes.get_geometry` | Observer | Get pane dimensions and split feasibility |
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
+| `terminal.panes.tag` | Writer | Merge opaque key/value tags into a pane's metadata (tn-bbvf). Tags are arbitrary strings — therminal does not interpret them. Existing keys are overwritten; other keys are left untouched. Tags persist across daemon restarts via `sessions.json`. |
+| `terminal.panes.untag` | Writer | Remove tags from a pane. Omit `keys` to clear all tags; pass a list to remove only the named keys. |
 | `terminal.panes.wait_for_output` | Observer | Wait for output matching a pattern (string/regex) |
 | `terminal.panes.query_events` | Observer | Snapshot recent structured lifecycle events from a pane's in-memory `EventLog` (spawn / status_change / command_start / command_finish / resize / pty_eof / bell). Supports `since_timestamp_secs` and `limit` (default 100). Backed by a per-pane `Arc<Mutex<EventLog>>` ring buffer (5000-entry cap); the JSONL file on disk is never read. |
 | `terminal.semantic.query_history` | Observer | Query semantic region index (Prompt, Command, Output, Error) |

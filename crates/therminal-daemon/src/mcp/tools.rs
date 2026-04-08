@@ -16,12 +16,13 @@ use super::{
     GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo,
     LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult,
     ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult,
-    PaneIdParam, PaneInfo, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
-    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
-    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
-    SessionListResult, SpawnPaneParam, SpawnPaneResult, TherminalMcpServer, WaitForOutputParam,
-    WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
-    build_content_preview, find_first_pane_in_session, find_pane_info, json_content,
+    PaneIdParam, PaneInfo, PaneTagsResult, QueryCommandsParam, QueryCommandsResult,
+    QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult,
+    SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult, SessionIdParam,
+    SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam,
+    TherminalMcpServer, UntagPaneParam, WaitForOutputParam, WaitForOutputResult,
+    WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult, build_content_preview,
+    find_first_pane_in_session, find_pane_info, json_content,
 };
 
 impl TherminalMcpServer {
@@ -231,6 +232,44 @@ impl TherminalMcpServer {
         }
     }
 
+    pub(super) async fn handle_tag_pane(
+        &self,
+        params: TagPaneParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut mgr = self.session_mgr.lock().await;
+        match mgr.tag_pane(params.pane_id, params.tags) {
+            Ok(tags) => {
+                let result = PaneTagsResult {
+                    pane_id: params.pane_id,
+                    tags,
+                };
+                Ok(CallToolResult::success(vec![json_content(&result)?]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "tag_pane failed: {e}"
+            ))])),
+        }
+    }
+
+    pub(super) async fn handle_untag_pane(
+        &self,
+        params: UntagPaneParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut mgr = self.session_mgr.lock().await;
+        match mgr.untag_pane(params.pane_id, params.keys) {
+            Ok(tags) => {
+                let result = PaneTagsResult {
+                    pane_id: params.pane_id,
+                    tags,
+                };
+                Ok(CallToolResult::success(vec![json_content(&result)?]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "untag_pane failed: {e}"
+            ))])),
+        }
+    }
+
     pub(super) async fn handle_list_panes(
         &self,
         params: ListPanesParam,
@@ -251,6 +290,7 @@ impl TherminalMcpServer {
                     };
                     let last_exit_code = pane.last_exit_code();
                     let agent_name = mgr.agent_registry().get(pane.id).map(|e| e.name.clone());
+                    let tags = pane.tags();
                     panes.push(PaneInfo {
                         pane_id: pane.id,
                         session_id: *session_id,
@@ -260,6 +300,7 @@ impl TherminalMcpServer {
                         cwd,
                         last_exit_code,
                         agent_name,
+                        tags,
                     });
                 }
             }
@@ -1059,6 +1100,16 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.panes.write",
             "Write text input to a pane's PTY (send keystrokes or commands to the terminal)",
             schema_for_type::<WriteToPaneParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.tag",
+            "Merge opaque key/value tags into a pane's metadata. Tags are arbitrary strings — therminal does not interpret them — and can be used by external tools (issue trackers, branch-naming conventions, conductor worker IDs) to bind a pane to external concepts. Existing keys are overwritten; keys not present in the request are left untouched. Returns the full tag set after the merge. Tags persist across daemon restarts.",
+            schema_for_type::<TagPaneParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.untag",
+            "Remove tags from a pane. If `keys` is omitted, all tags on the pane are cleared; otherwise only the named keys are removed (no-op for keys that aren't set). Returns the remaining tag set.",
+            schema_for_type::<UntagPaneParam>(),
         ),
         Tool::new(
             "terminal.panes.get_geometry",
