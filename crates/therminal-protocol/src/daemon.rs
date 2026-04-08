@@ -521,10 +521,16 @@ impl PaneStateSnapshot {
         emit_mode(&mut out, "1004", m.focus_in_out);
         // Bracketed paste.
         emit_mode(&mut out, "2004", m.bracketed_paste);
-        // Mouse modes — order matters minimally, but emitting all is safe.
-        emit_mode(&mut out, "1000", m.mouse_report_click);
-        emit_mode(&mut out, "1002", m.mouse_drag);
-        emit_mode(&mut out, "1003", m.mouse_motion);
+        // Mouse modes ?1000/?1002/?1003 share a single mutually-exclusive
+        // bitmask in alacritty, so emit only the highest active mode. A
+        // fresh local Term defaults to all-off, so no DECRSTs are needed.
+        if m.mouse_motion {
+            emit_mode(&mut out, "1003", true);
+        } else if m.mouse_drag {
+            emit_mode(&mut out, "1002", true);
+        } else if m.mouse_report_click {
+            emit_mode(&mut out, "1000", true);
+        }
         emit_mode(&mut out, "1006", m.sgr_mouse);
         // Alt screen (after mouse so the screen we paint into is correct).
         emit_mode(&mut out, "1049", m.alt_screen);
@@ -543,7 +549,20 @@ impl PaneStateSnapshot {
         for (i, row) in self.grid_chars.iter().enumerate() {
             let line_no = i + 1;
             out.extend_from_slice(format!("\x1b[{line_no};1H").as_bytes());
-            out.extend_from_slice(row.as_bytes());
+            // Sanitize: replace any C0/DEL/C1 control chars with space so a
+            // stray ESC (or other control) in the captured grid can't be
+            // re-interpreted by the local Term's VTE parser as the start of
+            // an escape sequence on replay.
+            for c in row.chars() {
+                let cp = c as u32;
+                let safe = if cp < 0x20 || cp == 0x7F || (0x80..=0x9F).contains(&cp) {
+                    ' '
+                } else {
+                    c
+                };
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(safe.encode_utf8(&mut buf).as_bytes());
+            }
         }
 
         // Final cursor position (1-based).

@@ -251,8 +251,18 @@ pub(crate) fn build_remote_pane_state(
     // flag stays false and the tn-wlu6 ESC[2J heuristic below remains
     // in charge.
     let snapshot_applied = Arc::new(AtomicBool::new(false));
+    // tn-zamd review fixup: while the CapturePaneState RPC is in flight,
+    // the tn-wlu6 ESC[2J fast path must NOT independently transition out
+    // of buffering — otherwise it can flush live post-clear bytes to the
+    // worker before the snapshot replay arrives, and the snapshot would
+    // then clobber the fresh live state. `snapshot_pending` starts true
+    // and is cleared by the main thread once the RPC has resolved (success
+    // OR failure OR timeout), at which point the ESC[2J path is allowed
+    // to act as the fallback.
+    let snapshot_pending = Arc::new(AtomicBool::new(true));
     let byte_tx_for_main = byte_tx.clone();
     let snapshot_applied_for_forwarder = Arc::clone(&snapshot_applied);
+    let snapshot_pending_for_forwarder = Arc::clone(&snapshot_pending);
     let shutdown_for_forwarder = Arc::clone(&shutdown);
     let forwarder_socket = daemon_socket.clone();
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
@@ -324,25 +334,35 @@ pub(crate) fn build_remote_pane_state(
             // While buffering, race the recv against the buffer deadline so
             // we flush even if no new bytes arrive (e.g. plain shell idle).
             let event = if buffering {
-                let now = std::time::Instant::now();
-                if now >= buffer_deadline {
-                    debug!(
-                        remote_pane_id,
-                        chunks = pre_clear_buffer.len(),
-                        "tn-wlu6: pre-clear window expired without ESC[2J, flushing buffer"
-                    );
-                    for chunk in pre_clear_buffer.drain(..) {
-                        if !send_bytes(chunk) {
-                            return;
-                        }
-                    }
-                    buffering = false;
+                let snapshot_done = !snapshot_pending_for_forwarder.load(Ordering::Acquire);
+                if !snapshot_done {
+                    // tn-zamd review fixup: while the CapturePaneState RPC is
+                    // still in flight, ignore the tn-wlu6 deadline entirely —
+                    // the snapshot replay path will set snapshot_applied (or
+                    // clear snapshot_pending on failure) and the loop top will
+                    // then take over.
                     sub_client.recv_event().await
                 } else {
-                    let remaining = buffer_deadline - now;
-                    match tokio::time::timeout(remaining, sub_client.recv_event()).await {
-                        Ok(ev) => ev,
-                        Err(_) => continue, // deadline hit; loop top will flush
+                    let now = std::time::Instant::now();
+                    if now >= buffer_deadline {
+                        debug!(
+                            remote_pane_id,
+                            chunks = pre_clear_buffer.len(),
+                            "tn-wlu6: pre-clear window expired without ESC[2J, flushing buffer"
+                        );
+                        for chunk in pre_clear_buffer.drain(..) {
+                            if !send_bytes(chunk) {
+                                return;
+                            }
+                        }
+                        buffering = false;
+                        sub_client.recv_event().await
+                    } else {
+                        let remaining = buffer_deadline - now;
+                        match tokio::time::timeout(remaining, sub_client.recv_event()).await {
+                            Ok(ev) => ev,
+                            Err(_) => continue, // deadline hit; loop top will flush
+                        }
                     }
                 }
             } else {
@@ -354,9 +374,15 @@ pub(crate) fn build_remote_pane_state(
                     if pane_id == remote_pane_id =>
                 {
                     if buffering {
-                        // Scan this chunk for ESC[2J. If present, drop the
+                        // tn-zamd review fixup: gate the ESC[2J fast path on
+                        // the snapshot RPC having resolved. Otherwise we may
+                        // race the main-thread snapshot replay and end up
+                        // clobbering fresh live state with stale snapshot.
+                        let snapshot_done = !snapshot_pending_for_forwarder.load(Ordering::Acquire);
+                        // Scan this chunk for ESC[2J. If present (and the
+                        // snapshot path is no longer in play), drop the
                         // buffered prefix and forward from the clear onward.
-                        if let Some(pos) = find_subsequence(&data, ESC_2J) {
+                        if snapshot_done && let Some(pos) = find_subsequence(&data, ESC_2J) {
                             debug!(
                                 remote_pane_id,
                                 dropped_chunks = pre_clear_buffer.len(),
@@ -423,13 +449,18 @@ pub(crate) fn build_remote_pane_state(
                 // Feed the synthesized bytes directly into the worker
                 // thread, ahead of any live bytes the forwarder has
                 // buffered (which we're about to drop).
-                if byte_tx_for_main.send(bytes).is_err() {
+                // tn-zamd review fixup: only mark the snapshot applied if
+                // the worker actually received the replay bytes. Otherwise
+                // the forwarder would drop its buffer for nothing and the
+                // pane would end up blank.
+                if byte_tx_for_main.send(bytes).is_ok() {
+                    snapshot_applied.store(true, Ordering::Release);
+                } else {
                     warn!(
                         remote_pane_id,
                         "tn-zamd: worker channel closed before snapshot replay"
                     );
                 }
-                snapshot_applied.store(true, Ordering::Release);
             }
             Ok(Err(e)) => {
                 warn!(remote_pane_id, error = %e, "tn-zamd: CapturePaneState failed; falling back to tn-wlu6 heuristic");
@@ -441,6 +472,10 @@ pub(crate) fn build_remote_pane_state(
                 );
             }
         }
+        // tn-zamd review fixup: regardless of outcome, the snapshot path is
+        // no longer pending. Releasing this flag lets the forwarder's
+        // tn-wlu6 ESC[2J fast path / deadline flush take over as fallback.
+        snapshot_pending.store(false, Ordering::Release);
     }
 
     // ── 5. Spawn the tokio writer task: drain input_tx → SendKeys ──────
