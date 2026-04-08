@@ -27,7 +27,7 @@ use therminal_terminal::osc633::{CommandBlock, CommandTracker};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler, TermSize};
 use therminal_terminal::region_index::RegionIndex;
 use therminal_terminal::state_inference::{
-    AgentDetailsSnapshot, AgentStateInference, InferenceConfig,
+    AgentCadenceSnapshot, AgentDetailsSnapshot, AgentStateInference, InferenceConfig,
 };
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -510,6 +510,18 @@ impl Pane {
         self.inference
             .lock()
             .map(|inf| inf.snapshot())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot the per-pane output cadence window. Returns a plain DTO
+    /// suitable for serialising into the MCP `terminal.agents.get_cadence`
+    /// response. Holds the inference lock only for the duration of the
+    /// snapshot build (sample timestamps converted to wall-clock seconds
+    /// before the lock is released).
+    pub fn agent_cadence_snapshot(&self) -> AgentCadenceSnapshot {
+        self.inference
+            .lock()
+            .map(|inf| inf.cadence_snapshot())
             .unwrap_or_default()
     }
 
@@ -1198,6 +1210,21 @@ impl SessionManager {
             for window in &session.windows {
                 if let Some(pane) = window.pane(pane_id) {
                     return Some(pane.agent_details_snapshot());
+                }
+            }
+        }
+        None
+    }
+
+    /// Snapshot a pane's output cadence window by pane ID. Returns `None`
+    /// if the pane does not exist. The DTO is plain owned data with sample
+    /// timestamps already converted to wall-clock Unix seconds, so the
+    /// caller can serialise it after the session-manager lock is released.
+    pub fn pane_agent_cadence(&self, pane_id: PaneId) -> Option<AgentCadenceSnapshot> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.agent_cadence_snapshot());
                 }
             }
         }

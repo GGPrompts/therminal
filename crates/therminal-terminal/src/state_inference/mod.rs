@@ -62,6 +62,55 @@ pub struct AgentDetailsSnapshot {
     pub last_command_duration_ms: Option<i64>,
 }
 
+/// Plain-data snapshot of the inference engine's output cadence window.
+///
+/// Returned by [`AgentStateInference::cadence_snapshot`] so the daemon's MCP
+/// `terminal.agents.get_cadence` handler can serve cadence metrics without
+/// exposing the internal `VecDeque<ByteChunkStats>` or holding the
+/// inference lock during serialisation. Sample timestamps are converted from
+/// monotonic `Instant` to wall-clock Unix epoch seconds at snapshot time so
+/// the result is meaningful when crossing process boundaries.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentCadenceSnapshot {
+    /// Number of chunks currently in the sliding window.
+    pub chunk_count: usize,
+    /// Average inter-chunk arrival interval in milliseconds. `0.0` when
+    /// fewer than two chunks have been observed.
+    pub avg_arrival_ms: f32,
+    /// Largest gap between consecutive chunks in milliseconds. `0.0` when
+    /// fewer than two chunks have been observed.
+    pub max_gap_ms: f32,
+    /// True when recent output looks like a spinner (cursor-control-heavy,
+    /// low visible text per chunk).
+    pub is_spinner: bool,
+    /// True when recent output is a sustained high-throughput stream
+    /// (>500 visible chars/sec for at least 2 seconds, no backspaces).
+    pub is_streaming: bool,
+    /// Most recent samples (oldest first), capped at
+    /// [`AgentCadenceSnapshot::MAX_RECENT_SAMPLES`].
+    pub recent_samples: Vec<CadenceSampleSnapshot>,
+}
+
+impl AgentCadenceSnapshot {
+    /// Maximum number of recent samples returned in a snapshot. The internal
+    /// chunk-stats window is capped at 20 today, but this constant exists so
+    /// the public DTO contract does not change if the internal cap grows.
+    pub const MAX_RECENT_SAMPLES: usize = 50;
+}
+
+/// One chunk-arrival sample as exposed via [`AgentCadenceSnapshot`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CadenceSampleSnapshot {
+    /// Wall-clock arrival time in Unix epoch seconds, computed at snapshot
+    /// time from the chunk's monotonic `Instant`.
+    pub timestamp_secs: u64,
+    /// Number of bytes in the chunk.
+    pub bytes: usize,
+    /// Gap from the previous chunk in milliseconds. `0.0` for the first
+    /// sample in the window.
+    pub gap_ms: f32,
+}
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
@@ -306,6 +355,92 @@ impl AgentStateInference {
             last_exit_code: self.last_exit_code,
             last_command_duration_ms: self.last_command_duration_ms,
         }
+    }
+
+    /// Build a plain-data snapshot of the output cadence window.
+    ///
+    /// Computes summary metrics (avg arrival, max gap, spinner / streaming
+    /// classification) from the internal `chunk_stats` window and returns a
+    /// trimmed list of recent samples capped at
+    /// [`AgentCadenceSnapshot::MAX_RECENT_SAMPLES`]. Sample timestamps are
+    /// converted from monotonic `Instant`s to wall-clock Unix-epoch seconds
+    /// using the supplied `now_*` references — taking them as parameters
+    /// keeps this function deterministic for tests and avoids syscalls under
+    /// the inference lock when the daemon already holds wall-clock state.
+    ///
+    /// The DTO is intentionally plain (no internal `VecDeque` exposure) so
+    /// it can be sent over IPC / serialised by MCP without dragging private
+    /// types across the crate boundary.
+    pub fn cadence_snapshot_at(
+        &self,
+        now_instant: Instant,
+        now_unix_secs: u64,
+    ) -> AgentCadenceSnapshot {
+        let chunk_count = self.chunk_stats.len();
+
+        // Inter-chunk gaps in milliseconds. `intervals[i]` is the gap
+        // between `chunk_stats[i]` and `chunk_stats[i + 1]`. Empty when
+        // fewer than two chunks have been observed.
+        let intervals: Vec<f32> = self
+            .chunk_stats
+            .iter()
+            .zip(self.chunk_stats.iter().skip(1))
+            .map(|(a, b)| b.timestamp.duration_since(a.timestamp).as_secs_f32() * 1000.0)
+            .collect();
+
+        let avg_arrival_ms = if intervals.is_empty() {
+            0.0
+        } else {
+            intervals.iter().sum::<f32>() / intervals.len() as f32
+        };
+        let max_gap_ms = intervals.iter().copied().fold(0.0_f32, f32::max);
+
+        // Build the recent-sample list. Each sample's wall-clock seconds is
+        // computed by subtracting the chunk's age (now_instant - chunk
+        // timestamp) from the supplied `now_unix_secs`. The first sample's
+        // gap is 0.0; every subsequent sample's gap mirrors `intervals`.
+        let take_n = chunk_count.min(AgentCadenceSnapshot::MAX_RECENT_SAMPLES);
+        let skip_n = chunk_count.saturating_sub(take_n);
+        let mut recent_samples: Vec<CadenceSampleSnapshot> = Vec::with_capacity(take_n);
+        let mut prev_ts: Option<Instant> = None;
+        for chunk in self.chunk_stats.iter().skip(skip_n) {
+            let age_secs = now_instant
+                .checked_duration_since(chunk.timestamp)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let timestamp_secs = now_unix_secs.saturating_sub(age_secs);
+            let gap_ms = match prev_ts {
+                Some(prev) => chunk.timestamp.duration_since(prev).as_secs_f32() * 1000.0,
+                None => 0.0,
+            };
+            recent_samples.push(CadenceSampleSnapshot {
+                timestamp_secs,
+                bytes: chunk.byte_count,
+                gap_ms,
+            });
+            prev_ts = Some(chunk.timestamp);
+        }
+
+        AgentCadenceSnapshot {
+            chunk_count,
+            avg_arrival_ms,
+            max_gap_ms,
+            is_spinner: is_spinner_pattern(&self.chunk_stats),
+            is_streaming: is_streaming_cadence(&self.chunk_stats),
+            recent_samples,
+        }
+    }
+
+    /// Convenience wrapper around [`Self::cadence_snapshot_at`] that uses
+    /// the system clock at the moment of the call. Suitable for production
+    /// callers (e.g. the daemon's MCP handler); tests prefer the explicit
+    /// `_at` form so they can pin both clocks.
+    pub fn cadence_snapshot(&self) -> AgentCadenceSnapshot {
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.cadence_snapshot_at(Instant::now(), now_unix_secs)
     }
 
     /// Get the effective agent type (config override > detected > None).
@@ -691,6 +826,77 @@ mod tests {
         let engine = make_engine(None);
         let snap = engine.snapshot();
         assert_eq!(snap, AgentDetailsSnapshot::default());
+    }
+
+    #[test]
+    fn cadence_snapshot_default_for_fresh_engine() {
+        // A brand-new engine should yield zero defaults / empty samples.
+        // Same fallback the daemon's MCP `terminal.agents.get_cadence`
+        // handler relies on for panes that have not received any PTY
+        // bytes yet.
+        let engine = make_engine(None);
+        let snap = engine.cadence_snapshot();
+        assert_eq!(snap.chunk_count, 0);
+        assert_eq!(snap.avg_arrival_ms, 0.0);
+        assert_eq!(snap.max_gap_ms, 0.0);
+        assert!(!snap.is_spinner);
+        assert!(!snap.is_streaming);
+        assert!(snap.recent_samples.is_empty());
+    }
+
+    #[test]
+    fn cadence_snapshot_computes_avg_and_max_gap() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+        // 4 chunks at +0ms / +50ms / +250ms / +300ms.
+        engine.feed_bytes_at(b"abc", t0);
+        engine.feed_bytes_at(b"defgh", t0 + Duration::from_millis(50));
+        engine.feed_bytes_at(b"ij", t0 + Duration::from_millis(250));
+        engine.feed_bytes_at(b"klmno", t0 + Duration::from_millis(300));
+
+        // Snapshot at a fixed wall-clock for determinism.
+        let snap = engine.cadence_snapshot_at(t0 + Duration::from_millis(310), 1_700_000_000);
+
+        assert_eq!(snap.chunk_count, 4);
+        // Intervals: 50, 200, 50  -> avg = 100ms, max = 200ms.
+        assert!((snap.avg_arrival_ms - 100.0).abs() < 0.01);
+        assert!((snap.max_gap_ms - 200.0).abs() < 0.01);
+        assert_eq!(snap.recent_samples.len(), 4);
+        assert_eq!(snap.recent_samples[0].bytes, 3);
+        // First sample's gap is 0.0 by contract.
+        assert_eq!(snap.recent_samples[0].gap_ms, 0.0);
+        assert!((snap.recent_samples[1].gap_ms - 50.0).abs() < 0.01);
+        assert!((snap.recent_samples[2].gap_ms - 200.0).abs() < 0.01);
+        assert!((snap.recent_samples[3].gap_ms - 50.0).abs() < 0.01);
+        // Wall-clock conversion: chunk t0 is 0ms behind now (310 - 0 = 310ms),
+        // chunk t0+50 is 260ms behind, etc. Truncated to whole seconds, all
+        // four chunks should report `now_unix_secs` (since 310ms < 1s).
+        for sample in &snap.recent_samples {
+            assert_eq!(sample.timestamp_secs, 1_700_000_000);
+        }
+    }
+
+    #[test]
+    fn cadence_snapshot_recent_samples_capped() {
+        // Even though the internal chunk window is capped at 20 today, the
+        // public DTO contract caps `recent_samples` at 50 — verify the cap
+        // is honoured. We feed 30 chunks (a bit above the internal cap so
+        // the engine evicts down to 20) and confirm the snapshot returns
+        // at most 50 samples and does NOT exceed the internal window.
+        let mut engine = make_engine(Some(AgentType::Claude));
+        let t0 = Instant::now();
+        for i in 0..30u64 {
+            engine.feed_bytes_at(b"xx", t0 + Duration::from_millis(i * 10));
+        }
+        let snap = engine.cadence_snapshot_at(t0 + Duration::from_millis(310), 1_700_000_000);
+        assert!(
+            snap.recent_samples.len() <= AgentCadenceSnapshot::MAX_RECENT_SAMPLES,
+            "recent_samples must not exceed MAX_RECENT_SAMPLES",
+        );
+        // Internal window cap is MAX_CHUNK_STATS = 20, so chunk_count
+        // should be 20 here and the samples list should match.
+        assert_eq!(snap.chunk_count, 20);
+        assert_eq!(snap.recent_samples.len(), 20);
     }
 
     #[test]

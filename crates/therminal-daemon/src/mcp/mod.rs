@@ -562,6 +562,54 @@ pub(super) struct AgentDetailsResult {
     pub(super) last_command_duration_ms: Option<u64>,
 }
 
+/// One PTY chunk-arrival sample as exposed via `terminal.agents.get_cadence`.
+///
+/// Wall-clock times are computed from the inference engine's monotonic
+/// `Instant` snapshots at the moment the snapshot is built, so they're safe
+/// to serialise across IPC. `gap_ms` is `0.0` for the first sample in the
+/// returned window.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct CadenceSampleResult {
+    /// Wall-clock arrival time, Unix epoch seconds.
+    pub(super) timestamp_secs: u64,
+    /// Number of bytes in the PTY chunk.
+    pub(super) bytes: u64,
+    /// Gap from the previous sample in milliseconds. `0.0` for the first
+    /// sample in the window.
+    pub(super) gap_ms: f32,
+}
+
+/// Output cadence metrics for the agent running in a specific pane.
+///
+/// Returned by `terminal.agents.get_cadence`. Built from the per-pane
+/// `AgentStateInference` engine's chunk-stats sliding window. Fields default
+/// to zero / `false` / empty when the pane has no streaming activity (e.g.
+/// a pane that hasn't received any PTY bytes yet, or a pane whose chunk
+/// window has fewer than two entries to compute intervals from).
+///
+/// `recent_samples` is capped to keep the wire payload bounded —
+/// the underlying chunk window is small (~20 entries today) but the cap
+/// prevents future window growth from leaking unbounded data through MCP.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct AgentCadenceResult {
+    /// Number of chunks currently in the analysis window.
+    pub(super) chunk_count: u64,
+    /// Average inter-chunk arrival interval in milliseconds. `0.0` when
+    /// fewer than two chunks have been observed.
+    pub(super) avg_arrival_ms: f32,
+    /// Largest gap between consecutive chunks in milliseconds. `0.0` when
+    /// fewer than two chunks have been observed.
+    pub(super) max_gap_ms: f32,
+    /// `true` when recent output looks like a spinner pattern
+    /// (cursor-control-heavy, low visible text per chunk).
+    pub(super) is_spinner: bool,
+    /// `true` when recent output is a sustained high-throughput stream
+    /// (>500 visible chars/sec for at least 2 seconds, no backspaces).
+    pub(super) is_streaming: bool,
+    /// Most recent chunk samples (oldest first), capped at 50.
+    pub(super) recent_samples: Vec<CadenceSampleResult>,
+}
+
 /// Dynamic status snapshot for the agent running in a specific pane.
 ///
 /// Strict subset of `AgentDetailsResult` focused on the live mode + capacity
@@ -1102,6 +1150,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_get_agent_status(params).await
             }
+            "terminal.agents.get_cadence" => {
+                let params: PaneIdParam = parse_args(args)?;
+                self.handle_get_agent_cadence(params).await
+            }
             "terminal.agents.find_with_capacity" => {
                 let params: FindWithCapacityParam = parse_args(args)?;
                 self.handle_find_with_capacity(params).await
@@ -1519,6 +1571,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
         ];
         for tool in &observer_tools {
@@ -1635,6 +1688,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.get_cadence",
             // Writer
             "terminal.sessions.create",
             "terminal.panes.write",
@@ -1643,7 +1697,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 20, "expected exactly 20 tools");
+        assert_eq!(all_tools.len(), 21, "expected exactly 21 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -1814,11 +1868,11 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 23 tools must be returned.
+    /// Lock in the count: exactly 24 tools must be returned.
     #[test]
-    fn tool_definitions_returns_23_tools() {
+    fn tool_definitions_returns_24_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 23, "expected exactly 23 tool definitions");
+        assert_eq!(tools.len(), 24, "expected exactly 24 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1850,6 +1904,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
         ];
         for name in &expected {
@@ -2257,6 +2312,143 @@ pub(crate) mod tests {
             .await
             .expect("handler should not error at transport level");
         assert_eq!(result.is_error, Some(true));
+    }
+
+    // ── terminal.agents.get_cadence ─────────────────────────────────────
+
+    /// `terminal.agents.get_cadence` must be advertised in `tool_definitions()`.
+    #[test]
+    fn get_agent_cadence_tool_is_registered() {
+        let defs = super::tools::tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            names.contains(&"terminal.agents.get_cadence"),
+            "tool_definitions missing terminal.agents.get_cadence: {names:?}"
+        );
+    }
+
+    /// Observer-tier enforcement: a Sandboxed-tier caller is permitted to
+    /// call `terminal.agents.get_cadence`, matching the rest of the
+    /// `terminal.agents.*` read surface.
+    #[test]
+    fn sandboxed_agent_can_call_get_agent_cadence() {
+        let server = make_server(sandboxed_config());
+        let agent = agent("sandboxed-bot");
+        assert!(
+            server
+                .enforce_trust("terminal.agents.get_cadence", &agent)
+                .is_ok()
+        );
+    }
+
+    /// Regression-lock the trust class: `get_cadence` must classify as
+    /// Observer so it remains gated by `enforce_trust` even if the
+    /// dispatch arm is reordered.
+    #[test]
+    fn get_agent_cadence_is_observer_tier() {
+        use crate::trust::{ToolCategory, tool_category};
+        assert_eq!(
+            tool_category("terminal.agents.get_cadence"),
+            Some(ToolCategory::Observer)
+        );
+    }
+
+    /// Calling `handle_get_agent_cadence` on a nonexistent pane must
+    /// return a tool error (not a transport error). This matches the
+    /// convention used by `handle_get_agent_details`.
+    #[tokio::test]
+    async fn get_agent_cadence_nonexistent_pane_returns_tool_error() {
+        let server = make_server(trusted_config());
+        let params = super::PaneIdParam { pane_id: 999_999 };
+        let result = server
+            .handle_get_agent_cadence(params)
+            .await
+            .expect("handler should not error at transport level");
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    /// `AgentCadenceResult` with no streaming activity (zero / false /
+    /// empty defaults) must serialise to a stable shape so callers can
+    /// rely on the field set being present.
+    #[test]
+    fn agent_cadence_defaults_serialize_to_zero_shape() {
+        let result = super::AgentCadenceResult {
+            chunk_count: 0,
+            avg_arrival_ms: 0.0,
+            max_gap_ms: 0.0,
+            is_spinner: false,
+            is_streaming: false,
+            recent_samples: Vec::new(),
+        };
+        let v = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(v["chunk_count"], 0);
+        assert_eq!(v["avg_arrival_ms"], 0.0);
+        assert_eq!(v["max_gap_ms"], 0.0);
+        assert_eq!(v["is_spinner"], false);
+        assert_eq!(v["is_streaming"], false);
+        assert!(v["recent_samples"].is_array());
+        assert_eq!(v["recent_samples"].as_array().unwrap().len(), 0);
+    }
+
+    /// End-to-end: a freshly-created pane has no (or trivially little)
+    /// streaming activity, so `handle_get_agent_cadence` must succeed and
+    /// return a structurally valid `AgentCadenceResult`. Validates the
+    /// full plumbing path:
+    /// `SessionManager::pane_agent_cadence` -> `Pane::agent_cadence_snapshot`
+    /// -> `AgentStateInference::cadence_snapshot` -> `AgentCadenceResult`,
+    /// and locks in the `recent_samples` cap so future window growth can't
+    /// silently leak unbounded data through MCP.
+    #[tokio::test]
+    async fn get_agent_cadence_returns_defaults_for_fresh_pane() {
+        let server = make_server(trusted_config());
+        let pane_id = {
+            let mut mgr = server.session_mgr.lock().await;
+            let session_id = mgr
+                .create_session(Some("cadence-test".to_string()))
+                .expect("create session");
+            mgr.iter_sessions()
+                .find(|(id, _)| **id == session_id)
+                .and_then(|(_, s)| s.windows.first())
+                .and_then(|w| w.panes.first())
+                .map(|p| p.id)
+                .expect("session has at least one pane")
+        };
+
+        let result = server
+            .handle_get_agent_cadence(super::PaneIdParam { pane_id })
+            .await
+            .expect("handler should not error at transport level");
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "expected success for live pane"
+        );
+
+        let payload = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("parse json");
+
+        // chunk_count is u64 in the result; freshly-spawned panes will
+        // usually be 0 but a shell prompt might already have arrived, so
+        // we assert structural invariants instead of an exact count.
+        let chunk_count = v["chunk_count"].as_u64().expect("chunk_count is u64");
+        let samples = v["recent_samples"]
+            .as_array()
+            .expect("recent_samples is array");
+        // The cap MUST hold even if a prompt did arrive.
+        assert!(samples.len() <= 50, "recent_samples cap (<=50) violated");
+        // chunk_count and samples.len() should agree up to the cap.
+        assert_eq!(samples.len(), chunk_count.min(50) as usize);
+        // Boolean classification fields must always be present.
+        assert!(v["is_spinner"].is_boolean());
+        assert!(v["is_streaming"].is_boolean());
+        // Numeric metrics must always be present.
+        assert!(v["avg_arrival_ms"].is_number());
+        assert!(v["max_gap_ms"].is_number());
     }
 
     // ── terminal.agents.find_with_capacity ──────────────────────────────

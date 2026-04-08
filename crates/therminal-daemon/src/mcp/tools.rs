@@ -10,17 +10,17 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use tracing::debug;
 
 use super::{
-    AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentStatusResult, CommandInfo,
-    CreateSessionParam, DestroyPaneResult, EmptyParams, EventInfo, FindWithCapacityParam,
-    FindWithCapacityResult, GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam,
-    GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo,
-    LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult,
-    ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult,
-    PaneIdParam, PaneInfo, PaneTagsResult, QueryCommandsParam, QueryCommandsResult,
-    QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult,
-    SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult, SessionIdParam,
-    SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam,
-    TherminalMcpServer, UntagPaneParam, WaitForOutputParam, WaitForOutputResult,
+    AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentStatusResult,
+    CadenceSampleResult, CommandInfo, CreateSessionParam, DestroyPaneResult, EmptyParams,
+    EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetHotspotsParam, GetHotspotsResult,
+    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
+    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
+    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
+    PaneContentResult, PaneIdParam, PaneInfo, PaneTagsResult, QueryCommandsParam,
+    QueryCommandsResult, QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam,
+    QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
+    SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
+    TagPaneParam, TherminalMcpServer, UntagPaneParam, WaitForOutputParam, WaitForOutputResult,
     WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult, build_content_preview,
     find_first_pane_in_session, find_pane_info, json_content,
 };
@@ -442,6 +442,48 @@ impl TherminalMcpServer {
             last_command_duration_ms: snapshot
                 .last_command_duration_ms
                 .and_then(|d| if d < 0 { None } else { Some(d as u64) }),
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return output cadence metrics for the agent running in a pane.
+    ///
+    /// The pane must exist (returns a tool error otherwise). All metric
+    /// fields default to zero / `false` / empty when the pane has no
+    /// streaming activity, so callers can use the result unconditionally
+    /// instead of branching on `Option`s. `recent_samples` is capped at
+    /// 50 entries by the underlying snapshot DTO so the wire payload stays
+    /// bounded even if the chunk-stats window grows in future revisions.
+    pub(super) async fn handle_get_agent_cadence(
+        &self,
+        params: PaneIdParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        let Some(snapshot) = mgr.pane_agent_cadence(params.pane_id) else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "pane not found: {}",
+                params.pane_id
+            ))]));
+        };
+
+        let recent_samples: Vec<CadenceSampleResult> = snapshot
+            .recent_samples
+            .into_iter()
+            .map(|s| CadenceSampleResult {
+                timestamp_secs: s.timestamp_secs,
+                bytes: s.bytes as u64,
+                gap_ms: s.gap_ms,
+            })
+            .collect();
+
+        let result = AgentCadenceResult {
+            chunk_count: snapshot.chunk_count as u64,
+            avg_arrival_ms: snapshot.avg_arrival_ms,
+            max_gap_ms: snapshot.max_gap_ms,
+            is_spinner: snapshot.is_spinner,
+            is_streaming: snapshot.is_streaming,
+            recent_samples,
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
@@ -1169,6 +1211,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         Tool::new(
             "terminal.agents.get_status",
             "Get a dynamic mode + capacity snapshot for the agent in a pane: agent_type, status, current_tool (from AgentRegistry) plus context_percent and model (from PaneCapacityCache). Strict subset of terminal.agents.get_details intended for sibling-agent coordination. Returns an error if neither registry nor capacity data is known for the pane.",
+            schema_for_type::<PaneIdParam>(),
+        ),
+        Tool::new(
+            "terminal.agents.get_cadence",
+            "Get output cadence metrics for the agent in a pane: chunk_count, avg_arrival_ms, max_gap_ms, is_spinner, is_streaming, plus recent_samples (capped at 50, oldest first). Backed by the per-pane AgentStateInference engine's chunk-stats sliding window. Useful for predicting time-to-completion, animating progress, and distinguishing stalled agents from thinking agents. Returns an error only if the pane does not exist; panes with no streaming activity return zero / false / empty defaults.",
             schema_for_type::<PaneIdParam>(),
         ),
         Tool::new(

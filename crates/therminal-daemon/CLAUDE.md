@@ -77,7 +77,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
-Tools exposed (23 tools):
+Tools exposed (24 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -104,6 +104,7 @@ Tools exposed (23 tools):
 | `terminal.agents.find_with_capacity` | Observer | Return agents whose REMAINING context-window capacity (`100 - context_percent`) is at least `threshold_percent`. Iterates `list_agents()`, joins with `pane_capacity()`, sorts descending by `remaining_percent`. Agents with unknown capacity (no `PaneCapacityCache` entry) are INCLUDED — treated as "potentially has capacity" so callers don't accidentally skip fresh panes — and sort last. |
 | `terminal.agents.get_status` | Observer | Dynamic mode + capacity snapshot for a single pane's agent: `pane_id`, `agent_type`, `status`, `current_tool`, `context_percent`, `model`. Strict subset of `get_details` intended for sibling-agent coordination. Combines `AgentRegistry` (mode) with `pane_capacity()` (capacity). Errors when neither lookup yields anything for the pane. |
 | `terminal.agents.get_details` | Observer | Get inference details for a pane's agent: `agent_type`, `model`, `context_percent`, `consecutive_failures`, `last_command`, `last_exit_code`, `last_command_duration_ms`. Backed by a per-pane `AgentStateInference` engine fed from the PTY reader thread; `agent_type` falls back from `AgentRegistry` to the engine's own detection when no registry entry exists. |
+| `terminal.agents.get_cadence` | Observer | Get output cadence metrics for a pane's agent: `chunk_count`, `avg_arrival_ms`, `max_gap_ms`, `is_spinner`, `is_streaming`, plus `recent_samples` (oldest first, capped at 50). Backed by the per-pane `AgentStateInference` engine's chunk-stats sliding window. Sample timestamps are converted from monotonic `Instant` to wall-clock Unix seconds at snapshot time. Useful for predicting time-to-completion, animating progress, and distinguishing stalled vs thinking agents. Returns an error only if the pane does not exist; panes with no streaming activity return zero / false / empty defaults. |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 
