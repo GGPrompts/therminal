@@ -1861,6 +1861,8 @@ pub(crate) mod tests {
             "terminal.agents.get_session_detail",
             "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
+            "terminal.patterns.stats",
+            "terminal.events.stats",
         ];
         for tool in &observer_tools {
             assert!(
@@ -1980,6 +1982,9 @@ pub(crate) mod tests {
             "terminal.agents.get_status",
             "terminal.agents.get_session_detail",
             "terminal.agents.get_cadence",
+            "terminal.agents.find_with_capacity",
+            "terminal.patterns.stats",
+            "terminal.events.stats",
             // Writer
             "terminal.sessions.create",
             "terminal.panes.write",
@@ -1988,7 +1993,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 24, "expected exactly 24 tools");
+        assert_eq!(all_tools.len(), 27, "expected exactly 27 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -2160,10 +2165,11 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 28 tools must be returned. Bumped from
-    /// 27 to 28 in tn-ifee with `terminal.agents.get_session_detail`.
+    /// Lock in the count: exactly 29 tools must be returned. Bumped from
+    /// 27 to 29: +1 in tn-ifee (`terminal.agents.get_session_detail`),
+    /// +1 in tn-xula (`terminal.events.stats`).
     #[test]
-    fn tool_definitions_returns_28_tools() {
+    fn tool_definitions_returns_29_tools() {
         let tools = tool_definitions();
         assert_eq!(tools.len(), 29, "expected exactly 29 tool definitions");
     }

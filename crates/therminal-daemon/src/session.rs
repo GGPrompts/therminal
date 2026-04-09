@@ -2156,6 +2156,7 @@ impl SessionManager {
             ));
         }
         session.active_workspace = workspace_id;
+        // no subscribers is normal — events broadcast to whatever clients are attached
         let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
             session_id,
             active_workspace: workspace_id,

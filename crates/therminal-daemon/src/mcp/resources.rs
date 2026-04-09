@@ -203,7 +203,22 @@ impl TherminalMcpServer {
                 )
             })?;
             let page = bus.query(&filter, MAX_PAGE_SIZE);
-            let json = serde_json::to_string(&page).map_err(|e| {
+            // Back-compat shim: `therminal://claude/events` must return a
+            // flat JSON array of `TaggedAgentEvent`s (matching the pre-bus
+            // wire shape the `claude-events` dev binary deserializes). The
+            // harness→bus bridge (`ensure.rs`) publishes each
+            // `TaggedAgentEvent` as the `body` of a `TerminalEvent`, so
+            // unwrapping `body` per event reproduces the original shape.
+            // The new `terminal://events` URI keeps the structured
+            // `QueryPage { events, next_cursor, has_more }` shape.
+            let json = if uri == CLAUDE_EVENTS_URI {
+                let events: Vec<serde_json::Value> =
+                    page.events.into_iter().map(|e| e.body).collect();
+                serde_json::to_string(&events)
+            } else {
+                serde_json::to_string(&page)
+            }
+            .map_err(|e| {
                 ErrorData::new(
                     ErrorCode::INTERNAL_ERROR,
                     format!("failed to serialize event page: {e}"),
@@ -353,11 +368,19 @@ impl TherminalMcpServer {
         // forwarder runs the filter in-process and applies the SPEC §5 lag
         // cap: subscribers more than `MAX_SUBSCRIBER_LAG` events behind the
         // bus tip get dropped silently with a warn log.
-        let unified_query: Option<String> = if uri == CLAUDE_EVENTS_URI {
-            Some("source_class=harness&source_id=claude".to_string())
+        // Only route to the unified bus when it exists. For the
+        // `CLAUDE_EVENTS_URI` shim, if the bus is absent (test-only
+        // constructor) we fall through to the legacy Claude broadcast path
+        // below so tests exercising `claude_events` without a bus still work.
+        let unified_query: Option<String> = if self.event_bus.is_some() {
+            if uri == CLAUDE_EVENTS_URI {
+                Some("source_class=harness&source_id=claude".to_string())
+            } else {
+                uri.strip_prefix(EVENTS_URI)
+                    .map(|rest| rest.strip_prefix('?').unwrap_or(rest).to_string())
+            }
         } else {
-            uri.strip_prefix(EVENTS_URI)
-                .map(|rest| rest.strip_prefix('?').unwrap_or(rest).to_string())
+            None
         };
         if let Some(query) = unified_query {
             let Some(bus) = self.event_bus.as_ref().cloned() else {

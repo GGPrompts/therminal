@@ -23,7 +23,7 @@
 
 pub mod control;
 pub mod ensure;
-pub mod event_bus;
+pub(crate) mod event_bus;
 #[cfg(unix)]
 pub mod fd_passing;
 pub mod handoff;

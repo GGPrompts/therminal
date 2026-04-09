@@ -175,8 +175,8 @@ pub static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
             // branches B/C) to avoid false positives on `C:\` alone.
             r"[A-Za-z]:[\\/]",
             r"(?:[A-Za-z0-9_\-.]+[\\/])*",
-            r"[A-Za-z0-9_\-.]+",
-            r"(?:\.(?:{ext_any}))?",
+            r"[A-Za-z0-9_\-]+",
+            r"\.(?:{ext_any})",
             r")",
             // Optional :line[:col] suffix applies to all four branches.
             r"(?::\d+(?::\d+)?)?",
@@ -2152,6 +2152,22 @@ kind = "pattern-demo"
             .collect();
         assert_eq!(fp.len(), 1, "expected one match, got {fp:?}");
         assert_eq!(fp[0].text, r"D:\src\main.rs:12:3");
+    }
+
+    #[test]
+    fn windows_path_without_extension_is_not_hotspot() {
+        // Branch D regression: `C:\Users\foo\AppData` (no known file
+        // extension) must not produce a FilePath hotspot. Matches the
+        // "known extension required" rule used by branches B and C.
+        let hotspots = detect(&[r"cd C:\Users\foo\AppData to continue"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert!(
+            fp.is_empty(),
+            "expected no FilePath hotspot for extensionless Windows path, got {fp:?}"
+        );
     }
 
     #[test]

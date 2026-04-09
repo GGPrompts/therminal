@@ -517,6 +517,7 @@ async fn start_daemon(
         let mut rx = claude_tx.subscribe();
         let bus = Arc::clone(&event_bus);
         tokio::spawn(async move {
+            tracing::info!("harness->bus bridge started (claude)");
             loop {
                 match rx.recv().await {
                     Ok(tagged) => {
@@ -532,8 +533,17 @@ async fn start_daemon(
                             body,
                         });
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!(
+                            "harness->bus bridge (claude) exiting: source channel closed"
+                        );
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("harness->bus bridge lagged, skipped {} events", n);
+                        bus.note_dropped_subscriber();
+                        continue;
+                    }
                 }
             }
         });
