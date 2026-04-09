@@ -200,6 +200,7 @@ impl App {
             _config_watcher: config_watcher,
             last_split_direction: crate::pane::SplitDirection::Horizontal,
             show_help_overlay: false,
+            help_overlay_scroll_rows: 0,
             active_menu: None,
             tab_menu_workspace_id: None,
             rename_state: None,

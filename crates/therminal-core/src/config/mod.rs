@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use toml_edit::{DocumentMut, Item, Table};
 use tracing::{info, warn};
 
 use crate::font::FontConfig as CoreFontConfig;
@@ -28,6 +29,114 @@ use crate::palette::Color;
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "therminal.toml";
+
+fn merged_toml_with_existing(existing: &str, replacement: &str) -> Result<String, toml_edit::TomlError> {
+    let mut existing_doc: DocumentMut = existing.parse()?;
+    let replacement_doc: DocumentMut = replacement.parse()?;
+    merge_table(existing_doc.as_table_mut(), replacement_doc.as_table());
+    Ok(existing_doc.to_string())
+}
+
+fn merge_table(dst: &mut Table, src: &Table) {
+    let keys: Vec<String> = src.iter().map(|(k, _)| k.to_string()).collect();
+    for key in keys {
+        let Some(src_item) = src.get(&key) else {
+            continue;
+        };
+
+        match src_item {
+            Item::Table(src_table) => {
+                if !matches!(dst.get(&key), Some(Item::Table(_))) {
+                    dst.insert(&key, Item::Table(src_table.clone()));
+                    continue;
+                }
+                if let Some(Item::Table(dst_table)) = dst.get_mut(&key) {
+                    merge_table(dst_table, src_table);
+                }
+            }
+            Item::Value(src_value) => {
+                if let Some(dst_item) = dst.get_mut(&key)
+                    && let Some(dst_value) = dst_item.as_value_mut()
+                {
+                    *dst_value = src_value.clone();
+                    continue;
+                }
+                dst.insert(&key, src_item.clone());
+            }
+            _ => {
+                dst.insert(&key, src_item.clone());
+            }
+        }
+    }
+}
+
+/// In-memory state machine for settings editing.
+///
+/// Tracks three states:
+/// - `saved`: last persisted config snapshot.
+/// - `draft`: current editable form state.
+/// - `applied`: last runtime-applied state.
+#[derive(Debug, Clone)]
+pub struct ConfigEditSession {
+    saved: TherminalConfig,
+    draft: TherminalConfig,
+    applied: TherminalConfig,
+}
+
+impl ConfigEditSession {
+    /// Initialize an edit session from an already-loaded persisted config.
+    pub fn from_saved(saved: TherminalConfig) -> Self {
+        Self {
+            draft: saved.clone(),
+            applied: saved.clone(),
+            saved,
+        }
+    }
+
+    /// Returns the persisted snapshot captured by this session.
+    pub fn saved(&self) -> &TherminalConfig {
+        &self.saved
+    }
+
+    /// Returns the current mutable draft state.
+    pub fn draft_mut(&mut self) -> &mut TherminalConfig {
+        &mut self.draft
+    }
+
+    /// Returns the current draft state.
+    pub fn draft(&self) -> &TherminalConfig {
+        &self.draft
+    }
+
+    /// Returns the currently applied runtime state.
+    pub fn applied(&self) -> &TherminalConfig {
+        &self.applied
+    }
+
+    /// Apply the draft to runtime state (no disk write).
+    pub fn apply_draft(&mut self) {
+        self.applied = self.draft.clone();
+    }
+
+    /// Persist the draft to `path`, then mark all session states as saved.
+    pub fn save_draft_to(&mut self, path: &Path) -> std::io::Result<()> {
+        self.draft.save_to(path)?;
+        self.saved = self.draft.clone();
+        self.applied = self.draft.clone();
+        Ok(())
+    }
+
+    /// Revert draft + applied back to the last saved snapshot.
+    pub fn discard_draft(&mut self) {
+        self.draft = self.saved.clone();
+        self.applied = self.saved.clone();
+    }
+
+    /// True when draft differs from saved snapshot.
+    pub fn is_dirty(&self) -> bool {
+        toml::to_string(&self.draft).ok() != toml::to_string(&self.saved).ok()
+    }
+}
 
 /// Return the full path to the Therminal config file.
 pub fn config_path() -> PathBuf {
@@ -274,7 +383,15 @@ impl TherminalConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let contents = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let replacement = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let contents = match std::fs::read_to_string(path) {
+            Ok(existing) => match merged_toml_with_existing(&existing, &replacement) {
+                Ok(merged) => merged,
+                Err(_) => replacement,
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => replacement,
+            Err(err) => return Err(err),
+        };
         std::fs::write(path, contents)
     }
 
@@ -1715,6 +1832,67 @@ size = 16.0
         assert!(loaded.terminal.osc_133);
         assert!(loaded.terminal.osc_7);
         assert!(!loaded.terminal.osc_1337);
+    }
+
+    #[test]
+    fn save_to_preserves_existing_comments_and_unknown_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+        let original = r#"# user header comment
+[general]
+# keep this comment
+title = "Old Title"
+
+[custom]
+keep_me = "yes"
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut config = TherminalConfig::load_from(&path);
+        config.general.title = "New Title".to_string();
+        config.save_to(&path).unwrap();
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("# user header comment"));
+        assert!(on_disk.contains("# keep this comment"));
+        assert!(on_disk.contains("title = \"New Title\""));
+        assert!(on_disk.contains("[custom]"));
+        assert!(on_disk.contains("keep_me = \"yes\""));
+    }
+
+    #[test]
+    fn config_edit_session_tracks_dirty_apply_discard_and_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+
+        let saved = TherminalConfig::default();
+        let mut session = ConfigEditSession::from_saved(saved.clone());
+        assert!(!session.is_dirty());
+        assert_eq!(session.saved().general.title, "Therminal");
+        assert_eq!(session.applied().general.title, "Therminal");
+
+        session.draft_mut().general.title = "Draft Title".to_string();
+        assert!(session.is_dirty());
+        assert_eq!(session.applied().general.title, "Therminal");
+
+        session.apply_draft();
+        assert_eq!(session.applied().general.title, "Draft Title");
+
+        session.discard_draft();
+        assert!(!session.is_dirty());
+        assert_eq!(session.draft().general.title, "Therminal");
+        assert_eq!(session.applied().general.title, "Therminal");
+
+        session.draft_mut().general.title = "Persisted Title".to_string();
+        session.apply_draft();
+        session.save_draft_to(&path).unwrap();
+
+        assert!(!session.is_dirty());
+        assert_eq!(session.saved().general.title, "Persisted Title");
+        assert_eq!(session.applied().general.title, "Persisted Title");
+
+        let reloaded = TherminalConfig::load_from(&path);
+        assert_eq!(reloaded.general.title, "Persisted Title");
     }
 
     // ── Config wiring audit tests ───────────────────────────────────────────

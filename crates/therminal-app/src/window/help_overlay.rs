@@ -117,6 +117,7 @@ pub(crate) fn plan_help_layout(cat_heights: &[f32], cap: f32) -> HelpLayoutPlan 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_help_overlay(
     keybindings: &KeybindingsConfig,
+    scroll_rows: u32,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -174,6 +175,10 @@ pub(crate) fn draw_help_overlay(
 
     let extra_h = if clipped { hint_h } else { 0.0 };
     let panel_h = (title_h + content_inner_h + extra_h + padding_v * 2.0).min(max_panel_h);
+
+    let max_scroll_rows = max_scroll_rows(keybindings, surface_width, surface_height);
+    let scroll_rows = scroll_rows.min(max_scroll_rows);
+    let scroll_offset = scroll_rows as f32 * row_h;
 
     let panel_x = (sw - panel_w) / 2.0;
     let panel_y = (sh - panel_h) / 2.0;
@@ -340,7 +345,7 @@ pub(crate) fn draw_help_overlay(
         rows.push(RowInfo {
             buf_idx: buffers.len() - 1,
             x: col_x,
-            y: current_y,
+            y: current_y - scroll_offset,
             color: accent_color,
         });
         current_y += header_row_h;
@@ -367,7 +372,7 @@ pub(crate) fn draw_help_overlay(
             rows.push(RowInfo {
                 buf_idx: buffers.len() - 1,
                 x: col_x,
-                y: current_y,
+                y: current_y - scroll_offset,
                 color: text_color,
             });
 
@@ -392,7 +397,7 @@ pub(crate) fn draw_help_overlay(
             rows.push(RowInfo {
                 buf_idx: buffers.len() - 1,
                 x: col_x_desc,
-                y: current_y,
+                y: current_y - scroll_offset,
                 color: muted_color,
             });
 
@@ -400,7 +405,7 @@ pub(crate) fn draw_help_overlay(
         }
     }
 
-    if clipped {
+    if max_scroll_rows > 0 {
         let hint_y = panel_y + panel_h - padding_v - hint_h;
         let mut hint_buf = Buffer::new(&mut renderer.font_system, metrics);
         hint_buf.set_size(
@@ -408,9 +413,14 @@ pub(crate) fn draw_help_overlay(
             Some(panel_w - padding_h * 2.0),
             Some(row_h),
         );
+        let hint = format!(
+            "scroll: wheel / PgUp PgDn / arrows ({}/{})",
+            scroll_rows,
+            max_scroll_rows
+        );
         hint_buf.set_text(
             &mut renderer.font_system,
-            "more bindings hidden — resize window",
+            &hint,
             &Attrs::new()
                 .family(Family::Name(&renderer.font_config.family))
                 .color(muted_color),
@@ -485,6 +495,44 @@ pub(crate) fn draw_help_overlay(
         ) {
             tracing::warn!("help overlay text render failed: {}", e);
         }
+    }
+}
+
+/// Return the maximum vertical scroll offset for the help overlay body,
+/// measured in whole row steps.
+pub(crate) fn max_scroll_rows(
+    keybindings: &KeybindingsConfig,
+    _surface_width: u32,
+    surface_height: u32,
+) -> u32 {
+    let sh = surface_height as f32;
+
+    let row_h = 24.0_f32;
+    let header_row_h = 32.0_f32;
+    let padding_v = 20.0_f32;
+    let title_h = row_h + 4.0 + 8.0;
+    let hint_h = row_h;
+
+    let categories: Vec<(String, Vec<(String, String)>)> = build_help_categories(keybindings);
+    let cat_heights: Vec<f32> = categories
+        .iter()
+        .map(|(_, b)| header_row_h + b.len() as f32 * row_h)
+        .collect();
+
+    let max_panel_h = sh * 0.80;
+    let inner_max_h = (max_panel_h - padding_v * 2.0 - title_h - hint_h).max(0.0);
+    let plan = plan_help_layout(&cat_heights, inner_max_h);
+    let content_inner_h = match plan {
+        HelpLayoutPlan::SingleColumn { content_h } => content_h,
+        HelpLayoutPlan::TwoColumn { content_h, .. } => content_h,
+    };
+
+    let overflow_px = (content_inner_h - inner_max_h).max(0.0);
+    let rows = (overflow_px / row_h).ceil();
+    if rows.is_finite() && rows > 0.0 {
+        rows as u32
+    } else {
+        0
     }
 }
 

@@ -214,6 +214,9 @@ pub struct App {
     /// Whether the keybinding help overlay is currently visible.
     show_help_overlay: bool,
 
+    /// Scroll offset (in row units) for the keybinding help overlay body.
+    help_overlay_scroll_rows: u32,
+
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,
 

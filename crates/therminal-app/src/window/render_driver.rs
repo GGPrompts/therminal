@@ -294,6 +294,7 @@ impl App {
                 });
             help_overlay::draw_help_overlay(
                 &self.config.keybindings,
+                self.help_overlay_scroll_rows,
                 renderer,
                 &gpu.device,
                 &gpu.queue,

@@ -17,10 +17,23 @@ use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
 use super::keybindings::lookup_binding;
 use super::mouse::HeaderAction;
 use super::render_driver::JumpDirection;
-use super::{App, chrome};
+use super::{App, chrome, help_overlay};
 use crate::pane::SplitDirection;
 
 impl App {
+    fn help_overlay_max_scroll_rows(&self) -> u32 {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return 0;
+        };
+        help_overlay::max_scroll_rows(&self.config.keybindings, gpu.config.width, gpu.config.height)
+    }
+
+    fn scroll_help_overlay_by(&mut self, delta_rows: i32) {
+        let max_rows = self.help_overlay_max_scroll_rows();
+        let next = (self.help_overlay_scroll_rows as i32 + delta_rows).clamp(0, max_rows as i32);
+        self.help_overlay_scroll_rows = next as u32;
+    }
+
     /// Check if this key event matches a configured keybinding.
     /// Returns true if the event was consumed.
     pub(super) fn handle_keybinding(&mut self, key_event: &KeyEvent) -> bool {
@@ -81,6 +94,9 @@ impl App {
             }
             KeyAction::ShowHelp => {
                 self.show_help_overlay = !self.show_help_overlay;
+                if self.show_help_overlay {
+                    self.help_overlay_scroll_rows = 0;
+                }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -479,6 +495,18 @@ impl App {
         if self.active_menu.is_some() {
             return;
         }
+        if self.show_help_overlay {
+            let lines = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
+            };
+            // Wheel up (positive y) scrolls toward the top.
+            self.scroll_help_overlay_by(-lines);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
         self.handle_mouse_wheel(delta);
     }
 
@@ -497,6 +525,7 @@ impl App {
         // Dismiss help overlay on any mouse click.
         if self.show_help_overlay && state == ElementState::Pressed && button == MouseButton::Left {
             self.show_help_overlay = false;
+            self.help_overlay_scroll_rows = 0;
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -953,9 +982,28 @@ impl App {
             return;
         }
 
-        // When help overlay is visible, any key dismisses it.
+        // Help overlay key handling: navigation keys scroll, other keys dismiss.
         if self.show_help_overlay {
-            self.show_help_overlay = false;
+            match &key_event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.show_help_overlay = false;
+                    self.help_overlay_scroll_rows = 0;
+                }
+                Key::Named(NamedKey::ArrowUp) => self.scroll_help_overlay_by(-1),
+                Key::Named(NamedKey::ArrowDown) => self.scroll_help_overlay_by(1),
+                Key::Named(NamedKey::PageUp) => self.scroll_help_overlay_by(-10),
+                Key::Named(NamedKey::PageDown) => self.scroll_help_overlay_by(10),
+                Key::Named(NamedKey::Home) => self.help_overlay_scroll_rows = 0,
+                Key::Named(NamedKey::End) => {
+                    self.help_overlay_scroll_rows = self.help_overlay_max_scroll_rows();
+                }
+                Key::Character(s) if s.eq_ignore_ascii_case("j") => self.scroll_help_overlay_by(1),
+                Key::Character(s) if s.eq_ignore_ascii_case("k") => self.scroll_help_overlay_by(-1),
+                _ => {
+                    self.show_help_overlay = false;
+                    self.help_overlay_scroll_rows = 0;
+                }
+            }
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
