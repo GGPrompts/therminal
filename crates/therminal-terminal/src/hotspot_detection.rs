@@ -168,8 +168,17 @@ pub static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
             // (common in prose like "see section 2.h") are rejected by
             // the regex itself instead of relying on post-filtering.
             r"(?:[A-Za-z0-9_\-.]+/)*[A-Za-z0-9_\-]*[A-Za-z][A-Za-z0-9_\-]*\.(?:{ext_single})",
+            r"|",
+            // Branch D: Windows drive-letter absolute paths — C:\foo\bar.rs,
+            // C:/foo/bar.rs. Both forward-slash and backslash separators are
+            // accepted. A known file extension is required (same whitelist as
+            // branches B/C) to avoid false positives on `C:\` alone.
+            r"[A-Za-z]:[\\/]",
+            r"(?:[A-Za-z0-9_\-.]+[\\/])*",
+            r"[A-Za-z0-9_\-.]+",
+            r"(?:\.(?:{ext_any}))?",
             r")",
-            // Optional :line[:col] suffix applies to all three branches.
+            // Optional :line[:col] suffix applies to all four branches.
             r"(?::\d+(?::\d+)?)?",
         ),
         ext_any = ext_any,
@@ -2108,6 +2117,41 @@ kind = "pattern-demo"
         assert_eq!(ps.target.as_deref(), Some("src/lib.rs"));
         assert_eq!(ps.label.as_deref(), Some("open src/lib.rs:42"));
         assert_eq!(ps.declared_kind, "pattern-demo");
+    }
+
+    // ── Windows drive-letter absolute paths (tn-v974) ─────────────────
+
+    #[test]
+    fn detects_windows_backslash_path() {
+        let hotspots = detect(&[r"error at C:\foo\bar.rs here"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1, "expected one match, got {fp:?}");
+        assert_eq!(fp[0].text, r"C:\foo\bar.rs");
+    }
+
+    #[test]
+    fn detects_windows_forward_slash_path_with_line() {
+        let hotspots = detect(&["error at C:/foo/bar.rs:42 here"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1, "expected one match, got {fp:?}");
+        assert_eq!(fp[0].text, "C:/foo/bar.rs:42");
+    }
+
+    #[test]
+    fn detects_windows_path_with_line_and_col() {
+        let hotspots = detect(&[r"error at D:\src\main.rs:12:3 here"]);
+        let fp: Vec<_> = hotspots
+            .iter()
+            .filter(|h| h.kind == HotspotKind::FilePath)
+            .collect();
+        assert_eq!(fp.len(), 1, "expected one match, got {fp:?}");
+        assert_eq!(fp[0].text, r"D:\src\main.rs:12:3");
     }
 
     #[test]

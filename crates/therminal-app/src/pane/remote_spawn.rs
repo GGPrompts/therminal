@@ -356,14 +356,32 @@ pub(crate) fn build_remote_pane_state(
             }
 
             // tn-zamd: if the main thread just finished applying a
-            // structured snapshot, drop buffered stale bytes and go live.
+            // structured snapshot, flush the buffered post-subscribe bytes
+            // through to the worker and go live.
+            //
+            // tn-b77d: previous code DROPPED the buffer here. That lost any
+            // DEC private-mode sequences (`\e[?2004h`, `\e[?1000h`,
+            // `\e[?1049h`, ...) that the daemon emitted between Subscribe
+            // and the snapshot replay landing on the worker, leaving the
+            // GUI's local Term with stale mode flags forever (broken paste,
+            // mouse, alt-screen, app cursor in TUIs spawned around attach
+            // time). The snapshot's CUP+grid replay paints the visible grid
+            // unconditionally, so any duplicated visible bytes in the buffer
+            // (text that was already captured into the snapshot grid) are
+            // immediately overwritten by the snapshot's paint pass — but
+            // mode-set sequences are idempotent and need to be preserved so
+            // the local Term tracks the daemon's authoritative TermMode.
             if buffering && snapshot_applied_for_forwarder.load(Ordering::Acquire) {
                 debug!(
                     remote_pane_id,
-                    dropped_chunks = pre_clear_buffer.len(),
-                    "tn-zamd: snapshot applied, dropping pre-snapshot buffer"
+                    flushed_chunks = pre_clear_buffer.len(),
+                    "tn-zamd/tn-b77d: snapshot applied, flushing pre-snapshot buffer"
                 );
-                pre_clear_buffer.clear();
+                for chunk in pre_clear_buffer.drain(..) {
+                    if !send_bytes(chunk) {
+                        return;
+                    }
+                }
                 buffering = false;
             }
 
@@ -656,4 +674,102 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::term::TermMode;
+
+    /// tn-b77d regression: feeding a DEC private mode-set sequence
+    /// (`\e[?2004h`) through the same VTE pipeline used by
+    /// `run_remote_worker` MUST update the local `Term`'s `BRACKETED_PASTE`
+    /// flag. If this stops being true, every daemon-pane-attached TUI that
+    /// turns on bracketed paste / mouse / alt-screen / app-cursor after
+    /// attach time will silently get stale flags on the GUI side, breaking
+    /// paste, mouse routing, and overlay decisions.
+    ///
+    /// This locks down the Option A invariant: the GUI's local `Term` is a
+    /// real VTE parser, not just a snapshot replay target.
+    #[test]
+    fn local_term_picks_up_post_attach_bracketed_paste_decset() {
+        let term_config = TermConfig {
+            scrolling_history: 100,
+            ..Default::default()
+        };
+        let term_size = TermSize {
+            columns: 80,
+            screen_lines: 24,
+        };
+        let listener = PaneListener::new();
+        let term = Term::new(term_config, &term_size, listener);
+        let term = Arc::new(FairMutex::new(term));
+
+        let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+        let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+
+        // Sanity: starts off.
+        assert!(
+            !term.lock().mode().contains(TermMode::BRACKETED_PASTE),
+            "fresh Term should not have BRACKETED_PASTE set"
+        );
+
+        // Feed the same byte stream a TUI like Claude Code would emit
+        // shortly after attach, through the same call site as the worker.
+        let bytes = b"\x1b[?2004h";
+        {
+            let mut guard = term.lock();
+            processor.advance_with_interceptor(&mut *guard, &mut interceptor, bytes);
+        }
+
+        assert!(
+            term.lock().mode().contains(TermMode::BRACKETED_PASTE),
+            "BRACKETED_PASTE must be set after worker processes \\e[?2004h \
+             — if this fails, the GUI's local Term has stopped tracking \
+             daemon-side mode-set sequences (tn-b77d regression)"
+        );
+    }
+
+    /// tn-b77d regression: same invariant for mouse modes. A TUI that
+    /// enters alt-screen + SGR mouse after attach must end up with those
+    /// flags reflected in the local Term, otherwise mouse clicks get
+    /// swallowed for selection instead of being routed to the TUI.
+    #[test]
+    fn local_term_picks_up_post_attach_mouse_and_alt_screen() {
+        let term_config = TermConfig {
+            scrolling_history: 100,
+            ..Default::default()
+        };
+        let term_size = TermSize {
+            columns: 80,
+            screen_lines: 24,
+        };
+        let listener = PaneListener::new();
+        let term = Term::new(term_config, &term_size, listener);
+        let term = Arc::new(FairMutex::new(term));
+
+        let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+        let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+
+        // ?1002 = button + drag mouse, ?1006 = SGR encoding, ?1049 = alt screen.
+        let bytes = b"\x1b[?1002h\x1b[?1006h\x1b[?1049h";
+        {
+            let mut guard = term.lock();
+            processor.advance_with_interceptor(&mut *guard, &mut interceptor, bytes);
+        }
+
+        let mode = *term.lock().mode();
+        assert!(
+            mode.contains(TermMode::MOUSE_DRAG),
+            "MOUSE_DRAG should be set"
+        );
+        assert!(
+            mode.contains(TermMode::SGR_MOUSE),
+            "SGR_MOUSE should be set"
+        );
+        assert!(
+            mode.contains(TermMode::ALT_SCREEN),
+            "ALT_SCREEN should be set"
+        );
+    }
 }
