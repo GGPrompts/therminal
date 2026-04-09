@@ -243,13 +243,13 @@ pub(crate) fn draw_help_overlay(
         255,
     );
 
-    // Inner panel rect doubles as glyphon scissor so any overflow rows are
-    // clipped to the box (last-resort safety net for tiny windows).
+    // Inner panel bounds for static text (title/footer), plus a dedicated
+    // scroll viewport for binding rows so the list cannot overlap header/footer.
     let inner_left = panel_x + padding_h;
     let inner_top = panel_y + padding_v;
     let inner_right = panel_x + panel_w - padding_h;
     let inner_bottom = panel_y + panel_h - padding_v;
-    let bounds = TextBounds {
+    let static_bounds = TextBounds {
         left: inner_left as i32,
         top: inner_top as i32,
         right: inner_right as i32,
@@ -297,6 +297,7 @@ pub(crate) fn draw_help_overlay(
         x: f32,
         y: f32,
         color: GlyphColor,
+        scrollable: bool,
     }
     let mut rows: Vec<RowInfo> = Vec::new();
 
@@ -305,9 +306,21 @@ pub(crate) fn draw_help_overlay(
         x: content_x,
         y: panel_y + padding_v,
         color: text_color,
+        scrollable: false,
     });
 
     let title_baseline_y = current_y;
+    let content_bottom = if max_scroll_rows > 0 {
+        inner_bottom - hint_h
+    } else {
+        inner_bottom
+    };
+    let content_bounds = TextBounds {
+        left: inner_left as i32,
+        top: title_baseline_y as i32,
+        right: inner_right as i32,
+        bottom: content_bottom as i32,
+    };
     let col0_x = content_x;
     let col1_x = content_x + col_inner_w + column_gap;
 
@@ -347,6 +360,7 @@ pub(crate) fn draw_help_overlay(
             x: col_x,
             y: current_y - scroll_offset,
             color: accent_color,
+            scrollable: true,
         });
         current_y += header_row_h;
 
@@ -374,6 +388,7 @@ pub(crate) fn draw_help_overlay(
                 x: col_x,
                 y: current_y - scroll_offset,
                 color: text_color,
+                scrollable: true,
             });
 
             // Description (right within column)
@@ -399,6 +414,7 @@ pub(crate) fn draw_help_overlay(
                 x: col_x_desc,
                 y: current_y - scroll_offset,
                 color: muted_color,
+                scrollable: true,
             });
 
             current_y += row_h;
@@ -434,11 +450,17 @@ pub(crate) fn draw_help_overlay(
             x: content_x,
             y: hint_y,
             color: muted_color,
+            scrollable: false,
         });
     }
 
     // Build TextArea references from the stored buffers and positions.
     for row in &rows {
+        let bounds = if row.scrollable {
+            content_bounds
+        } else {
+            static_bounds
+        };
         text_areas.push(TextArea {
             buffer: &buffers[row.buf_idx],
             left: row.x,
