@@ -1086,9 +1086,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn default_windows_state_dirs_use_temp_dir() {
-        assert_eq!(claude_state_dir(), std::env::temp_dir().join("claude-code-state"));
+        assert_eq!(
+            claude_state_dir(),
+            std::env::temp_dir().join("claude-code-state")
+        );
         assert_eq!(codex_state_dir(), std::env::temp_dir().join("codex-state"));
-        assert_eq!(copilot_state_dir(), std::env::temp_dir().join("copilot-state"));
+        assert_eq!(
+            copilot_state_dir(),
+            std::env::temp_dir().join("copilot-state")
+        );
     }
 
     #[cfg(not(windows))]

@@ -90,6 +90,8 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 
 ## Pane Operations
 
+`therminal pane create` now accepts `--spawn '<cmd>'`, forwarding `startup_command` through daemon `SplitPane`. The daemon waits for the new pane's first OSC 133/633 `PromptStart` before injecting the command; if the shell never emits prompt integration, it falls back after 300ms. Delegate-style callers should rely on that daemon-side contract instead of sleeping client-side.
+
 - **Pane Swap**: `LayoutNode::swap_pane(a, b)` swaps two leaves in the binary tree. `SwapNext` (`Alt+Shift+Right`) / `SwapPrev` (`Alt+Shift+Left`).
 - **Mouse-Drag Separator Resize**: Dragging a pane separator adjusts `split_ratio`. Implemented in `window/mouse.rs`. 6 px hit-test threshold.
 - **Window Edge Resize (CSD)**: When `general.use_csd = true` (default on Linux/Windows) the winit window is created with `with_decorations(false)`, so the OS provides no resize grips. `window/mouse.rs` compensates with `ResizeEdge` hit-testing at the four edges + four corners, updates the cursor icon on hover (`N/S/E/W/NE/NW/SE/SW Resize`), and on mouse-down calls `Window::drag_resize_window(direction)` so the compositor handles the interactive resize. Gated on `use_csd` — disabled when native decorations are on. Precedence runs *after* tab bar, status bar, context menu, and pane separator hit-tests, so edge resize is the fallback when no other UI element claims the point.

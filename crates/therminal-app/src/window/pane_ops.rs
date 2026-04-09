@@ -92,6 +92,7 @@ impl App {
             pane_id: daemon_source,
             horizontal,
             cwd: inherited_cwd,
+            startup_command: None,
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -277,6 +278,7 @@ impl App {
             pane_id: anchor_daemon_id,
             horizontal: true,
             cwd: None,
+            startup_command: None,
         }) {
             Ok(r) => r,
             Err(e) => {

@@ -132,25 +132,40 @@ impl App {
                 .and_then(|wm| wm.focused_pane())
                 .and_then(|fid| layout.find_pane(fid));
 
-            let (cwd, last_exit_code, agent_name, dimensions) = if let Some(pane) = focused_pane {
-                let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
-                let dims = if let Some(term) = pane.backend.term() {
-                    let term_guard = term.lock();
-                    let cols = alacritty_terminal::grid::Dimensions::columns(&*term_guard);
-                    let rows = alacritty_terminal::grid::Dimensions::screen_lines(&*term_guard);
-                    (cols, rows)
+            let (cwd, claude_title, last_exit_code, agent_name, dimensions) =
+                if let Some(pane) = focused_pane {
+                    let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
+                    let agent_pid = {
+                        let reg = self
+                            .agent_registry
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        reg.get(pane.id).and_then(|entry| entry.pid)
+                    };
+                    let claude_meta =
+                        agent_pid.and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid));
+                    let dims = if let Some(term) = pane.backend.term() {
+                        let term_guard = term.lock();
+                        let cols = alacritty_terminal::grid::Dimensions::columns(&*term_guard);
+                        let rows = alacritty_terminal::grid::Dimensions::screen_lines(&*term_guard);
+                        (cols, rows)
+                    } else {
+                        (80, 24)
+                    };
+                    (
+                        claude_meta
+                            .as_ref()
+                            .and_then(|meta| meta.cwd.as_ref())
+                            .map(|cwd| cwd.to_string_lossy().into_owned())
+                            .or_else(|| status.cwd.clone()),
+                        claude_meta.and_then(|meta| meta.session_title),
+                        status.last_exit_code,
+                        status.agent_name.clone(),
+                        dims,
+                    )
                 } else {
-                    (80, 24)
+                    (None, None, None, None, (80, 24))
                 };
-                (
-                    status.cwd.clone(),
-                    status.last_exit_code,
-                    status.agent_name.clone(),
-                    dims,
-                )
-            } else {
-                (None, None, None, (80, 24))
-            };
 
             let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
                 (wm.workspace_ids(), wm.active_id())
@@ -164,6 +179,7 @@ impl App {
 
             let status_info = chrome::StatusBarInfo {
                 agent_name,
+                claude_title,
                 cwd,
                 dimensions,
                 last_exit_code,

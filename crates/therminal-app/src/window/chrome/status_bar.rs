@@ -14,6 +14,10 @@ use super::text_cache::{cached_buf, ensure_shaped};
 pub(crate) struct StatusBarInfo {
     /// Agent name (from ProcessDetector), shown on the left when present.
     pub agent_name: Option<String>,
+    /// Claude session title for the focused pane when available from the
+    /// Claude state poller. This intentionally comes from the same source as
+    /// the pane header, not from shell state.
+    pub claude_title: Option<String>,
     /// Current working directory (from OSC 7).
     pub cwd: Option<String>,
     /// Pane grid dimensions (cols, rows).
@@ -162,7 +166,11 @@ pub(crate) fn draw_status_bar(
         230,
     );
 
-    let center_text = compose_center_text(info.cwd.as_deref(), info.focused_pane_id);
+    let center_text = compose_center_text(
+        info.claude_title.as_deref(),
+        info.cwd.as_deref(),
+        info.focused_pane_id,
+    );
     let center_color = GlyphColor::rgba(
         PaletteColor::INK.r,
         PaletteColor::INK.g,
@@ -507,14 +515,23 @@ pub(super) fn compose_template_hint(status: &ConfigTemplateStatus) -> String {
     }
 }
 
-/// Compose the center section of the status bar from cwd and the focused
-/// pane's display number. Extracted for unit testing.
-pub(super) fn compose_center_text(cwd: Option<&str>, focused_pane_id: Option<u64>) -> String {
+/// Compose the center section of the status bar from shared Claude chrome
+/// metadata (when available), fallback cwd, and the focused pane id.
+pub(super) fn compose_center_text(
+    claude_title: Option<&str>,
+    cwd: Option<&str>,
+    focused_pane_id: Option<u64>,
+) -> String {
     let cwd_text = cwd.map(abbreviate_path).unwrap_or_default();
-    match (focused_pane_id, cwd_text.is_empty()) {
-        (Some(n), false) => format!("{cwd_text}  ·  pane {n}"),
-        (Some(n), true) => format!("pane {n}"),
+    let base = match (claude_title, cwd_text.is_empty()) {
+        (Some(title), false) => format!("{title}  ·  {cwd_text}"),
+        (Some(title), true) => title.to_string(),
         (None, _) => cwd_text,
+    };
+    match (focused_pane_id, base.is_empty()) {
+        (Some(n), false) => format!("{base}  ·  pane {n}"),
+        (Some(n), true) => format!("pane {n}"),
+        (None, _) => base,
     }
 }
 
@@ -581,9 +598,14 @@ pub(super) fn windows_path_to_linux(windows_path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn make_info(cwd: Option<&str>, focused_pane_id: Option<u64>) -> StatusBarInfo {
+    fn make_info(
+        claude_title: Option<&str>,
+        cwd: Option<&str>,
+        focused_pane_id: Option<u64>,
+    ) -> StatusBarInfo {
         StatusBarInfo {
             agent_name: None,
+            claude_title: claude_title.map(String::from),
             cwd: cwd.map(String::from),
             dimensions: (80, 24),
             last_exit_code: None,
@@ -619,7 +641,7 @@ mod tests {
 
     #[test]
     fn status_bar_info_carries_focused_pane_id() {
-        let info = make_info(Some("/tmp"), Some(3));
+        let info = make_info(None, Some("/tmp"), Some(3));
         assert_eq!(info.focused_pane_id, Some(3));
     }
 
@@ -631,7 +653,7 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
-        let s = compose_center_text(Some("/tmp/foo"), Some(2));
+        let s = compose_center_text(None, Some("/tmp/foo"), Some(2));
         assert!(s.contains("/tmp/foo"));
         assert!(s.contains("pane 2"));
         if let Some(v) = prev {
@@ -643,7 +665,7 @@ mod tests {
 
     #[test]
     fn center_text_falls_back_to_pane_only_without_cwd() {
-        let s = compose_center_text(None, Some(7));
+        let s = compose_center_text(None, None, Some(7));
         assert_eq!(s, "pane 7");
     }
 
@@ -653,12 +675,24 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
-        let s = compose_center_text(Some("/tmp/foo"), None);
+        let s = compose_center_text(None, Some("/tmp/foo"), None);
         assert_eq!(s, "/tmp/foo");
         if let Some(v) = prev {
             unsafe {
                 std::env::set_var("HOME", v);
             }
         }
+    }
+
+    #[test]
+    fn center_text_prefers_claude_title_when_present() {
+        let s = compose_center_text(Some("fix login bug"), Some("/tmp/foo"), Some(2));
+        assert_eq!(s, "fix login bug  ·  /tmp/foo  ·  pane 2");
+    }
+
+    #[test]
+    fn center_text_uses_claude_title_without_cwd() {
+        let s = compose_center_text(Some("fix login bug"), None, Some(2));
+        assert_eq!(s, "fix login bug  ·  pane 2");
     }
 }

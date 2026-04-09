@@ -29,6 +29,28 @@ use tracing::{debug, warn};
 
 use therminal_harness_claude::state::{ClaudeSessionState, ClaudeStatePoller};
 
+/// Shared Claude metadata used by chrome surfaces for one pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudeChromeMeta {
+    pub session_title: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+impl ClaudeChromeMeta {
+    /// Shared header composition rule:
+    /// 1. session title
+    /// 2. working-dir basename
+    pub(crate) fn header_title(&self) -> Option<String> {
+        if let Some(ref title) = self.session_title {
+            return Some(title.clone());
+        }
+        self.cwd
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    }
+}
+
 /// Per-session metadata cached from the Claude state poller.
 #[derive(Debug, Clone, Default)]
 struct SessionMeta {
@@ -124,32 +146,23 @@ impl ClaudeCwdTracker {
         g.pid_to_session = pid_to_session;
     }
 
-    /// Look up the agent cwd for an OS pid, going via the pid -> session
-    /// reverse map. Returns `None` when the pid is not a known Claude
-    /// process, or when its session state has no `working_dir` field.
-    pub fn cwd_for_pid(&self, pid: u32) -> Option<PathBuf> {
-        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let sid = g.pid_to_session.get(&pid)?;
-        g.by_session.get(sid).and_then(|m| m.cwd.clone())
-    }
-
-    /// Look up the header title for a pane whose agent has the given OS
-    /// pid. Fallback order:
-    ///
-    /// 1. `session_title` from the Claude state file
-    /// 2. `working_dir` basename
-    /// 3. `None` (caller keeps default chrome)
-    pub fn header_title_for_pid(&self, pid: u32) -> Option<String> {
+    /// Shared chrome metadata lookup for a Claude pid.
+    pub fn chrome_meta_for_pid(&self, pid: u32) -> Option<ClaudeChromeMeta> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let sid = g.pid_to_session.get(&pid)?;
         let meta = g.by_session.get(sid)?;
-        if let Some(ref title) = meta.session_title {
-            return Some(title.clone());
-        }
-        meta.cwd
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+        Some(ClaudeChromeMeta {
+            session_title: meta.session_title.clone(),
+            cwd: meta.cwd.clone(),
+        })
+    }
+
+    /// Test-only pid -> cwd lookup retained for the existing tracker
+    /// regression tests. Production chrome should use `chrome_meta_for_pid`
+    /// so all surfaces share the same source object.
+    #[cfg(test)]
+    pub fn cwd_for_pid(&self, pid: u32) -> Option<PathBuf> {
+        self.chrome_meta_for_pid(pid).and_then(|meta| meta.cwd)
     }
 
     /// Direct session -> cwd lookup. Exposed for tests.
@@ -251,7 +264,8 @@ mod tests {
             Some("fix login bug"),
         )]);
         assert_eq!(
-            t.header_title_for_pid(4242),
+            t.chrome_meta_for_pid(4242)
+                .and_then(|meta| meta.header_title()),
             Some("fix login bug".to_string()),
         );
     }
@@ -265,13 +279,36 @@ mod tests {
             Some("/home/u/my-project"),
             None,
         )]);
-        assert_eq!(t.header_title_for_pid(4242), Some("my-project".to_string()),);
+        assert_eq!(
+            t.chrome_meta_for_pid(4242)
+                .and_then(|meta| meta.header_title()),
+            Some("my-project".to_string()),
+        );
     }
 
     #[test]
     fn header_title_none_when_no_data() {
         let t = ClaudeCwdTracker::new();
         t.replace_from(&[mk_state_with_title("sid-a", Some(4242), None, None)]);
-        assert_eq!(t.header_title_for_pid(4242), None);
+        assert_eq!(
+            t.chrome_meta_for_pid(4242)
+                .and_then(|meta| meta.header_title()),
+            None
+        );
+    }
+
+    #[test]
+    fn chrome_meta_round_trips_title_and_cwd() {
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state_with_title(
+            "sid-a",
+            Some(4242),
+            Some("/home/u/repo"),
+            Some("fix login bug"),
+        )]);
+        let meta = t.chrome_meta_for_pid(4242).expect("expected metadata");
+        assert_eq!(meta.session_title.as_deref(), Some("fix login bug"));
+        assert_eq!(meta.cwd, Some(PathBuf::from("/home/u/repo")));
+        assert_eq!(meta.header_title().as_deref(), Some("fix login bug"));
     }
 }

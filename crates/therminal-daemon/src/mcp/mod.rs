@@ -299,6 +299,9 @@ pub(super) struct SpawnPaneParam {
     /// Pane ID to split from. If specified, the new pane is created as a sibling of this pane.
     #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
     pub(super) split_from: Option<u64>,
+    /// Optional command written to the pane after the first shell prompt
+    /// starts rendering. Appends a trailing newline when missing.
+    pub(super) startup_command: Option<String>,
 }
 
 // ── Tool result types ───────────────────────────────────────────────────
@@ -1615,6 +1618,14 @@ pub(crate) mod tests {
             parse(r#"{"split_from":"5","split_direction":"horizontal"}"#);
         assert_eq!(params.split_from, Some(5));
         assert_eq!(params.split_direction.as_deref(), Some("horizontal"));
+    }
+
+    #[test]
+    fn spawn_pane_accepts_startup_command() {
+        let params: super::SpawnPaneParam =
+            parse(r#"{"split_from":"5","startup_command":"echo hello"}"#);
+        assert_eq!(params.split_from, Some(5));
+        assert_eq!(params.startup_command.as_deref(), Some("echo hello"));
     }
 
     #[test]

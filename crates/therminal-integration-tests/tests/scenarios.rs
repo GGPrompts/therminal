@@ -98,6 +98,8 @@ async fn split_pane_appears_in_list_panes() {
         .send_request(IpcRequest::SplitPane {
             pane_id,
             horizontal: true,
+            cwd: None,
+            startup_command: None,
         })
         .await
         .expect("split_pane should succeed");

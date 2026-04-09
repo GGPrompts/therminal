@@ -43,7 +43,7 @@ The daemon exposes a multiplexed IPC protocol over Unix domain sockets with leng
 
 **Envelope** (`IpcMessage`): Three variants -- `Request { request_id, payload }`, `Response { request_id, payload }`, `Event { payload }`. The `request_id: u64` enables multiplexing multiple in-flight requests over one connection.
 
-**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`.
+**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`. `SplitPane` now accepts `startup_command` in addition to `pane_id`, `horizontal`, and `cwd`.
 
 **Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
 
@@ -86,7 +86,7 @@ Tools exposed (26 tools):
 | `terminal.sessions.create` | Writer | Spawn a new PTY session |
 | `terminal.sessions.destroy` | Admin | Destroy a session and all its panes |
 | `terminal.panes.list` | Observer | List all panes with dimensions, session membership, title, plus optional `cwd` (from OSC 7 / spawn), `last_exit_code` (from OSC 633 D), and `agent_name` (from `AgentRegistry`). Optional fields are omitted when unknown to preserve wire compatibility. |
-| `terminal.panes.create` | Writer | Create a pane (split from existing or add to session) |
+| `terminal.panes.create` | Writer | Create a pane (split from existing or add to session). Optional `startup_command` is injected after the first OSC 133/633 prompt-start mark; if no shell integration arrives, the daemon falls back to a 300ms delay before writing. |
 | `terminal.panes.destroy` | Admin | Destroy a pane and its PTY |
 | `terminal.panes.get_content` | Observer | Read the visible grid snapshot with cursor position. **tn-sp3n behavior change:** trailing whitespace is now trimmed from every row by default — empty rows on a sparse pane are returned as `""` instead of `cols`-wide padding (typical 70-90% byte savings). Optional params: `trim_trailing_whitespace=false` restores the historical fixed-width grid, `compact=true` drops fully-blank rows, and `rows=N` returns only the last N visible / non-empty rows. The response now includes a stable `content_hash` (hex-encoded `DefaultHasher` over the full grid + cursor) so subscribers can short-circuit on unchanged screens. |
 | `terminal.panes.get_summary` | Observer | (tn-sp3n) Lightweight (~100 bytes) status snapshot for one pane: `pane_id`, `cursor_col`, `cursor_line`, `content_hash`, `last_command` + `last_exit_code` (from `CommandTracker`), `hotspot_count`, `agent_name` + `agent_status` (from `AgentRegistry`), `timestamp_secs`. Designed for conductor polling — answers "is this pane idle, working, or done?" without pulling any grid content. Compare `content_hash` against the previous tick to decide whether to follow up with `get_content` / `peek`. |

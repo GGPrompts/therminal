@@ -506,7 +506,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_claude_state_dir_uses_temp_dir() {
-        assert_eq!(claude_state_dir(), std::env::temp_dir().join("claude-code-state"));
+        assert_eq!(
+            claude_state_dir(),
+            std::env::temp_dir().join("claude-code-state")
+        );
     }
 
     #[cfg(not(windows))]

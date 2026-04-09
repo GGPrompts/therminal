@@ -32,6 +32,9 @@ pub enum PaneCmd {
         /// Session id when seeding a new pane in an existing session.
         #[arg(long)]
         session: Option<u64>,
+        /// Run this command in the new pane once the shell prompt is ready.
+        #[arg(long = "spawn")]
+        startup_command: Option<String>,
         #[command(flatten)]
         out: OutputFlags,
     },
@@ -94,8 +97,9 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             from,
             split,
             session,
+            startup_command,
             out,
-        } => create(ctx, from, split, session, out),
+        } => create(ctx, from, split, session, startup_command, out),
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
         PaneCmd::Send { pane_id, keys, raw } => send(ctx, pane_id, &keys, raw),
         PaneCmd::Peek {
@@ -149,6 +153,7 @@ fn create(
     from: Option<u64>,
     split: Option<String>,
     session: Option<u64>,
+    startup_command: Option<String>,
     out: OutputFlags,
 ) -> Result<()> {
     // Determine the source pane to split from. If `--from` is set we use it
@@ -166,6 +171,7 @@ fn create(
         pane_id: source_pane,
         horizontal,
         cwd: None,
+        startup_command,
     })?;
     let new_pane = match resp {
         IpcResponse::PaneSplit { new_pane_id } => new_pane_id,

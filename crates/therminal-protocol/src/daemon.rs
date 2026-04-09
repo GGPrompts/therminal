@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -116,6 +116,10 @@ pub enum IpcRequest {
         horizontal: bool,
         /// Working directory for the new pane. Empty/None means use spawn defaults.
         cwd: Option<String>,
+        /// Optional command injected into the new pane after the first shell
+        /// prompt starts rendering. If the shell never emits OSC 133/633
+        /// prompt marks, the daemon falls back to a short timeout.
+        startup_command: Option<String>,
     },
     /// Kill (destroy) a specific pane.
     KillPane { pane_id: PaneId },

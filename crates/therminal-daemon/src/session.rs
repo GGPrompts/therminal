@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -46,6 +46,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
+
+const STARTUP_COMMAND_FALLBACK: Duration = Duration::from_millis(300);
+const STARTUP_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn next_session_id() -> SessionId {
     NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
@@ -736,6 +739,24 @@ impl Pane {
         self.pty_writer.flush()
     }
 
+    fn has_seen_prompt_start(&self) -> bool {
+        use therminal_terminal::osc633::CommandState;
+
+        self.command_tracker
+            .lock()
+            .ok()
+            .and_then(|tracker| tracker.current_block().map(|block| block.state.clone()))
+            .is_some_and(|state| {
+                matches!(
+                    state,
+                    CommandState::PromptStart
+                        | CommandState::Input
+                        | CommandState::Executing
+                        | CommandState::Finished
+                )
+            })
+    }
+
     /// Take a snapshot of the current terminal state, including scrollback history.
     pub fn snapshot(&self) -> PaneSnapshot {
         let term = self.term.lock();
@@ -1157,6 +1178,19 @@ fn split_layout_leaf(
             second: Box::new(split_layout_leaf(*second, source, new_leaf, direction)),
         },
     }
+}
+
+fn normalize_startup_command(startup_command: Option<&str>) -> Option<Vec<u8>> {
+    let command = startup_command?;
+    if command.is_empty() {
+        return None;
+    }
+
+    let mut bytes = command.as_bytes().to_vec();
+    if !matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.push(b'\n');
+    }
+    Some(bytes)
 }
 
 /// A leaf's computed cell dimensions inside a `LayoutSnapshot`. Produced
@@ -1688,11 +1722,7 @@ impl SessionManager {
     /// Returns the new pane's ID. `horizontal=true` splits cols
     /// (side-by-side), `horizontal=false` splits rows (stacked).
     pub fn split_pane(&mut self, pane_id: PaneId, horizontal: bool) -> Result<PaneId, String> {
-        self.split_pane_with_options(
-            pane_id,
-            horizontal,
-            &therminal_terminal::pty::SpawnOptions::default(),
-        )
+        self.split_pane_with_options(pane_id, horizontal, &Default::default(), None)
     }
 
     /// Split a pane with custom spawn options for the new pane's PTY.
@@ -1719,6 +1749,7 @@ impl SessionManager {
         pane_id: PaneId,
         horizontal: bool,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
+        startup_command: Option<&str>,
     ) -> Result<PaneId, String> {
         use therminal_protocol::daemon::LayoutSplitDirection;
 
@@ -1855,8 +1886,50 @@ impl SessionManager {
             }
         }
 
+        self.maybe_send_startup_command(new_id, startup_command)?;
+
         self.mark_dirty();
         Ok(new_id)
+    }
+
+    pub fn maybe_send_startup_command(
+        &mut self,
+        pane_id: PaneId,
+        startup_command: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(startup_bytes) = normalize_startup_command(startup_command) else {
+            return Ok(());
+        };
+
+        let saw_prompt = self.wait_for_prompt_start(pane_id, STARTUP_COMMAND_FALLBACK);
+        if !saw_prompt {
+            debug!(
+                pane_id,
+                fallback_ms = STARTUP_COMMAND_FALLBACK.as_millis(),
+                "startup_command prompt wait timed out; using fallback"
+            );
+        }
+
+        self.send_keys_to_pane(pane_id, &startup_bytes)
+    }
+
+    fn wait_for_prompt_start(&self, pane_id: PaneId, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .sessions
+                .values()
+                .flat_map(|session| session.windows.iter())
+                .find_map(|window| window.pane(pane_id))
+                .is_some_and(Pane::has_seen_prompt_start)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(STARTUP_COMMAND_POLL_INTERVAL);
+        }
     }
 
     /// Kill (destroy) a single pane by ID. Removes it from its window.
@@ -3008,6 +3081,32 @@ mod tests {
         } else {
             panic!("expected split");
         }
+    }
+
+    #[test]
+    fn normalize_startup_command_appends_newline() {
+        assert_eq!(
+            normalize_startup_command(Some("echo hello")),
+            Some(b"echo hello\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn normalize_startup_command_preserves_existing_newline() {
+        assert_eq!(
+            normalize_startup_command(Some("echo hello\n")),
+            Some(b"echo hello\n".to_vec())
+        );
+        assert_eq!(
+            normalize_startup_command(Some("echo hello\r")),
+            Some(b"echo hello\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn normalize_startup_command_skips_empty_strings() {
+        assert_eq!(normalize_startup_command(None), None);
+        assert_eq!(normalize_startup_command(Some("")), None);
     }
 
     #[test]

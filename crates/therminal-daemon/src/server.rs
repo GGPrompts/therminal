@@ -519,13 +519,19 @@ async fn dispatch_ipc(
             pane_id,
             horizontal,
             cwd,
+            startup_command,
         } => {
             let mut mgr = session_mgr.lock().await;
             let spawn_options = therminal_terminal::pty::SpawnOptions {
                 cwd: cwd.clone().unwrap_or_default(),
                 ..Default::default()
             };
-            match mgr.split_pane_with_options(*pane_id, *horizontal, &spawn_options) {
+            match mgr.split_pane_with_options(
+                *pane_id,
+                *horizontal,
+                &spawn_options,
+                startup_command.as_deref(),
+            ) {
                 Ok(new_pane_id) => IpcResponse::PaneSplit { new_pane_id },
                 Err(e) => IpcResponse::Error { message: e },
             }

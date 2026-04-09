@@ -85,6 +85,7 @@ impl TherminalMcpServer {
             cwd: params.cwd.unwrap_or_default(),
             ..Default::default()
         };
+        let startup_command = params.startup_command.as_deref();
 
         // Determine horizontal flag from split_direction (default: vertical).
         let horizontal = match params.split_direction.as_deref() {
@@ -101,7 +102,12 @@ impl TherminalMcpServer {
 
         if let Some(split_from_id) = params.split_from {
             // Split from an existing pane.
-            match mgr.split_pane_with_options(split_from_id, horizontal, &spawn_options) {
+            match mgr.split_pane_with_options(
+                split_from_id,
+                horizontal,
+                &spawn_options,
+                startup_command,
+            ) {
                 Ok(new_pane_id) => {
                     // Find the session and pane to get dimensions.
                     let (session_id, cols, rows) =
@@ -137,6 +143,11 @@ impl TherminalMcpServer {
                         // find that pane and return it.
                         let (pane_id, cols, rows) =
                             find_first_pane_in_session(&mgr, sid).unwrap_or((0, 80, 24));
+                        if let Err(e) = mgr.maybe_send_startup_command(pane_id, startup_command) {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "startup_command failed: {e}"
+                            ))]));
+                        }
                         let result = SpawnPaneResult {
                             pane_id,
                             session_id: sid,
@@ -155,7 +166,12 @@ impl TherminalMcpServer {
 
             // Session exists -- split from its first pane.
             if let Some((first_pane_id, _, _)) = find_first_pane_in_session(&mgr, session_id) {
-                match mgr.split_pane_with_options(first_pane_id, horizontal, &spawn_options) {
+                match mgr.split_pane_with_options(
+                    first_pane_id,
+                    horizontal,
+                    &spawn_options,
+                    startup_command,
+                ) {
                     Ok(new_pane_id) => {
                         let (_, cols, rows) =
                             find_pane_info(&mgr, new_pane_id).unwrap_or((session_id, 80, 24));
@@ -1337,7 +1353,7 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "terminal.panes.create",
-            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command and working directory.",
+            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command, working directory, and an optional startup command injected after the first prompt.",
             schema_for_type::<SpawnPaneParam>(),
         ),
         Tool::new(

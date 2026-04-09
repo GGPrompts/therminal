@@ -297,10 +297,11 @@ fn render_single_pane(
         let reg = agent_registry.lock().unwrap_or_else(|e| e.into_inner());
         reg.get(pane.id).and_then(|entry| entry.pid)
     };
+    let claude_meta = agent_pid.and_then(|pid| claude_cwd.chrome_meta_for_pid(pid));
     let claude_agent_cwd: Option<std::path::PathBuf> =
-        agent_pid.and_then(|pid| claude_cwd.cwd_for_pid(pid));
+        claude_meta.as_ref().and_then(|meta| meta.cwd.clone());
     let claude_header_title: Option<String> =
-        agent_pid.and_then(|pid| claude_cwd.header_title_for_pid(pid));
+        claude_meta.as_ref().and_then(|meta| meta.header_title());
     let vp = pane.viewport;
     let term = match pane.backend.term() {
         Some(t) => t,
