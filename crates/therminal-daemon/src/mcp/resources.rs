@@ -24,8 +24,9 @@ use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycle
 
 use super::{
     AGENT_EVENT_BUFFER_CAP, AGENT_EVENTS_URI, CLAUDE_EVENT_BUFFER_CAP, CLAUDE_EVENTS_URI,
-    TherminalMcpServer, extract_agent_identity, render_grid_lines,
+    EVENTS_URI, TherminalMcpServer, extract_agent_identity, render_grid_lines,
 };
+use crate::event_bus::{EventFilter, MAX_PAGE_SIZE, MAX_SUBSCRIBER_LAG};
 
 impl TherminalMcpServer {
     /// Build the list of concrete resources from current pane state.
@@ -73,6 +74,21 @@ impl TherminalMcpServer {
                 }
             }
         }
+
+        // Unified event bus (tn-xula). Always advertised; the actual
+        // ring buffer / forwarder lives on the daemon-side `EventBus`.
+        resources.push(Annotated::new(
+            RawResource::new(EVENTS_URI, "Unified terminal event bus".to_string())
+                .with_description(
+                    "Unified event stream from all three integration surfaces — \
+                     harness crates, pattern packs, and core capabilities. \
+                     Filter via query string: source_class, source_id, kinds (glob), \
+                     panes, since (cursor). See docs/event-bus-spec.md."
+                        .to_string(),
+                )
+                .with_mime_type("application/json"),
+            None,
+        ));
 
         // Global Claude agent-event stream (always advertised; subscriptions
         // become no-ops if the pipeline failed to start).
@@ -166,6 +182,38 @@ impl TherminalMcpServer {
         let uri = &request.uri;
         let agent = extract_agent_identity(&context);
         self.enforce_resource_trust(uri, &agent)?;
+
+        // Unified event bus (tn-xula) — `terminal://events?<filters>` and the
+        // backward-compat `therminal://claude/events` shim. The shim rewrites
+        // its URI into a filter on the unified bus per SPEC §6.
+        let unified_query: Option<String> = if uri == CLAUDE_EVENTS_URI {
+            Some("source_class=harness&source_id=claude".to_string())
+        } else {
+            uri.strip_prefix(EVENTS_URI)
+                .map(|rest| rest.strip_prefix('?').unwrap_or(rest).to_string())
+        };
+        if let Some(query) = unified_query
+            && let Some(bus) = self.event_bus.as_ref()
+        {
+            let filter = EventFilter::from_query(&query).map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("invalid event filter: {e}"),
+                    None,
+                )
+            })?;
+            let page = bus.query(&filter, MAX_PAGE_SIZE);
+            let json = serde_json::to_string(&page).map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("failed to serialize event page: {e}"),
+                    None,
+                )
+            })?;
+            return Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(json, uri.to_string()).with_mime_type("application/json"),
+            ]));
+        }
 
         // Global Claude event stream: drain the buffered events that the
         // subscription background task has accumulated since the last read.
@@ -298,6 +346,82 @@ impl TherminalMcpServer {
         let uri = &request.uri;
         let agent = extract_agent_identity(&context);
         self.enforce_resource_trust(uri, &agent)?;
+
+        // Unified event bus subscription (tn-xula). Handles both the new
+        // `terminal://events?<filters>` URI and the legacy
+        // `therminal://claude/events` shim (rewritten to a filter). The
+        // forwarder runs the filter in-process and applies the SPEC §5 lag
+        // cap: subscribers more than `MAX_SUBSCRIBER_LAG` events behind the
+        // bus tip get dropped silently with a warn log.
+        let unified_query: Option<String> = if uri == CLAUDE_EVENTS_URI {
+            Some("source_class=harness&source_id=claude".to_string())
+        } else {
+            uri.strip_prefix(EVENTS_URI)
+                .map(|rest| rest.strip_prefix('?').unwrap_or(rest).to_string())
+        };
+        if let Some(query) = unified_query {
+            let Some(bus) = self.event_bus.as_ref().cloned() else {
+                return Err(ErrorData::new(
+                    ErrorCode(-32002),
+                    "unified event bus is not running on this daemon".to_string(),
+                    None,
+                ));
+            };
+            let filter = EventFilter::from_query(&query).map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("invalid event filter: {e}"),
+                    None,
+                )
+            })?;
+            let mut event_rx = bus.subscribe();
+            let peer = context.peer.clone();
+            let uri_owned = uri.to_string();
+            let bus_for_drop = Arc::clone(&bus);
+            let handle = tokio::spawn(async move {
+                let mut lag: u64 = 0;
+                loop {
+                    match event_rx.recv().await {
+                        Ok(event) => {
+                            if !filter.matches(&event) {
+                                continue;
+                            }
+                            let params = ResourceUpdatedNotificationParam::new(&uri_owned);
+                            if let Err(e) = peer.notify_resource_updated(params).await {
+                                debug!(
+                                    error = %e,
+                                    uri = %uri_owned,
+                                    "failed to send unified-bus resource-updated notification, stopping subscription"
+                                );
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            debug!(uri = %uri_owned, "unified bus channel closed");
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            lag = lag.saturating_add(n);
+                            if lag > MAX_SUBSCRIBER_LAG {
+                                tracing::warn!(
+                                    uri = %uri_owned,
+                                    lag,
+                                    "event-bus: dropped slow subscriber"
+                                );
+                                bus_for_drop.note_dropped_subscriber();
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            let mut subs = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = subs.insert(uri.to_string(), handle) {
+                old.abort();
+            }
+            info!(uri = %uri, "unified event-bus subscription active");
+            return Ok(());
+        }
 
         // Global Claude agent-event stream subscription.
         if uri == CLAUDE_EVENTS_URI {

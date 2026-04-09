@@ -60,7 +60,8 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.agents.get_session_detail"
         | "terminal.agents.get_cadence"
         | "terminal.agents.find_with_capacity"
-        | "terminal.patterns.stats" => Some(ToolCategory::Observer),
+        | "terminal.patterns.stats"
+        | "terminal.events.stats" => Some(ToolCategory::Observer),
         "terminal.sessions.create"
         | "terminal.panes.write"
         | "terminal.panes.create"
@@ -77,6 +78,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
 /// URIs that don't match any known resource pattern.
 pub fn resource_category(uri: &str) -> Option<ToolCategory> {
     if uri.starts_with("terminal://pane/")
+        || uri.starts_with("terminal://events")
         || uri.starts_with("therminal://claude/")
         || uri.starts_with("therminal://agents/")
     {

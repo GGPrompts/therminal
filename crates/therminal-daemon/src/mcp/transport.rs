@@ -46,6 +46,7 @@ pub async fn start_mcp_server(
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     pattern_engine: Option<Arc<PatternEngine>>,
+    event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if !config.enabled {
@@ -65,6 +66,7 @@ pub async fn start_mcp_server(
             claude_events,
             agent_events,
             pattern_engine,
+            event_bus,
             shutdown,
         )
         .await?;
@@ -80,6 +82,7 @@ pub async fn start_mcp_server(
             claude_events,
             agent_events,
             pattern_engine,
+            event_bus,
             shutdown,
         )
         .await?;
@@ -102,18 +105,20 @@ fn spawn_mcp_connection<R, W>(
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     pattern_engine: Option<Arc<PatternEngine>>,
+    event_bus: Option<Arc<crate::event_bus::EventBus>>,
 ) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     tokio::spawn(async move {
-        let server = TherminalMcpServer::new(
+        let server = TherminalMcpServer::new_with_bus(
             session_mgr,
             trust_config,
             rate_limiter,
             claude_events,
             agent_events,
             pattern_engine,
+            event_bus,
         );
         match server.serve((reader, writer)).await {
             Ok(running) => {
@@ -139,6 +144,7 @@ async fn start_mcp_server_unix(
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     pattern_engine: Option<Arc<PatternEngine>>,
+    event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     // Clean stale socket
@@ -182,6 +188,7 @@ async fn start_mcp_server_unix(
                             claude_events.clone(),
                             agent_events.clone(),
                             pattern_engine.clone(),
+                            event_bus.clone(),
                         );
                     }
                     Err(e) => {
@@ -221,6 +228,7 @@ async fn start_mcp_server_windows(
     claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     pattern_engine: Option<Arc<PatternEngine>>,
+    event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -251,6 +259,7 @@ async fn start_mcp_server_windows(
                             claude_events.clone(),
                             agent_events.clone(),
                             pattern_engine.clone(),
+                            event_bus.clone(),
                         );
 
                         // Create a new pipe instance for the next client.

@@ -1275,6 +1275,25 @@ impl TherminalMcpServer {
     /// (tests or when `patterns.enabled = false` but the engine hasn't
     /// been constructed) we return an empty stats object instead of a
     /// tool-call error so downstream consumers have a stable shape.
+    /// Handle `terminal.events.stats` (tn-xula).
+    pub(super) async fn handle_events_stats(&self) -> Result<CallToolResult, ErrorData> {
+        let stats = match &self.event_bus {
+            Some(bus) => bus.stats(),
+            None => crate::event_bus::EventBusStats {
+                total_events: 0,
+                events_harness: 0,
+                events_pattern: 0,
+                events_core: 0,
+                dropped_subscribers: 0,
+                buffer_used: 0,
+                buffer_capacity: 0,
+                buffer_fill_pct: 0.0,
+                current_cursor: 0,
+            },
+        };
+        Ok(CallToolResult::success(vec![json_content(&stats)?]))
+    }
+
     pub(super) async fn handle_patterns_stats(&self) -> Result<CallToolResult, ErrorData> {
         let stats = match &self.pattern_engine {
             Some(engine) => engine.stats().with_cap_limit(engine.config().max_patterns),
@@ -1432,6 +1451,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.agents.find_with_capacity",
             "Return all detected agents whose REMAINING context-window capacity is at least `threshold_percent` (0.0 - 100.0). `remaining_percent = 100.0 - context_percent`. Agents whose capacity is unknown (no PaneCapacityCache entry) are INCLUDED — treated as 'potentially has capacity' so callers don't accidentally exclude fresh panes. Results are sorted by `remaining_percent` descending; agents with unknown capacity sort last.",
             schema_for_type::<FindWithCapacityParam>(),
+        ),
+        Tool::new(
+            "terminal.events.stats",
+            "Return aggregate stats for the unified event bus (tn-xula): total events published, per-source-class counts (harness/pattern/core), dropped-subscriber count, current ring buffer fill, and the current monotonic cursor. Read-only (Observer tier).",
+            schema_for_type::<EmptyParams>(),
         ),
         Tool::new(
             "terminal.patterns.stats",

@@ -998,6 +998,9 @@ pub struct TherminalMcpServer {
     /// Shared pattern engine (tn-yrjd). `None` when the daemon is built
     /// without pattern support (tests, headless smoke).
     pub(super) pattern_engine: Option<Arc<PatternEngine>>,
+    /// Unified event bus (tn-xula). `None` only in legacy unit tests that
+    /// construct the server through the historical 6-arg `new`.
+    pub(super) event_bus: Option<Arc<crate::event_bus::EventBus>>,
 }
 
 pub(super) const CLAUDE_EVENT_BUFFER_CAP: usize = 256;
@@ -1007,6 +1010,9 @@ pub(super) const AGENT_EVENT_BUFFER_CAP: usize = 256;
 pub(super) const CLAUDE_EVENTS_URI: &str = "therminal://claude/events";
 /// URI for the global agent lifecycle event stream backed by `AgentRegistry`.
 pub(super) const AGENT_EVENTS_URI: &str = "therminal://agents/events";
+/// URI prefix for the unified event bus (tn-xula). Filter parameters live in
+/// the optional query string per `docs/event-bus-spec.md` §4.
+pub(super) const EVENTS_URI: &str = "terminal://events";
 
 impl TherminalMcpServer {
     /// Create a new MCP server backed by the given session manager and trust config.
@@ -1017,6 +1023,28 @@ impl TherminalMcpServer {
         claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
         agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
         pattern_engine: Option<Arc<PatternEngine>>,
+    ) -> Self {
+        Self::new_with_bus(
+            session_mgr,
+            trust_config,
+            rate_limiter,
+            claude_events,
+            agent_events,
+            pattern_engine,
+            None,
+        )
+    }
+
+    /// Construct a server wired to the unified event bus (tn-xula).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_bus(
+        session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+        trust_config: Arc<TrustConfig>,
+        rate_limiter: Arc<RateLimiter>,
+        claude_events: Option<tokio::sync::broadcast::Sender<TaggedAgentEvent>>,
+        agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
+        pattern_engine: Option<Arc<PatternEngine>>,
+        event_bus: Option<Arc<crate::event_bus::EventBus>>,
     ) -> Self {
         Self {
             session_mgr,
@@ -1032,6 +1060,7 @@ impl TherminalMcpServer {
                 std::collections::VecDeque::with_capacity(AGENT_EVENT_BUFFER_CAP),
             )),
             pattern_engine,
+            event_bus,
         }
     }
 
@@ -1413,6 +1442,7 @@ impl ServerHandler for TherminalMcpServer {
                 self.handle_find_with_capacity(params).await
             }
             "terminal.patterns.stats" => self.handle_patterns_stats().await,
+            "terminal.events.stats" => self.handle_events_stats().await,
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -2135,7 +2165,7 @@ pub(crate) mod tests {
     #[test]
     fn tool_definitions_returns_28_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 28, "expected exactly 28 tool definitions");
+        assert_eq!(tools.len(), 29, "expected exactly 29 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -2173,6 +2203,7 @@ pub(crate) mod tests {
             "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
             "terminal.patterns.stats",
+            "terminal.events.stats",
         ];
         for name in &expected {
             assert!(names.contains(name), "missing tool definition: {name}");
@@ -3243,8 +3274,9 @@ pub(crate) mod tests {
         let resources = server.build_resource_list().await;
         assert_eq!(
             resources.len(),
-            2,
-            "expected only the global event-stream resources with no panes"
+            3,
+            "expected only the global event-stream resources with no panes \
+             (terminal://events + claude/events + agents/events)"
         );
     }
 

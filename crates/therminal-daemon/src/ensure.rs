@@ -258,10 +258,20 @@ async fn start_daemon(
         mgr.set_osc_registry(Arc::clone(&osc_registry));
         mgr.set_harness_event_sink(harness_event_tx);
     }
+    // We construct the event bus a few lines below, but the drain thread
+    // needs a clone of it. Build a one-element holder via Arc::new and pass
+    // it down. To keep the diff localized, the bus is constructed here,
+    // earlier than its previous position; the MCP-side `event_bus_for_mcp`
+    // holder still picks it up via Arc clone below.
+    let early_event_bus = std::sync::Arc::new(crate::event_bus::EventBus::with_default_capacity());
+    let bus_for_drain = std::sync::Arc::clone(&early_event_bus);
     // Drain the harness-event channel on a dedicated OS thread. Using a
     // plain thread (not tokio::spawn_blocking) keeps the daemon working
     // when the tokio runtime is paused, and avoids warning-storms from
-    // blocking recv on a runtime worker.
+    // blocking recv on a runtime worker. The drain doubles as a bridge
+    // into the unified event bus (tn-xula): every TaggedHarnessEvent
+    // becomes a `TerminalEvent { source_class: harness, source_id: <owner>,
+    // kind: <handler-supplied>, body: <handler-supplied> }`.
     std::thread::Builder::new()
         .name("harness-event-drain".into())
         .spawn(move || {
@@ -271,6 +281,15 @@ async fn start_daemon(
                     kind = %tagged.event.kind,
                     "harness OSC event received"
                 );
+                bus_for_drain.publish(therminal_protocol::bus_types::TerminalEvent {
+                    source_class: therminal_protocol::bus_types::SourceClass::Harness,
+                    source_id: tagged.source_id.to_string(),
+                    kind: tagged.event.kind,
+                    pane_id: None,
+                    ts_ms: 0,
+                    cursor: 0,
+                    body: tagged.event.body,
+                });
             }
             debug!("harness-event-drain: channel closed, exiting");
         })
@@ -484,6 +503,48 @@ async fn start_daemon(
         }
     }
 
+    // Unified event bus (tn-xula). Constructed earlier so the OSC drain
+    // thread can hold an Arc clone; the MCP server gets another clone here.
+    let event_bus = Arc::clone(&early_event_bus);
+    let event_bus_for_mcp = Some(Arc::clone(&event_bus));
+
+    // Bridge: claude harness broadcast → unified bus. The harness emits
+    // `TaggedAgentEvent`s; we wrap each one as a `TerminalEvent` with
+    // `source_class=harness, source_id="claude"`. Pane resolution is
+    // best-effort — we leave `pane_id=None` because the harness's event
+    // shape carries `EventSource` (TopLevel/Subagent) rather than a pane id.
+    if let Some(claude_tx) = claude_events_tx.as_ref() {
+        let mut rx = claude_tx.subscribe();
+        let bus = Arc::clone(&event_bus);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(tagged) => {
+                        let body = serde_json::to_value(&tagged)
+                            .unwrap_or_else(|_| serde_json::json!({ "serialize_error": true }));
+                        bus.publish(therminal_protocol::bus_types::TerminalEvent {
+                            source_class: therminal_protocol::bus_types::SourceClass::Harness,
+                            source_id: "claude".to_string(),
+                            kind: "claude.event".to_string(),
+                            pane_id: None,
+                            ts_ms: 0,
+                            cursor: 0,
+                            body,
+                        });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
+
+    // Spawn the MCP server alongside the IPC server. Note: the harness OSC
+    // event drain thread above (`harness-event-drain`) is a sync mpsc loop;
+    // republishing into the bus from there happens via the dedicated bridge
+    // task installed below to avoid synchronously holding the bus mutex from
+    // the PTY reader thread.
+
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = app_config.mcp.clone();
@@ -500,6 +561,7 @@ async fn start_daemon(
             claude_events_tx,
             agent_events_tx_for_mcp,
             pattern_engine_for_mcp,
+            event_bus_for_mcp,
             mcp_shutdown_clone,
         )
         .await
