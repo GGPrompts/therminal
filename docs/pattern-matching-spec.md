@@ -6,7 +6,7 @@ This document specifies the pattern-pack surface: the config-driven regex +
 action engine that lets users and AI agents extend terminal behavior without
 writing Rust.
 
-**Status:** SPEC — no implementation yet. Consumer issue: `tn-yrjd`.
+**Status:** Shipped. Engine implementation landed in `tn-yrjd` (2026-04-08); PTY line-finalization and OSC 133 C dispatch wiring landed in `tn-86us` (2026-04-09). The `emit_event` action is fully live. The `hotspot` action produces events today and a follow-up (`tn-f9cl`) wires the per-pane hotspot sink. The `widget` action publishes events; widget placement onto the tn-npd substrate is tracked as a separate follow-up.
 
 ---
 
@@ -251,9 +251,10 @@ kind = "error"
 ### 5.2 `widget`
 
 Renders a small widget at an anchor point relative to the matched text. Widget
-rendering uses the tiny-skia overlay substrate tracked in `tn-npd`. If that
-substrate is not yet shipped, the engine buffers widget placements and renders
-them when the substrate becomes available; no pack changes are required.
+rendering uses the tiny-skia overlay substrate from `tn-npd` (shipped). The
+pattern engine currently publishes widget-match events to the bus; the sink that
+routes matches into the app-side `WidgetManager` is tracked as a follow-up. No
+pack changes will be required when that sink lands.
 
 Sub-table: `[pattern.widget]`
 
