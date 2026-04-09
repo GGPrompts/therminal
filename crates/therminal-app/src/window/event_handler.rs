@@ -262,13 +262,17 @@ impl App {
         // actions are available in a single merged menu.
         if !has_selection
             && let Some((col, row)) = self.pixel_to_grid_for_pane(px as f64, py as f64, pane_id)
-            && let Some((kind, text, is_dir)) = self
+            && let Some((kind, text, is_dir, resolved)) = self
                 .grid_renderer
                 .as_ref()
                 .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
         {
+            // Prefer the harness-resolved absolute path when present
+            // (tn-gidy) so right-click menu actions also survive agent
+            // worktree hops.
+            let effective = resolved.unwrap_or(text);
             let hotspot_menu =
-                crate::menu::build_hotspot_palette(kind, text.to_string(), is_dir, (px, py));
+                crate::menu::build_hotspot_palette(kind, effective.to_string(), is_dir, (px, py));
             let mut merged = hotspot_menu.sections;
             merged.append(&mut menu.sections);
             menu.sections = merged;

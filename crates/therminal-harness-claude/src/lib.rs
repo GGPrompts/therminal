@@ -54,6 +54,7 @@ pub mod markers;
 pub mod pipeline;
 pub mod session_log;
 pub mod state;
+pub mod tool_call_hotspots;
 
 pub use agent_events::AgentEvent;
 pub use jsonl_tailer::{ClaudeJsonlRegistry, EventSource, SessionJsonlTailer, TaggedAgentEvent};

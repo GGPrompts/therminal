@@ -35,4 +35,24 @@ pub enum AgentEvent {
     },
     /// Model thinking/reasoning content.
     Thinking { content: String },
+    /// A tool call whose path argument has been resolved against the
+    /// agent's current working directory (tn-gidy). Emitted by
+    /// [`crate::pipeline`] when a [`AgentEvent::ToolUse`] carries a
+    /// recognised path-shaped input and the cwd index knows the agent's
+    /// working directory for the source session.
+    ///
+    /// Consumers: MCP subscribers observing `source_class=harness` +
+    /// `kind=tool_call`; the renderer bridge that turns these into
+    /// clickable hotspots.
+    ToolCallResolved {
+        /// Tool name (e.g. `"Update"`, `"Read"`, `"Edit"`).
+        tool: String,
+        /// The path as Claude printed it (typically relative to the agent cwd).
+        display_path: String,
+        /// The absolute path after joining against the agent cwd.
+        resolved_path: String,
+        /// Claude Code session id that owns this tool call. Clients use
+        /// this to correlate with `EventSource` and the cwd index.
+        session_id: String,
+    },
 }

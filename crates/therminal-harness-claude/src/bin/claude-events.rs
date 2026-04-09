@@ -359,6 +359,15 @@ fn format_event_line(cli: &Cli, ev: &TaggedAgentEvent, now_hms: &str) -> String 
             paint(&format!("{:<12}", "assistant"), MAGENTA, no_color),
             truncate(content, 80),
         ),
+        AgentEvent::ToolCallResolved {
+            tool,
+            display_path,
+            resolved_path,
+            ..
+        } => (
+            paint(&format!("{:<12}", tool), CYAN, no_color),
+            truncate(&format!("{display_path} → {resolved_path}"), 80),
+        ),
     };
 
     format!("{now_hms} {tag}{indent}  {kind} {payload}")

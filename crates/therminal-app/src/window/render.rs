@@ -40,7 +40,12 @@ fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
         if let Some(row_hs) = row_hotspots.get(&cell.row) {
             for h in row_hs {
                 if cell.col >= h.start_col && cell.col < h.end_col {
-                    cell.hotspot = Some((h.kind.clone(), Arc::from(h.text.as_str()), h.is_dir));
+                    cell.hotspot = Some((
+                        h.kind.clone(),
+                        Arc::from(h.text.as_str()),
+                        h.is_dir,
+                        h.resolved_text.as_deref().map(Arc::from),
+                    ));
                     break; // first matching hotspot wins
                 }
             }

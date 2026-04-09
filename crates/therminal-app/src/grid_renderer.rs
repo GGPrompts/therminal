@@ -165,15 +165,21 @@ pub struct RenderCell {
     pub hotspot: Option<HotspotInfo>,
 }
 
-/// Per-cell hotspot annotation: kind + full matched text + is_dir flag.
+/// Per-cell hotspot annotation: kind + full matched text + is_dir flag +
+/// optional harness-resolved absolute path (tn-gidy).
 ///
 /// Stored on each `RenderCell` and surfaced via the renderer's
 /// `hotspot_map` so the click handler can branch on whether the target
-/// is a directory.
+/// is a directory. When the hotspot was emitted by a harness crate that
+/// pre-resolved the path against the agent's cwd (e.g. Claude Code
+/// `Update(crates/foo.rs)` joined against the agent working_dir), the
+/// fourth tuple element carries the absolute path; the click handler
+/// prefers it over the visible `text` to survive worktree hops.
 pub type HotspotInfo = (
     therminal_terminal::hotspot_detection::HotspotKind,
     Arc<str>,
     bool,
+    Option<Arc<str>>,
 );
 
 /// Build the full rendered text for a terminal cell.
@@ -1081,12 +1087,18 @@ impl GridRenderer {
                     // Re-insert from fresh cell data.
                     if let Some(row) = cached_row {
                         for cell in &row.cells {
-                            if let Some((ref kind, ref full_text, is_dir)) = cell.hotspot
+                            if let Some((ref kind, ref full_text, is_dir, ref resolved)) =
+                                cell.hotspot
                                 && cell.hyperlink.is_none()
                             {
                                 self.hotspot_map.insert(
                                     (pane_id, cell.row, cell.col),
-                                    (kind.clone(), Arc::clone(full_text), is_dir),
+                                    (
+                                        kind.clone(),
+                                        Arc::clone(full_text),
+                                        is_dir,
+                                        resolved.clone(),
+                                    ),
                                 );
                             }
                         }

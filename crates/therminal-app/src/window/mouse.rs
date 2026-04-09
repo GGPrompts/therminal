@@ -761,22 +761,26 @@ impl App {
         pane_id: PaneId,
         row: usize,
         col: usize,
-    ) -> Option<(
-        therminal_terminal::hotspot_detection::HotspotKind,
-        std::sync::Arc<str>,
-        bool,
-    )> {
+    ) -> Option<crate::grid_renderer::HotspotInfo> {
         self.grid_renderer
             .as_ref()
             .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
     }
 
     /// Handle a click on a hotspot cell: open an action palette.
+    ///
+    /// When the hotspot carries a harness-resolved absolute path
+    /// (tn-gidy — Claude Code's `Update(crates/foo.rs)` joined against
+    /// the agent's working_dir), we prefer it over the visible `text`
+    /// so clicks survive worktree hops where the pane's OSC 7 cwd
+    /// diverges from the agent's cwd. Otherwise we fall back to the
+    /// visible text and the standard resolve-against-pane-cwd path.
     fn handle_hotspot_click(&mut self, pane_id: PaneId, row: usize, col: usize) -> bool {
-        let (kind, text, is_dir) = match self.hotspot_at(pane_id, row, col) {
+        let (kind, text, is_dir, resolved) = match self.hotspot_at(pane_id, row, col) {
             Some(h) => h,
             None => return false,
         };
+        let text = resolved.unwrap_or(text);
         let (px, py) = match self.cursor_position {
             Some(pos) => pos,
             None => return false,

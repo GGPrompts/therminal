@@ -24,6 +24,7 @@ notify = { workspace = true }
 time = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
+regex = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
