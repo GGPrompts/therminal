@@ -375,3 +375,85 @@ match = "INTEGRATION_MARKER_86US_[0-9]+"
         "expected at least one pattern match, got {last_total}"
     );
 }
+
+/// Scenario 6 -- Pattern engine hotspot-action dispatch (tn-f9cl).
+#[tokio::test]
+async fn pattern_engine_dispatches_hotspot_action_match() {
+    let pack_toml = r#"
+pack_name = "integration-f9cl"
+pack_description = "tn-f9cl integration test pack (hotspot action)"
+
+[[pattern]]
+name = "f9cl_marker"
+scope = "finalized_line"
+action = "hotspot"
+match = "HOTSPOT_MARKER_F9CL_(?P<num>[0-9]+)"
+
+[pattern.hotspot]
+on_click = "open_editor"
+target = "/tmp/test-{num}.rs"
+kind = "file"
+"#;
+
+    let harness = DaemonHarness::spawn_with_setup(|config_dir| {
+        let pack_dir = config_dir.join("therminal").join("patterns");
+        std::fs::create_dir_all(&pack_dir)?;
+        std::fs::write(pack_dir.join("integration-f9cl.toml"), pack_toml)?;
+        Ok(())
+    })
+    .await
+    .expect("daemon harness should spawn");
+    let stats_resp = harness
+        .client()
+        .send_request(IpcRequest::QueryPatternStats)
+        .await
+        .unwrap();
+    match stats_resp {
+        IpcResponse::PatternStats {
+            total_matches_dispatched,
+            total_loaded,
+        } => {
+            assert_eq!(total_matches_dispatched, 0);
+            assert!(total_loaded >= 1);
+        }
+        other => panic!("expected PatternStats, got {other:?}"),
+    }
+    let (_session_id, pane_id) = harness
+        .create_session_with_pane(Some("hotspot-test"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    harness
+        .client()
+        .send_request(IpcRequest::SendKeys {
+            pane_id,
+            keys: b"echo HOTSPOT_MARKER_F9CL_99\n".to_vec(),
+        })
+        .await
+        .unwrap();
+    let _ = wait_for_output(harness.client(), pane_id, Duration::from_secs(5), |g| {
+        g.contains("HOTSPOT_MARKER_F9CL_99")
+    })
+    .await
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let IpcResponse::PatternStats {
+            total_matches_dispatched,
+            ..
+        } = harness
+            .client()
+            .send_request(IpcRequest::QueryPatternStats)
+            .await
+            .unwrap()
+        {
+            if total_matches_dispatched >= 1 {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("hotspot pattern match not dispatched");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

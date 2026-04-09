@@ -161,6 +161,20 @@ impl App {
             None
         };
 
+        let pattern_engine = if config.patterns.enabled {
+            use therminal_terminal::semantic_patterns::{PatternEngine, PatternEngineConfig};
+            Some(PatternEngine::new(PatternEngineConfig {
+                enabled: true,
+                user_pattern_dir: config.patterns.directory.clone(),
+                shipped_pattern_dir: None,
+                max_patterns: config.patterns.max_patterns,
+                slow_pattern_threshold_us: config.patterns.slow_pattern_threshold_us,
+                slow_strike_limit: config.patterns.slow_strike_limit,
+            }))
+        } else {
+            None
+        };
+
         Self {
             window: None,
             gpu: None,
@@ -208,6 +222,7 @@ impl App {
             daemon_runtime: None,
             pane_id_map: super::PaneIdMap::default(),
             daemon_session_id: None,
+            pattern_engine,
             widget_renderer: None,
             widget_manager: crate::widgets::WidgetManager::new(),
             initial_pane_pending: false,
