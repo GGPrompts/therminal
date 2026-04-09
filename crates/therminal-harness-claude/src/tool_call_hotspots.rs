@@ -104,10 +104,23 @@ impl ClaudeSessionCwdIndex {
         match update {
             ClaudeStateUpdate::Upserted(state) => self.upsert(state),
             ClaudeStateUpdate::Removed { .. } => {
-                // Path-keyed removal is handled by the pipeline, not here.
-                // Stale entries self-correct on the next Upsert; real eviction
-                // is not safety-critical because we only use this index for
-                // UI hints.
+                // `ClaudeStateUpdate::Removed` carries only the deleted state
+                // file path — not the `session_id` we key the index by — so
+                // we cannot evict the entry here without re-deriving the id
+                // from the filename, which would couple the index to hook
+                // path layout. The pipeline calls `forget(session_id)`
+                // explicitly when it knows the id; otherwise stale entries
+                // remain until overwritten by the next `Upserted` for the
+                // same id.
+                //
+                // Memory note: this index is bounded by the number of live
+                // Claude sessions a user runs in parallel (typically << 100),
+                // and entries are at most a `String` + `PathBuf`. Unbounded
+                // growth in pathological cases (sessions that disappear
+                // without ever being re-upserted) is acceptable for a
+                // pure-UI-hint structure; if it ever becomes a concern,
+                // a periodic sweep against `ClaudeStatePoller`'s live set
+                // can evict orphans.
             }
         }
     }
@@ -119,26 +132,26 @@ impl ClaudeSessionCwdIndex {
         if state.session_id.is_empty() {
             return;
         }
-        let mut g = self.inner.lock().expect("cwd index poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.insert(state.session_id.clone(), PathBuf::from(wd));
     }
 
     /// Explicitly drop a session's entry (used by the pipeline on Removed).
     pub fn forget(&self, session_id: &str) {
-        let mut g = self.inner.lock().expect("cwd index poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.remove(session_id);
     }
 
     /// Look up the agent cwd for a Claude session id. Returns `None` when
     /// the session is unknown or its state didn't carry a `working_dir`.
     pub fn cwd_for(&self, session_id: &str) -> Option<PathBuf> {
-        let g = self.inner.lock().expect("cwd index poisoned");
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.get(session_id).cloned()
     }
 
     /// Current number of indexed sessions.
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("cwd index poisoned").len()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -194,7 +207,13 @@ pub fn detect_claude_tool_call_hotspots(rows: &[String], agent_cwd: &Path) -> Ve
             let start_col = row[..start_byte].chars().count();
             let end_col = row[..end_byte].chars().count();
 
-            let resolved = resolve_against(agent_cwd, display);
+            // Reject paths containing `..` so a hostile JSONL can't push
+            // the resolver outside `agent_cwd` (e.g. `Read(../../etc/passwd)`).
+            // When rejected, skip the hotspot entirely — the user can still
+            // see the printed text, just not click it.
+            let Some(resolved) = resolve_against(agent_cwd, display) else {
+                continue;
+            };
 
             out.push(TextHotspot {
                 kind: HotspotKind::FilePath,
@@ -215,12 +234,22 @@ pub fn detect_claude_tool_call_hotspots(rows: &[String], agent_cwd: &Path) -> Ve
 /// returned unchanged. The result is a logical join — we do not call
 /// `canonicalize` because that would stat the filesystem (the detector
 /// must stay a pure function).
-fn resolve_against(agent_cwd: &Path, rel: &str) -> PathBuf {
+///
+/// Returns `None` if `rel` contains a `..` component, to prevent a
+/// hostile JSONL from coaxing the editor-fallback chain into opening
+/// files outside `agent_cwd`. Absolute paths are returned as-is — the
+/// caller has already opted in to those by typing/printing them.
+fn resolve_against(agent_cwd: &Path, rel: &str) -> Option<PathBuf> {
     let p = Path::new(rel);
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
     if p.is_absolute() {
-        p.to_path_buf()
+        Some(p.to_path_buf())
     } else {
-        agent_cwd.join(p)
+        Some(agent_cwd.join(p))
     }
 }
 
@@ -379,6 +408,41 @@ mod tests {
         assert!(idx.cwd_for("sid-1").is_some());
         idx.forget("sid-1");
         assert!(idx.cwd_for("sid-1").is_none());
+    }
+
+    #[test]
+    fn parent_dir_traversal_is_rejected() {
+        let cwd = Path::new("/home/u/repo");
+        let hs = detect_claude_tool_call_hotspots(
+            &rows(&["Read(../../etc/passwd)", "Edit(src/../../../etc/shadow)"]),
+            cwd,
+        );
+        assert!(
+            hs.is_empty(),
+            "paths containing `..` must not produce hotspots"
+        );
+    }
+
+    #[test]
+    fn normal_relative_path_resolves() {
+        assert_eq!(
+            resolve_against(Path::new("/work"), "src/lib.rs"),
+            Some(PathBuf::from("/work/src/lib.rs"))
+        );
+    }
+
+    #[test]
+    fn absolute_path_passes_through() {
+        assert_eq!(
+            resolve_against(Path::new("/work"), "/etc/hosts"),
+            Some(PathBuf::from("/etc/hosts"))
+        );
+    }
+
+    #[test]
+    fn parent_dir_returns_none() {
+        assert_eq!(resolve_against(Path::new("/work"), "../etc/passwd"), None);
+        assert_eq!(resolve_against(Path::new("/work"), "src/../../etc"), None);
     }
 
     #[test]

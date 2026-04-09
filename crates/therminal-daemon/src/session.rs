@@ -176,9 +176,9 @@ impl PtyReaderHandler for DaemonPtyHandler {
                     InterceptedEvent::Osc633(mark) | InterceptedEvent::Osc133(mark) => {
                         use therminal_terminal::osc633::Osc633Mark;
                         match mark {
-                            Osc633Mark::PreExec => pd.on_command_start(None),
+                            Osc633Mark::PreExec => pd.on_command_start(),
                             Osc633Mark::CommandLine { command } => {
-                                pd.on_command_start(Some(command.clone()));
+                                pd.set_command_text(command.clone());
                             }
                             Osc633Mark::CommandFinished { .. } => pd.on_command_finish(),
                             _ => {}
@@ -1325,7 +1325,7 @@ impl SessionManager {
     pub fn pattern_stats(&self) -> (u64, usize) {
         let total_matches = self
             .pattern_matches_total
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(std::sync::atomic::Ordering::Acquire);
         let total_loaded = self
             .pattern_engine
             .as_ref()

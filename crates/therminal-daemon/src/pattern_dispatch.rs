@@ -123,10 +123,30 @@ impl PatternDispatcher {
     }
 
     /// Called when a PreExec (C) mark is observed for this pane.
-    pub fn on_command_start(&mut self, command: Option<String>) {
+    ///
+    /// Shells emit OSC 633 marks in the order B → E → C → … → D, so the
+    /// command text is delivered by the E mark *before* this method fires.
+    /// We therefore preserve `current_command` if it's already populated
+    /// from an earlier `set_command_text` call within the same prompt
+    /// boundary, and only clear it on `on_command_finish`.
+    pub fn on_command_start(&mut self) {
+        // Flush any partial bytes from the previous segment so they aren't
+        // silently dropped when we reset `transcript_buf` for the new
+        // command region.
+        if !self.line_buf.is_empty() {
+            let partial = std::mem::take(&mut self.line_buf);
+            self.dispatch_line(&partial);
+        }
         self.in_command = true;
         self.transcript_buf.clear();
-        self.current_command = command;
+    }
+
+    /// Called when an OSC 633 `E` (CommandLine) mark is observed for this
+    /// pane. Sets the command text without touching `in_command` or
+    /// `transcript_buf` — the C mark that follows is responsible for the
+    /// region reset.
+    pub fn set_command_text(&mut self, command: String) {
+        self.current_command = Some(command);
     }
 
     /// Called when a CommandFinished (D) mark is observed for this pane.
@@ -160,7 +180,7 @@ impl PatternDispatcher {
             return;
         }
         for m in matches {
-            self.matches_total.fetch_add(1, Ordering::Relaxed);
+            self.matches_total.fetch_add(1, Ordering::Release);
             let kind_base = m.pattern_name.clone();
             let source_id = m.pack_name.clone();
             let scope = m.scope.as_str();
