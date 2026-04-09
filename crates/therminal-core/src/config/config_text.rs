@@ -187,6 +187,7 @@ pub(super) fn default_config_text() -> String {
         "#          resize_grow | resize_shrink | resize_reset | focus_next | focus_prev\n",
     );
     out.push_str("#          focus_up | focus_down | focus_left | focus_right | zoom_pane\n");
+    out.push_str("#          show_help | show_settings | close_all_panes | restore_layout\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("[keybindings]\n");
     out.push_str("# [[keybindings.bindings]]\n");

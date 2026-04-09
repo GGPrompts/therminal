@@ -16,7 +16,7 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::RenderableCursor;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -181,6 +181,86 @@ pub type HotspotInfo = (
     bool,
     Option<Arc<str>>,
 );
+
+fn ansi_index_for_named(named: NamedColor) -> Option<usize> {
+    Some(match named {
+        NamedColor::Black | NamedColor::DimBlack => 0,
+        NamedColor::Red | NamedColor::DimRed => 1,
+        NamedColor::Green | NamedColor::DimGreen => 2,
+        NamedColor::Yellow | NamedColor::DimYellow => 3,
+        NamedColor::Blue | NamedColor::DimBlue => 4,
+        NamedColor::Magenta | NamedColor::DimMagenta => 5,
+        NamedColor::Cyan | NamedColor::DimCyan => 6,
+        NamedColor::White | NamedColor::DimWhite => 7,
+        NamedColor::BrightBlack => 8,
+        NamedColor::BrightRed => 9,
+        NamedColor::BrightGreen => 10,
+        NamedColor::BrightYellow => 11,
+        NamedColor::BrightBlue => 12,
+        NamedColor::BrightMagenta => 13,
+        NamedColor::BrightCyan => 14,
+        NamedColor::BrightWhite => 15,
+        _ => return None,
+    })
+}
+
+fn resolve_fg_color(
+    fg_override: Option<[f32; 4]>,
+    ansi_override: Option<&[[f32; 4]; 16]>,
+    color: &AnsiColor,
+) -> [f32; 4] {
+    match color {
+        AnsiColor::Named(NamedColor::Foreground)
+        | AnsiColor::Named(NamedColor::BrightForeground)
+        | AnsiColor::Named(NamedColor::DimForeground) => {
+            fg_override.unwrap_or_else(|| ansi_to_glyphon_fg(color))
+        }
+        AnsiColor::Named(named) => {
+            if let Some(palette) = ansi_override
+                && let Some(idx) = ansi_index_for_named(*named)
+            {
+                return palette[idx];
+            }
+            ansi_to_glyphon_fg(color)
+        }
+        AnsiColor::Indexed(idx) => {
+            if let Some(palette) = ansi_override
+                && (*idx as usize) < palette.len()
+            {
+                return palette[*idx as usize];
+            }
+            ansi_to_glyphon_fg(color)
+        }
+        AnsiColor::Spec(_) => ansi_to_glyphon_fg(color),
+    }
+}
+
+fn resolve_bg_color(ansi_override: Option<&[[f32; 4]; 16]>, color: &AnsiColor) -> Option<[f32; 4]> {
+    match color {
+        AnsiColor::Named(NamedColor::Background) => None,
+        AnsiColor::Named(NamedColor::Black) => None,
+        AnsiColor::Named(named) => {
+            if let Some(palette) = ansi_override
+                && let Some(idx) = ansi_index_for_named(*named)
+            {
+                return Some(palette[idx]);
+            }
+            ansi_to_glyphon_bg(color)
+        }
+        AnsiColor::Indexed(idx) => {
+            if *idx == 0 {
+                return None;
+            }
+            if let Some(palette) = ansi_override
+                && (*idx as usize) < palette.len()
+            {
+                return Some(palette[*idx as usize]);
+            }
+            ansi_to_glyphon_bg(color)
+        }
+        AnsiColor::Spec(_) => ansi_to_glyphon_bg(color),
+    }
+}
 
 /// Build the full rendered text for a terminal cell.
 pub(crate) fn cell_display_text(c: char, zerowidth: Option<&[char]>) -> String {
@@ -365,6 +445,8 @@ pub struct GridRenderer {
     cursor_override: Option<[f32; 4]>,
     /// Override for selection color (from config.colors.selection).
     selection_override: Option<[f32; 4]>,
+    /// Optional ANSI palette override (16-color table from config.colors.ansi).
+    ansi_override: Option<[[f32; 4]; 16]>,
 
     /// Cache for overlay text buffers (status bar, pane headers, tab bar).
     /// Key: slot name (e.g. "header_index_0", "status_center", "tab_1").
@@ -561,6 +643,7 @@ impl GridRenderer {
             fg_override: None,
             cursor_override: None,
             selection_override: None,
+            ansi_override: None,
             overlay_cache: HashMap::new(),
         }
     }
@@ -608,6 +691,25 @@ impl GridRenderer {
             .as_deref()
             .and_then(therminal_core::config::ColorsConfig::parse_hex)
             .map(|c| c.to_f32_array());
+        self.ansi_override = colors.ansi.as_ref().and_then(|entries| {
+            if entries.len() < 16 {
+                return None;
+            }
+            let mut out = [[0.0; 4]; 16];
+            for (i, raw) in entries.iter().take(16).enumerate() {
+                let parsed = therminal_core::config::ColorsConfig::parse_hex(raw.as_str())?;
+                out[i] = parsed.to_f32_array();
+            }
+            Some(out)
+        });
+    }
+
+    fn map_fg_color(&self, color: &AnsiColor) -> [f32; 4] {
+        resolve_fg_color(self.fg_override, self.ansi_override.as_ref(), color)
+    }
+
+    fn map_bg_color(&self, color: &AnsiColor) -> Option<[f32; 4]> {
+        resolve_bg_color(self.ansi_override.as_ref(), color)
     }
 
     /// Get the resolved background clear color as `[f32; 4]`, respecting config overrides.
@@ -1245,9 +1347,9 @@ impl GridRenderer {
                 } else if cell.hyperlink.is_some() {
                     PaletteColor::ACCENT_COOL.to_f32_array()
                 } else if cell.flags.contains(Flags::INVERSE) {
-                    ansi_to_glyphon_bg(&cell.bg).unwrap_or(TERM_BG)
+                    self.map_bg_color(&cell.bg).unwrap_or(self.resolved_bg())
                 } else {
-                    ansi_to_glyphon_fg(&cell.fg)
+                    self.map_fg_color(&cell.fg)
                 };
 
                 if cell.c == ' ' && !is_block_cursor {
@@ -1487,6 +1589,8 @@ impl GridRenderer {
 mod tests {
     use super::FontConfig;
     use super::cell_display_text;
+    use super::resolve_fg_color;
+    use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
     use therminal_core::font::PLATFORM_MONOSPACE;
 
     #[test]
@@ -1513,5 +1617,24 @@ mod tests {
     #[test]
     fn cell_display_text_normalizes_nul_to_space() {
         assert_eq!(cell_display_text('\0', None), " ");
+    }
+
+    #[test]
+    fn foreground_named_color_uses_fg_override_when_present() {
+        let fg = [0.12, 0.34, 0.56, 1.0];
+        let resolved = resolve_fg_color(Some(fg), None, &AnsiColor::Named(NamedColor::Foreground));
+        assert_eq!(resolved, fg);
+    }
+
+    #[test]
+    fn named_ansi_color_uses_ansi_override_palette() {
+        let mut palette = [[0.0, 0.0, 0.0, 1.0]; 16];
+        palette[12] = [0.91, 0.22, 0.13, 1.0];
+        let resolved = resolve_fg_color(
+            None,
+            Some(&palette),
+            &AnsiColor::Named(NamedColor::BrightBlue),
+        );
+        assert_eq!(resolved, palette[12]);
     }
 }

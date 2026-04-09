@@ -305,6 +305,19 @@ fn bool_text(value: bool) -> &'static str {
     if value { "ON" } else { "OFF" }
 }
 
+fn truncate_for_width(text: &str, width_px: f32) -> String {
+    // Heuristic tuned for 18px overlay text: keep rows single-line and avoid overlap.
+    let max_chars = (width_px / 9.0).floor().max(4.0) as usize;
+    let len = text.chars().count();
+    if len <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out: String = text.chars().take(keep).collect();
+    out.push_str("...");
+    out
+}
+
 pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset) {
     let (background, foreground, cursor, ansi): (&str, &str, &str, [&str; 16]) = match preset {
         ThemePreset::Paper => (
@@ -483,13 +496,6 @@ pub(crate) fn draw_settings_overlay(
 
     let metrics = Metrics::new(18.0, 24.0);
     let title_metrics = Metrics::new(22.0, 28.0);
-    let bounds = TextBounds {
-        left: 0,
-        top: 0,
-        right: surface_width as i32,
-        bottom: surface_height as i32,
-    };
-
     renderer.viewport.update(
         queue,
         Resolution {
@@ -513,17 +519,22 @@ pub(crate) fn draw_settings_overlay(
     let accent = GlyphColor::rgba(87, 161, 255, 255);
 
     let mut buffers: Vec<Buffer> = Vec::new();
-    let mut placements: Vec<(usize, f32, f32, GlyphColor)> = Vec::new();
+    let mut placements: Vec<(usize, f32, f32, GlyphColor, TextBounds)> = Vec::new();
 
     let mut add_text = |text: String,
                         left: f32,
                         top: f32,
                         width: f32,
+                        height: f32,
                         m: Metrics,
                         color: GlyphColor,
                         weight: Weight| {
         let mut buf = Buffer::new(&mut renderer.font_system, m);
-        buf.set_size(&mut renderer.font_system, Some(width.max(1.0)), Some(30.0));
+        buf.set_size(
+            &mut renderer.font_system,
+            Some(width.max(1.0)),
+            Some(height.max(1.0)),
+        );
         buf.set_text(
             &mut renderer.font_system,
             &text,
@@ -537,7 +548,18 @@ pub(crate) fn draw_settings_overlay(
         buf.shape_until_scroll(&mut renderer.font_system, false);
         let idx = buffers.len();
         buffers.push(buf);
-        placements.push((idx, left, top, color));
+        placements.push((
+            idx,
+            left,
+            top,
+            color,
+            TextBounds {
+                left: left as i32,
+                top: top as i32,
+                right: (left + width) as i32,
+                bottom: (top + height) as i32,
+            },
+        ));
     };
 
     add_text(
@@ -545,6 +567,7 @@ pub(crate) fn draw_settings_overlay(
         panel_x + 18.0,
         panel_y + 18.0,
         panel_w - 36.0,
+        36.0,
         title_metrics,
         ink,
         Weight::SEMIBOLD,
@@ -554,6 +577,7 @@ pub(crate) fn draw_settings_overlay(
         content_x + 24.0,
         panel_y + 24.0,
         panel_w - nav_w - 48.0,
+        28.0,
         metrics,
         muted,
         Weight::NORMAL,
@@ -577,6 +601,7 @@ pub(crate) fn draw_settings_overlay(
             panel_x + 20.0,
             nav_start_y + idx as f32 * nav_row_h + 6.0,
             nav_w - 34.0,
+            nav_row_h - 6.0,
             metrics,
             color,
             Weight::MEDIUM,
@@ -589,6 +614,7 @@ pub(crate) fn draw_settings_overlay(
             content_x + 24.0,
             panel_y + 78.0,
             panel_w - nav_w - 48.0,
+            34.0,
             title_metrics,
             ink,
             Weight::SEMIBOLD,
@@ -608,11 +634,17 @@ pub(crate) fn draw_settings_overlay(
             } else {
                 ink
             };
+            let row_width = panel_w - nav_w - 56.0;
+            let row_text = truncate_for_width(
+                &format!("{marker} {}: {value_text}", control.label),
+                row_width,
+            );
             add_text(
-                format!("{marker} {}: {value_text}", control.label),
+                row_text,
                 content_x + 28.0,
                 panel_y + 118.0 + i as f32 * 36.0,
-                panel_w - nav_w - 56.0,
+                row_width,
+                32.0,
                 metrics,
                 row_color,
                 Weight::NORMAL,
@@ -622,12 +654,12 @@ pub(crate) fn draw_settings_overlay(
 
     let text_areas: Vec<TextArea<'_>> = placements
         .iter()
-        .map(|(idx, left, top, color)| TextArea {
+        .map(|(idx, left, top, color, clip_bounds)| TextArea {
             buffer: &buffers[*idx],
             left: *left,
             top: *top,
             scale: 1.0,
-            bounds,
+            bounds: *clip_bounds,
             default_color: *color,
             custom_glyphs: &[],
         })
@@ -681,6 +713,29 @@ pub(crate) fn draw_settings_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn srgb_to_linear(v: f64) -> f64 {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn relative_luminance(hex: &str) -> f64 {
+        let color = ColorsConfig::parse_hex(hex).expect("valid hex color");
+        let r = srgb_to_linear(color.r as f64 / 255.0);
+        let g = srgb_to_linear(color.g as f64 / 255.0);
+        let b = srgb_to_linear(color.b as f64 / 255.0);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    fn contrast_ratio(a: &str, b: &str) -> f64 {
+        let l1 = relative_luminance(a);
+        let l2 = relative_luminance(b);
+        let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
 
     #[test]
     fn tab_switches_focus_between_nav_and_controls() {
@@ -740,5 +795,49 @@ mod tests {
         assert_eq!(colors.foreground.as_deref(), Some("#000000"));
         assert_eq!(colors.cursor.as_deref(), Some("#000000"));
         assert_eq!(colors.ansi.as_ref().map(|v| v.len()), Some(16));
+    }
+
+    #[test]
+    fn theme_presets_keep_readable_fg_bg_contrast() {
+        // WCAG AA threshold for normal text.
+        const MIN_CONTRAST: f64 = 4.5;
+        let mut colors = ColorsConfig::default();
+
+        apply_theme_preset(&mut colors, ThemePreset::Paper);
+        let ratio = contrast_ratio(
+            colors.background.as_deref().unwrap_or("#000000"),
+            colors.foreground.as_deref().unwrap_or("#ffffff"),
+        );
+        assert!(ratio >= MIN_CONTRAST, "Paper contrast too low: {ratio:.2}");
+
+        apply_theme_preset(&mut colors, ThemePreset::TokyoNightLight);
+        let ratio = contrast_ratio(
+            colors.background.as_deref().unwrap_or("#000000"),
+            colors.foreground.as_deref().unwrap_or("#ffffff"),
+        );
+        assert!(
+            ratio >= MIN_CONTRAST,
+            "TokyoNightLight contrast too low: {ratio:.2}"
+        );
+
+        apply_theme_preset(&mut colors, ThemePreset::TomorrowNightBright);
+        let ratio = contrast_ratio(
+            colors.background.as_deref().unwrap_or("#000000"),
+            colors.foreground.as_deref().unwrap_or("#ffffff"),
+        );
+        assert!(
+            ratio >= MIN_CONTRAST,
+            "TomorrowNightBright contrast too low: {ratio:.2}"
+        );
+
+        apply_theme_preset(&mut colors, ThemePreset::HemisuDark);
+        let ratio = contrast_ratio(
+            colors.background.as_deref().unwrap_or("#000000"),
+            colors.foreground.as_deref().unwrap_or("#ffffff"),
+        );
+        assert!(
+            ratio >= MIN_CONTRAST,
+            "HemisuDark contrast too low: {ratio:.2}"
+        );
     }
 }

@@ -49,6 +49,8 @@ pub enum KeyAction {
     ZoomPane,
     /// Show the keybinding help overlay.
     ShowHelp,
+    /// Show the settings overlay.
+    ShowSettings,
     /// Close all panes (batch kill).
     CloseAllPanes,
     /// Restore the last closed-all layout.
@@ -113,6 +115,7 @@ impl KeyAction {
             KeyAction::FocusRight => "Focus pane right",
             KeyAction::ZoomPane => "Toggle pane zoom",
             KeyAction::ShowHelp => "Show keybinding help",
+            KeyAction::ShowSettings => "Show settings",
             KeyAction::CloseAllPanes => "Close all panes",
             KeyAction::RestoreLayout => "Restore last layout",
             KeyAction::SwapNext => "Swap pane with next",
@@ -163,7 +166,9 @@ impl KeyAction {
             | KeyAction::JumpErrorPrev
             | KeyAction::JumpErrorNext => "Navigation",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
-            KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp => "General",
+            KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp | KeyAction::ShowSettings => {
+                "General"
+            }
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
@@ -290,6 +295,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+?".to_string(),
                     action: KeyAction::ShowHelp,
+                },
+                // Settings overlay
+                Keybinding {
+                    key: "ctrl+,".to_string(),
+                    action: KeyAction::ShowSettings,
                 },
                 // Batch pane operations
                 Keybinding {

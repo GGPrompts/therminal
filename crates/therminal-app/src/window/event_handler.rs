@@ -11,7 +11,7 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 
-use therminal_core::config::KeyAction;
+use therminal_core::config::{ConfigEditSession, KeyAction, config_path};
 use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
 
 use super::keybindings::lookup_binding;
@@ -56,6 +56,17 @@ impl App {
         self.help_overlay_scroll_rows = 0;
     }
 
+    fn persist_settings_overlay_edits(&mut self) {
+        let mut edit = ConfigEditSession::from_saved(self.config.clone());
+        let path = config_path();
+        if let Err(e) = edit.save_draft_to(&path) {
+            warn!(?path, %e, "failed to persist settings overlay edits");
+            self.show_toast("settings save failed (see logs)");
+            return;
+        }
+        info!(?path, "persisted settings overlay edits");
+    }
+
     fn apply_settings_command(&mut self, command: SettingsCommand) {
         match command {
             SettingsCommand::TogglePaneHeaders => {
@@ -81,6 +92,7 @@ impl App {
                 }
             }
         }
+        self.persist_settings_overlay_edits();
     }
 
     /// Check if this key event matches a configured keybinding.
@@ -146,6 +158,16 @@ impl App {
                     self.close_overlay();
                 } else {
                     self.open_help_overlay();
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            KeyAction::ShowSettings => {
+                if self.overlay_mode == Some(OverlayMode::Settings) {
+                    self.close_overlay();
+                } else {
+                    self.open_settings_overlay();
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
