@@ -20,6 +20,7 @@ pub(crate) enum SettingsFocus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemePreset {
+    OriginalTherminal,
     Paper,
     TokyoNightLight,
     TomorrowNightBright,
@@ -29,6 +30,7 @@ pub(crate) enum ThemePreset {
 impl ThemePreset {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::OriginalTherminal => "Original Therminal (default)",
             Self::Paper => "Paper (light)",
             Self::TokyoNightLight => "Tokyo Night Light (light)",
             Self::TomorrowNightBright => "Tomorrow Night Bright (dark)",
@@ -268,6 +270,10 @@ impl SettingsOverlayState {
             "Theme Presets",
             vec![
                 SettingsControl::new(
+                    "Apply Original Therminal",
+                    ControlBinding::ApplyThemePreset(ThemePreset::OriginalTherminal),
+                ),
+                SettingsControl::new(
                     "Apply Paper",
                     ControlBinding::ApplyThemePreset(ThemePreset::Paper),
                 ),
@@ -320,6 +326,16 @@ fn truncate_for_width(text: &str, width_px: f32) -> String {
 
 pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset) {
     let (background, foreground, cursor, ansi): (&str, &str, &str, [&str; 16]) = match preset {
+        ThemePreset::OriginalTherminal => (
+            "#060a12",
+            "#e7f0ff",
+            "#fef3c7",
+            [
+                "#060a12", "#ff5f78", "#ffb24f", "#eab308", "#56a7ff", "#56a7ff", "#39ffb6",
+                "#e7f0ff", "#7b8fa9", "#ff7d8f", "#59ffc7", "#f97316", "#56a7ff", "#e7f0ff",
+                "#4ce5cc", "#fef3c7",
+            ],
+        ),
         ThemePreset::Paper => (
             "#f2eede",
             "#000000",
@@ -790,6 +806,27 @@ mod tests {
     #[test]
     fn theme_preset_writes_expected_palette_fields() {
         let mut colors = ColorsConfig::default();
+        apply_theme_preset(&mut colors, ThemePreset::OriginalTherminal);
+        assert_eq!(colors.background.as_deref(), Some("#060a12"));
+        assert_eq!(colors.foreground.as_deref(), Some("#e7f0ff"));
+        assert_eq!(colors.cursor.as_deref(), Some("#fef3c7"));
+        assert_eq!(
+            colors
+                .ansi
+                .as_ref()
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("#060a12")
+        );
+        assert_eq!(
+            colors
+                .ansi
+                .as_ref()
+                .and_then(|v| v.get(15))
+                .map(String::as_str),
+            Some("#fef3c7")
+        );
+
         apply_theme_preset(&mut colors, ThemePreset::Paper);
         assert_eq!(colors.background.as_deref(), Some("#f2eede"));
         assert_eq!(colors.foreground.as_deref(), Some("#000000"));
@@ -802,6 +839,16 @@ mod tests {
         // WCAG AA threshold for normal text.
         const MIN_CONTRAST: f64 = 4.5;
         let mut colors = ColorsConfig::default();
+
+        apply_theme_preset(&mut colors, ThemePreset::OriginalTherminal);
+        let ratio = contrast_ratio(
+            colors.background.as_deref().unwrap_or("#000000"),
+            colors.foreground.as_deref().unwrap_or("#ffffff"),
+        );
+        assert!(
+            ratio >= MIN_CONTRAST,
+            "OriginalTherminal contrast too low: {ratio:.2}"
+        );
 
         apply_theme_preset(&mut colors, ThemePreset::Paper);
         let ratio = contrast_ratio(
