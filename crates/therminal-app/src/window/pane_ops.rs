@@ -1419,6 +1419,49 @@ impl App {
         }
     }
 
+    /// Open a known-absolute file directly in the user's configured
+    /// editor, bypassing the hotspot cwd-resolution machinery.
+    ///
+    /// The settings gear uses this because `open_in_editor` runs every
+    /// path through [`resolve_relative_to_cwd`], which joins any
+    /// not-starting-with-`/` path against the focused pane's shell cwd.
+    /// On Windows with a WSL focused pane, that turns
+    /// `C:\Users\marci\AppData\Roaming\therminal\therminal.toml` into
+    /// `/home/marci/.../C:\Users\marci\...\therminal.toml` — nonsense.
+    ///
+    /// Instead, take the path verbatim, try the `editor_chain` resolver
+    /// (so `$EDITOR` still wins), and spawn the editor directly. Falls
+    /// back to `open::that` on any failure so at minimum the platform
+    /// default handler gets a crack at it.
+    pub(crate) fn open_absolute_in_editor(&mut self, path: &std::path::Path) {
+        use std::process::Command;
+
+        let chain = self.config.hotspots.editor_chain.clone();
+        let editor = resolve_editor_chain(&chain, which_on_path, |var| std::env::var(var).ok());
+
+        if let Some(editor) = editor {
+            match Command::new(&editor).arg(path).spawn() {
+                Ok(_) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        "open_absolute_in_editor: editor {editor} failed on {}: {e}",
+                        path.display()
+                    );
+                    self.show_toast(format!("$EDITOR ({editor}) failed to launch"));
+                    // Fall through to open::that as a last resort.
+                }
+            }
+        }
+
+        if let Err(e) = open::that(path) {
+            tracing::warn!(
+                "open_absolute_in_editor: fallback open::that failed on {}: {e}",
+                path.display()
+            );
+            self.show_toast(format!("could not open {}", path.display()));
+        }
+    }
+
     /// tn-q8ce: open a Linux-style hotspot path inside a WSL pane on
     /// native Windows.
     ///

@@ -623,7 +623,13 @@ impl App {
                                     ));
                                     return;
                                 }
-                                self.open_in_editor(&config_file.to_string_lossy());
+                                // Use the absolute-path editor hand-off,
+                                // not `open_in_editor`. The latter joins
+                                // the path against the focused pane's
+                                // shell cwd, which on Windows+WSL turns
+                                // `C:\Users\…\therminal.toml` into
+                                // `/home/marci/…/C:\Users\…\therminal.toml`.
+                                self.open_absolute_in_editor(&config_file);
                             }
                         }
                         return;

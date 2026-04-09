@@ -181,6 +181,13 @@ pub(crate) fn draw_csd_buttons(
 
     let family = renderer.font_config.family.clone();
 
+    // Settings gear ⚙ (U+2699) is a symbol character that most mono
+    // fonts don't ship. Don't pin it to the user's mono family —
+    // let cosmic-text's fallback chain pick up a system symbol font
+    // (Segoe UI Symbol on Windows, Noto Sans Symbols on Linux,
+    // Apple Symbols on macOS). The other CSD glyphs (─ □ ✕) are
+    // box-drawing and widely supported, so they stay pinned to the
+    // configured mono family for visual consistency.
     let settings_label = "\u{2699}";
     let settings_slot = "csd_settings";
     ensure_shaped(
@@ -190,7 +197,7 @@ pub(crate) fn draw_csd_buttons(
         CSD_BTN_W,
         bar_h,
         settings_label,
-        Attrs::new().family(Family::Name(&family)).color(icon_color),
+        Attrs::new().color(icon_color),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );

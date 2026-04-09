@@ -699,6 +699,44 @@ pub fn strip_line_col_suffix(text: &str) -> &str {
 /// - anything without a leading `~` → unchanged
 ///
 /// Returns a `Cow` so the no-op case doesn't allocate.
+/// Return true if `path` is a Windows-absolute path that should be
+/// treated as already-absolute by [`resolve_relative_to_cwd`].
+///
+/// Matches three shapes:
+/// - Drive-letter with either separator: `C:\foo`, `D:/bar`
+/// - UNC server paths: `\\server\share\…`
+/// - Forward-slash UNC variant: `//server/share/…`
+///
+/// A bare `C:` (no separator) is intentionally not matched because it
+/// is Windows-relative (the cwd on drive C), not absolute. A stray
+/// `\\` without a following name is rejected for the same reason.
+///
+/// Pure, zero-allocation, works on any build. Used so Windows-absolute
+/// paths pulled out of shell output don't get incorrectly joined
+/// against a Linux-style cwd when therminal is running on native
+/// Windows with a WSL shell. See tn-jci5.
+pub fn is_windows_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    // Drive-letter form: `[A-Za-z]:[\\/]…`
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    // UNC form: `\\…` or `//…` with at least one non-separator char
+    // after the double separator.
+    if bytes.len() >= 3
+        && ((bytes[0] == b'\\' && bytes[1] == b'\\') || (bytes[0] == b'/' && bytes[1] == b'/'))
+        && bytes[2] != b'\\'
+        && bytes[2] != b'/'
+    {
+        return true;
+    }
+    false
+}
+
 pub fn expand_tilde<'a>(path: &'a str, home_dir: Option<&str>) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
     if path == "~" {
@@ -739,8 +777,18 @@ pub fn expand_tilde<'a>(path: &'a str, home_dir: Option<&str>) -> std::borrow::C
 pub fn resolve_relative_to_cwd<'a>(path: &'a str, cwd: Option<&str>) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
 
-    // Already absolute — nothing to do.
+    // Already absolute (Unix) — nothing to do.
     if path.starts_with('/') {
+        return Cow::Borrowed(path);
+    }
+    // Windows-absolute paths — `C:\…`, `C:/…`, and UNC `\\server\…`
+    // or `\\wsl.localhost\…`. These are absolute in Windows terms even
+    // though they don't start with `/`, so joining them against a
+    // Unix-style `cwd` (e.g. a WSL pane's OSC 7) produces nonsense like
+    // `/home/marci/C:\Users\…`. Treat them as already-absolute (tn-jci5,
+    // partial — full platform-aware join is still tracked under that
+    // issue).
+    if is_windows_absolute(path) {
         return Cow::Borrowed(path);
     }
     // Caller is responsible for `~` expansion first; we leave it alone.
@@ -1835,6 +1883,68 @@ mod tests {
         // `expand_tilde` first).
         let out = resolve_relative_to_cwd("~/foo", Some("/home/x"));
         assert_eq!(out, "~/foo");
+    }
+
+    // ── tn-jci5: Windows-absolute paths must not be joined against a
+    //    Unix-style cwd (the therminal-on-Windows + WSL shell topology).
+
+    #[test]
+    fn is_windows_absolute_drive_letter() {
+        assert!(is_windows_absolute(r"C:\Users\marci"));
+        assert!(is_windows_absolute("C:/Users/marci"));
+        assert!(is_windows_absolute(r"d:\foo"));
+        assert!(is_windows_absolute("Z:/tmp"));
+    }
+
+    #[test]
+    fn is_windows_absolute_unc() {
+        assert!(is_windows_absolute(r"\\server\share\file"));
+        assert!(is_windows_absolute(r"\\wsl.localhost\Ubuntu\home\marci"));
+        assert!(is_windows_absolute(r"\\wsl$\Ubuntu\home\marci"));
+    }
+
+    #[test]
+    fn is_windows_absolute_rejects_ambiguous() {
+        // Bare drive letter (no separator) is Windows-relative, not absolute.
+        assert!(!is_windows_absolute("C:"));
+        assert!(!is_windows_absolute("C:foo"));
+        // Single backslash is not UNC.
+        assert!(!is_windows_absolute(r"\foo"));
+        // Double separator with no name is not UNC.
+        assert!(!is_windows_absolute(r"\\"));
+        assert!(!is_windows_absolute("//"));
+        // Linux absolute still isn't "Windows absolute".
+        assert!(!is_windows_absolute("/home/marci"));
+        // Relative.
+        assert!(!is_windows_absolute("foo.rs"));
+        assert!(!is_windows_absolute("./foo.rs"));
+        // Empty.
+        assert!(!is_windows_absolute(""));
+    }
+
+    #[test]
+    fn resolve_relative_leaves_windows_absolute_alone_under_unix_cwd() {
+        // Regression test for the settings-gear bug: on Windows with a
+        // WSL focused pane, the config path is Windows-absolute
+        // (`C:\Users\…`) but the cwd is Linux-style. Joining them
+        // produced `/home/marci/.../C:\Users\...\therminal.toml`.
+        let out = resolve_relative_to_cwd(
+            r"C:\Users\marci\AppData\Roaming\therminal\therminal.toml",
+            Some("/home/marci/projects/therminal"),
+        );
+        assert_eq!(
+            out,
+            r"C:\Users\marci\AppData\Roaming\therminal\therminal.toml"
+        );
+    }
+
+    #[test]
+    fn resolve_relative_leaves_unc_alone_under_unix_cwd() {
+        let out = resolve_relative_to_cwd(
+            r"\\wsl.localhost\Ubuntu\home\marci\foo.rs",
+            Some("/home/marci"),
+        );
+        assert_eq!(out, r"\\wsl.localhost\Ubuntu\home\marci\foo.rs");
     }
 
     #[test]
