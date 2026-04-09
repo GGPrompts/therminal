@@ -19,7 +19,7 @@ pub struct EventsArgs {
     pub follow: bool,
     /// Comma-separated event kinds to subscribe to. Empty = all kinds.
     /// Valid: state_changed, session_created, session_destroyed,
-    /// pane_output, workspace_changed, pane_exited.
+    /// pane_output, workspace_changed, pane_exited, pane_resized.
     #[arg(long, value_delimiter = ',')]
     pub kinds: Vec<String>,
     /// Comma-separated pane ids; events for other panes are dropped.
@@ -88,6 +88,7 @@ fn parse_kinds(raw: &[String]) -> Result<Vec<EventKind>> {
             "pane_output" => EventKind::PaneOutput,
             "workspace_changed" => EventKind::WorkspaceChanged,
             "pane_exited" => EventKind::PaneExited,
+            "pane_resized" => EventKind::PaneResized,
             other => bail!("unknown event kind: {other}"),
         };
         out.push(kind);
@@ -100,9 +101,9 @@ fn pane_matches(event: &DaemonEvent, panes: Option<&std::collections::HashSet<u6
         return true;
     };
     match event {
-        DaemonEvent::PaneOutput { pane_id, .. } | DaemonEvent::PaneExited { pane_id, .. } => {
-            set.contains(pane_id)
-        }
+        DaemonEvent::PaneOutput { pane_id, .. }
+        | DaemonEvent::PaneExited { pane_id, .. }
+        | DaemonEvent::PaneResized { pane_id, .. } => set.contains(pane_id),
         // Non-pane-scoped events pass through unconditionally so callers can
         // see things like SessionCreated even when filtering by pane.
         _ => true,

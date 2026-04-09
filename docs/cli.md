@@ -44,7 +44,7 @@ and `crates/therminal-daemon/CLAUDE.md`.
 
 ```text
 therminal pane list [--session N] [--json]
-therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--json]
+therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--json]
 therminal pane destroy <pane_id>
 therminal pane send <pane_id> <keys> [--raw]
 therminal pane peek <pane_id> [--last N] [--trim] [--json]
@@ -94,9 +94,8 @@ therminal workspace switch --session N <workspace_id>
 session_id  workspace_id  name  pane_count  active(0|1)
 ```
 
-`workspace switch` is currently a stub: workspace switching is GUI-driven
-and the daemon does not yet expose a `SwitchWorkspace` IPC primitive. The
-CLI prints a clear error so scripts notice the gap.
+`workspace switch` is wired end-to-end via daemon IPC (`SwitchWorkspace`).
+On success, the command exits cleanly with no stdout payload.
 
 ### `agents`
 
@@ -122,24 +121,24 @@ heterogeneous, so JSON Lines is the right shape: each event is still
 ~100 bytes and trivially `jq`-friendly.
 
 Valid `--kinds`: `state_changed`, `session_created`, `session_destroyed`,
-`pane_output`, `workspace_changed`, `pane_exited`. Empty = all kinds.
+`pane_output`, `workspace_changed`, `pane_exited`, `pane_resized`.
+Empty = all kinds.
 
 `--limit N` exits after printing `N` events (handy for tests).
 
 ### `semantic`
 
 ```text
-therminal semantic commands <pane_id> [--limit N]
+therminal semantic commands <pane_id> [--since-line N] [--limit N] [--json]
 therminal semantic hotspots <pane_id> [--kind file|url|git_ref|issue] [--json]
 ```
 
 `semantic hotspots` runs the same regex pass the GUI uses (file paths,
 URLs, error locations, git refs, issue refs) over a `CapturePane` snapshot.
 
-`semantic commands` is currently a stub — daemon does not expose
-`query_commands` over its lightweight IPC channel. Use the
-`terminal.semantic.query_commands` MCP tool until a CLI primitive lands
-(tracked separately).
+`semantic commands` queries daemon-side OSC 633 command summaries through
+lightweight IPC (`QueryCommands`) and prints TSV by default or JSON with
+`--json`.
 
 ## Cache-friendliness notes
 
@@ -185,6 +184,16 @@ therminal pane list
 
 # Stream session lifecycle events into jq.
 therminal events --kinds session_created,session_destroyed --follow | jq -c '.'
+
+# Create a new session/tab layout with startup commands, then watch geometry
+# settle from daemon-side resize cascades.
+sid=$(therminal session create)
+root=$(therminal pane list --session "$sid" | cut -f1)
+left=$(therminal pane create --from "$root" --split vertical --spawn 'htop\n')
+right=$(therminal pane create --from "$root" --split horizontal --spawn 'cargo test\n')
+therminal pane resize "$left" 100x28
+therminal pane resize "$right" 100x28
+therminal events --kinds pane_resized,workspace_changed --panes "$left,$right" --limit 20 | jq -c '.'
 ```
 
 See also `examples/cli/poll_swarm.sh` for an end-to-end shell loop.

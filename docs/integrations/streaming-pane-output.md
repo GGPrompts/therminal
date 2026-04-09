@@ -83,9 +83,9 @@ await client.close();
 
 ## Shell script example (raw JSON-RPC over the MCP socket)
 
-The daemon's MCP socket lives at `$XDG_RUNTIME_DIR/therminal/mcp.sock` (Linux) or the path
-returned by `therminal config show`. The `therminal mcp` subcommand bridges stdio to the
-socket, so you can drive it with `nc` or `socat`:
+The daemon's MCP socket lives at `$XDG_RUNTIME_DIR/therminal/mcp.sock` by default on Linux
+(or a custom `[mcp].socket_path` in `therminal.toml`). The `therminal mcp` subcommand bridges
+stdio to the socket, so you can drive it with `nc` or `socat`:
 
 ```bash
 PANE_ID="abc123"

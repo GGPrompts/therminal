@@ -55,7 +55,7 @@ enum Command {
     /// Session operations (list, create, destroy).
     #[command(subcommand)]
     Session(cli::session::SessionCmd),
-    /// Workspace operations (list).
+    /// Workspace operations (list, switch).
     #[command(subcommand)]
     Workspace(cli::workspace::WorkspaceCmd),
     /// Agent registry queries.

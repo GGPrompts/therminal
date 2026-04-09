@@ -1,8 +1,13 @@
 # Delegate Profiles
 
-Sibling delegate profiles let you spawn isolated AI agent processes — each
-with a defined role, working-directory policy, and MCP/permission envelope —
-directly into a new pane from within Therminal.
+Delegate profiles are currently **schema-only** configuration for planned
+sibling-agent spawning. Therminal parses and validates
+`[delegate.profiles.<name>]` in `therminal.toml`, but there is not yet a
+runtime command or UI flow that launches delegates from these profiles.
+
+When runtime spawning lands, these profiles will define isolated AI agent
+processes — each with a role, working-directory policy, and
+MCP/permission envelope.
 
 See also: [tn-ztv3 epic](../../.beads/) — sibling Claude delegation pattern
 and the [architecture note](../../CLAUDE.md#integration-taxonomy) on when to
@@ -35,10 +40,10 @@ permission_mode = "default"      # forwarded verbatim to the delegate
 | `mcp_enabled` | list of strings | no | `[]` | MCP tool-domain prefix allowlist; empty = no extra grants |
 | `permission_mode` | string | no | `"default"` | Passed verbatim to the delegate process at spawn time |
 
-### Command template tokens
+### Command template tokens (planned runtime behavior)
 
-The `command` field is a shell-style string. The following tokens are
-substituted at spawn time:
+The `command` field is a shell-style string. Once runtime spawning is
+implemented, the following tokens are substituted at spawn time:
 
 | Token | Replaced with |
 |---|---|
@@ -46,13 +51,16 @@ substituted at spawn time:
 | `{session_id}` | The daemon session ID |
 | `{cwd}` | The resolved working directory (after `working_dir` policy) |
 
-### Working-directory modes
+### Working-directory modes (planned runtime behavior)
 
 | Value | Behaviour |
 |---|---|
 | `"same"` | Inherit the cwd of the triggering pane (default) |
 | `"worktree"` | Walk up from the triggering pane's cwd to find the nearest `.git` root; fall back to `"same"` if none found |
 | `"scratch/{random}"` | Create a temporary directory under `<runtime_dir>/scratch/<uuid>`; removed when the delegate exits |
+
+Today these values are validated and round-tripped by config parsing, but
+no delegate process is spawned yet.
 
 ### Validation
 

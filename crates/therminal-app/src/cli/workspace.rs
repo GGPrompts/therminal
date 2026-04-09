@@ -26,9 +26,6 @@ pub enum WorkspaceCmd {
         out: OutputFlags,
     },
     /// Switch the active workspace within a session.
-    ///
-    /// Currently a no-op stub: workspace switching is GUI-driven and the
-    /// daemon does not yet expose a switch RPC.
     Switch {
         #[arg(long)]
         session: u64,

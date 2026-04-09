@@ -8,8 +8,9 @@ MCP IPC endpoint and forwards JSON-RPC bidirectionally over stdin/stdout.
 ## What this enables
 
 - A single therminal window on Windows, rendered with native GPU acceleration.
-- MCP clients running inside WSL2 drive that window over the 15-tool MCP
-  surface (session management, pane ops, resources, subscriptions).
+- MCP clients running inside WSL2 drive that window over Therminal's MCP
+  tool/resource surface (session management, pane ops, resources,
+  subscriptions).
 - No X server, no WSLg, no cross-VM socket forwarding. The stdio bridge is
   launched as a WSL child process that crosses into Windows via `binfmt_misc`.
 
@@ -101,9 +102,10 @@ routing — happens inside the Windows daemon.
    `TherminalConfig`, calls `McpConfig::resolved_socket_path()`, and on
    Windows opens the named pipe via
    `tokio::net::windows::named_pipe::ClientOptions`.
-3. Two `tokio::io::copy` tasks race in a `select!`: one pumps stdin to the
-   pipe, one pumps the pipe to stdout. The bridge exits cleanly when either
-   side closes.
+3. The bridge pumps both directions with `tokio::io::copy` tasks, performs
+  explicit half-close on EOF, and waits for daemon->stdout to drain before
+  tearing down stdin->daemon. This avoids truncating in-flight MCP
+  responses when stdin closes first.
 4. The daemon's MCP server handles the JSON-RPC protocol, tool dispatch,
    and trust-tier enforcement. The bridge is pure plumbing.
 
