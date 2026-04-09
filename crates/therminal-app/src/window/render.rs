@@ -137,8 +137,12 @@ fn extend_hotspots_from_patterns(
             for (byte_idx, ch) in text.char_indices() {
                 map[byte_idx] = col;
                 col += 1;
-                for b in (byte_idx + 1)..byte_idx + ch.len_utf8() {
-                    map[b] = col;
+                for item in map
+                    .iter_mut()
+                    .take(byte_idx + ch.len_utf8())
+                    .skip(byte_idx + 1)
+                {
+                    *item = col;
                 }
             }
             map[text.len()] = col;
