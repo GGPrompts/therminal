@@ -28,10 +28,11 @@ pub(crate) struct StatusBarInfo {
     pub active_workspace: usize,
     /// Whether a pane is currently zoomed to fullscreen.
     pub is_zoomed: bool,
-    /// 1-indexed display number of the focused pane (left-to-right tree order),
-    /// surfaced in the footer center section so users can identify the active
-    /// pane even when per-pane headers are hidden via `show_pane_headers = false`.
-    pub focused_pane_id: Option<usize>,
+    /// Real daemon PaneId of the focused pane, surfaced in the footer center
+    /// section so users can identify the active pane even when per-pane
+    /// headers are hidden via `show_pane_headers = false`. Matches the value
+    /// copied by "Copy pane ID" in the context menu (tn-5wrx).
+    pub focused_pane_id: Option<u64>,
     /// Result of the template-version scan performed at config load time
     /// (tn-3ge3). When non-`UpToDate`, the status bar shows a small muted
     /// hint nudging the user to regenerate via `therminal --print-config`.
@@ -508,7 +509,7 @@ pub(super) fn compose_template_hint(status: &ConfigTemplateStatus) -> String {
 
 /// Compose the center section of the status bar from cwd and the focused
 /// pane's display number. Extracted for unit testing.
-pub(super) fn compose_center_text(cwd: Option<&str>, focused_pane_id: Option<usize>) -> String {
+pub(super) fn compose_center_text(cwd: Option<&str>, focused_pane_id: Option<u64>) -> String {
     let cwd_text = cwd.map(abbreviate_path).unwrap_or_default();
     match (focused_pane_id, cwd_text.is_empty()) {
         (Some(n), false) => format!("{cwd_text}  ·  pane {n}"),
@@ -580,7 +581,7 @@ pub(super) fn windows_path_to_linux(windows_path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn make_info(cwd: Option<&str>, focused_pane_id: Option<usize>) -> StatusBarInfo {
+    fn make_info(cwd: Option<&str>, focused_pane_id: Option<u64>) -> StatusBarInfo {
         StatusBarInfo {
             agent_name: None,
             cwd: cwd.map(String::from),

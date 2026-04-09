@@ -158,20 +158,9 @@ impl App {
                 (vec![1], 1)
             };
 
-            // Compute the 1-indexed display number of the focused pane within
-            // the layout's left-to-right traversal order, so the footer can
-            // surface "pane N" even when per-pane headers are hidden.
-            let focused_pane_id = self
-                .workspaces
-                .as_ref()
-                .and_then(|wm| wm.focused_pane())
-                .and_then(|fid| {
-                    layout
-                        .pane_ids()
-                        .iter()
-                        .position(|pid| *pid == fid)
-                        .map(|i| i + 1)
-                });
+            // Use the real daemon PaneId (not a workspace-local ordinal) so
+            // the footer matches the header and "Copy pane ID" (tn-5wrx).
+            let focused_pane_id = self.workspaces.as_ref().and_then(|wm| wm.focused_pane());
 
             let status_info = chrome::StatusBarInfo {
                 agent_name,

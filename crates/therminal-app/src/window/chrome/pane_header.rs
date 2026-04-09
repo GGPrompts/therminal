@@ -186,11 +186,16 @@ pub(crate) fn draw_split_separator(
 }
 
 /// Draw the pane header strip (background + text).
+///
+/// `center_title` is an optional string rendered in the center of the
+/// header. When `Some`, it replaces the default "pane N" center label
+/// (used for Claude session titles / working-dir basenames). The
+/// far-left always shows the real daemon `PaneId`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_pane_header(
     pane: &PaneState,
-    pane_index: usize,
     is_focused: bool,
+    center_title: Option<&str>,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -247,7 +252,8 @@ pub(crate) fn draw_pane_header(
     let line_height = header_h;
     let metrics = Metrics::new(font_size, line_height);
 
-    let index_text = format!(" {}", pane_index + 1);
+    let pane_id = pane.id;
+    let index_text = format!(" {pane_id}");
     let index_color = GlyphColor::rgba(
         PaletteColor::INK_MUTED.r,
         PaletteColor::INK_MUTED.g,
@@ -255,7 +261,10 @@ pub(crate) fn draw_pane_header(
         if is_focused { 255 } else { 200 },
     );
 
-    let process_text = format!("pane {}", pane_index + 1);
+    let process_text = match center_title {
+        Some(title) => title.to_string(),
+        None => format!("pane {pane_id}"),
+    };
     let process_color = if is_focused {
         GlyphColor::rgba(
             PaletteColor::INK.r,
@@ -290,15 +299,15 @@ pub(crate) fn draw_pane_header(
     let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
 
     let focus_tag = if is_focused { "f" } else { "u" };
-    let idx_slot = format!("hdr_idx_{pane_index}");
+    let idx_slot = format!("hdr_idx_{pane_id}");
     let idx_key = format!("{index_text}|{:.0}|{focus_tag}", vp.width());
-    let proc_slot = format!("hdr_proc_{pane_index}");
+    let proc_slot = format!("hdr_proc_{pane_id}");
     let proc_key = format!("{process_text}|{:.0}|{focus_tag}", vp.width());
-    let close_slot = format!("hdr_close_{pane_index}");
+    let close_slot = format!("hdr_close_{pane_id}");
     let close_key = format!("X|{focus_tag}");
-    let vsplit_slot = format!("hdr_vsplit_{pane_index}");
+    let vsplit_slot = format!("hdr_vsplit_{pane_id}");
     let vsplit_key = format!("V|{focus_tag}");
-    let hsplit_slot = format!("hdr_hsplit_{pane_index}");
+    let hsplit_slot = format!("hdr_hsplit_{pane_id}");
     let hsplit_key = format!("H|{focus_tag}");
 
     // Phase 1: shape all buffers.

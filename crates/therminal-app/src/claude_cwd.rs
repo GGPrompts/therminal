@@ -29,6 +29,15 @@ use tracing::{debug, warn};
 
 use therminal_harness_claude::state::{ClaudeSessionState, ClaudeStatePoller};
 
+/// Per-session metadata cached from the Claude state poller.
+#[derive(Debug, Clone, Default)]
+struct SessionMeta {
+    /// Agent working directory (from `working_dir`).
+    cwd: Option<PathBuf>,
+    /// User-authored session title (from `session_title`).
+    session_title: Option<String>,
+}
+
 /// Thread-safe bundle of the two lookups the renderer needs.
 #[derive(Debug, Default)]
 pub struct ClaudeCwdTracker {
@@ -37,8 +46,8 @@ pub struct ClaudeCwdTracker {
 
 #[derive(Debug, Default)]
 struct Inner {
-    /// Claude session id -> agent working directory.
-    by_session: HashMap<String, PathBuf>,
+    /// Claude session id -> agent metadata (cwd + session_title).
+    by_session: HashMap<String, SessionMeta>,
     /// OS process id -> Claude session id (for the `AgentEntry.pid` path).
     pid_to_session: HashMap<u32, String>,
 }
@@ -84,14 +93,19 @@ impl ClaudeCwdTracker {
     /// `O(n)` per tick where `n` is the number of live Claude sessions
     /// (typically << 100).
     fn replace_from(&self, states: &[ClaudeSessionState]) {
-        let mut by_session: HashMap<String, PathBuf> = HashMap::new();
+        let mut by_session: HashMap<String, SessionMeta> = HashMap::new();
         let mut pid_to_session: HashMap<u32, String> = HashMap::new();
         for s in states {
             if s.session_id.is_empty() {
                 continue;
             }
-            if let Some(wd) = s.working_dir.as_deref() {
-                by_session.insert(s.session_id.clone(), PathBuf::from(wd));
+            let meta = SessionMeta {
+                cwd: s.working_dir.as_deref().map(PathBuf::from),
+                session_title: s.session_title.clone(),
+            };
+            // Only insert if there is at least one useful field.
+            if meta.cwd.is_some() || meta.session_title.is_some() {
+                by_session.insert(s.session_id.clone(), meta);
             }
             if let Some(pid) = s.pid
                 && pid > 0
@@ -116,14 +130,33 @@ impl ClaudeCwdTracker {
     pub fn cwd_for_pid(&self, pid: u32) -> Option<PathBuf> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let sid = g.pid_to_session.get(&pid)?;
-        g.by_session.get(sid).cloned()
+        g.by_session.get(sid).and_then(|m| m.cwd.clone())
+    }
+
+    /// Look up the header title for a pane whose agent has the given OS
+    /// pid. Fallback order:
+    ///
+    /// 1. `session_title` from the Claude state file
+    /// 2. `working_dir` basename
+    /// 3. `None` (caller keeps default chrome)
+    pub fn header_title_for_pid(&self, pid: u32) -> Option<String> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let sid = g.pid_to_session.get(&pid)?;
+        let meta = g.by_session.get(sid)?;
+        if let Some(ref title) = meta.session_title {
+            return Some(title.clone());
+        }
+        meta.cwd
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
     }
 
     /// Direct session -> cwd lookup. Exposed for tests.
     #[cfg(test)]
     pub fn cwd_for_session(&self, session_id: &str) -> Option<PathBuf> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.by_session.get(session_id).cloned()
+        g.by_session.get(session_id).and_then(|m| m.cwd.clone())
     }
 }
 
@@ -190,5 +223,55 @@ mod tests {
         let t = ClaudeCwdTracker::new();
         t.replace_from(&[mk_state("", Some(4242), Some("/w"))]);
         assert_eq!(t.cwd_for_pid(4242), None);
+    }
+
+    fn mk_state_with_title(
+        sid: &str,
+        pid: Option<i64>,
+        wd: Option<&str>,
+        title: Option<&str>,
+    ) -> ClaudeSessionState {
+        ClaudeSessionState {
+            session_id: sid.to_string(),
+            status: ClaudeStatus::Idle,
+            working_dir: wd.map(|s| s.to_string()),
+            session_title: title.map(|s| s.to_string()),
+            pid,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn header_title_prefers_session_title() {
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state_with_title(
+            "sid-a",
+            Some(4242),
+            Some("/home/u/repo"),
+            Some("fix login bug"),
+        )]);
+        assert_eq!(
+            t.header_title_for_pid(4242),
+            Some("fix login bug".to_string()),
+        );
+    }
+
+    #[test]
+    fn header_title_falls_back_to_working_dir_basename() {
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state_with_title(
+            "sid-a",
+            Some(4242),
+            Some("/home/u/my-project"),
+            None,
+        )]);
+        assert_eq!(t.header_title_for_pid(4242), Some("my-project".to_string()),);
+    }
+
+    #[test]
+    fn header_title_none_when_no_data() {
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state_with_title("sid-a", Some(4242), None, None)]);
+        assert_eq!(t.header_title_for_pid(4242), None);
     }
 }

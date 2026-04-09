@@ -185,14 +185,12 @@ pub(crate) fn render_panes_recursive(
 ) {
     match node {
         LayoutNode::Leaf(pane) => {
-            let idx = *pane_counter;
             *pane_counter += 1;
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pane_encoder"),
             });
             render_single_pane(
                 pane,
-                idx,
                 focused == Some(pane.id) && show_focus,
                 pane_count,
                 show_pane_headers,
@@ -277,7 +275,6 @@ pub(crate) fn render_panes_recursive(
 #[allow(clippy::too_many_arguments)]
 fn render_single_pane(
     pane: &PaneState,
-    pane_index: usize,
     draw_focus_border: bool,
     pane_count: usize,
     show_pane_headers: bool,
@@ -292,17 +289,18 @@ fn render_single_pane(
     claude_cwd: &ClaudeCwdTracker,
     pattern_engine: Option<&PatternEngine>,
 ) {
-    // Look up the Claude agent cwd for this pane once per frame (tn-ykxb).
-    // Two layers of Option because the pane might not have an agent at
-    // all, and an agent might not be a Claude process with a live state
-    // file. When `None`, the Claude tool-call hotspot extension below
-    // becomes a no-op and clicks fall through to the generic detector.
-    let claude_agent_cwd: Option<std::path::PathBuf> = {
+    // Look up the Claude agent cwd and header title for this pane once
+    // per frame (tn-ykxb, tn-5wrx). Two layers of Option because the
+    // pane might not have an agent at all, and an agent might not be a
+    // Claude process with a live state file.
+    let agent_pid: Option<u32> = {
         let reg = agent_registry.lock().unwrap_or_else(|e| e.into_inner());
-        reg.get(pane.id)
-            .and_then(|entry| entry.pid)
-            .and_then(|pid| claude_cwd.cwd_for_pid(pid))
+        reg.get(pane.id).and_then(|entry| entry.pid)
     };
+    let claude_agent_cwd: Option<std::path::PathBuf> =
+        agent_pid.and_then(|pid| claude_cwd.cwd_for_pid(pid));
+    let claude_header_title: Option<String> =
+        agent_pid.and_then(|pid| claude_cwd.header_title_for_pid(pid));
     let vp = pane.viewport;
     let term = match pane.backend.term() {
         Some(t) => t,
@@ -348,8 +346,8 @@ fn render_single_pane(
         if pane_count > 1 && show_pane_headers {
             draw_pane_header(
                 pane,
-                pane_index,
                 draw_focus_border,
+                claude_header_title.as_deref(),
                 renderer,
                 device,
                 queue,
@@ -511,8 +509,8 @@ fn render_single_pane(
     if pane_count > 1 && show_pane_headers {
         draw_pane_header(
             pane,
-            pane_index,
             draw_focus_border,
+            claude_header_title.as_deref(),
             renderer,
             device,
             queue,
