@@ -599,7 +599,20 @@ where
     // against the real filesystem instead of a literal `~/...`. The
     // `~user/...` form is left un-expanded here and falls through to
     // the heuristic (see [`expand_tilde`]).
-    let home = std::env::var("HOME").ok();
+    //
+    // On Windows we intentionally pass `None` for `home`: the host
+    // process's `$HOME` points at the Windows user profile
+    // (`C:\Users\<user>`), but the hotspots in a WSL pane refer to the
+    // Linux `$HOME` (`/home/<user>`) which the Windows process cannot
+    // see. Expanding `~` against the wrong home just produces a
+    // Windows path that the stat below can't classify and the
+    // heuristic rejects (rule 3 — no forward-slash separator). Leave
+    // the literal `~/...` untouched and let the heuristic handle it.
+    let home = if cfg!(windows) {
+        None
+    } else {
+        std::env::var("HOME").ok()
+    };
     for h in hotspots.iter_mut() {
         if h.kind != HotspotKind::FilePath {
             continue;

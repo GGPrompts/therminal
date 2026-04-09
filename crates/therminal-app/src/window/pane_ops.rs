@@ -1346,6 +1346,32 @@ impl App {
     pub(crate) fn open_in_editor(&mut self, path_with_loc: &str) {
         use std::process::Command;
 
+        // tn-q8ce: on native Windows with a WSL pane, Linux-shaped
+        // hotspot paths (`~/foo.rs`, `/home/marci/foo.rs`,
+        // `./src/main.rs`) must never be touched by the Windows host:
+        // - Expanding `~` via `std::env::var("HOME")` would use the
+        //   Windows user profile (`C:\Users\<user>`), not the WSL
+        //   `/home/<user>` the hotspot actually references.
+        // - Joining relative paths against the focused pane's WSL cwd
+        //   via `resolve_relative_to_cwd` is correct, but then
+        //   handing off to a Windows editor via `Command::new` can't
+        //   open a `/home/...` path.
+        //
+        // Detect the WSL-destined shape from the **focused pane's
+        // cwd** (a POSIX-absolute cwd unambiguously identifies a WSL
+        // shell — Windows shells never emit that shape) BEFORE any
+        // host-side manipulation, and route the **raw** hotspot text
+        // into a new WSL pane. `open_in_wsl_pane_editor` writes a
+        // shell one-liner into the new pane's PTY so `~`, `$EDITOR`,
+        // relative paths, and everything else expand in the WSL
+        // shell, not the Windows host.
+        let cwd = self.focused_pane_cwd();
+        #[cfg(windows)]
+        if crate::window::wsl_paths::is_wsl_pane_path(cwd.as_deref(), path_with_loc) {
+            self.open_in_wsl_pane_editor(path_with_loc, cwd.as_deref());
+            return;
+        }
+
         // Expand `~/…` before the pre-flight stat in `plan_open_in_editor`
         // — otherwise `~/foo.rs:42` stat's as a literal `~/foo.rs` and
         // the hotspot silently fails the "is a regular file" check.
@@ -1356,33 +1382,11 @@ impl App {
         // OSC 7 shell cwd. A raw `./src/main.rs:42` from shell output
         // would otherwise stat as "not a regular file" and silently
         // fail the editor hand-off.
-        let cwd = self.focused_pane_cwd();
         let resolved = therminal_terminal::hotspot_detection::resolve_relative_to_cwd(
             expanded.as_ref(),
             cwd.as_deref(),
         );
         let path_with_loc = resolved.as_ref();
-
-        // tn-q8ce: on native Windows with a WSL pane, the path is a
-        // Linux path (e.g. `/home/marci/foo.rs`). Handing it to a
-        // Windows editor via `Command::new(editor).spawn()` fails —
-        // Windows stats `C:\home\marci\foo.rs` and gets NotFound.
-        //
-        // The correct UX is to spawn the user's Linux `$EDITOR`
-        // **inside the WSL pane**: split a new pane, `cd` into the
-        // containing directory, and exec `$EDITOR '<path>' +<line>`.
-        // That uses nvim/helix/whatever the user has configured in
-        // their Linux shell, not notepad.exe on the Windows side.
-        //
-        // This branch is only taken on `cfg!(windows)` when the path
-        // is Linux-shaped. On Linux/macOS builds, and for Windows-
-        // native paths, we fall through to the existing
-        // `plan_open_in_editor` chain below.
-        #[cfg(windows)]
-        if crate::window::wsl_paths::is_translatable_linux_path(path_with_loc) {
-            self.open_in_wsl_pane_editor(path_with_loc);
-            return;
-        }
 
         let chain = self.config.hotspots.editor_chain.clone();
         let outcome = plan_open_in_editor(
@@ -1479,8 +1483,9 @@ impl App {
     /// Running the editor inside the pane is the right UX — the user
     /// gets their actual Linux editor on the actual Linux path.
     #[cfg(windows)]
-    fn open_in_wsl_pane_editor(&mut self, path_with_loc: &str) {
+    fn open_in_wsl_pane_editor(&mut self, path_with_loc: &str, pane_cwd: Option<&str>) {
         // Split off `:line[:col]` so we can render it as `+<line>`.
+        // The hotspot suffix is always plain digits separated by `:`.
         let (path, line) = match path_with_loc.find(':') {
             Some(idx) if path_with_loc[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
                 let rest = &path_with_loc[idx + 1..];
@@ -1490,25 +1495,37 @@ impl App {
             _ => (path_with_loc, "1"),
         };
 
-        // Derive the parent dir for `cd`. If the path has no parent
-        // (e.g. "/foo.rs"), fall back to "/".
-        let parent = std::path::Path::new(path)
-            .parent()
-            .and_then(|p| p.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("/");
-
-        // Build the one-liner. `${EDITOR:-${VISUAL:-nvim}}` lets the
-        // WSL shell pick the user's configured editor with a sensible
-        // default. `+<line>` is the universal vi/vim/nvim jump syntax
-        // (helix uses `:<line>` but we prefer vim compatibility; users
-        // with helix can set `$EDITOR=helix` and live without jump).
-        let cmd = format!(
-            "cd {parent_q} && clear && exec ${{EDITOR:-${{VISUAL:-nvim}}}} {path_q} +{line}\n",
-            parent_q = shell_quote(parent),
-            path_q = shell_quote(path),
-            line = line,
-        );
+        // Build a shell one-liner that runs entirely inside the WSL
+        // pane. The shell — not the Windows host — handles:
+        //   - `~` expansion via the Linux `$HOME`
+        //   - relative path resolution against `$PWD`
+        //   - `$EDITOR` / `$VISUAL` lookup from the Linux environment
+        //   - file I/O on the Linux filesystem
+        //
+        // We `cd` to the originating pane's cwd first so relative
+        // paths (`./src/main.rs`, `../Cargo.toml`) resolve correctly.
+        // `${EDITOR:-${VISUAL:-nvim}}` gives the user's configured
+        // editor with a sensible default. `+<line>` is the universal
+        // vi/vim/nvim jump syntax.
+        //
+        // The path is intentionally NOT shell-quoted with single
+        // quotes — that would prevent `~` expansion. Instead we rely
+        // on the hotspot text not containing shell metacharacters
+        // (the file-path regex in `hotspot_detection.rs` only matches
+        // `[A-Za-z0-9_\-./]` bodies, which are all shell-safe). If a
+        // future regex widens the charset we'll need a smarter
+        // escaper that expands tildes and quotes the rest.
+        let mut cmd = String::new();
+        if let Some(cwd) = pane_cwd {
+            cmd.push_str("cd ");
+            cmd.push_str(&shell_quote(cwd));
+            cmd.push_str(" && ");
+        }
+        cmd.push_str("clear && exec ${EDITOR:-${VISUAL:-nvim}} ");
+        cmd.push_str(path);
+        cmd.push_str(" +");
+        cmd.push_str(line);
+        cmd.push('\n');
 
         // Capture original focus so we can detect split failure.
         let original_focus = self.focused_pane();

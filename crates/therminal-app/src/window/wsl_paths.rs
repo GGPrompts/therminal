@@ -38,6 +38,50 @@
 
 use std::borrow::Cow;
 
+/// Return true when the click handler should route `path` into a new
+/// WSL pane instead of handing it to the Windows host.
+///
+/// The decision is based on the **focused pane's cwd**, not the path
+/// alone. If the cwd is a POSIX absolute path (`/home/marci/…`) the
+/// pane is unambiguously a WSL shell — the daemon's OSC 7 reader
+/// populated it from the Linux shell, Windows cmd/pwsh never emit
+/// forward-slash roots. All path shapes then flow to WSL: absolute
+/// (`/foo`), tilde (`~/foo`), relative (`./foo`, `../foo`, `foo`).
+/// The only exception is Windows-absolute paths (`C:\…`, `\\…`),
+/// which represent the rare "echo'd Windows path inside a WSL pane"
+/// case and stay on the host side.
+///
+/// On non-Windows builds always returns `false` — there is nothing
+/// to route, and the caller's existing path handles the shell-local
+/// case correctly.
+///
+/// Returns `false` when we can't determine the cwd (no focused pane,
+/// OSC 7 never fired) so the caller falls through to the existing
+/// host-side path. Worst case: a click fails as before instead of
+/// doing something surprising.
+pub fn is_wsl_pane_path(cwd: Option<&str>, path: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    // Require a POSIX-absolute cwd as the WSL shell fingerprint. A
+    // Windows cwd (cmd, pwsh) starts with a drive letter or UNC
+    // prefix and must not be treated as WSL.
+    let Some(cwd) = cwd else {
+        return false;
+    };
+    if !cwd.starts_with('/') {
+        return false;
+    }
+    // Windows-absolute paths emitted inside a WSL pane (e.g. the user
+    // pastes a `C:\…` path, or a cross-compile tool logs one) stay
+    // on the host — the Linux shell has no better claim to them than
+    // the Windows FS does.
+    if therminal_terminal::hotspot_detection::is_windows_absolute(path) {
+        return false;
+    }
+    true
+}
+
 /// Return true if `path` is an absolute Linux-style path (starts with `/`)
 /// that should be translated when the host is Windows + WSL.
 ///
@@ -139,7 +183,7 @@ fn split_line_col_suffix(path: &str) -> (&str, &str) {
     (&path[..last_colon], &path[last_colon..])
 }
 
-// ── Windows-only: distro detection ──────────────────────────────────────
+// ── Windows-only: distro + $HOME detection ─────────────────────────────
 
 /// Cached default WSL distribution name.
 ///
@@ -148,6 +192,13 @@ fn split_line_col_suffix(path: &str) -> (&str, &str) {
 /// command failed) so we don't re-probe on every click.
 #[cfg(windows)]
 static DEFAULT_DISTRO: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Cached Linux `$HOME` from the default WSL distribution.
+///
+/// Populated on first call to [`detect_wsl_home`] via
+/// `wsl.exe -e sh -c 'printf %s "$HOME"'`. `None` if the probe failed.
+#[cfg(windows)]
+static WSL_HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 /// Return the name of the user's default WSL distribution, or `None` if
 /// WSL is not installed / not detectable.
@@ -190,6 +241,66 @@ pub fn detect_default_distro() -> Option<String> {
     {
         None
     }
+}
+
+/// Return the Linux `$HOME` of the default WSL distribution, or
+/// `None` if we can't detect it.
+///
+/// Cached for the lifetime of the process. Only runs on Windows.
+/// Used to expand `~` in Linux-shaped paths before handing them to
+/// Windows file managers (which treat `~` as a literal directory).
+pub fn detect_wsl_home() -> Option<String> {
+    #[cfg(windows)]
+    {
+        WSL_HOME
+            .get_or_init(|| {
+                use std::process::Command;
+                let output = Command::new("wsl.exe")
+                    .args(["-e", "sh", "-c", r#"printf %s "$HOME""#])
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
+                let s = String::from_utf8_lossy(&cleaned).trim().to_string();
+                if s.is_empty() || !s.starts_with('/') {
+                    None
+                } else {
+                    Some(s)
+                }
+            })
+            .clone()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Expand a leading `~/` in a Linux-style path using the WSL `$HOME`
+/// (not the Windows host's `$HOME`).
+///
+/// On Windows, consults [`detect_wsl_home`] and substitutes `~` with
+/// the Linux HOME. `~` alone becomes `$HOME`. Paths without a leading
+/// `~` pass through unchanged. On non-Windows builds this is a no-op
+/// (callers should use the regular [`therminal_terminal::hotspot_detection::expand_tilde`]).
+pub fn expand_tilde_wsl(path: &str) -> Cow<'_, str> {
+    if !cfg!(windows) {
+        return Cow::Borrowed(path);
+    }
+    if path != "~" && !path.starts_with("~/") {
+        return Cow::Borrowed(path);
+    }
+    let Some(home) = detect_wsl_home() else {
+        return Cow::Borrowed(path);
+    };
+    if path == "~" {
+        return Cow::Owned(home);
+    }
+    let rest = &path[2..]; // strip "~/"
+    let trimmed = home.trim_end_matches('/');
+    Cow::Owned(format!("{trimmed}/{rest}"))
 }
 
 /// Top-level click-handler hook: translate a Linux path to a WSL UNC

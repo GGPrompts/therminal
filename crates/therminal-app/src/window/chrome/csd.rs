@@ -181,14 +181,18 @@ pub(crate) fn draw_csd_buttons(
 
     let family = renderer.font_config.family.clone();
 
-    // Settings gear ⚙ (U+2699) is a symbol character that most mono
-    // fonts don't ship. Don't pin it to the user's mono family —
-    // let cosmic-text's fallback chain pick up a system symbol font
-    // (Segoe UI Symbol on Windows, Noto Sans Symbols on Linux,
-    // Apple Symbols on macOS). The other CSD glyphs (─ □ ✕) are
-    // box-drawing and widely supported, so they stay pinned to the
-    // configured mono family for visual consistency.
-    let settings_label = "\u{2699}";
+    // Settings icon: we originally used ⚙ (U+2699 gear) but it's a
+    // symbol codepoint that most monospace fonts don't ship and
+    // glyphon's fallback chain doesn't reliably pick up a system
+    // symbol font (Segoe UI Symbol, Noto Sans Symbols, Apple Symbols)
+    // without explicit wiring. Use ≡ (U+2261, identical-to / triple
+    // bar) instead — it's in the Mathematical Operators block, ships
+    // with every serious mono font (cascadia, firacode, jetbrains
+    // mono, Source Code Pro, etc.), and visually reads as "menu /
+    // settings" (the same shape Android/Material uses for the
+    // hamburger menu). Stays pinned to the user's mono family for
+    // visual consistency with the other CSD glyphs.
+    let settings_label = "\u{2261}";
     let settings_slot = "csd_settings";
     ensure_shaped(
         settings_slot,
@@ -197,7 +201,7 @@ pub(crate) fn draw_csd_buttons(
         CSD_BTN_W,
         bar_h,
         settings_label,
-        Attrs::new().color(icon_color),
+        Attrs::new().family(Family::Name(&family)).color(icon_color),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );

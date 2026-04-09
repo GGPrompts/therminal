@@ -178,6 +178,21 @@ impl App {
     /// when the binary is missing. Falls all the way through to the
     /// file-manager chain when `folder_pane_command` is empty.
     pub(crate) fn open_folder_in_pane(&mut self, path: &str) {
+        let cwd = self.focused_pane_cwd();
+
+        // tn-q8ce: on native Windows with a WSL pane, route the raw
+        // hotspot path into a new WSL pane and let the Linux shell
+        // handle `~` expansion, relative-path resolution, and
+        // `folder_pane_command` (tfe) lookup. The Windows host can't
+        // expand `~` correctly (it would use `C:\Users\<user>`), and
+        // `std::fs::metadata` can't see the Linux filesystem to
+        // validate the target.
+        #[cfg(windows)]
+        if crate::window::wsl_paths::is_wsl_pane_path(cwd.as_deref(), path) {
+            self.open_folder_in_wsl_pane(path, cwd.as_deref());
+            return;
+        }
+
         // Expand `~/…` / `~` before building the `cd` line. The shell
         // we're `exec`-ing into can't expand `~` inside single quotes,
         // so an un-expanded path would land us in `/~/…` (nonexistent).
@@ -186,7 +201,6 @@ impl App {
         // tn-vm2j: join relative paths against the focused pane's
         // OSC 7 shell cwd before building the `cd` line. Absolute and
         // tilde-expanded paths pass through unchanged.
-        let cwd = self.focused_pane_cwd();
         let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
         let path = resolved.as_ref();
         let command = self.config.hotspots.folder_pane_command.clone();
@@ -233,21 +247,103 @@ impl App {
         self.pty_write_to_pane(&bytes, new_pane);
     }
 
+    /// tn-q8ce: open a WSL-destined directory hotspot inside a new
+    /// WSL pane on native Windows.
+    ///
+    /// Mirrors [`App::open_in_wsl_pane_editor`] but for directories:
+    /// splits a new pane, `cd`'s to the originating pane's cwd so
+    /// relatives resolve, `cd`'s into the target directory, and
+    /// `exec`'s the configured `folder_pane_command` (default `tfe`).
+    /// Hands off everything to the WSL shell so `~`, `$HOME`, and
+    /// `$PATH` all come from the Linux environment.
+    #[cfg(windows)]
+    fn open_folder_in_wsl_pane(&mut self, path: &str, pane_cwd: Option<&str>) {
+        let command = self.config.hotspots.folder_pane_command.clone();
+
+        // Build the shell one-liner. Path is intentionally unquoted
+        // so the shell expands `~` — the file-path regex limits
+        // hotspot content to `[A-Za-z0-9_\-./]` which is all shell-
+        // safe. If `folder_pane_command` is empty we fall through to
+        // the file-manager chain (matching the Linux branch).
+        if command.is_empty() {
+            debug!(
+                "open_folder_in_wsl_pane: folder_pane_command is empty, deferring to file manager"
+            );
+            self.open_folder_in_file_manager(path);
+            return;
+        }
+
+        let head = command.first().cloned().unwrap_or_default();
+        if head.is_empty() {
+            self.open_folder_in_file_manager(path);
+            return;
+        }
+
+        // Substitute `{path}` tokens in the configured argv, then
+        // join into a space-separated command line. Tokens that
+        // don't contain `{path}` pass through unchanged. We don't
+        // shell-quote because — again — the regex-bounded path
+        // charset is shell-safe and we need `~` to expand.
+        let substituted: Vec<String> = command.iter().map(|a| a.replace("{path}", path)).collect();
+        let args_line = substituted.join(" ");
+
+        let mut cmd = String::new();
+        if let Some(cwd) = pane_cwd {
+            cmd.push_str("cd ");
+            cmd.push_str(&shell_quote(cwd));
+            cmd.push_str(" && ");
+        }
+        cmd.push_str("cd ");
+        cmd.push_str(path);
+        cmd.push_str(" && clear && exec ");
+        cmd.push_str(&args_line);
+        cmd.push('\n');
+
+        let original_focus = self.focused_pane();
+        self.split_focused_pane(SplitDirection::Vertical);
+        let new_pane = match self.focused_pane() {
+            Some(id) if Some(id) != original_focus => id,
+            _ => {
+                warn!("open_folder_in_wsl_pane: split did not produce a new pane");
+                return;
+            }
+        };
+
+        info!(%path, cmd = %args_line, "open_folder_in_wsl_pane: spawning command in new WSL pane");
+        self.pty_write_to_pane(cmd.as_bytes(), new_pane);
+    }
+
     /// Reveal `path` in an external file manager via the
     /// `folder_opener` chain. Final fallback is `open::that(path)` so
     /// the platform default (xdg-open / open / explorer) wins.
     pub(crate) fn open_folder_in_file_manager(&mut self, path: &str) {
+        let cwd = self.focused_pane_cwd();
+
+        // tn-q8ce: on native Windows with a WSL pane, `~` refers to
+        // the Linux `$HOME` (`/home/<user>`), not the Windows user
+        // profile. Expand via the cached WSL HOME probe before
+        // anything else — otherwise `expand_tilde` below would use
+        // `std::env::var("HOME")` which on Windows points at
+        // `C:\Users\<user>`.
+        let wsl_pre_expanded: std::borrow::Cow<str> =
+            if cfg!(windows) && crate::window::wsl_paths::is_wsl_pane_path(cwd.as_deref(), path) {
+                crate::window::wsl_paths::expand_tilde_wsl(path)
+            } else {
+                std::borrow::Cow::Borrowed(path)
+            };
+
         // Expand `~/…` before handing the path to any external tool —
         // most file managers (Explorer, Finder, Nautilus) treat `~` as
-        // a literal directory name instead of `$HOME`.
+        // a literal directory name instead of `$HOME`. On the WSL
+        // branch above this is now a no-op (the tilde is already
+        // gone); on Linux/macOS it still handles the local HOME.
         let home = std::env::var("HOME").ok();
-        let expanded = expand_tilde(path, home.as_deref());
+        let expanded = expand_tilde(wsl_pre_expanded.as_ref(), home.as_deref());
         // tn-vm2j: join relative paths against the focused pane's
         // OSC 7 shell cwd before handing off. Most file managers
         // refuse to open relative paths or treat them as relative to
         // their own cwd (which is therminal's process cwd, almost
         // never what the user meant).
-        let cwd = self.focused_pane_cwd();
         let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
         // tn-q8ce: on native Windows with a WSL pane, translate the
         // Linux path into the `\\wsl.localhost\…` UNC form so that
