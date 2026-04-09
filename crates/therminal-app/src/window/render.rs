@@ -338,6 +338,7 @@ fn render_single_pane(
     // URL/hotspot detection.
     if let Some(ref damaged) = damaged_rows
         && !damaged.iter().any(|&d| d)
+        && renderer.pane_cache_matches_viewport(pane.id, screen_lines, display_offset)
     {
         term_guard.reset_damage();
         drop(term_guard);

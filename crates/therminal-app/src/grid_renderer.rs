@@ -262,6 +262,15 @@ fn resolve_bg_color(ansi_override: Option<&[[f32; 4]; 16]>, color: &AnsiColor) -
     }
 }
 
+fn viewport_cache_matches(
+    cached_line_count: Option<usize>,
+    last_display_offset: Option<usize>,
+    screen_lines: usize,
+    display_offset: usize,
+) -> bool {
+    cached_line_count == Some(screen_lines) && last_display_offset == Some(display_offset)
+}
+
 /// Build the full rendered text for a terminal cell.
 pub(crate) fn cell_display_text(c: char, zerowidth: Option<&[char]>) -> String {
     let mut text = String::with_capacity(1 + zerowidth.map_or(0, |extra| extra.len()));
@@ -407,6 +416,10 @@ pub struct GridRenderer {
 
     // Per-pane last cursor position to rebuild affected cell buffers when cursor moves.
     pane_last_cursor_pos: HashMap<PaneId, (usize, usize)>,
+
+    // Per-pane last rendered display offset. Row caches are viewport-relative,
+    // so a scrollback change invalidates the cached visible rows.
+    pane_last_display_offset: HashMap<PaneId, usize>,
 
     // The pane whose caches are currently active. Set via `set_current_pane()`.
     current_pane: Option<PaneId>,
@@ -630,6 +643,7 @@ impl GridRenderer {
             pane_cell_buffers: HashMap::new(),
             pane_cell_shape_keys: HashMap::new(),
             pane_last_cursor_pos: HashMap::new(),
+            pane_last_display_offset: HashMap::new(),
             current_pane: None,
             frame_count: 0,
             rect_verts_cpu: Vec::new(),
@@ -702,6 +716,8 @@ impl GridRenderer {
             }
             Some(out)
         });
+
+        self.clear_render_caches();
     }
 
     fn map_fg_color(&self, color: &AnsiColor) -> [f32; 4] {
@@ -737,6 +753,31 @@ impl GridRenderer {
         }
     }
 
+    /// Drop all per-pane render caches so the next frame fully rebuilds.
+    pub fn clear_render_caches(&mut self) {
+        self.pane_row_cache.clear();
+        self.pane_cell_buffers.clear();
+        self.pane_cell_shape_keys.clear();
+        self.pane_last_cursor_pos.clear();
+        self.pane_last_display_offset.clear();
+    }
+
+    /// Returns true when the cached viewport rows for `pane_id` match the
+    /// current visible scrollback offset and line count.
+    pub fn pane_cache_matches_viewport(
+        &self,
+        pane_id: PaneId,
+        screen_lines: usize,
+        display_offset: usize,
+    ) -> bool {
+        viewport_cache_matches(
+            self.pane_row_cache.get(&pane_id).map(Vec::len),
+            self.pane_last_display_offset.get(&pane_id).copied(),
+            screen_lines,
+            display_offset,
+        )
+    }
+
     /// Update the viewport resolution (call on resize).
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         self.viewport.update(queue, Resolution { width, height });
@@ -757,10 +798,7 @@ impl GridRenderer {
         self.atlas.trim();
         self.overlay_atlas.trim();
 
-        self.pane_row_cache.clear();
-        self.pane_cell_buffers.clear();
-        self.pane_cell_shape_keys.clear();
-        self.pane_last_cursor_pos.clear();
+        self.clear_render_caches();
     }
 
     /// Replace the font configuration and recalculate metrics.
@@ -819,10 +857,7 @@ impl GridRenderer {
 
         self.atlas.trim();
         self.overlay_atlas.trim();
-        self.pane_row_cache.clear();
-        self.pane_cell_buffers.clear();
-        self.pane_cell_shape_keys.clear();
-        self.pane_last_cursor_pos.clear();
+        self.clear_render_caches();
     }
 
     /// Adjust the font size by `delta` points (e.g. +1.0 or -1.0).
@@ -855,6 +890,7 @@ impl GridRenderer {
         // is no longer cleared every frame).
         self.hotspot_map.retain(|&(pid, _, _), _| pid != pane_id);
         self.pane_last_cursor_pos.remove(&pane_id);
+        self.pane_last_display_offset.remove(&pane_id);
     }
 
     /// Clear per-frame maps at the start of a new frame, before any panes
@@ -1428,6 +1464,8 @@ impl GridRenderer {
 
         self.pane_last_cursor_pos
             .insert(pane_id, (cursor_row, cursor_col));
+        self.pane_last_display_offset
+            .insert(pane_id, display_offset);
 
         // ── Update viewport ──────────────────────────────────────────────
         self.viewport.update(
@@ -1636,5 +1674,13 @@ mod tests {
             &AnsiColor::Named(NamedColor::BrightBlue),
         );
         assert_eq!(resolved, palette[12]);
+    }
+
+    #[test]
+    fn viewport_cache_matches_only_same_offset_and_line_count() {
+        assert!(super::viewport_cache_matches(Some(3), Some(5), 3, 5));
+        assert!(!super::viewport_cache_matches(Some(3), Some(6), 3, 5));
+        assert!(!super::viewport_cache_matches(Some(4), Some(5), 3, 5));
+        assert!(!super::viewport_cache_matches(None, Some(5), 3, 5));
     }
 }
