@@ -4,17 +4,18 @@
 //! `terminal_terminal::hotspot_detection` library is the same code path
 //! the GUI and the MCP server use, so the CLI just calls `CapturePane` and
 //! re-runs the regex pass locally. That keeps the daemon IPC surface
-//! unchanged for tn-k13n while still giving callers the answer.
+//! unchanged while still giving callers the answer.
 //!
 //! Command-history (OSC 633) is daemon-side state — the parser lives in
-//! the PTY reader thread. There's no IPC primitive for that today, so the
-//! `commands` subcommand prints a clear "use MCP for now" stub. This is
-//! flagged as a follow-up rather than blocking the rest of the CLI.
+//! the PTY reader thread. tn-8ysl added the `IpcRequest::QueryCommands`
+//! primitive so the CLI can fetch the same data the
+//! `terminal.semantic.query_commands` MCP tool returns without paying JSON-RPC
+//! framing costs.
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
 
-use therminal_protocol::daemon::{IpcRequest, IpcResponse};
+use therminal_protocol::daemon::{CommandSummary, IpcRequest, IpcResponse};
 use therminal_terminal::hotspot_detection::{HotspotKind, detect_hotspots_from_text};
 
 use super::OutputFlags;
@@ -24,14 +25,16 @@ use super::runtime::CliCtx;
 #[derive(Subcommand, Debug)]
 pub enum SemanticCmd {
     /// Recent shell commands captured via OSC 633 from a pane.
-    ///
-    /// Currently a stub — daemon does not expose query_commands over IPC.
-    /// Use the `terminal.semantic.query_commands` MCP tool until a CLI
-    /// primitive lands (tracked separately).
     Commands {
         pane_id: u64,
+        /// Drop blocks whose `start_line` is below this value.
+        #[arg(long, default_value_t = 0)]
+        since_line: usize,
+        /// Keep only the newest N entries. Capped daemon-side.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[command(flatten)]
+        out: OutputFlags,
     },
     /// Detected hotspots (file paths, URLs, error locations, …) in a pane.
     ///
@@ -49,17 +52,76 @@ pub enum SemanticCmd {
 
 pub fn run(ctx: &CliCtx, cmd: SemanticCmd) -> Result<()> {
     match cmd {
-        SemanticCmd::Commands { pane_id, limit } => commands(ctx, pane_id, limit),
+        SemanticCmd::Commands {
+            pane_id,
+            since_line,
+            limit,
+            out,
+        } => commands(ctx, pane_id, since_line, limit, out),
         SemanticCmd::Hotspots { pane_id, kind, out } => {
             hotspots(ctx, pane_id, kind.as_deref(), out)
         }
     }
 }
 
-fn commands(_ctx: &CliCtx, pane_id: u64, limit: usize) -> Result<()> {
-    bail!(
-        "semantic commands not yet exposed over CLI IPC (pane={pane_id}, limit={limit}); use the terminal.semantic.query_commands MCP tool"
-    )
+fn commands(
+    ctx: &CliCtx,
+    pane_id: u64,
+    since_line: usize,
+    limit: usize,
+    out: OutputFlags,
+) -> Result<()> {
+    let resp = ctx.send(IpcRequest::QueryCommands {
+        pane_id,
+        since_line,
+        limit,
+    })?;
+    let commands: Vec<CommandSummary> = match resp {
+        IpcResponse::Commands { commands, .. } => commands,
+        IpcResponse::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    };
+
+    if out.json {
+        let rows: Vec<_> = commands
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "command": c.command,
+                    "exit_code": c.exit_code,
+                    "duration_ms": c.duration_ms,
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "started_at_secs": c.started_at_secs,
+                })
+            })
+            .collect();
+        return write_json(&rows);
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    for c in &commands {
+        // Format: start_line<TAB>exit_code<TAB>duration_ms<TAB>command
+        let exit = c
+            .exit_code
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let dur = c
+            .duration_ms
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let text = c.command.as_deref().unwrap_or("");
+        write_tsv_row(
+            &mut stdout,
+            [
+                c.start_line.to_string().as_str(),
+                exit.as_str(),
+                dur.as_str(),
+                text,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn hotspots(ctx: &CliCtx, pane_id: u64, kind_filter: Option<&str>, out: OutputFlags) -> Result<()> {

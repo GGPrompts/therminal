@@ -59,3 +59,90 @@ pub struct OutputFlags {
     #[arg(long)]
     pub json: bool,
 }
+
+#[cfg(test)]
+mod parity_tests {
+    //! CLI ↔ MCP parity test (tn-8ysl).
+    //!
+    //! This is the CLI-side mirror of the `SHARED_SURFACE` allowlist in
+    //! `crates/therminal-daemon/src/mcp/mod.rs`. Both tests must agree.
+    //! If you add a shared-surface operation, update both lists.
+    //!
+    //! The daemon-side test checks that each MCP tool name in the
+    //! allowlist exists in `tool_definitions()`. This test checks that
+    //! each CLI subcommand path in the allowlist parses cleanly through
+    //! `clap`, so a rename or drop on the CLI side fails loudly too.
+
+    use clap::{Parser, Subcommand};
+
+    /// Shared surface: `(mcp_tool_name, cli_argv_tail)` pairs.
+    /// Must stay in sync with `SHARED_SURFACE` in the daemon crate's
+    /// `mcp::mod::tests` module.
+    const SHARED_SURFACE: &[(&str, &[&str])] = &[
+        ("terminal.sessions.list", &["session", "list"]),
+        ("terminal.panes.list", &["pane", "list"]),
+        ("terminal.panes.write", &["pane", "send", "1", "hi"]),
+        ("terminal.panes.peek", &["pane", "peek", "1"]),
+        ("terminal.panes.tag", &["pane", "tag", "1", "k=v"]),
+        ("terminal.panes.untag", &["pane", "untag", "1", "k"]),
+        ("terminal.agents.list", &["agents", "list"]),
+        ("terminal.workspaces.list", &["workspace", "list"]),
+        (
+            "terminal.semantic.query_commands",
+            &["semantic", "commands", "1"],
+        ),
+        (
+            "terminal.semantic.get_hotspots",
+            &["semantic", "hotspots", "1"],
+        ),
+    ];
+
+    /// Minimal clap root that mirrors `Command` in `main.rs` just enough
+    /// to exercise the shared-surface subcommands without pulling in the
+    /// GUI's full CLI (which wants a winit event loop context).
+    #[derive(Parser, Debug)]
+    #[command(name = "therminal")]
+    struct ParityRoot {
+        #[command(subcommand)]
+        cmd: ParityCmd,
+    }
+
+    #[derive(Subcommand, Debug)]
+    enum ParityCmd {
+        Pane {
+            #[command(subcommand)]
+            cmd: super::pane::PaneCmd,
+        },
+        Session {
+            #[command(subcommand)]
+            cmd: super::session::SessionCmd,
+        },
+        Workspace {
+            #[command(subcommand)]
+            cmd: super::workspace::WorkspaceCmd,
+        },
+        Agents {
+            #[command(subcommand)]
+            cmd: super::agents::AgentsCmd,
+        },
+        Semantic {
+            #[command(subcommand)]
+            cmd: super::semantic::SemanticCmd,
+        },
+    }
+
+    #[test]
+    fn shared_surface_cli_paths_parse() {
+        for (mcp, argv_tail) in SHARED_SURFACE {
+            let mut argv: Vec<&str> = vec!["therminal"];
+            argv.extend_from_slice(argv_tail);
+            match ParityRoot::try_parse_from(&argv) {
+                Ok(_) => {}
+                Err(e) => panic!(
+                    "shared-surface CLI path {:?} failed to parse (MCP counterpart: `{mcp}`): {e}",
+                    argv_tail
+                ),
+            }
+        }
+    }
+}

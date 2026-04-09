@@ -2134,6 +2134,36 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Switch the active workspace for a session without touching the
+    /// stored topology (tn-8ysl). Validates that the requested workspace
+    /// exists in the session's `workspace_state` (or is `1` for legacy
+    /// sessions that haven't populated their workspace state yet), then
+    /// updates `active_workspace` and broadcasts `WorkspaceChanged`.
+    pub fn set_active_workspace(
+        &mut self,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        let exists = session.workspace_state.iter().any(|w| w.id == workspace_id)
+            || (session.workspace_state.is_empty() && workspace_id == 1);
+        if !exists {
+            return Err(format!(
+                "workspace {workspace_id} not found in session {session_id}"
+            ));
+        }
+        session.active_workspace = workspace_id;
+        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+            session_id,
+            active_workspace: workspace_id,
+        });
+        self.mark_dirty();
+        Ok(())
+    }
+
     /// Get the workspace topology for a session.
     pub fn get_workspace_state(
         &self,

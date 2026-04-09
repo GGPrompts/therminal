@@ -1,10 +1,11 @@
 //! `therminal workspace …` subcommands.
 //!
-//! Workspace **switching** is a GUI-only operation today (the daemon stores
-//! the topology but doesn't drive a focus change without a client). Until
-//! the daemon grows a `SwitchWorkspace` IPC primitive (tracked separately),
-//! `workspace switch` is a stub that prints a clear error so scripts notice
-//! the gap rather than silently succeed.
+//! tn-8ysl added the `IpcRequest::SwitchWorkspace` primitive so the CLI
+//! can change the active workspace without going through the GUI. The
+//! daemon updates `Session::active_workspace` via
+//! `SessionManager::set_active_workspace` and broadcasts a
+//! `WorkspaceChanged` event so subscribed clients (including the GUI)
+//! see the change.
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
@@ -111,8 +112,14 @@ fn list(ctx: &CliCtx, session: Option<u64>, out: OutputFlags) -> Result<()> {
     Ok(())
 }
 
-fn switch(_ctx: &CliCtx, session: u64, workspace_id: u64) -> Result<()> {
-    bail!(
-        "workspace switch is GUI-driven; daemon has no SwitchWorkspace RPC yet (session={session}, workspace={workspace_id})"
-    )
+fn switch(ctx: &CliCtx, session: u64, workspace_id: u64) -> Result<()> {
+    let resp = ctx.send(IpcRequest::SwitchWorkspace {
+        session_id: session,
+        workspace_id,
+    })?;
+    match resp {
+        IpcResponse::WorkspaceSwitched { .. } => Ok(()),
+        IpcResponse::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
 }

@@ -49,6 +49,13 @@ pub enum PaneCmd {
         raw: bool,
     },
     /// Print the last N non-empty rows of a pane's visible grid (default 10, cap 50).
+    ///
+    /// **Handoff (tn-8ysl → tn-sp3n)**: the `terminal.panes.get_content` MCP
+    /// tool returns a `content_hash` so callers can short-circuit on
+    /// unchanged screens, but `IpcResponse::PaneCaptured` does not yet
+    /// carry that field. Once `content_hash` is plumbed through the
+    /// IPC response, add an `--if-changed <hash>` flag here that exits 0
+    /// with no output when the daemon's current hash matches.
     Peek {
         pane_id: u64,
         /// Limit to the last N non-empty rows (default 10, max 50).

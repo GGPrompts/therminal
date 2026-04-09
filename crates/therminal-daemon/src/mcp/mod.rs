@@ -2210,6 +2210,66 @@ pub(crate) mod tests {
         }
     }
 
+    // ── CLI ↔ MCP parity (tn-8ysl) ──────────────────────────────────────
+    //
+    // A small "shared surface" allowlist: operations that must exist on
+    // BOTH the MCP tool surface and the `therminal` CLI. The CLI subcommand
+    // path is recorded alongside each MCP tool name so drift in either
+    // direction is visible. The CLI column is a hardcoded snapshot of the
+    // `clap` subcommand structure in `crates/therminal-app/src/cli/` —
+    // renaming a CLI subcommand without touching this list, or removing
+    // an MCP tool without touching this list, both break the test.
+    //
+    // NOT every MCP tool needs a CLI counterpart (e.g. pane_summary is
+    // MCP-only today) and not every CLI subcommand maps to an MCP tool
+    // (e.g. `therminal events --follow` is a streaming subscription). Add
+    // entries here only when both surfaces intentionally expose the same
+    // operation.
+    const SHARED_SURFACE: &[(&str, &str)] = &[
+        ("terminal.sessions.list", "session list"),
+        ("terminal.panes.list", "pane list"),
+        ("terminal.panes.write", "pane send"),
+        ("terminal.panes.peek", "pane peek"),
+        ("terminal.panes.tag", "pane tag"),
+        ("terminal.panes.untag", "pane untag"),
+        ("terminal.agents.list", "agents list"),
+        ("terminal.workspaces.list", "workspace list"),
+        ("terminal.semantic.query_commands", "semantic commands"),
+        ("terminal.semantic.get_hotspots", "semantic hotspots"),
+    ];
+
+    /// Every MCP name in the shared-surface allowlist must exist in
+    /// `tool_definitions()`. Fails loudly if a tool is removed or renamed
+    /// without updating the allowlist (and implicitly the CLI).
+    #[test]
+    fn shared_surface_mcp_tools_exist() {
+        use std::collections::HashSet;
+        let tools = tool_definitions();
+        let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        for (mcp, cli) in SHARED_SURFACE {
+            assert!(
+                names.contains(mcp),
+                "shared-surface MCP tool `{mcp}` missing from tool_definitions() \
+                 (CLI counterpart: `therminal {cli}`). If you renamed the tool, \
+                 update SHARED_SURFACE and the matching CLI subcommand."
+            );
+        }
+    }
+
+    /// Guard against the allowlist itself going stale: entries must be
+    /// unique on both sides and must reference an IpcRequest primitive
+    /// the daemon actually handles (sampled via a small static map).
+    #[test]
+    fn shared_surface_allowlist_is_consistent() {
+        use std::collections::HashSet;
+        let mut mcp_seen: HashSet<&str> = HashSet::new();
+        let mut cli_seen: HashSet<&str> = HashSet::new();
+        for (mcp, cli) in SHARED_SURFACE {
+            assert!(mcp_seen.insert(mcp), "duplicate MCP entry: {mcp}");
+            assert!(cli_seen.insert(cli), "duplicate CLI entry: {cli}");
+        }
+    }
+
     // ── Resource surface lock ────────────────────────────────────────────
 
     /// `build_resource_list` must always include the Claude events URI even

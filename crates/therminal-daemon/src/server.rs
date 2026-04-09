@@ -679,6 +679,60 @@ async fn dispatch_ipc(
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
+        IpcRequest::QueryCommands {
+            pane_id,
+            since_line,
+            limit,
+        } => {
+            use therminal_protocol::daemon::CommandSummary;
+            let mgr = session_mgr.lock().await;
+            match mgr.pane_command_blocks(*pane_id) {
+                Some(blocks) => {
+                    let effective_limit = if *limit == 0 { 20 } else { *limit };
+                    let filtered: Vec<_> = blocks
+                        .into_iter()
+                        .filter(|b| b.start_line >= *since_line)
+                        .collect();
+                    let total = filtered.len();
+                    let start = total.saturating_sub(effective_limit);
+                    let commands: Vec<CommandSummary> = filtered[start..]
+                        .iter()
+                        .map(|b| CommandSummary {
+                            command: b.command.clone(),
+                            exit_code: b.exit_code,
+                            duration_ms: b.duration.map(|d| d.as_millis() as u64),
+                            start_line: b.start_line,
+                            end_line: b.end_line,
+                            started_at_secs: b.started_at.and_then(|t| {
+                                t.duration_since(std::time::UNIX_EPOCH)
+                                    .ok()
+                                    .map(|d| d.as_secs())
+                            }),
+                        })
+                        .collect();
+                    IpcResponse::Commands {
+                        pane_id: *pane_id,
+                        commands,
+                    }
+                }
+                None => IpcResponse::Error {
+                    message: format!("pane not found: {pane_id}"),
+                },
+            }
+        }
+        IpcRequest::SwitchWorkspace {
+            session_id,
+            workspace_id,
+        } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.set_active_workspace(*session_id, *workspace_id) {
+                Ok(()) => IpcResponse::WorkspaceSwitched {
+                    session_id: *session_id,
+                    active_workspace: *workspace_id,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
         IpcRequest::RequestHandoffFds => {
             #[cfg(unix)]
             {

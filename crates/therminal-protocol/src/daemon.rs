@@ -195,6 +195,27 @@ pub enum IpcRequest {
     ListPanes { session_id: Option<SessionId> },
     /// List detected agents across all panes (tn-k13n CLI subcommand).
     ListAgents,
+    /// Query recent shell commands captured by OSC 633 for a pane
+    /// (tn-8ysl CLI subcommand; mirrors
+    /// `terminal.semantic.query_commands`). Results are returned
+    /// oldest-first within the `limit`-truncated window.
+    QueryCommands {
+        pane_id: PaneId,
+        /// Drop blocks whose `start_line` is below this value. `0` = no
+        /// filter.
+        since_line: usize,
+        /// Keep only the newest `limit` blocks after filtering. `0` = use
+        /// the daemon default (20).
+        limit: usize,
+    },
+    /// Switch the active workspace within a session (tn-8ysl CLI
+    /// subcommand). Calls `SessionManager::set_active_workspace` on the
+    /// daemon side and broadcasts `DaemonEvent::WorkspaceChanged` to
+    /// subscribers.
+    SwitchWorkspace {
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    },
 }
 
 /// Typed IPC responses.
@@ -295,8 +316,39 @@ pub enum IpcResponse {
     Panes { panes: Vec<PaneSummary> },
     /// Agent summaries returned by `IpcRequest::ListAgents`.
     Agents { agents: Vec<AgentSummary> },
+    /// OSC 633 command history returned by `IpcRequest::QueryCommands`.
+    Commands {
+        pane_id: PaneId,
+        commands: Vec<CommandSummary>,
+    },
+    /// Active workspace switched in response to `IpcRequest::SwitchWorkspace`.
+    WorkspaceSwitched {
+        session_id: SessionId,
+        active_workspace: WorkspaceId,
+    },
     /// Generic error response.
     Error { message: String },
+}
+
+/// Lightweight command-history entry returned by
+/// `IpcRequest::QueryCommands`. Mirrors the JSON shape the
+/// `terminal.semantic.query_commands` MCP tool returns so CLI and MCP
+/// consumers see the same schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandSummary {
+    /// Command line text, if captured via an OSC 633 `E` mark.
+    pub command: Option<String>,
+    /// Process exit code (from the `D` mark), if finished.
+    pub exit_code: Option<i32>,
+    /// Wall-clock duration in milliseconds between the `C` and `D`
+    /// marks, if finished.
+    pub duration_ms: Option<u64>,
+    /// Grid line where the prompt started (`A` mark).
+    pub start_line: usize,
+    /// Grid line where execution finished (`D` mark), if any.
+    pub end_line: Option<usize>,
+    /// Unix epoch seconds at which the `C` (PreExec) mark was observed.
+    pub started_at_secs: Option<u64>,
 }
 
 /// Lightweight pane summary returned by `IpcRequest::ListPanes`.
