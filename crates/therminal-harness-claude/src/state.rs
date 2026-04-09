@@ -159,6 +159,11 @@ pub struct ClaudeSessionState {
     pub last_command_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive_failures: Option<u32>,
+    /// User-authored session title from the `UserPromptSubmit` hook
+    /// (`hookSpecificOutput.sessionTitle`). Inference-unrecoverable; only
+    /// available when the hook script writes it. See tn-ifee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
 }
 
 fn default_subagent_count() -> Option<u32> {
@@ -219,6 +224,8 @@ struct ClaudeSessionStateRepr {
     last_command_duration_ms: Option<u64>,
     #[serde(default)]
     consecutive_failures: Option<u32>,
+    #[serde(default)]
+    session_title: Option<String>,
 }
 
 impl From<ClaudeSessionStateRepr> for ClaudeSessionState {
@@ -252,6 +259,7 @@ impl From<ClaudeSessionStateRepr> for ClaudeSessionState {
             last_command_started_at: r.last_command_started_at,
             last_command_duration_ms: r.last_command_duration_ms,
             consecutive_failures: r.consecutive_failures,
+            session_title: r.session_title,
         }
     }
 }
@@ -281,6 +289,7 @@ impl Default for ClaudeSessionState {
             last_command_started_at: None,
             last_command_duration_ms: None,
             consecutive_failures: None,
+            session_title: None,
         }
     }
 }
@@ -1302,5 +1311,59 @@ mod tests {
             !poller.known_bad_files.contains(&path),
             "good re-read should not mark path as bad"
         );
+    }
+
+    // ── tn-ifee: enriched session detail fields ─────────────────────────
+
+    /// Real-shape state file from `state-tracker.sh` (see tn-ifee context):
+    /// carries `claude_session_id` plus all five fields surfaced by
+    /// `terminal.agents.get_session_detail`.
+    #[test]
+    fn parses_real_shape_state_file_with_session_title() {
+        let json = r#"{
+            "session_id": "946a34ea4138",
+            "claude_session_id": "73d64234-6693-4cff-ae42-e175a401cee8",
+            "status": "tool_use",
+            "current_tool": "Bash",
+            "subagent_count": 1,
+            "context_percent": 9,
+            "working_dir": "/home/marci/projects/therminal",
+            "model": "claude-opus-4-6",
+            "session_title": "therminal / tn-ifee",
+            "last_updated": "2026-04-09T02:39:43Z",
+            "pid": 124460,
+            "source": "hook"
+        }"#;
+        let state: ClaudeSessionState =
+            serde_json::from_str(json).expect("real-shape state parses");
+        // claude_session_id is preferred over session_id (tn-r2a3 alias).
+        assert_eq!(state.session_id, "73d64234-6693-4cff-ae42-e175a401cee8");
+        assert_eq!(state.current_tool.as_deref(), Some("Bash"));
+        assert_eq!(
+            state.working_dir.as_deref(),
+            Some("/home/marci/projects/therminal")
+        );
+        assert_eq!(state.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(state.context_percent, Some(9.0));
+        assert_eq!(state.session_title.as_deref(), Some("therminal / tn-ifee"));
+    }
+
+    /// Pre-tn-r2a3 / pre-tn-ifee state file: only `session_id`, no
+    /// `claude_session_id`, no new fields. Must still parse cleanly with
+    /// `None` for the new fields.
+    #[test]
+    fn parses_legacy_state_file_without_new_fields() {
+        let json = r#"{
+            "session_id": "old-uuid-style-id",
+            "status": "idle",
+            "pid": 1234
+        }"#;
+        let state: ClaudeSessionState = serde_json::from_str(json).expect("legacy state parses");
+        assert_eq!(state.session_id, "old-uuid-style-id");
+        assert!(state.session_title.is_none());
+        assert!(state.current_tool.is_none());
+        assert!(state.working_dir.is_none());
+        assert!(state.context_percent.is_none());
+        assert!(state.model.is_none());
     }
 }

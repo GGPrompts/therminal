@@ -10,20 +10,21 @@ use rmcp::model::{CallToolResult, Content, Tool};
 use tracing::debug;
 
 use super::{
-    AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentStatusResult,
-    CadenceSampleResult, CommandInfo, CreateSessionParam, DestroyPaneResult, EmptyParams,
-    EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetContentParam, GetHotspotsParam,
-    GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam,
-    GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult,
-    ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
-    MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, PanePeekResult, PaneSummaryResult,
-    PaneTagsResult, PeekPaneParam, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
-    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
-    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
-    SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam, TherminalMcpServer,
-    UntagPaneParam, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
-    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
-    json_content, now_unix_secs, pane_content_hash, render_grid_lines,
+    AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentSessionDetail,
+    AgentStatusResult, CadenceSampleResult, CommandInfo, CreateSessionParam, DestroyPaneResult,
+    EmptyParams, EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetContentParam,
+    GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
+    GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson,
+    ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult, ListWorkspacesParam,
+    ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo,
+    PanePeekResult, PaneSummaryResult, PaneTagsResult, PeekPaneParam, QueryCommandsParam,
+    QueryCommandsResult, QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam,
+    QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
+    SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
+    TagPaneParam, TherminalMcpServer, UntagPaneParam, WaitForOutputParam, WaitForOutputResult,
+    WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult, build_content_preview,
+    find_first_pane_in_session, find_pane_info, json_content, now_unix_secs, pane_content_hash,
+    render_grid_lines,
 };
 
 impl TherminalMcpServer {
@@ -292,6 +293,7 @@ impl TherminalMcpServer {
                     let last_exit_code = pane.last_exit_code();
                     let agent_name = mgr.agent_registry().get(pane.id).map(|e| e.name.clone());
                     let tags = pane.tags();
+                    let session_title = mgr.pane_capacity(pane.id).and_then(|e| e.session_title);
                     panes.push(PaneInfo {
                         pane_id: pane.id,
                         session_id: *session_id,
@@ -302,6 +304,7 @@ impl TherminalMcpServer {
                         last_exit_code,
                         agent_name,
                         tags,
+                        session_title,
                     });
                 }
             }
@@ -533,6 +536,40 @@ impl TherminalMcpServer {
             current_tool,
             context_percent,
             model,
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    /// Return the enriched Claude Code session detail for a pane (tn-ifee).
+    ///
+    /// Surfaces the five fields agreed in tn-ifee:
+    /// `session_title`, `current_tool`, `working_dir`, `context_percent`,
+    /// `model`. All fields are sourced from the per-pane `PaneCapacityCache`
+    /// — populated by the Claude state poller in `therminal-harness-claude`.
+    /// All fields are nullable. Returns a tool error only if the pane does
+    /// not exist.
+    pub(super) async fn handle_get_agent_session_detail(
+        &self,
+        params: PaneIdParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mgr = self.session_mgr.lock().await;
+
+        // Verify pane exists — match the convention of get_agent_details.
+        if mgr.pane_agent_details(params.pane_id).is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "pane not found: {}",
+                params.pane_id
+            ))]));
+        }
+
+        let cap = mgr.pane_capacity(params.pane_id);
+        let result = AgentSessionDetail {
+            pane_id: params.pane_id,
+            session_title: cap.as_ref().and_then(|e| e.session_title.clone()),
+            current_tool: cap.as_ref().and_then(|e| e.current_tool.clone()),
+            working_dir: cap.as_ref().and_then(|e| e.working_dir.clone()),
+            context_percent: cap.as_ref().and_then(|e| e.context_percent),
+            model: cap.as_ref().and_then(|e| e.model.clone()),
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
@@ -822,6 +859,9 @@ impl TherminalMcpServer {
         let agent_status = registry_entry
             .as_ref()
             .map(|e| e.status.as_str().to_string());
+        let session_title = mgr
+            .pane_capacity(params.pane_id)
+            .and_then(|e| e.session_title);
 
         drop(mgr);
 
@@ -843,6 +883,7 @@ impl TherminalMcpServer {
             hotspot_count,
             agent_name,
             agent_status,
+            session_title,
             timestamp_secs: now_unix_secs(),
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
@@ -1375,6 +1416,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         Tool::new(
             "terminal.agents.get_status",
             "Get a dynamic mode + capacity snapshot for the agent in a pane: agent_type, status, current_tool (from AgentRegistry) plus context_percent and model (from PaneCapacityCache). Strict subset of terminal.agents.get_details intended for sibling-agent coordination. Returns an error if neither registry nor capacity data is known for the pane.",
+            schema_for_type::<PaneIdParam>(),
+        ),
+        Tool::new(
+            "terminal.agents.get_session_detail",
+            "Get the enriched Claude Code session detail for a pane (tn-ifee): session_title, current_tool, working_dir, context_percent, model. Sourced from the per-pane `PaneCapacityCache` populated by the Claude state poller from `/tmp/claude-code-state/`. Every field is nullable — absence is normal when hooks aren't installed or haven't ticked yet. Returns an error only if the pane does not exist.",
             schema_for_type::<PaneIdParam>(),
         ),
         Tool::new(

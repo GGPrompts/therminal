@@ -387,6 +387,10 @@ pub(super) struct PaneSummaryResult {
     /// "thinking", "tool_use"). Omitted when no agent is registered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) agent_status: Option<String>,
+    /// User-authored session title (`hookSpecificOutput.sessionTitle`).
+    /// Omitted when no hook has written it. See tn-ifee.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) session_title: Option<String>,
     /// Wall-clock seconds when the snapshot was taken.
     pub(super) timestamp_secs: u64,
 }
@@ -430,6 +434,13 @@ pub(super) struct PaneInfo {
     /// `terminal.panes.untag`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(super) tags: std::collections::HashMap<String, String>,
+    /// User-authored session title from the Claude Code
+    /// `UserPromptSubmit` hook (`hookSpecificOutput.sessionTitle`).
+    /// `None` when no hook has written it. Surfaced here so callers don't
+    /// need a separate `terminal.agents.get_session_detail` call just to
+    /// render a tab/header label. See tn-ifee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) session_title: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -743,6 +754,53 @@ pub(super) struct AgentStatusResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) current_tool: Option<String>,
     /// Context-window usage percentage (0.0 - 100.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) context_percent: Option<f32>,
+    /// Model string (e.g. "claude-opus-4-6").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) model: Option<String>,
+}
+
+/// Detailed agent session info returned by
+/// `terminal.agents.get_session_detail`. The five tn-ifee fields plus
+/// `pane_id` for caller convenience. Every field is `Option` because
+/// absence is normal — hooks may not be installed, may lag, or may not
+/// have observed a tool call yet.
+///
+/// ## Deferred fields (intentionally NOT included — keep this list current)
+///
+/// The following fields were deliberately scoped out of tn-ifee to keep
+/// the surface small. Add them only after a deliberate decision (file an
+/// issue, justify the cost):
+///
+/// - `total_input_tokens` / `total_output_tokens` — token-counter UI is a
+///   separate widget; expose via a dedicated tool when there's a consumer.
+/// - `input_tokens_cache_read` / `input_tokens_cache_creation` — cache
+///   health widget is a separate epic.
+/// - `tool_args` (parsed JSON) — chrome rendering belongs to a future
+///   header/status bar issue, not the wire format.
+/// - `subagent_count` — exposed indirectly via the `therminal://claude/events`
+///   stream's `EventSource::Subagent` lineage; a flat counter is redundant.
+/// - `last_prompt_summary` — privacy-sensitive; opt-in only.
+/// - Richer `status` enum — current `String` is `ClaudeStatus::as_str()`
+///   and is sufficient for v1; promote to a typed enum once a second
+///   consumer needs it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct AgentSessionDetail {
+    /// The pane the agent is running in (echoed for caller convenience).
+    pub(super) pane_id: u64,
+    /// User-authored title from the `UserPromptSubmit` hook
+    /// (`hookSpecificOutput.sessionTitle`). Inference-unrecoverable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) session_title: Option<String>,
+    /// Tool currently in flight (e.g. "Bash", "Read"). From PreToolUse hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) current_tool: Option<String>,
+    /// Claude's working directory (not the shell's). From hook `$PWD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) working_dir: Option<String>,
+    /// Context-window usage percent (0.0 - 100.0). Sourced from the
+    /// `PaneCapacityCache` populated by the Claude state poller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) context_percent: Option<f32>,
     /// Model string (e.g. "claude-opus-4-6").
@@ -1342,6 +1400,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_get_agent_status(params).await
             }
+            "terminal.agents.get_session_detail" => {
+                let params: PaneIdParam = parse_args(args)?;
+                self.handle_get_agent_session_detail(params).await
+            }
             "terminal.agents.get_cadence" => {
                 let params: PaneIdParam = parse_args(args)?;
                 self.handle_get_agent_cadence(params).await
@@ -1766,6 +1828,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.get_session_detail",
             "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
         ];
@@ -1885,6 +1948,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.get_session_detail",
             "terminal.agents.get_cadence",
             // Writer
             "terminal.sessions.create",
@@ -1894,7 +1958,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
             "terminal.panes.destroy",
         ];
-        assert_eq!(all_tools.len(), 23, "expected exactly 23 tools");
+        assert_eq!(all_tools.len(), 24, "expected exactly 24 tools");
         for tool in &all_tools {
             assert!(
                 server.enforce_trust(tool, &agent).is_ok(),
@@ -2066,12 +2130,12 @@ pub(crate) mod tests {
 
     // ── tool_definitions() surface lock ─────────────────────────────────
 
-    /// Lock in the count: exactly 27 tools must be returned. Bumped from
-    /// 26 to 27 in tn-yrjd with `terminal.patterns.stats`.
+    /// Lock in the count: exactly 28 tools must be returned. Bumped from
+    /// 27 to 28 in tn-ifee with `terminal.agents.get_session_detail`.
     #[test]
-    fn tool_definitions_returns_27_tools() {
+    fn tool_definitions_returns_28_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 27, "expected exactly 27 tool definitions");
+        assert_eq!(tools.len(), 28, "expected exactly 28 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -2105,6 +2169,7 @@ pub(crate) mod tests {
             "terminal.agents.list",
             "terminal.agents.get_details",
             "terminal.agents.get_status",
+            "terminal.agents.get_session_detail",
             "terminal.agents.get_cadence",
             "terminal.agents.find_with_capacity",
             "terminal.patterns.stats",
@@ -2355,6 +2420,7 @@ pub(crate) mod tests {
             last_exit_code: Some(0),
             agent_name: Some("claude-code".to_string()),
             tags: Default::default(),
+            session_title: None,
         };
         let v = serde_json::to_value(&info).expect("serialize");
         assert_eq!(v["pane_id"], 1);
@@ -2378,6 +2444,7 @@ pub(crate) mod tests {
             last_exit_code: None,
             agent_name: None,
             tags: Default::default(),
+            session_title: None,
         };
         let v = serde_json::to_value(&info).expect("serialize");
         // None fields are skipped entirely for backward compatibility.
@@ -2405,6 +2472,7 @@ pub(crate) mod tests {
             last_exit_code: Some(127),
             agent_name: None,
             tags: Default::default(),
+            session_title: None,
         };
         let v = serde_json::to_value(&info).expect("serialize");
         assert_eq!(v["last_exit_code"], 127);
@@ -2716,6 +2784,7 @@ pub(crate) mod tests {
                     status: None,
                     session_id: "s1".to_string(),
                     updated_at: 0,
+                    ..Default::default()
                 },
             );
             cache.upsert(
@@ -2726,6 +2795,7 @@ pub(crate) mod tests {
                     status: None,
                     session_id: "s2".to_string(),
                     updated_at: 0,
+                    ..Default::default()
                 },
             );
             // pane 3: no capacity entry on purpose.
@@ -2764,6 +2834,94 @@ pub(crate) mod tests {
         // Pane 3 has neither (skipped via skip_serializing_if).
         assert!(agents[1].get("remaining_percent").is_none());
         assert!(agents[1].get("context_percent").is_none());
+    }
+
+    // ── tn-ifee: terminal.agents.get_session_detail ─────────────────────
+
+    #[test]
+    fn get_agent_session_detail_tool_is_registered() {
+        let defs = super::tools::tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            names.contains(&"terminal.agents.get_session_detail"),
+            "tool_definitions missing terminal.agents.get_session_detail: {names:?}"
+        );
+    }
+
+    #[test]
+    fn get_agent_session_detail_is_observer_tier() {
+        use crate::trust::{ToolCategory, tool_category};
+        assert_eq!(
+            tool_category("terminal.agents.get_session_detail"),
+            Some(ToolCategory::Observer)
+        );
+    }
+
+    #[tokio::test]
+    async fn get_agent_session_detail_nonexistent_pane_returns_tool_error() {
+        let server = make_server(trusted_config());
+        let result = server
+            .handle_get_agent_session_detail(super::PaneIdParam { pane_id: 999_999 })
+            .await
+            .expect("handler should not error at transport level");
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    /// End-to-end: create a real pane, populate the capacity cache with all
+    /// five tn-ifee fields, call the handler, assert every field is present
+    /// in the response.
+    #[tokio::test]
+    async fn get_agent_session_detail_returns_all_five_fields() {
+        use crate::pane_capacity::PaneCapacityEntry;
+
+        let server = make_server(trusted_config());
+        let pane_id = {
+            let mut mgr = server.session_mgr.lock().await;
+            let session_id = mgr
+                .create_session(Some("session-detail-test".to_string()))
+                .expect("create session");
+            let pane_id = mgr
+                .iter_sessions()
+                .find(|(id, _)| **id == session_id)
+                .and_then(|(_, s)| s.windows.first())
+                .and_then(|w| w.panes.first())
+                .map(|p| p.id)
+                .expect("session has at least one pane");
+            mgr.pane_capacity_cache().upsert(
+                pane_id,
+                PaneCapacityEntry {
+                    context_percent: Some(9.0),
+                    model: Some("claude-opus-4-6".into()),
+                    status: Some("tool_use".into()),
+                    session_id: "73d64234-6693-4cff-ae42-e175a401cee8".into(),
+                    session_title: Some("therminal / tn-ifee".into()),
+                    current_tool: Some("Bash".into()),
+                    working_dir: Some("/home/marci/projects/therminal".into()),
+                    updated_at: 0,
+                },
+            );
+            pane_id
+        };
+
+        let result = server
+            .handle_get_agent_session_detail(super::PaneIdParam { pane_id })
+            .await
+            .expect("handler should not error at transport level");
+        assert_ne!(result.is_error, Some(true));
+
+        let payload = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("parse json");
+        assert_eq!(v["pane_id"].as_u64(), Some(pane_id));
+        assert_eq!(v["session_title"], "therminal / tn-ifee");
+        assert_eq!(v["current_tool"], "Bash");
+        assert_eq!(v["working_dir"], "/home/marci/projects/therminal");
+        assert_eq!(v["model"], "claude-opus-4-6");
+        assert!((v["context_percent"].as_f64().unwrap() - 9.0).abs() < 1e-6);
     }
 
     // ── terminal.semantic.query_commands ────────────────────────────────

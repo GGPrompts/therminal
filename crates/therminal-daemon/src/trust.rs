@@ -57,6 +57,7 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.agents.list"
         | "terminal.agents.get_details"
         | "terminal.agents.get_status"
+        | "terminal.agents.get_session_detail"
         | "terminal.agents.get_cadence"
         | "terminal.agents.find_with_capacity"
         | "terminal.patterns.stats" => Some(ToolCategory::Observer),

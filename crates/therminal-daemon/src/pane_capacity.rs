@@ -22,12 +22,23 @@ use therminal_terminal::state_inference::AgentType;
 use therminal_harness_claude::state::ClaudeSessionState;
 
 /// One pane's most recently observed agent capacity snapshot.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Carries the five tn-ifee fields (`session_title`, `current_tool`,
+/// `working_dir`, `context_percent`, `model`) so MCP handlers can resolve
+/// `pane_id -> AgentSessionDetail` from a single cache lookup. All fields
+/// are `Option` because absence is normal until a hook tick fills them.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PaneCapacityEntry {
     pub context_percent: Option<f32>,
     pub model: Option<String>,
     pub status: Option<String>,
     pub session_id: String,
+    /// User-authored session title (`hookSpecificOutput.sessionTitle`).
+    pub session_title: Option<String>,
+    /// Tool currently in flight (e.g. "Bash", "Read"). From PreToolUse hook.
+    pub current_tool: Option<String>,
+    /// Claude's working directory (not the shell's). From hook `$PWD`.
+    pub working_dir: Option<String>,
     pub updated_at: u64,
 }
 
@@ -120,6 +131,9 @@ pub fn entry_from_state(state: &ClaudeSessionState) -> PaneCapacityEntry {
         model: state.model.clone(),
         status: Some(format!("{:?}", state.status).to_lowercase()),
         session_id: state.session_id.clone(),
+        session_title: state.session_title.clone(),
+        current_tool: state.current_tool.clone(),
+        working_dir: state.working_dir.clone(),
         updated_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -140,6 +154,7 @@ mod tests {
             status: Some("processing".into()),
             session_id: "sess-abc".into(),
             updated_at: 1_700_000_000,
+            ..Default::default()
         };
         cache.upsert(42, entry.clone());
 
@@ -163,6 +178,7 @@ mod tests {
                 status: None,
                 session_id: "keep".into(),
                 updated_at: 0,
+                ..Default::default()
             },
         );
         cache.upsert(
@@ -173,6 +189,7 @@ mod tests {
                 status: None,
                 session_id: "drop".into(),
                 updated_at: 0,
+                ..Default::default()
             },
         );
         cache.remove_by_session_id("drop");
