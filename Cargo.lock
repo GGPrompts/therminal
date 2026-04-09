@@ -3411,6 +3411,7 @@ dependencies = [
  "base64",
  "bytemuck",
  "clap",
+ "dirs",
  "glyphon",
  "libc",
  "notify-rust",

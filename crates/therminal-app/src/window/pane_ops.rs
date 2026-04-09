@@ -68,12 +68,6 @@ impl App {
     /// (with a warn!-level log). Callers should NOT mutate the layout
     /// themselves — this helper owns both the RPC and the tree insert.
     ///
-    /// F13 (tn-97j6): the remote split path intentionally bypasses
-    /// `validate_inherited_cwd` because remote split does not currently
-    /// forward cwd to the daemon at all. Any future change that wires cwd
-    /// inheritance through `IpcRequest::SplitPane` MUST reintroduce the
-    /// `validate_inherited_cwd` check here so a stale/missing dir falls
-    /// back to the spawn defaults instead of failing the daemon spawn.
     pub(crate) fn split_pane_remote(
         &mut self,
         source_local: PaneId,
@@ -90,10 +84,14 @@ impl App {
             }
         };
         let horizontal = matches!(direction, SplitDirection::Horizontal);
+        let inherited_cwd = self
+            .get_layout()
+            .and_then(|layout| cwd_from_source_pane(layout, source_local));
 
         let resp = match self.daemon_rpc_blocking(IpcRequest::SplitPane {
             pane_id: daemon_source,
             horizontal,
+            cwd: inherited_cwd,
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -256,7 +254,7 @@ impl App {
     /// / send_to_workspace replacement / restore_layout rebuild).
     ///
     /// Flow:
-    /// 1. Issue `IpcRequest::SplitPane { pane_id: anchor_daemon_id, horizontal: true }`
+    /// 1. Issue `IpcRequest::SplitPane { pane_id: anchor_daemon_id, horizontal: true, cwd: None }`
     /// 2. Allocate a fresh local id via `next_pane_id()`
     /// 3. Build the local `PaneState` via `remote_spawn::build_remote_pane_state`
     /// 4. Insert the (local, daemon) pair into `pane_id_map`
@@ -278,6 +276,7 @@ impl App {
         let resp = match self.daemon_rpc_blocking(IpcRequest::SplitPane {
             pane_id: anchor_daemon_id,
             horizontal: true,
+            cwd: None,
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -488,10 +487,18 @@ fn validate_inherited_cwd(cwd: Option<String>) -> Option<String> {
         return None;
     }
     if std::path::Path::new(&cwd).is_dir() {
-        Some(cwd)
-    } else {
-        None
+        return Some(cwd);
     }
+
+    #[cfg(windows)]
+    {
+        let translated = crate::window::wsl_paths::translate_if_wsl_windows(&cwd);
+        if translated.as_ref() != cwd && std::path::Path::new(translated.as_ref()).is_dir() {
+            return Some(translated.into_owned());
+        }
+    }
+
+    None
 }
 
 /// Normalize clipboard text for paste-into-PTY.
@@ -700,14 +707,7 @@ impl App {
         // id in this single-process app. The daemon uses the same naming
         // scheme, so this matches if/when the daemon is also writing logs.
         let session_id = format!("pane-{focused}");
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-            let user = std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "unknown".to_string());
-            format!("/tmp/therminal-{user}")
-        });
-        let log_path = std::path::PathBuf::from(runtime_dir)
-            .join("therminal")
+        let log_path = therminal_runtime::paths::runtime_dir()
             .join("sessions")
             .join(format!("{session_id}.events.jsonl"));
         let log_path_str = log_path.to_string_lossy().into_owned();

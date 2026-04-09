@@ -140,14 +140,7 @@ impl EventLog {
     /// Falls back to `/tmp/therminal-<user>/sessions/` when `XDG_RUNTIME_DIR`
     /// is not set, using `$USER` for a per-user namespace (cross-platform).
     pub fn for_session(session_id: &str, max_entries: usize) -> std::io::Result<Self> {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-            let user = std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "unknown".to_string());
-            format!("/tmp/therminal-{user}")
-        });
-        let path = PathBuf::from(runtime_dir)
-            .join("therminal")
+        let path = therminal_runtime::paths::runtime_dir()
             .join("sessions")
             .join(format!("{session_id}.events.jsonl"));
         Self::new(path, max_entries)

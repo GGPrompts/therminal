@@ -165,6 +165,7 @@ fn create(
     let resp = ctx.send(IpcRequest::SplitPane {
         pane_id: source_pane,
         horizontal,
+        cwd: None,
     })?;
     let new_pane = match resp {
         IpcResponse::PaneSplit { new_pane_id } => new_pane_id,

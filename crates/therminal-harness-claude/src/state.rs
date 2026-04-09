@@ -1,5 +1,5 @@
-//! ClaudeStatePoller — monitors `/tmp/claude-code-state/`, `/tmp/codex-state/`,
-//! and `/tmp/copilot-state/` for agent session state files using the `notify`
+//! ClaudeStatePoller — monitors the platform Claude/Codex/Copilot state
+//! directories for agent session state files using the `notify`
 //! crate.
 //!
 //! Ported from thermal-desktop (`thermal-core::claude_state`). Claude Code and
@@ -27,14 +27,32 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::{debug, trace, warn};
 
+fn default_state_dir(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join(name)
+    }
+
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp").join(name)
+    }
+}
+
 /// The directory where Claude Code state JSON files are written.
-const CLAUDE_STATE_DIR: &str = "/tmp/claude-code-state";
+fn claude_state_dir() -> PathBuf {
+    default_state_dir("claude-code-state")
+}
 
 /// The directory where Codex state JSON files are written (via adapter script).
-const CODEX_STATE_DIR: &str = "/tmp/codex-state";
+fn codex_state_dir() -> PathBuf {
+    default_state_dir("codex-state")
+}
 
 /// The directory where Copilot state JSON files are written (via hook script).
-const COPILOT_STATE_DIR: &str = "/tmp/copilot-state";
+fn copilot_state_dir() -> PathBuf {
+    default_state_dir("copilot-state")
+}
 
 /// Sessions older than this without a live PID are considered dead.
 const SESSION_MAX_AGE: time::Duration = time::Duration::hours(2);
@@ -500,11 +518,7 @@ impl ClaudeStatePoller {
     /// Create a new poller watching Claude, Codex, and Copilot state
     /// directories. Creates the directories if they do not exist.
     pub fn new() -> NotifyResult<Self> {
-        let dirs = vec![
-            PathBuf::from(CLAUDE_STATE_DIR),
-            PathBuf::from(CODEX_STATE_DIR),
-            PathBuf::from(COPILOT_STATE_DIR),
-        ];
+        let dirs = vec![claude_state_dir(), codex_state_dir(), copilot_state_dir()];
         Self::with_dirs(dirs)
     }
 
@@ -1067,6 +1081,22 @@ mod tests {
     fn agent_type_copilot_dir() {
         let path = Path::new("/tmp/copilot-state/session-abc.json");
         assert_eq!(agent_type_for_path(path), Some("copilot".to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_windows_state_dirs_use_temp_dir() {
+        assert_eq!(claude_state_dir(), std::env::temp_dir().join("claude-code-state"));
+        assert_eq!(codex_state_dir(), std::env::temp_dir().join("codex-state"));
+        assert_eq!(copilot_state_dir(), std::env::temp_dir().join("copilot-state"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn default_unix_state_dirs_use_tmp() {
+        assert_eq!(claude_state_dir(), PathBuf::from("/tmp/claude-code-state"));
+        assert_eq!(codex_state_dir(), PathBuf::from("/tmp/codex-state"));
+        assert_eq!(copilot_state_dir(), PathBuf::from("/tmp/copilot-state"));
     }
 
     #[test]

@@ -111,7 +111,12 @@ pub enum IpcRequest {
     /// Capture pane content (terminal grid snapshot).
     CapturePane { pane_id: PaneId },
     /// Split a pane (creates a new pane in the same session).
-    SplitPane { pane_id: PaneId, horizontal: bool },
+    SplitPane {
+        pane_id: PaneId,
+        horizontal: bool,
+        /// Working directory for the new pane. Empty/None means use spawn defaults.
+        cwd: Option<String>,
+    },
     /// Kill (destroy) a specific pane.
     KillPane { pane_id: PaneId },
     /// Select (focus) a specific pane.

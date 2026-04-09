@@ -82,16 +82,30 @@ struct Tracked {
     reclaimed: bool,
 }
 
+fn default_state_dir(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join(name)
+    }
+
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp").join(name)
+    }
+}
+
 /// Resolve the Claude projects directory.
 fn claude_projects_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".claude").join("projects")
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".claude")
+        .join("projects")
 }
 
 /// Resolve the Claude state directory (host-wide; pid-keyed JSON files live
 /// here, written by Claude Code's hooks).
 fn claude_state_dir() -> PathBuf {
-    PathBuf::from("/tmp/claude-code-state")
+    default_state_dir("claude-code-state")
 }
 
 /// Extract the parent session id from a subagent JSONL path.
@@ -487,6 +501,18 @@ mod tests {
         let owned: HashSet<String> = HashSet::new();
         let p = PathBuf::from("/foo.jsonl");
         assert!(!subagent_in_scope(SwarmWatchScope::Current, &owned, &p));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_claude_state_dir_uses_temp_dir() {
+        assert_eq!(claude_state_dir(), std::env::temp_dir().join("claude-code-state"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_claude_state_dir_uses_tmp() {
+        assert_eq!(claude_state_dir(), PathBuf::from("/tmp/claude-code-state"));
     }
 
     #[test]
