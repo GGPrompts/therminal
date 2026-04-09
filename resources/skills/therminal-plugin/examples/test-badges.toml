@@ -1,0 +1,75 @@
+pack_name = "test-badges"
+pack_description = "Pass/fail badges and result events for cargo test, pytest, and jest"
+
+# cargo test summary: "test result: ok. 5 passed; 0 failed; 0 ignored"
+# prompt_boundary fires once after the command exits, not on every line.
+[[pattern]]
+name = "cargo-badge"
+description = "Pass/fail badge for cargo test summary"
+match = 'test result: (?P<status>FAILED|ok)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed'
+scope = "prompt_boundary"
+action = "widget"
+
+[pattern.applies_to]
+command = "cargo"
+
+[pattern.widget]
+kind = "badge"
+anchor = "line_right"
+label = "{passed} passed / {failed} failed"
+color.ok = "green"
+color.FAILED = "red"
+
+[[pattern]]
+name = "cargo-event"
+description = "Emit event with cargo test result counts"
+match = 'test result: (?P<status>FAILED|ok)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed'
+scope = "prompt_boundary"
+action = "emit_event"
+
+[pattern.applies_to]
+command = "cargo"
+
+[pattern.emit_event]
+extra.runner = "cargo"
+extra.status = "{status}"
+
+# pytest: "5 passed, 2 failed in 1.23s"
+[[pattern]]
+name = "pytest-badge"
+description = "Pass/fail badge for pytest summary line"
+match = '(?P<passed>\d+) passed(?:, (?P<failed>\d+) failed)?'
+scope = "finalized_line"
+action = "widget"
+
+[pattern.widget]
+kind = "badge"
+anchor = "line_right"
+label = "{passed} passed"
+color.default = "green"
+
+[[pattern]]
+name = "pytest-event"
+description = "Emit event with pytest result counts"
+match = '(?P<passed>\d+) passed(?:, (?P<failed>\d+) failed)?'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.runner = "pytest"
+extra.passed = "{passed}"
+extra.failed = "{failed}"
+
+# jest: "Tests: 2 failed, 5 passed, 7 total"
+[[pattern]]
+name = "jest-badge"
+description = "Pass/fail badge for jest summary line"
+match = 'Tests:\s+(?:(?P<failed>\d+) failed, )?(?P<passed>\d+) passed, (?P<total>\d+) total'
+scope = "finalized_line"
+action = "widget"
+
+[pattern.widget]
+kind = "badge"
+anchor = "line_right"
+label = "{passed}/{total} passed"
+color.default = "green"

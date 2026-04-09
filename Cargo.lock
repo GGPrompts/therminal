@@ -3504,6 +3504,7 @@ dependencies = [
  "dirs",
  "libc",
  "notify",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

@@ -527,6 +527,67 @@ fn glossary_pack_emits_event_for_acronym() {
     }
 }
 
+// ── Skill example packs smoke test ──────────────────────────────────────
+
+/// Resolve the in-repo `resources/skills/therminal-plugin/examples/` directory.
+fn skill_plugin_examples_dir() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .join("resources")
+        .join("skills")
+        .join("therminal-plugin")
+        .join("examples")
+}
+
+#[test]
+fn skill_example_packs_load_cleanly() {
+    let dir = skill_plugin_examples_dir();
+    assert!(
+        dir.exists(),
+        "resources/skills/therminal-plugin/examples/ must exist at {}",
+        dir.display()
+    );
+
+    let (packs, errors) = loader::load_packs_from_dir(&dir);
+    assert!(
+        errors.is_empty(),
+        "pack load errors in skill examples: {errors:?}"
+    );
+    assert!(
+        packs.len() >= 3,
+        "expected ≥3 skill example packs, got {} ({:?})",
+        packs.len(),
+        packs.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+
+    // Every pattern in every pack must have compiled without error.
+    for pack in &packs {
+        assert!(
+            pack.load_errors.is_empty(),
+            "skill example pack {} has per-pattern errors: {:?}",
+            pack.name,
+            pack.load_errors
+        );
+        assert!(
+            !pack.patterns.is_empty(),
+            "skill example pack {} has zero patterns",
+            pack.name
+        );
+    }
+
+    // Required example packs must be present.
+    let names: Vec<&str> = packs.iter().map(|p| p.name.as_str()).collect();
+    for expected in ["cargo-errors", "test-badges", "glossary"] {
+        assert!(
+            names.contains(&expected),
+            "missing skill example pack {expected}: have {names:?}"
+        );
+    }
+}
+
 // ── Perf test ────────────────────────────────────────────────────────────
 
 /// SPEC perf target: 100 patterns × 1000 lines, bounded total time.

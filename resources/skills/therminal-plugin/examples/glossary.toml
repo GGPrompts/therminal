@@ -1,0 +1,40 @@
+pack_name = "glossary"
+pack_description = "Emit lookup events for common technical acronyms"
+
+# When these tokens appear in any terminal line, emit an event carrying the
+# matched term plus a short definition. External consumers subscribe to
+# therminal://events?source_class=pattern and render the definition as a
+# tooltip or notification. This demonstrates the simplest emit_event pattern.
+
+[[pattern]]
+name = "osc"
+description = "Operating System Command (ANSI escape family)"
+match = '\b(?P<term>OSC)\b'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.definition = "Operating System Command — ANSI escape sequence family (ESC ] code;data BEL)"
+
+[[pattern]]
+name = "pty"
+description = "Pseudo-Terminal — kernel device backing a shell session"
+match = '\b(?P<term>PTY)\b'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.definition = "Pseudo-Terminal — kernel device pair (master/slave) that backs a shell session"
+
+[[pattern]]
+name = "mcp"
+description = "Model Context Protocol"
+match = '\b(?P<term>MCP)\b'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.definition = "Model Context Protocol — the standard agents use to discover and call tool servers"

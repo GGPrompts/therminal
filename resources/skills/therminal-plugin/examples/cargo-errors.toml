@@ -1,0 +1,47 @@
+pack_name = "cargo-errors"
+pack_description = "Clickable hotspots and build-event emission for cargo build output"
+
+# Click to jump to compiler error location. Matches the canonical
+# `error[E0123]: message --> src/file.rs:42:5` line that rustc emits.
+[[pattern]]
+name = "compile-error"
+description = "Jump to Rust compiler error location"
+match = 'error\[(?P<code>E\d+)\]: (?P<msg>[^\n]+?) --> (?P<file>[^:\s]+):(?P<line>\d+):(?P<col>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_editor"
+target = "{file}"
+label = "{code}: {msg} ({file}:{line}:{col})"
+kind = "error"
+
+# Same for warnings — no [code] attribute in the warning shape.
+[[pattern]]
+name = "compile-warning"
+description = "Jump to Rust compiler warning location"
+match = 'warning: (?P<msg>[^\n]+?) --> (?P<file>[^:\s]+):(?P<line>\d+):(?P<col>\d+)'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "open_editor"
+target = "{file}"
+label = "warning: {msg} ({file}:{line}:{col})"
+kind = "warning"
+
+# Emit an event when a cargo build finishes so orchestrators know the
+# outcome without polling. prompt_boundary fires after the command exits.
+[[pattern]]
+name = "build-finished"
+description = "Emit event when cargo build completes"
+match = '(?P<outcome>error|warning)\[?'
+scope = "prompt_boundary"
+action = "emit_event"
+
+[pattern.applies_to]
+command = "cargo"
+
+[pattern.emit_event]
+extra.tool = "cargo"
+extra.outcome = "{outcome}"
