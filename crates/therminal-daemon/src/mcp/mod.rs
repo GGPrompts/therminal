@@ -2995,6 +2995,7 @@ pub(crate) mod tests {
                     current_tool: Some("Bash".into()),
                     working_dir: Some("/home/marci/projects/therminal".into()),
                     updated_at: 0,
+                    last_seen_at: 0,
                 },
             );
             pane_id

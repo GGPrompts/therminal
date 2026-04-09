@@ -343,8 +343,15 @@ async fn start_daemon(
                         // the path. Best-effort: derive session_id from the file
                         // stem and let the cache drop any matching entry.
                         // (Path-stem vs session_id is not always 1:1, so this is
-                        // a no-op when they differ — entries age out via upserts.)
+                        // a no-op when they differ — entries also age out via the
+                        // TTL sweep below.)
                     }
+                }
+
+                // tn-hxso: sweep stale entries on every update tick.
+                let evicted = cache.evict_stale(crate::pane_capacity::DEFAULT_STALE_TTL_SECS);
+                if evicted > 0 {
+                    tracing::debug!(evicted, "pane_capacity: evicted stale entries");
                 }
             }
         });

@@ -411,11 +411,9 @@ impl TherminalMcpServer {
 
     /// Return detailed inference data for the agent running in a pane.
     ///
-    /// The pane must exist. `agent_type` is taken from the `AgentRegistry`
-    /// when an agent is currently registered on the pane; if no registry
-    /// entry exists, the inference engine's own detected type is used as a
-    /// fallback. All other fields (model, context_percent, last_command,
-    /// etc.) are taken from the per-pane `AgentStateInference` snapshot.
+    /// The pane must exist. `agent_type` is sourced exclusively from
+    /// `AgentRegistry` (process-tree detection, tn-hxso). No fallback to
+    /// the inference engine's own type detection.
     pub(super) async fn handle_get_agent_details(
         &self,
         params: PaneIdParam,
@@ -437,7 +435,7 @@ impl TherminalMcpServer {
             .map(|e| e.agent_type.as_str().to_string());
 
         let result = AgentDetailsResult {
-            agent_type: registry_agent_type.or(snapshot.agent_type),
+            agent_type: registry_agent_type,
             model: snapshot.model,
             context_percent: snapshot.context_percent,
             consecutive_failures: snapshot.consecutive_failures.max(0) as u32,
@@ -1429,7 +1427,7 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "terminal.agents.get_details",
-            "Get detailed inference data for the agent running in a pane: agent_type, model, context_percent, consecutive_failures, last_command, last_exit_code, last_command_duration_ms. All inference fields except consecutive_failures are currently None — the underlying state inference engine is not yet plumbed into the daemon (stub returning agent_type from AgentRegistry).",
+            "Get process-tree inference data for the agent running in a pane: agent_type (from AgentRegistry, consistent with agents.list), model, context_percent, consecutive_failures, last_command, last_exit_code, last_command_duration_ms. For state-file-driven fields, use terminal.agents.get_session_detail instead.",
             schema_for_type::<PaneIdParam>(),
         ),
         Tool::new(
