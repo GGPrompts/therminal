@@ -249,7 +249,14 @@ impl App {
         // never what the user meant).
         let cwd = self.focused_pane_cwd();
         let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
-        let path = resolved.as_ref();
+        // tn-q8ce: on native Windows with a WSL pane, translate the
+        // Linux path into the `\\wsl.localhost\…` UNC form so that
+        // Explorer / xdg-open-on-WSL / etc. can actually reveal the
+        // folder. File managers stat the path as a Windows path and
+        // need to reach the Linux filesystem through the UNC provider.
+        // No-op on Linux/macOS and on Windows with Windows-shaped paths.
+        let translated = crate::window::wsl_paths::translate_if_wsl_windows(resolved.as_ref());
+        let path = translated.as_ref();
         let chain = self.config.hotspots.folder_opener.clone();
         let plan = plan_folder_opener(&chain, which_on_path, |var| {
             std::env::var(var).ok().filter(|s| !s.is_empty())

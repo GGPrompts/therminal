@@ -608,6 +608,21 @@ impl App {
                             }
                             chrome::CsdAction::Settings => {
                                 let config_file = therminal_core::config::config_path();
+                                if !config_file.exists()
+                                    && let Err(e) =
+                                        therminal_core::config::TherminalConfig::default()
+                                            .save_default_to(&config_file)
+                                {
+                                    tracing::warn!(
+                                        "settings: failed to create default config at {}: {e}",
+                                        config_file.display()
+                                    );
+                                    self.show_toast(format!(
+                                        "failed to create {}",
+                                        config_file.display()
+                                    ));
+                                    return;
+                                }
                                 self.open_in_editor(&config_file.to_string_lossy());
                             }
                         }

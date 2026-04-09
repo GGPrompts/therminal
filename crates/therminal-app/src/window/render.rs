@@ -52,8 +52,19 @@ fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
 /// the real filesystem (tn-zqwg). Wraps `std::fs::metadata` so the click
 /// handler can route directory hotspots through `folder_pane_command`
 /// instead of the editor fallback chain.
+///
+/// tn-q8ce: on native Windows with a WSL pane, the hotspot path is a
+/// Linux path (e.g. `/home/marci/projects`) which `std::fs::metadata`
+/// cannot stat directly — it resolves to `C:\home\marci\…` and returns
+/// NotFound, so `is_dir` stays `false` and the click incorrectly lands
+/// in the editor path. We transparently stat via the `\\wsl.localhost\…`
+/// UNC form instead, which Windows can resolve through the WSL virtual
+/// filesystem provider. On Linux/macOS the translator is a no-op.
 fn promote_directory_hotspots_from_fs(hotspots: &mut [TextHotspot]) {
-    promote_directory_hotspots(hotspots, |p| std::fs::metadata(p).map(|m| m.is_dir()));
+    promote_directory_hotspots(hotspots, |p| {
+        let translated = crate::window::wsl_paths::translate_if_wsl_windows(p);
+        std::fs::metadata(translated.as_ref()).map(|m| m.is_dir())
+    });
 }
 
 /// Compute per-row "is continuation" flags from cell wrap state.

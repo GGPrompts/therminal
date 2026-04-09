@@ -457,3 +457,94 @@ fn multiple_sessions_independent() {
 
     mgr.shutdown();
 }
+
+// ── tn-gln6 #1: harness OSC events reach the daemon-side sink ──────────
+//
+// Regression test for the "dropped in production" bug: the OSC handler
+// registry was shared into pane interceptors, but the harness-event sink
+// was not. Handlers parsed sequences and threw the events away. This
+// test proves a full production path: real PTY → shell echoes OSC 1341
+// → reader thread → TherminalInterceptor → OscHandlerRegistry::dispatch
+// → SessionManager-installed harness_event_tx → test receiver.
+
+#[test]
+#[ignore] // Requires a real PTY
+fn harness_osc_event_reaches_session_manager_sink() {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::Instant;
+    use therminal_terminal::{HarnessEvent, OscHandlerRegistry};
+
+    let (mut mgr, _rx) = make_manager();
+
+    // 1. Build a fresh registry, register a handler for OSC 1341 that
+    //    emits a HarnessEvent carrying the payload chunk, and install
+    //    the registry on the session manager.
+    let registry = Arc::new(OscHandlerRegistry::new());
+    registry
+        .register(
+            1341,
+            "claude",
+            Box::new(|params: &[&[u8]]| {
+                let payload = params
+                    .get(1)
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .unwrap_or("")
+                    .to_string();
+                Some(HarnessEvent {
+                    kind: "claude.state".to_string(),
+                    body: serde_json::json!({ "payload": payload }),
+                })
+            }),
+        )
+        .expect("register OSC 1341");
+    mgr.set_osc_registry(Arc::clone(&registry));
+
+    // 2. Install the harness-event sink BEFORE the first session spawns
+    //    so the pane's interceptor picks it up at construction time.
+    let (harness_tx, harness_rx) = mpsc::channel();
+    mgr.set_harness_event_sink(harness_tx);
+
+    // 3. Spawn a real PTY session and wait for the shell prompt.
+    let session_id = mgr
+        .create_session(Some("harness-osc-test".into()))
+        .expect("create_session");
+    thread::sleep(Duration::from_millis(800));
+    let pane_id = mgr.attach(session_id).unwrap().panes[0].pane_id;
+
+    // 4. Drive a synthetic OSC 1341 sequence through the shell. `printf`
+    //    is universal across bash/zsh/sh. The sequence is:
+    //      ESC ] 1341 ; state=tool_use BEL
+    //    \033 = ESC, \007 = BEL.
+    let cmd = "printf '\\033]1341;state=tool_use\\007'\n";
+    mgr.write_to_pane(session_id, pane_id, cmd.as_bytes())
+        .expect("write_to_pane");
+
+    // 5. Poll the harness receiver for up to ~3 seconds. The reader
+    //    thread needs a moment to drain the PTY output and dispatch.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut received: Option<therminal_terminal::TaggedHarnessEvent> = None;
+    while Instant::now() < deadline {
+        match harness_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(tagged) => {
+                received = Some(tagged);
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let tagged = received.expect(
+        "expected TaggedHarnessEvent from OSC 1341 dispatch — \
+         the production-path sink is dropping events (tn-gln6 #1)",
+    );
+    assert_eq!(tagged.source_id, "claude");
+    assert_eq!(tagged.event.kind, "claude.state");
+    assert_eq!(
+        tagged.event.body,
+        serde_json::json!({ "payload": "state=tool_use" })
+    );
+
+    mgr.shutdown();
+}

@@ -24,6 +24,7 @@ mod pane_ops;
 mod render;
 mod render_driver;
 pub(crate) mod toast;
+pub(crate) mod wsl_paths;
 
 use std::collections::HashMap;
 use std::sync::Arc;

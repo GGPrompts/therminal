@@ -1363,6 +1363,27 @@ impl App {
         );
         let path_with_loc = resolved.as_ref();
 
+        // tn-q8ce: on native Windows with a WSL pane, the path is a
+        // Linux path (e.g. `/home/marci/foo.rs`). Handing it to a
+        // Windows editor via `Command::new(editor).spawn()` fails —
+        // Windows stats `C:\home\marci\foo.rs` and gets NotFound.
+        //
+        // The correct UX is to spawn the user's Linux `$EDITOR`
+        // **inside the WSL pane**: split a new pane, `cd` into the
+        // containing directory, and exec `$EDITOR '<path>' +<line>`.
+        // That uses nvim/helix/whatever the user has configured in
+        // their Linux shell, not notepad.exe on the Windows side.
+        //
+        // This branch is only taken on `cfg!(windows)` when the path
+        // is Linux-shaped. On Linux/macOS builds, and for Windows-
+        // native paths, we fall through to the existing
+        // `plan_open_in_editor` chain below.
+        #[cfg(windows)]
+        if crate::window::wsl_paths::is_translatable_linux_path(path_with_loc) {
+            self.open_in_wsl_pane_editor(path_with_loc);
+            return;
+        }
+
         let chain = self.config.hotspots.editor_chain.clone();
         let outcome = plan_open_in_editor(
             path_with_loc,
@@ -1396,6 +1417,70 @@ impl App {
                 self.show_toast(msg);
             }
         }
+    }
+
+    /// tn-q8ce: open a Linux-style hotspot path inside a WSL pane on
+    /// native Windows.
+    ///
+    /// Splits the focused pane and writes a shell command into the new
+    /// PTY that `cd`'s to the containing directory and `exec`'s the
+    /// user's Linux `$EDITOR` (with `$VISUAL` and `nvim` fallbacks) on
+    /// the file. Line / column suffixes in the hotspot string are
+    /// translated to `+<line>` so vim-family editors jump to the right
+    /// location.
+    ///
+    /// This intentionally bypasses the `editor_chain` + `plan_open_in_editor`
+    /// path because that path tries to launch a **Windows** process with
+    /// `Command::new(editor).spawn()`, which can't see the Linux
+    /// filesystem and can't run nvim/helix/etc. from inside WSL.
+    /// Running the editor inside the pane is the right UX — the user
+    /// gets their actual Linux editor on the actual Linux path.
+    #[cfg(windows)]
+    fn open_in_wsl_pane_editor(&mut self, path_with_loc: &str) {
+        // Split off `:line[:col]` so we can render it as `+<line>`.
+        let (path, line) = match path_with_loc.find(':') {
+            Some(idx) if path_with_loc[idx + 1..].starts_with(|c: char| c.is_ascii_digit()) => {
+                let rest = &path_with_loc[idx + 1..];
+                let line_str = rest.split(':').next().unwrap_or("1");
+                (&path_with_loc[..idx], line_str)
+            }
+            _ => (path_with_loc, "1"),
+        };
+
+        // Derive the parent dir for `cd`. If the path has no parent
+        // (e.g. "/foo.rs"), fall back to "/".
+        let parent = std::path::Path::new(path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/");
+
+        // Build the one-liner. `${EDITOR:-${VISUAL:-nvim}}` lets the
+        // WSL shell pick the user's configured editor with a sensible
+        // default. `+<line>` is the universal vi/vim/nvim jump syntax
+        // (helix uses `:<line>` but we prefer vim compatibility; users
+        // with helix can set `$EDITOR=helix` and live without jump).
+        let cmd = format!(
+            "cd {parent_q} && clear && exec ${{EDITOR:-${{VISUAL:-nvim}}}} {path_q} +{line}\n",
+            parent_q = shell_quote(parent),
+            path_q = shell_quote(path),
+            line = line,
+        );
+
+        // Capture original focus so we can detect split failure.
+        let original_focus = self.focused_pane();
+        self.split_focused_pane(crate::pane::SplitDirection::Vertical);
+        let new_pane = match self.focused_pane() {
+            Some(id) if Some(id) != original_focus => id,
+            _ => {
+                tracing::warn!("open_in_wsl_pane_editor: split did not produce a new pane");
+                self.show_toast("failed to split pane for editor");
+                return;
+            }
+        };
+
+        tracing::info!(path = %path, line = %line, "open_in_wsl_pane_editor: spawning editor in new WSL pane");
+        self.pty_write_to_pane(cmd.as_bytes(), new_pane);
     }
 
     /// Clear the active selection on all panes.

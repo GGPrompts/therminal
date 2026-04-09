@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use therminal_protocol::DaemonState;
 
@@ -239,11 +239,42 @@ async fn start_daemon(
     let osc_registry = Arc::new(therminal_terminal::OscHandlerRegistry::new());
     therminal_harness_claude::activate_markers(&osc_registry)
         .expect("claude OSC marker handler failed to register — check docs/osc-code-registry.md");
+    // tn-gln6 #1: wire the harness-event sink BEFORE any session is
+    // created. Panes constructed after this call will clone the sender
+    // into their `TherminalInterceptor` so OSC 1341 marker events
+    // (and any future harness OSC events) reach a daemon-side consumer
+    // instead of being silently dropped by the registry dispatch.
+    //
+    // The channel is a `std::sync::mpsc` because the producer runs on the
+    // PTY reader thread (not a tokio task). A dedicated OS thread drains
+    // it; today we log at `debug` and broadcast nothing further, but this
+    // is the hook point where a future `terminal://events` bus (tn-xula)
+    // will consume harness events without re-touching the pane plumbing.
+    let (harness_event_tx, harness_event_rx) =
+        std::sync::mpsc::channel::<therminal_terminal::TaggedHarnessEvent>();
     {
         let session_mgr = server.session_manager();
         let mut mgr = session_mgr.lock().await;
         mgr.set_osc_registry(Arc::clone(&osc_registry));
+        mgr.set_harness_event_sink(harness_event_tx);
     }
+    // Drain the harness-event channel on a dedicated OS thread. Using a
+    // plain thread (not tokio::spawn_blocking) keeps the daemon working
+    // when the tokio runtime is paused, and avoids warning-storms from
+    // blocking recv on a runtime worker.
+    std::thread::Builder::new()
+        .name("harness-event-drain".into())
+        .spawn(move || {
+            while let Ok(tagged) = harness_event_rx.recv() {
+                debug!(
+                    source_id = tagged.source_id,
+                    kind = %tagged.event.kind,
+                    "harness OSC event received"
+                );
+            }
+            debug!("harness-event-drain: channel closed, exiting");
+        })
+        .expect("failed to spawn harness-event drain thread");
     info!(
         code = therminal_harness_claude::CLAUDE_OSC_CODE,
         owner = therminal_harness_claude::CLAUDE_OWNER,
@@ -367,6 +398,19 @@ async fn start_daemon(
         .directory
         .clone()
         .unwrap_or_else(|| therminal_runtime::paths::config_dir().join("patterns"));
+    // tn-gln6 #2: create the pattern directory eagerly so the notify watcher
+    // can be installed even on first-time installs. Previously the watcher
+    // was only started if the directory already existed — a user who
+    // created the dir and dropped in their first pack after the daemon was
+    // already running got no hot-reload, ever. Creating up front also
+    // documents the expected location for users browsing their config dir.
+    if let Err(e) = std::fs::create_dir_all(&pattern_watch_dir) {
+        warn!(
+            path = %pattern_watch_dir.display(),
+            error = %e,
+            "failed to create pattern pack directory — hot-reload disabled"
+        );
+    }
     if pattern_watch_dir.exists() {
         let engine_for_watch = Arc::clone(&pattern_engine);
         let (notify_tx, mut notify_rx) = tokio::sync::mpsc::unbounded_channel::<()>();

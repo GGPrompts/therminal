@@ -20,6 +20,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi;
 use portable_pty::MasterPty;
+use therminal_terminal::TaggedHarnessEvent;
 use therminal_terminal::agent_registry::{AgentEntry, AgentRegistry, AgentStatus};
 use therminal_terminal::event_log::{DEFAULT_MAX_ENTRIES, EventLog, StoredEvent};
 use therminal_terminal::interceptor::{InterceptedEvent, TherminalInterceptor};
@@ -329,6 +330,7 @@ pub struct Pane {
 
 impl Pane {
     /// Spawn a new pane with a PTY and headless terminal.
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         cols: u16,
         rows: u16,
@@ -336,6 +338,7 @@ impl Pane {
         session_id: SessionId,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
         osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
+        harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let id = next_pane_id();
 
@@ -344,6 +347,14 @@ impl Pane {
         let (mut interceptor, interceptor_rx) =
             TherminalInterceptor::with_defaults_and_tracker(Arc::clone(&command_tracker));
         interceptor.set_osc_registry(osc_registry);
+        // tn-gln6 #1: install the shared harness-event sink so OSC 1341
+        // (and any future harness OSC codes) actually reach a daemon-side
+        // consumer instead of being silently dropped by the registry
+        // dispatch. The interceptor emits TaggedHarnessEvent over this
+        // channel; ensure.rs owns the receiver side and logs/routes events.
+        if let Some(tx) = harness_event_tx {
+            interceptor.set_harness_event_sink(tx);
+        }
 
         // Initialize cwd from spawn options; OSC 7 events will update it later.
         let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
@@ -408,6 +419,7 @@ impl Pane {
     /// reader/writer from it, and spawns a reader thread -- mirroring `Pane::spawn`
     /// but without spawning a new shell.
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     fn from_raw_fd(
         pane_id: PaneId,
         cols: u16,
@@ -416,6 +428,7 @@ impl Pane {
         event_tx: broadcast::Sender<DaemonEvent>,
         session_id: SessionId,
         osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
+        harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let pty_master = Box::new(FdPtyMaster::new(raw_fd));
 
@@ -424,6 +437,10 @@ impl Pane {
         let (mut interceptor, interceptor_rx) =
             TherminalInterceptor::with_defaults_and_tracker(Arc::clone(&command_tracker));
         interceptor.set_osc_registry(osc_registry);
+        // tn-gln6 #1: see Pane::spawn above.
+        if let Some(tx) = harness_event_tx {
+            interceptor.set_harness_event_sink(tx);
+        }
 
         // FD handoff panes don't have spawn options; cwd will be updated by OSC 7.
         let cwd = Arc::new(Mutex::new(String::new()));
@@ -866,6 +883,7 @@ impl Session {
         rows: u16,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
         osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
+        harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
     ) -> Result<&Pane, therminal_terminal::pty::PtyError> {
         let pane = Pane::spawn(
             cols,
@@ -874,6 +892,7 @@ impl Session {
             self.id,
             spawn_options,
             osc_registry,
+            harness_event_tx,
         )?;
         let mut window = Window::new();
         let pane_id = pane.id;
@@ -943,6 +962,12 @@ pub struct SessionManager {
     /// daemon registry via [`SessionManager::set_osc_registry`] before
     /// any PTY is opened.
     osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
+    /// Optional sink for `TaggedHarnessEvent`s produced by harness OSC
+    /// handlers in each pane's `TherminalInterceptor` (tn-gln6 #1).
+    /// Cloned into every new pane at construction time; the receiver lives
+    /// in `ensure.rs` and drains into a logger / future event bus.
+    /// `None` for unit tests that build a bare `SessionManager`.
+    harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
 }
 
 /// Swap two pane IDs wherever they appear as leaves in a `LayoutSnapshot`.
@@ -1195,7 +1220,18 @@ impl SessionManager {
             agent_registry: AgentRegistry::new(),
             pane_capacity: crate::pane_capacity::PaneCapacityCache::shared(),
             osc_registry: Arc::new(therminal_terminal::OscHandlerRegistry::new()),
+            harness_event_tx: None,
         }
+    }
+
+    /// Install a shared harness-event sink (tn-gln6 #1).
+    ///
+    /// Called once from `ensure.rs` at daemon startup. Every pane created
+    /// after this call gets the sink cloned into its `TherminalInterceptor`
+    /// so OSC 1341 (and any other harness OSC) events reach a daemon-side
+    /// consumer instead of being silently dropped.
+    pub fn set_harness_event_sink(&mut self, tx: std::sync::mpsc::Sender<TaggedHarnessEvent>) {
+        self.harness_event_tx = Some(tx);
     }
 
     /// Install a shared OSC handler registry (tn-hkpz).
@@ -1271,6 +1307,7 @@ impl SessionManager {
                 self.default_rows,
                 spawn_options,
                 Arc::clone(&self.osc_registry),
+                self.harness_event_tx.clone(),
             )?
             .id;
 
@@ -1631,6 +1668,7 @@ impl SessionManager {
             session_id,
             spawn_options,
             Arc::clone(&self.osc_registry),
+            self.harness_event_tx.clone(),
         )
         .map_err(|e| format!("failed to spawn pane: {e}"))?;
 
@@ -2266,6 +2304,7 @@ impl SessionManager {
                     self.event_tx.clone(),
                     session_id,
                     Arc::clone(&self.osc_registry),
+                    self.harness_event_tx.clone(),
                 ) {
                     Ok(pane) => {
                         window.add_pane(pane);
@@ -2347,6 +2386,7 @@ impl SessionManager {
                 first_pane.rows,
                 &spawn_opts,
                 Arc::clone(&self.osc_registry),
+                self.harness_event_tx.clone(),
             ) {
                 Ok(_) => {}
                 Err(e) => {
@@ -2383,6 +2423,7 @@ impl SessionManager {
                     session_id,
                     &opts,
                     Arc::clone(&self.osc_registry),
+                    self.harness_event_tx.clone(),
                 ) {
                     Ok(mut pane) => {
                         if !pane_meta.tags.is_empty() {

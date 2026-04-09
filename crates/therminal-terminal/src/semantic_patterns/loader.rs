@@ -86,7 +86,19 @@ pub fn load_pack_from_str(text: &str, fallback_pack_name: &str) -> Result<Compil
             }
             name
         }
-        None => fallback_pack_name.to_string(),
+        None => {
+            // Fallback names come from filenames via `pack_name_from_path`
+            // which sanitizes to `[a-z0-9_-]+`, but defend against callers
+            // that hand us a raw fallback (unit tests, future entry points).
+            // A fallback that fails validation is a caller bug — fail loud
+            // so shipped-vs-user shadowing stays deterministic.
+            if !is_valid_name(fallback_pack_name) {
+                return Err(format!(
+                    "invalid fallback pack_name {fallback_pack_name:?}: must match [a-z0-9_-]+"
+                ));
+            }
+            fallback_pack_name.to_string()
+        }
     };
 
     let mut patterns: Vec<Arc<CompiledPattern>> = Vec::with_capacity(raw.patterns.len());
@@ -304,12 +316,51 @@ fn compile_emit_event(raw: EmitEventActionToml) -> EmitEventAction {
     EmitEventAction { extra: raw.extra }
 }
 
-/// Derive the fallback pack name from a file path: the stem, lowercased.
+/// Derive the fallback pack name from a file path.
+///
+/// Takes the file stem, lowercases it, and replaces any character outside
+/// `[a-z0-9_-]` with `-` (then collapses consecutive `-` and trims leading/
+/// trailing `-`) so the result is guaranteed to satisfy
+/// [`is_valid_name`]. A stem that normalizes to the empty string falls back
+/// to `"unknown"` so the loader always has a usable identifier.
+///
+/// This is the single normalization point for filename-derived pack names;
+/// [`load_pack_from_str`] re-validates the result so a future caller that
+/// bypasses this helper cannot sneak an invalid name through.
 pub fn pack_name_from_path(path: &Path) -> String {
-    path.file_stem()
+    let stem = path
+        .file_stem()
         .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or("unknown");
+
+    let lowered = stem.to_ascii_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    let mut prev_dash = false;
+    for c in lowered.chars() {
+        let keep = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+        if keep {
+            // Collapse runs of '-' to a single one.
+            if c == '-' {
+                if prev_dash {
+                    continue;
+                }
+                prev_dash = true;
+            } else {
+                prev_dash = false;
+            }
+            out.push(c);
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Load every `*.toml` file from a directory (non-recursive).
@@ -650,5 +701,105 @@ action = "emit_event"
         let pack = load_pack_from_file(&path).unwrap();
         assert_eq!(pack.name, "demo");
         assert_eq!(pack.patterns.len(), 1);
+    }
+
+    // ── tn-gln6 #3: filename-derived fallback pack names ──────────────────
+
+    #[test]
+    fn pack_name_from_path_lowercases_stem() {
+        assert_eq!(
+            pack_name_from_path(Path::new("/tmp/Cargo-Errors.toml")),
+            "cargo-errors"
+        );
+    }
+
+    #[test]
+    fn pack_name_from_path_replaces_invalid_chars_with_dash() {
+        assert_eq!(
+            pack_name_from_path(Path::new("/tmp/my.pack.name.toml")),
+            "my-pack-name"
+        );
+        assert_eq!(
+            pack_name_from_path(Path::new("/tmp/some pack.toml")),
+            "some-pack"
+        );
+    }
+
+    #[test]
+    fn pack_name_from_path_collapses_and_trims_dashes() {
+        // "--foo..bar--" → "foo-bar"
+        assert_eq!(
+            pack_name_from_path(Path::new("/tmp/--foo..bar--.toml")),
+            "foo-bar"
+        );
+    }
+
+    #[test]
+    fn pack_name_from_path_unknown_on_all_invalid() {
+        // All-invalid stems normalize to empty and fall back to "unknown".
+        assert_eq!(pack_name_from_path(Path::new("/tmp/###.toml")), "unknown");
+        assert_eq!(pack_name_from_path(Path::new("/tmp/!!!.toml")), "unknown");
+    }
+
+    #[test]
+    fn fallback_name_always_passes_is_valid_name() {
+        // Every normalized result must round-trip through is_valid_name.
+        for raw in [
+            "Simple.toml",
+            "With Spaces.toml",
+            "UPPER_CASE.toml",
+            "my.pack.name.toml",
+            "weird#chars!.toml",
+            "123-numeric.toml",
+        ] {
+            let name = pack_name_from_path(Path::new(raw));
+            assert!(
+                is_valid_name(&name),
+                "normalized name {name:?} from {raw:?} failed is_valid_name"
+            );
+        }
+    }
+
+    #[test]
+    fn load_pack_rejects_unnormalized_fallback_name() {
+        // If a caller hands load_pack_from_str a raw (unnormalized)
+        // fallback with invalid chars, it must fail hard — not silently
+        // load a pack with an invalid id that would break collision logic.
+        let toml = "[[patterns]]\nname = \"x\"\nmatch = \"y\"\nscope = \"finalized_line\"\naction = \"emit_event\"\n";
+        let err = load_pack_from_str(toml, "Not Normalized").unwrap_err();
+        assert!(
+            err.contains("invalid fallback pack_name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pack_accepts_normalized_fallback_name() {
+        let toml = "[[patterns]]\nname = \"x\"\nmatch = \"y\"\nscope = \"finalized_line\"\naction = \"emit_event\"\n";
+        let pack = load_pack_from_str(toml, "cargo-errors").expect("pack loads");
+        assert_eq!(pack.name, "cargo-errors");
+    }
+
+    #[test]
+    fn load_pack_from_file_normalizes_mixed_case_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cargo-Errors.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[patterns]]
+name = "err"
+match = "error"
+scope = "finalized_line"
+action = "emit_event"
+"#,
+        )
+        .unwrap();
+
+        let pack = load_pack_from_file(&path).expect("pack loads");
+        assert_eq!(
+            pack.name, "cargo-errors",
+            "mixed-case filename stem must normalize to lowercase"
+        );
     }
 }
