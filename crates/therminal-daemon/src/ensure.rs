@@ -402,6 +402,21 @@ async fn start_daemon(
     ));
     let pattern_engine_for_mcp = Some(Arc::clone(&pattern_engine));
 
+    // tn-86us: install the engine + event bus on the session manager so
+    // every pane's `DaemonPtyHandler` gets a dispatcher scoped to the same
+    // shared state. This runs AFTER handoff / persisted-state restore —
+    // restored panes pre-date the dispatcher install and therefore do not
+    // get pattern dispatch until they are replaced. Any session created
+    // by `CreateSession` or `SplitPane` after this point picks it up.
+    {
+        let session_mgr = server.session_manager();
+        let mut mgr = session_mgr.lock().await;
+        mgr.set_pattern_dispatch(
+            Arc::clone(&pattern_engine),
+            std::sync::Arc::clone(&early_event_bus),
+        );
+    }
+
     // Hot-reload pattern packs on filesystem change (tn-yrjd). Uses the
     // same `notify` crate the `therminal.toml` watcher runs under, but
     // lives entirely in the daemon — the user pattern directory is a

@@ -34,8 +34,14 @@ enum StripState {
 /// stream, returning only the visible text. State is preserved across
 /// calls to [`AnsiStripper::feed`] so that sequences split across PTY
 /// read boundaries are consumed correctly.
-pub(crate) struct AnsiStripper {
+pub struct AnsiStripper {
     state: StripState,
+}
+
+impl Default for AnsiStripper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnsiStripper {

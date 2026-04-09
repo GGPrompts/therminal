@@ -720,6 +720,14 @@ async fn dispatch_ipc(
                 },
             }
         }
+        IpcRequest::QueryPatternStats => {
+            let mgr = session_mgr.lock().await;
+            let (total_matches, total_loaded) = mgr.pattern_stats();
+            IpcResponse::PatternStats {
+                total_matches_dispatched: total_matches,
+                total_loaded: total_loaded as u64,
+            }
+        }
         IpcRequest::SwitchWorkspace {
             session_id,
             workspace_id,

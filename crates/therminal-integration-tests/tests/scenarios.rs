@@ -25,7 +25,7 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use therminal_integration_tests::{DaemonHarness, wait_for_output};
 use therminal_protocol::IpcResponse;
@@ -256,4 +256,122 @@ async fn sleep_does_not_register_as_agent() {
         }
         other => panic!("expected Agents, got {other:?}"),
     }
+}
+
+/// Scenario 5 — Pattern engine finalized-line dispatch.
+///
+/// Drop a minimal pattern pack into `$XDG_CONFIG_HOME/therminal/patterns/`
+/// before the daemon starts, spawn a session, run a command whose output
+/// matches the pattern, and assert the daemon's `QueryPatternStats` IPC
+/// reports a non-zero dispatched-match count. Exercises the tn-86us
+/// dispatch plumbing end-to-end: PTY reader → ANSI stripper → line
+/// accumulator → `PatternEngine::process_finalized_line` → `EventBus`
+/// publish → counter bump.
+#[tokio::test]
+async fn pattern_engine_dispatches_finalized_line_match() {
+    let pack_toml = r#"
+pack_name = "integration-86us"
+pack_description = "tn-86us integration test pack"
+
+[[pattern]]
+name = "tn_marker"
+scope = "finalized_line"
+action = "emit_event"
+match = "INTEGRATION_MARKER_86US_[0-9]+"
+"#;
+
+    let harness = DaemonHarness::spawn_with_setup(|config_dir| {
+        let pack_dir = config_dir.join("therminal").join("patterns");
+        std::fs::create_dir_all(&pack_dir)?;
+        std::fs::write(pack_dir.join("integration-86us.toml"), pack_toml)?;
+        Ok(())
+    })
+    .await
+    .expect("daemon harness should spawn");
+
+    // Patterns load at startup; confirm our pack actually made it in.
+    let stats_resp = harness
+        .client()
+        .send_request(IpcRequest::QueryPatternStats)
+        .await
+        .expect("query_pattern_stats should succeed");
+    match stats_resp {
+        IpcResponse::PatternStats {
+            total_matches_dispatched,
+            total_loaded,
+        } => {
+            assert_eq!(total_matches_dispatched, 0, "baseline should be zero");
+            assert!(
+                total_loaded >= 1,
+                "expected our pack to load at least 1 pattern, got total_loaded={total_loaded}"
+            );
+        }
+        other => panic!("expected PatternStats, got {other:?}"),
+    }
+
+    let (_session_id, pane_id) = harness
+        .create_session_with_pane(Some("pattern-test"))
+        .await
+        .expect("create session");
+
+    // Let the shell print its initial prompt before we write.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Running `echo <marker>` produces one finalized line containing the
+    // marker. The pattern is finalized_line-scoped and should match
+    // exactly once per unique marker value we emit.
+    let cmd = b"echo INTEGRATION_MARKER_86US_42\n";
+    let resp = harness
+        .client()
+        .send_request(IpcRequest::SendKeys {
+            pane_id,
+            keys: cmd.to_vec(),
+        })
+        .await
+        .expect("send_keys should succeed");
+    assert!(
+        matches!(resp, IpcResponse::KeysSent { .. }),
+        "expected KeysSent, got {resp:?}"
+    );
+
+    // Wait for the marker to surface in the grid so we know the shell
+    // actually ran our command.
+    let _ = wait_for_output(harness.client(), pane_id, Duration::from_secs(5), |grid| {
+        grid.contains("INTEGRATION_MARKER_86US_42")
+    })
+    .await
+    .expect("marker should appear in grid");
+
+    // Poll the pattern stats until at least one dispatched match is
+    // observed. The dispatch is synchronous on the PTY reader thread, so
+    // this should become true within a few ticks of the line committing.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_total: u64 = 0;
+    loop {
+        let resp = harness
+            .client()
+            .send_request(IpcRequest::QueryPatternStats)
+            .await
+            .expect("query_pattern_stats should succeed");
+        if let IpcResponse::PatternStats {
+            total_matches_dispatched,
+            ..
+        } = resp
+        {
+            last_total = total_matches_dispatched;
+            if total_matches_dispatched >= 1 {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "pattern match was never dispatched: last total_matches_dispatched={last_total}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        last_total >= 1,
+        "expected at least one pattern match, got {last_total}"
+    );
 }

@@ -216,6 +216,11 @@ pub enum IpcRequest {
         session_id: SessionId,
         workspace_id: WorkspaceId,
     },
+    /// Query pattern engine stats (tn-86us). Returns the total number of
+    /// dispatched matches plus the total loaded pattern count. Used by
+    /// integration tests to assert that a pattern pack actually fired
+    /// against real PTY output.
+    QueryPatternStats,
 }
 
 /// Typed IPC responses.
@@ -325,6 +330,11 @@ pub enum IpcResponse {
     WorkspaceSwitched {
         session_id: SessionId,
         active_workspace: WorkspaceId,
+    },
+    /// Pattern engine stats snapshot (tn-86us).
+    PatternStats {
+        total_matches_dispatched: u64,
+        total_loaded: u64,
     },
     /// Generic error response.
     Error { message: String },

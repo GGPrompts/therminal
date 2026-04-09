@@ -37,6 +37,7 @@ pub use therminal_daemon_client::{client, framing, ipc_transport};
 pub mod lifecycle;
 pub mod mcp;
 pub mod pane_capacity;
+pub mod pattern_dispatch;
 pub mod persistence;
 pub mod process_detector_task;
 pub mod server;

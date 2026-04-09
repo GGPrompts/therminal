@@ -18,7 +18,7 @@
 //!       -> state file writes to /tmp/{agent}-state/
 //! ```
 
-mod ansi_strip;
+pub mod ansi_strip;
 mod cadence;
 mod matchers;
 mod patterns;

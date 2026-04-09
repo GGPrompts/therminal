@@ -55,6 +55,17 @@ impl DaemonHarness {
     /// The caller should `.await` this inside a tokio test; on success the
     /// daemon has already answered at least one `Ping`.
     pub async fn spawn() -> Result<Self> {
+        Self::spawn_with_setup(|_config_dir| Ok(())).await
+    }
+
+    /// Same as [`Self::spawn`], but runs `setup` against the hermetic
+    /// config directory (`$XDG_CONFIG_HOME`) before launching the daemon.
+    /// Used by scenarios that need to stage files the daemon reads at
+    /// startup (pattern packs, therminal.toml, trust config, ...).
+    pub async fn spawn_with_setup<F>(setup: F) -> Result<Self>
+    where
+        F: FnOnce(&Path) -> Result<()>,
+    {
         // Set up fresh isolated XDG directories under a tempdir. The
         // daemon's `therminal-runtime` crate reads XDG_RUNTIME_DIR for its
         // socket path and XDG_{CONFIG,DATA,CACHE}_HOME for everything else
@@ -69,6 +80,12 @@ impl DaemonHarness {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create XDG dir {}", dir.display()))?;
         }
+
+        // Let callers stage files under the hermetic config dir before
+        // the daemon starts. The daemon reads its config, trust TOML,
+        // and pattern packs at startup, so this is the one moment where
+        // tests can drop files into `$XDG_CONFIG_HOME/therminal/...`.
+        setup(&config_dir).context("harness pre-spawn setup failed")?;
 
         // Mirror `therminal_runtime::paths::socket_path("daemon")` on the
         // host OS so we know where to connect without pulling in that

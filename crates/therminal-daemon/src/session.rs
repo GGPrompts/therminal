@@ -125,6 +125,10 @@ struct DaemonPtyHandler {
     /// Shared agent state inference engine. Reader thread feeds bytes;
     /// MCP handlers snapshot state on demand.
     inference: Arc<Mutex<AgentStateInference>>,
+    /// Pattern engine dispatcher (tn-86us). `None` when the daemon was
+    /// built without a pattern engine installed on the session manager
+    /// (e.g. unit tests).
+    pattern_dispatch: Option<crate::pattern_dispatch::PatternDispatcher>,
 }
 
 impl PtyReaderHandler for DaemonPtyHandler {
@@ -150,12 +154,38 @@ impl PtyReaderHandler for DaemonPtyHandler {
             inf.feed_bytes(data);
         }
 
+        // Feed the pattern engine dispatcher (tn-86us). Runs the ANSI
+        // stripper + line accumulator internally and invokes
+        // `process_finalized_line` on every committed line.
+        if let Some(ref mut pd) = self.pattern_dispatch {
+            pd.process_bytes(data);
+        }
+
         // Drain intercepted events into the region index and update cwd.
         while let Ok(event) = self.interceptor_rx.try_recv() {
             if let InterceptedEvent::CurrentDirectory(ref path) = event
                 && let Ok(mut cwd) = self.cwd.lock()
             {
                 *cwd = path.clone();
+            }
+            // Route OSC 133/633 marks into the pattern dispatcher so
+            // `prompt_boundary`-scoped patterns run against the command
+            // transcript at the D mark.
+            if let Some(ref mut pd) = self.pattern_dispatch {
+                match &event {
+                    InterceptedEvent::Osc633(mark) | InterceptedEvent::Osc133(mark) => {
+                        use therminal_terminal::osc633::Osc633Mark;
+                        match mark {
+                            Osc633Mark::PreExec => pd.on_command_start(None),
+                            Osc633Mark::CommandLine { command } => {
+                                pd.on_command_start(Some(command.clone()));
+                            }
+                            Osc633Mark::CommandFinished { .. } => pd.on_command_finish(),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
             }
             if let Ok(mut idx) = self.region_index.lock() {
                 idx.push_event(&event);
@@ -328,6 +358,30 @@ pub struct Pane {
     shell_pid: Option<u32>,
 }
 
+/// Pattern-dispatch wiring handed to every new pane (tn-86us).
+#[derive(Clone, Default)]
+pub struct PaneDispatchCtx {
+    pub engine: Option<Arc<therminal_terminal::semantic_patterns::PatternEngine>>,
+    pub bus: Option<Arc<crate::event_bus::EventBus>>,
+    pub matches_total: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PaneDispatchCtx {
+    fn build_dispatcher(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<crate::pattern_dispatch::PatternDispatcher> {
+        let engine = self.engine.as_ref()?.clone();
+        let bus = self.bus.as_ref()?.clone();
+        Some(crate::pattern_dispatch::PatternDispatcher::new(
+            engine,
+            bus,
+            Arc::clone(&self.matches_total),
+            pane_id,
+        ))
+    }
+}
+
 impl Pane {
     /// Spawn a new pane with a PTY and headless terminal.
     #[allow(clippy::too_many_arguments)]
@@ -339,6 +393,7 @@ impl Pane {
         spawn_options: &therminal_terminal::pty::SpawnOptions,
         osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
         harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
+        pattern_ctx: PaneDispatchCtx,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let id = next_pane_id();
 
@@ -370,6 +425,7 @@ impl Pane {
             },
         })));
 
+        let pattern_dispatch = pattern_ctx.build_dispatcher(id);
         let handler = DaemonPtyHandler {
             event_tx,
             session_id,
@@ -379,6 +435,7 @@ impl Pane {
             region_index: Arc::clone(&region_index),
             cwd: Arc::clone(&cwd),
             inference: Arc::clone(&inference),
+            pattern_dispatch,
         };
 
         let mut core = PtyPaneCore::spawn(
@@ -429,6 +486,7 @@ impl Pane {
         session_id: SessionId,
         osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
         harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
+        pattern_ctx: PaneDispatchCtx,
     ) -> Result<Self, therminal_terminal::pty::PtyError> {
         let pty_master = Box::new(FdPtyMaster::new(raw_fd));
 
@@ -452,6 +510,7 @@ impl Pane {
             working_dir: None,
         })));
 
+        let pattern_dispatch = pattern_ctx.build_dispatcher(pane_id);
         let handler = DaemonPtyHandler {
             event_tx: event_tx.clone(),
             session_id,
@@ -461,6 +520,7 @@ impl Pane {
             region_index: Arc::clone(&region_index),
             cwd: Arc::clone(&cwd),
             inference: Arc::clone(&inference),
+            pattern_dispatch,
         };
 
         // Create headless Term.
@@ -884,6 +944,7 @@ impl Session {
         spawn_options: &therminal_terminal::pty::SpawnOptions,
         osc_registry: Arc<therminal_terminal::OscHandlerRegistry>,
         harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
+        pattern_ctx: PaneDispatchCtx,
     ) -> Result<&Pane, therminal_terminal::pty::PtyError> {
         let pane = Pane::spawn(
             cols,
@@ -893,6 +954,7 @@ impl Session {
             spawn_options,
             osc_registry,
             harness_event_tx,
+            pattern_ctx,
         )?;
         let mut window = Window::new();
         let pane_id = pane.id;
@@ -954,6 +1016,13 @@ pub struct SessionManager {
     agent_registry: AgentRegistry,
     /// Per-pane agent capacity cache fed by the Claude state poller.
     pane_capacity: Arc<crate::pane_capacity::PaneCapacityCache>,
+    /// Pattern engine + event bus + shared match counter (tn-86us).
+    /// Installed by `ensure.rs` at startup; cloned into every pane's
+    /// `DaemonPtyHandler` so finalized-line and prompt-boundary patterns
+    /// run on the reader thread and emit on the unified bus.
+    pattern_engine: Option<Arc<therminal_terminal::semantic_patterns::PatternEngine>>,
+    pattern_bus: Option<Arc<crate::event_bus::EventBus>>,
+    pattern_matches_total: Arc<std::sync::atomic::AtomicU64>,
     /// Shared OSC handler registry (tn-hkpz). Cloned into each new pane's
     /// `TherminalInterceptor` so harness crates can claim OSC codes at
     /// daemon startup and route sequences through typed parsers. Defaults
@@ -1221,7 +1290,48 @@ impl SessionManager {
             pane_capacity: crate::pane_capacity::PaneCapacityCache::shared(),
             osc_registry: Arc::new(therminal_terminal::OscHandlerRegistry::new()),
             harness_event_tx: None,
+            pattern_engine: None,
+            pattern_bus: None,
+            pattern_matches_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Install the pattern engine + event bus on this session manager.
+    /// New panes created after this call will receive a cloned handle on
+    /// their `DaemonPtyHandler` and dispatch finalized-line / prompt-
+    /// boundary patterns onto the bus. See tn-86us.
+    pub fn set_pattern_dispatch(
+        &mut self,
+        engine: Arc<therminal_terminal::semantic_patterns::PatternEngine>,
+        bus: Arc<crate::event_bus::EventBus>,
+    ) {
+        self.pattern_engine = Some(engine);
+        self.pattern_bus = Some(bus);
+    }
+
+    fn pattern_ctx(&self) -> PaneDispatchCtx {
+        PaneDispatchCtx {
+            engine: self.pattern_engine.clone(),
+            bus: self.pattern_bus.clone(),
+            matches_total: Arc::clone(&self.pattern_matches_total),
+        }
+    }
+
+    /// Snapshot of `(total_matches_dispatched, loaded_patterns)` for the
+    /// `QueryPatternStats` IPC tool. `loaded_patterns` reads the engine's
+    /// own `total_loaded` counter; `total_matches_dispatched` is the
+    /// per-daemon counter bumped by every dispatched match (includes
+    /// hotspot, widget, and emit_event actions).
+    pub fn pattern_stats(&self) -> (u64, usize) {
+        let total_matches = self
+            .pattern_matches_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_loaded = self
+            .pattern_engine
+            .as_ref()
+            .map(|e| e.stats().global.total_loaded)
+            .unwrap_or(0);
+        (total_matches, total_loaded)
     }
 
     /// Install a shared harness-event sink (tn-gln6 #1).
@@ -1308,6 +1418,7 @@ impl SessionManager {
                 spawn_options,
                 Arc::clone(&self.osc_registry),
                 self.harness_event_tx.clone(),
+                self.pattern_ctx(),
             )?
             .id;
 
@@ -1611,6 +1722,8 @@ impl SessionManager {
     ) -> Result<PaneId, String> {
         use therminal_protocol::daemon::LayoutSplitDirection;
 
+        let pattern_ctx = self.pattern_ctx();
+
         // Find which session and window this pane belongs to.
         let session_id = self
             .sessions
@@ -1669,6 +1782,7 @@ impl SessionManager {
             spawn_options,
             Arc::clone(&self.osc_registry),
             self.harness_event_tx.clone(),
+            pattern_ctx,
         )
         .map_err(|e| format!("failed to spawn pane: {e}"))?;
 
@@ -2336,6 +2450,7 @@ impl SessionManager {
                     session_id,
                     Arc::clone(&self.osc_registry),
                     self.harness_event_tx.clone(),
+                    self.pattern_ctx(),
                 ) {
                     Ok(pane) => {
                         window.add_pane(pane);
@@ -2418,6 +2533,7 @@ impl SessionManager {
                 &spawn_opts,
                 Arc::clone(&self.osc_registry),
                 self.harness_event_tx.clone(),
+                self.pattern_ctx(),
             ) {
                 Ok(_) => {}
                 Err(e) => {
@@ -2455,6 +2571,7 @@ impl SessionManager {
                     &opts,
                     Arc::clone(&self.osc_registry),
                     self.harness_event_tx.clone(),
+                    self.pattern_ctx(),
                 ) {
                     Ok(mut pane) => {
                         if !pane_meta.tags.is_empty() {
