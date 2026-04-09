@@ -35,6 +35,10 @@ src/
 └── mcp_stdio.rs         # MCP stdio bridge to daemon
 ```
 
+## App-Side Pattern Engine (tn-f9cl)
+
+The app owns a read-only `PatternEngine` sibling to the daemon's engine, stored as `App.pattern_engine: Option<PatternEngine>`. Both instantiate from the same `[patterns]` config. The app runs `process_finalized_line` per visible row during each render frame, converting `Hotspot`-action matches into `TextHotspot`s. Widget-action matches are skipped (deferred follow-up). On `ConfigChanged` the app re-instantiates its engine.
+
 ## Window Controller Facade
 
 `App` in `window/mod.rs` provides facade methods to centralize repeated patterns:

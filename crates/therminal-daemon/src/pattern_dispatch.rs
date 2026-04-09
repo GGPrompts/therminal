@@ -19,12 +19,10 @@
 //! - `ResolvedAction::EmitEvent` → publish on the unified event bus with
 //!   `source_class = Pattern`, `source_id = <pack_name>`, `kind = <pattern_name>`.
 //! - `ResolvedAction::Hotspot` → publish a summary event on the bus so
-//!   subscribers see the match. (Hot-path injection into the per-pane
-//!   hotspot set is tracked as a follow-up; the pattern-sourced hotspot
-//!   set is owned on the therminal-app side, not the daemon — see the
-//!   retro note in tn-yrjd and the follow-up at tn-86us below.)
+//!   MCP subscribers see the match. The **real hotspot sink** lives
+//!   app-side (tn-f9cl). The daemon publishes purely for MCP stats.
 //! - `ResolvedAction::Widget` → publish an event carrying the resolved
-//!   widget payload. Widget placement / draw is deferred (tn-86us retro).
+//!   widget payload. Widget placement is **not yet wired** (tn-f9cl).
 //!
 //! All three paths also bump a shared `matches_total` counter used by the
 //! `QueryPatternStats` IPC request for integration tests.
@@ -190,9 +188,7 @@ impl PatternDispatcher {
                 }
                 ResolvedAction::Hotspot(h) => {
                     self.publish(&source_id, &kind_base, scope, &m, hotspot_body(&m, h));
-                    // Widget placement and per-pane hotspot-set merge are
-                    // deferred (see module docs); the event publication is
-                    // enough for MCP-side observation and integration tests.
+                    // Real hotspot sink lives app-side (tn-f9cl).
                 }
                 ResolvedAction::Widget(w) => {
                     self.publish(&source_id, &kind_base, scope, &m, widget_body(&m, w));

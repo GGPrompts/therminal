@@ -115,6 +115,7 @@ impl App {
             gpu.config.height,
             &self.agent_registry,
             &self.claude_cwd,
+            self.pattern_engine.as_ref(),
         );
 
         // ── Overlay pass: chrome backgrounds ────────────────────────────

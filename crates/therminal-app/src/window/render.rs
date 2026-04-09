@@ -16,8 +16,10 @@ use alacritty_terminal::grid::Dimensions;
 use therminal_harness_claude::tool_call_hotspots::detect_claude_tool_call_hotspots;
 use therminal_terminal::agent_registry::AgentRegistry;
 use therminal_terminal::hotspot_detection::{
-    TextHotspot, detect_hotspots_from_text_with_wrap, promote_directory_hotspots,
+    TextHotspot, detect_hotspots_from_text_with_wrap, hotspots_from_pattern_matches,
+    promote_directory_hotspots,
 };
+use therminal_terminal::semantic_patterns::PatternEngine;
 
 use crate::claude_cwd::ClaudeCwdTracker;
 
@@ -115,6 +117,40 @@ fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec
         .collect()
 }
 
+fn extend_hotspots_from_patterns(
+    engine: &PatternEngine,
+    pane_id: u64,
+    row_texts: &[String],
+    hotspots: &mut Vec<TextHotspot>,
+) {
+    for (row_idx, text) in row_texts.iter().enumerate() {
+        if text.is_empty() {
+            continue;
+        }
+        let matches = engine.process_finalized_line(pane_id, text, None, None);
+        if matches.is_empty() {
+            continue;
+        }
+        let byte_to_col_map: Vec<usize> = {
+            let mut map = vec![0usize; text.len() + 1];
+            let mut col = 0usize;
+            for (byte_idx, ch) in text.char_indices() {
+                map[byte_idx] = col;
+                col += 1;
+                for b in (byte_idx + 1)..byte_idx + ch.len_utf8() {
+                    map[b] = col;
+                }
+            }
+            map[text.len()] = col;
+            map
+        };
+        let pattern_hotspots = hotspots_from_pattern_matches(&matches, row_idx, |byte| {
+            byte_to_col_map.get(byte).copied().unwrap_or(byte)
+        });
+        hotspots.extend(pattern_hotspots);
+    }
+}
+
 // ── Recursive pane rendering ───────────────────────────────────────────
 
 /// Recursively render all panes in the layout tree.
@@ -141,6 +177,7 @@ pub(crate) fn render_panes_recursive(
     surface_height: u32,
     agent_registry: &std::sync::Mutex<AgentRegistry>,
     claude_cwd: &ClaudeCwdTracker,
+    pattern_engine: Option<&PatternEngine>,
 ) {
     match node {
         LayoutNode::Leaf(pane) => {
@@ -164,6 +201,7 @@ pub(crate) fn render_panes_recursive(
                 surface_height,
                 agent_registry,
                 claude_cwd,
+                pattern_engine,
             );
             queue.submit(std::iter::once(encoder.finish()));
         }
@@ -188,6 +226,7 @@ pub(crate) fn render_panes_recursive(
                 surface_height,
                 agent_registry,
                 claude_cwd,
+                pattern_engine,
             );
             render_panes_recursive(
                 second,
@@ -204,6 +243,7 @@ pub(crate) fn render_panes_recursive(
                 surface_height,
                 agent_registry,
                 claude_cwd,
+                pattern_engine,
             );
 
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -246,6 +286,7 @@ fn render_single_pane(
     surface_height: u32,
     agent_registry: &std::sync::Mutex<AgentRegistry>,
     claude_cwd: &ClaudeCwdTracker,
+    pattern_engine: Option<&PatternEngine>,
 ) {
     // Look up the Claude agent cwd for this pane once per frame (tn-ykxb).
     // Two layers of Option because the pane might not have an agent at
@@ -412,6 +453,9 @@ fn render_single_pane(
         if let Some(ref cwd) = claude_agent_cwd {
             hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
         }
+        if let Some(engine) = pattern_engine {
+            extend_hotspots_from_patterns(engine, pane.id, &row_texts, &mut hotspots);
+        }
 
         // O(1) copy-back: build a HashMap from detected URLs keyed by (row, col),
         // then single-pass over `cells` to apply. Avoids O(N*M) linear search.
@@ -449,6 +493,9 @@ fn render_single_pane(
         promote_directory_hotspots_from_fs(&mut hotspots);
         if let Some(ref cwd) = claude_agent_cwd {
             hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
+        }
+        if let Some(engine) = pattern_engine {
+            extend_hotspots_from_patterns(engine, pane.id, &row_texts, &mut hotspots);
         }
 
         // Row-indexed hotspot application: O(C + H) instead of O(H*C).

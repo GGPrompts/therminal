@@ -306,6 +306,9 @@ pub struct App {
     /// `publish_workspace_state()` helper short-circuits.
     pub(crate) daemon_session_id: Option<therminal_protocol::SessionId>,
 
+    /// App-side read-only pattern engine (tn-f9cl).
+    pub(crate) pattern_engine: Option<therminal_terminal::semantic_patterns::PatternEngine>,
+
     /// Pre-rasterized overlay widgets (tn-npd). Created lazily during
     /// `init_gpu` because the render pipeline needs the surface format
     /// and device. `None` until the GPU is up; widgets are skipped
@@ -598,6 +601,25 @@ impl App {
         }
         if self.config.general.env != old_config.general.env {
             info!("env config changed; takes effect on next PTY spawn (restart needed)");
+        }
+
+        let patterns_changed = self.config.patterns != old_config.patterns;
+        if patterns_changed {
+            if self.config.patterns.enabled {
+                use therminal_terminal::semantic_patterns::{PatternEngine, PatternEngineConfig};
+                self.pattern_engine = Some(PatternEngine::new(PatternEngineConfig {
+                    enabled: true,
+                    user_pattern_dir: self.config.patterns.directory.clone(),
+                    shipped_pattern_dir: None,
+                    max_patterns: self.config.patterns.max_patterns,
+                    slow_pattern_threshold_us: self.config.patterns.slow_pattern_threshold_us,
+                    slow_strike_limit: self.config.patterns.slow_strike_limit,
+                }));
+                info!("pattern engine re-instantiated via hot-reload");
+            } else {
+                self.pattern_engine = None;
+                info!("pattern engine disabled via hot-reload");
+            }
         }
 
         if let Some(w) = self.window.as_ref() {
