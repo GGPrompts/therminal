@@ -30,7 +30,10 @@ use crate::palette::Color;
 /// Default config filename.
 const CONFIG_FILENAME: &str = "therminal.toml";
 
-fn merged_toml_with_existing(existing: &str, replacement: &str) -> Result<String, toml_edit::TomlError> {
+fn merged_toml_with_existing(
+    existing: &str,
+    replacement: &str,
+) -> Result<String, toml_edit::TomlError> {
     let mut existing_doc: DocumentMut = existing.parse()?;
     let replacement_doc: DocumentMut = replacement.parse()?;
     merge_table(existing_doc.as_table_mut(), replacement_doc.as_table());

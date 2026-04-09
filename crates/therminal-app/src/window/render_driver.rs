@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
-use super::{App, chrome, help_overlay, render};
+use super::settings_overlay::{self, SettingsRenderValues};
+use super::{App, OverlayMode, chrome, help_overlay, render};
 
 /// Direction for [`App::jump_to_region`].
 #[derive(Debug, Clone, Copy)]
@@ -285,25 +286,44 @@ impl App {
             }
         }
 
-        // ── Help overlay (on top of everything) ─────────────────────────
-        if self.show_help_overlay {
-            let mut encoder = gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("help_overlay_encoder"),
-                });
-            help_overlay::draw_help_overlay(
-                &self.config.keybindings,
-                self.help_overlay_scroll_rows,
-                renderer,
-                &gpu.device,
-                &gpu.queue,
-                &mut encoder,
-                &view,
-                gpu.config.width,
-                gpu.config.height,
-            );
-            gpu.queue.submit(std::iter::once(encoder.finish()));
+        // ── Modal overlays (on top of everything) ───────────────────────
+        match self.overlay_mode {
+            Some(OverlayMode::Help) => {
+                let mut encoder =
+                    gpu.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("help_overlay_encoder"),
+                        });
+                help_overlay::draw_help_overlay(
+                    &self.config.keybindings,
+                    self.help_overlay_scroll_rows,
+                    renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut encoder,
+                    &view,
+                    gpu.config.width,
+                    gpu.config.height,
+                );
+                gpu.queue.submit(std::iter::once(encoder.finish()));
+            }
+            Some(OverlayMode::Settings) => {
+                settings_overlay::draw_settings_overlay(
+                    &self.settings_overlay,
+                    SettingsRenderValues {
+                        show_pane_headers: self.config.general.show_pane_headers,
+                        show_status_bar: self.config.general.show_status_bar,
+                        show_tab_bar: self.config.general.show_tab_bar,
+                    },
+                    renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    gpu.config.width,
+                    gpu.config.height,
+                );
+            }
+            None => {}
         }
 
         // ── Context menu overlay (on top of everything) ────────────────

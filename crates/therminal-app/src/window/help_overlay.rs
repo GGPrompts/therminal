@@ -431,8 +431,7 @@ pub(crate) fn draw_help_overlay(
         );
         let hint = format!(
             "scroll: wheel / PgUp PgDn / arrows ({}/{})",
-            scroll_rows,
-            max_scroll_rows
+            scroll_rows, max_scroll_rows
         );
         hint_buf.set_text(
             &mut renderer.font_system,

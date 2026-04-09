@@ -17,7 +17,8 @@ use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
 use super::keybindings::lookup_binding;
 use super::mouse::HeaderAction;
 use super::render_driver::JumpDirection;
-use super::{App, chrome, help_overlay};
+use super::settings_overlay::{self, SettingsCommand};
+use super::{App, OverlayMode, chrome, help_overlay};
 use crate::pane::SplitDirection;
 
 impl App {
@@ -25,13 +26,61 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return 0;
         };
-        help_overlay::max_scroll_rows(&self.config.keybindings, gpu.config.width, gpu.config.height)
+        help_overlay::max_scroll_rows(
+            &self.config.keybindings,
+            gpu.config.width,
+            gpu.config.height,
+        )
     }
 
     fn scroll_help_overlay_by(&mut self, delta_rows: i32) {
         let max_rows = self.help_overlay_max_scroll_rows();
         let next = (self.help_overlay_scroll_rows as i32 + delta_rows).clamp(0, max_rows as i32);
         self.help_overlay_scroll_rows = next as u32;
+    }
+
+    fn open_help_overlay(&mut self) {
+        self.overlay_mode = Some(OverlayMode::Help);
+        self.help_overlay_scroll_rows = 0;
+        self.active_menu = None;
+    }
+
+    fn open_settings_overlay(&mut self) {
+        self.overlay_mode = Some(OverlayMode::Settings);
+        self.settings_overlay.reset_navigation();
+        self.active_menu = None;
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay_mode = None;
+        self.help_overlay_scroll_rows = 0;
+    }
+
+    fn apply_settings_command(&mut self, command: SettingsCommand) {
+        match command {
+            SettingsCommand::TogglePaneHeaders => {
+                self.config.general.show_pane_headers = !self.config.general.show_pane_headers;
+                self.relayout_and_redraw();
+            }
+            SettingsCommand::ToggleStatusBar => {
+                self.config.general.show_status_bar = !self.config.general.show_status_bar;
+                self.relayout_and_redraw();
+            }
+            SettingsCommand::ToggleTabBar => {
+                self.config.general.show_tab_bar = !self.config.general.show_tab_bar;
+                self.relayout_and_redraw();
+            }
+            SettingsCommand::ApplyThemePreset(preset) => {
+                settings_overlay::apply_theme_preset(&mut self.config.colors, preset);
+                if let Some(renderer) = self.grid_renderer.as_mut() {
+                    renderer.apply_color_overrides(&self.config.colors);
+                }
+                self.show_toast(format!("theme preset applied: {}", preset.label()));
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
     }
 
     /// Check if this key event matches a configured keybinding.
@@ -93,9 +142,10 @@ impl App {
                 self.reset_font_size_action();
             }
             KeyAction::ShowHelp => {
-                self.show_help_overlay = !self.show_help_overlay;
-                if self.show_help_overlay {
-                    self.help_overlay_scroll_rows = 0;
+                if self.overlay_mode == Some(OverlayMode::Help) {
+                    self.close_overlay();
+                } else {
+                    self.open_help_overlay();
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -495,17 +545,23 @@ impl App {
         if self.active_menu.is_some() {
             return;
         }
-        if self.show_help_overlay {
-            let lines = match delta {
-                MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
-                MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
-            };
-            // Wheel up (positive y) scrolls toward the top.
-            self.scroll_help_overlay_by(-lines);
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
+        match self.overlay_mode {
+            Some(OverlayMode::Help) => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
+                };
+                // Wheel up (positive y) scrolls toward the top.
+                self.scroll_help_overlay_by(-lines);
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
             }
-            return;
+            Some(OverlayMode::Settings) => {
+                return;
+            }
+            None => {}
         }
         self.handle_mouse_wheel(delta);
     }
@@ -522,10 +578,9 @@ impl App {
             self.commit_rename();
         }
 
-        // Dismiss help overlay on any mouse click.
-        if self.show_help_overlay && state == ElementState::Pressed && button == MouseButton::Left {
-            self.show_help_overlay = false;
-            self.help_overlay_scroll_rows = 0;
+        // Dismiss active overlays on mouse press.
+        if self.overlay_mode.is_some() && state == ElementState::Pressed {
+            self.close_overlay();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -658,29 +713,11 @@ impl App {
                                 }
                             }
                             chrome::CsdAction::Settings => {
-                                let config_file = therminal_core::config::config_path();
-                                if !config_file.exists()
-                                    && let Err(e) =
-                                        therminal_core::config::TherminalConfig::default()
-                                            .save_default_to(&config_file)
-                                {
-                                    tracing::warn!(
-                                        "settings: failed to create default config at {}: {e}",
-                                        config_file.display()
-                                    );
-                                    self.show_toast(format!(
-                                        "failed to create {}",
-                                        config_file.display()
-                                    ));
-                                    return;
+                                self.open_settings_overlay();
+                                if let Some(w) = self.window.as_ref() {
+                                    w.request_redraw();
                                 }
-                                // Use the absolute-path editor hand-off,
-                                // not `open_in_editor`. The latter joins
-                                // the path against the focused pane's
-                                // shell cwd, which on Windows+WSL turns
-                                // `C:\Users\…\therminal.toml` into
-                                // `/home/marci/…/C:\Users\…\therminal.toml`.
-                                self.open_absolute_in_editor(&config_file);
+                                return;
                             }
                         }
                         return;
@@ -982,32 +1019,56 @@ impl App {
             return;
         }
 
-        // Help overlay key handling: navigation keys scroll, other keys dismiss.
-        if self.show_help_overlay {
-            match &key_event.logical_key {
-                Key::Named(NamedKey::Escape) => {
-                    self.show_help_overlay = false;
-                    self.help_overlay_scroll_rows = 0;
+        // Overlay key handling runs before general keybindings.
+        match self.overlay_mode {
+            Some(OverlayMode::Help) => {
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.close_overlay(),
+                    Key::Named(NamedKey::ArrowUp) => self.scroll_help_overlay_by(-1),
+                    Key::Named(NamedKey::ArrowDown) => self.scroll_help_overlay_by(1),
+                    Key::Named(NamedKey::PageUp) => self.scroll_help_overlay_by(-10),
+                    Key::Named(NamedKey::PageDown) => self.scroll_help_overlay_by(10),
+                    Key::Named(NamedKey::Home) => self.help_overlay_scroll_rows = 0,
+                    Key::Named(NamedKey::End) => {
+                        self.help_overlay_scroll_rows = self.help_overlay_max_scroll_rows();
+                    }
+                    Key::Character(s) if s.eq_ignore_ascii_case("j") => {
+                        self.scroll_help_overlay_by(1)
+                    }
+                    Key::Character(s) if s.eq_ignore_ascii_case("k") => {
+                        self.scroll_help_overlay_by(-1)
+                    }
+                    _ => self.close_overlay(),
                 }
-                Key::Named(NamedKey::ArrowUp) => self.scroll_help_overlay_by(-1),
-                Key::Named(NamedKey::ArrowDown) => self.scroll_help_overlay_by(1),
-                Key::Named(NamedKey::PageUp) => self.scroll_help_overlay_by(-10),
-                Key::Named(NamedKey::PageDown) => self.scroll_help_overlay_by(10),
-                Key::Named(NamedKey::Home) => self.help_overlay_scroll_rows = 0,
-                Key::Named(NamedKey::End) => {
-                    self.help_overlay_scroll_rows = self.help_overlay_max_scroll_rows();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
                 }
-                Key::Character(s) if s.eq_ignore_ascii_case("j") => self.scroll_help_overlay_by(1),
-                Key::Character(s) if s.eq_ignore_ascii_case("k") => self.scroll_help_overlay_by(-1),
-                _ => {
-                    self.show_help_overlay = false;
-                    self.help_overlay_scroll_rows = 0;
-                }
+                return;
             }
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
+            Some(OverlayMode::Settings) => {
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.close_overlay(),
+                    Key::Named(NamedKey::Tab) => {
+                        let reverse = self.modifiers.state().shift_key();
+                        self.settings_overlay.tab(reverse);
+                    }
+                    Key::Named(NamedKey::ArrowUp) => self.settings_overlay.arrow_up(),
+                    Key::Named(NamedKey::ArrowDown) => self.settings_overlay.arrow_down(),
+                    Key::Named(NamedKey::ArrowLeft) => self.settings_overlay.arrow_left(),
+                    Key::Named(NamedKey::ArrowRight) => self.settings_overlay.arrow_right(),
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(cmd) = self.settings_overlay.enter() {
+                            self.apply_settings_command(cmd);
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
             }
-            return;
+            None => {}
         }
 
         // Check configured keybindings first.

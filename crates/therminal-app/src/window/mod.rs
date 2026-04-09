@@ -23,6 +23,7 @@ mod mouse;
 mod pane_ops;
 mod render;
 mod render_driver;
+mod settings_overlay;
 pub(crate) mod toast;
 pub(crate) mod wsl_paths;
 
@@ -133,6 +134,13 @@ pub enum NotificationSource {
     Agent,
 }
 
+/// Active top-level overlay mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverlayMode {
+    Help,
+    Settings,
+}
+
 // ── GPU state ────────────────────────────────────────────────────────────
 
 struct GpuState {
@@ -211,11 +219,14 @@ pub struct App {
     /// Last split direction used (for auto-direction alternation).
     last_split_direction: SplitDirection,
 
-    /// Whether the keybinding help overlay is currently visible.
-    show_help_overlay: bool,
+    /// Active overlay mode, if any.
+    overlay_mode: Option<OverlayMode>,
 
     /// Scroll offset (in row units) for the keybinding help overlay body.
     help_overlay_scroll_rows: u32,
+
+    /// Settings overlay registry + keyboard navigation state.
+    settings_overlay: settings_overlay::SettingsOverlayState,
 
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,

@@ -1432,8 +1432,8 @@ impl App {
     /// Open a known-absolute file directly in the user's configured
     /// editor, bypassing the hotspot cwd-resolution machinery.
     ///
-    /// The settings gear uses this because `open_in_editor` runs every
-    /// path through [`resolve_relative_to_cwd`], which joins any
+    /// `open_in_editor` runs every path through
+    /// [`resolve_relative_to_cwd`], which joins any
     /// not-starting-with-`/` path against the focused pane's shell cwd.
     /// On Windows with a WSL focused pane, that turns
     /// `C:\Users\marci\AppData\Roaming\therminal\therminal.toml` into
@@ -1442,7 +1442,10 @@ impl App {
     /// Instead, take the path verbatim, try the `editor_chain` resolver
     /// (so `$EDITOR` still wins), and spawn the editor directly. Falls
     /// back to `open::that` on any failure so at minimum the platform
-    /// default handler gets a crack at it.
+    /// default handler gets a crack at it. Retained for direct open
+    /// paths even though the CSD settings button now opens the in-app
+    /// settings overlay.
+    #[allow(dead_code)]
     pub(crate) fn open_absolute_in_editor(&mut self, path: &std::path::Path) {
         use std::process::Command;
 
