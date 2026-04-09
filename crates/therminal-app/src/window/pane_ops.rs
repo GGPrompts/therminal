@@ -91,7 +91,7 @@ impl App {
         let resp = match self.daemon_rpc_blocking(IpcRequest::SplitPane {
             pane_id: daemon_source,
             horizontal,
-            cwd: inherited_cwd,
+            cwd: inherited_cwd.clone(),
             startup_command: None,
         }) {
             Ok(r) => r,
@@ -153,6 +153,7 @@ impl App {
                 handle_for_closure,
                 socket_for_closure,
                 callbacks,
+                inherited_cwd.clone(),
             ) {
                 Ok(state) => Some(state),
                 Err(e) => {
@@ -338,6 +339,7 @@ impl App {
             handle,
             socket,
             callbacks,
+            None,
         ) {
             Ok(state) => state,
             Err(e) => {
@@ -496,7 +498,9 @@ fn validate_inherited_cwd(cwd: Option<String>) -> Option<String> {
     {
         let translated = crate::window::wsl_paths::translate_if_wsl_windows(&cwd);
         if translated.as_ref() != cwd && std::path::Path::new(translated.as_ref()).is_dir() {
-            return Some(translated.into_owned());
+            // Return the original Linux path: the daemon passes it to
+            // wsl.exe --cd which expects a Linux path, not a UNC path.
+            return Some(cwd);
         }
     }
 
@@ -2826,6 +2830,42 @@ mod tests {
         let dir = std::env::temp_dir();
         let s = dir.to_string_lossy().into_owned();
         assert_eq!(validate_inherited_cwd(Some(s.clone())), Some(s));
+    }
+
+    /// On Windows with a WSL pane, OSC 7 emits a Linux path like
+    /// `/home/marci/projects`. validate_inherited_cwd must return the
+    /// **original Linux path** (not the translated UNC path), because
+    /// the daemon passes it straight to `wsl.exe --cd <path>` which
+    /// expects a Linux path, not `\\wsl.localhost\Ubuntu\...`.
+    #[cfg(windows)]
+    #[test]
+    fn validate_inherited_cwd_returns_linux_path_not_unc_on_windows() {
+        // We can't rely on a real WSL path existing in CI, so we test the
+        // logic branch directly: if translate_if_wsl_windows recognises the
+        // path as translatable and the translated UNC path is a dir, the
+        // function must return the original string, not the translated one.
+        //
+        // Use a path that is guaranteed to exist inside any WSL distro that
+        // GitHub's windows-latest runner has installed: /tmp.
+        // If no WSL is available the translated path won't be a dir and the
+        // test gracefully passes by checking neither branch returned a UNC.
+        let linux_path = "/tmp".to_string();
+        let result = validate_inherited_cwd(Some(linux_path.clone()));
+        if let Some(ref returned) = result {
+            // Whatever we got back must NOT start with `\\` — never a UNC.
+            assert!(
+                !returned.starts_with(r"\\"),
+                "validate_inherited_cwd returned a UNC path ({returned:?}) instead of the original Linux path; \
+                 wsl.exe --cd would fail with this"
+            );
+            // If we got something back it should be the original Linux path.
+            assert_eq!(
+                returned, &linux_path,
+                "validate_inherited_cwd should return the original Linux path, not a translated form"
+            );
+        }
+        // If result is None (no WSL / path not found) that's also acceptable
+        // — we just can't verify the positive branch without a live WSL install.
     }
 
     #[test]

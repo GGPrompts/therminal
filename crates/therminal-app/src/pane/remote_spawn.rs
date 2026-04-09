@@ -176,6 +176,7 @@ pub fn spawn_remote_pane(
         tokio_handle,
         daemon_socket,
         callbacks,
+        None,
     )?;
     Ok((state, session_id, remote_pane_id))
 }
@@ -204,6 +205,7 @@ pub(crate) fn build_remote_pane_state(
     tokio_handle: tokio::runtime::Handle,
     daemon_socket: std::path::PathBuf,
     callbacks: PaneCallbacks,
+    initial_cwd: Option<String>,
 ) -> Result<PaneState, anyhow::Error> {
     // ── 2. Build the local Term that the renderer reads from ──────────
     let term_config = TermConfig {
@@ -219,7 +221,10 @@ pub(crate) fn build_remote_pane_state(
     let term = Term::new(term_config, &term_size, listener);
     let term = Arc::new(FairMutex::new(term));
 
-    let status = Arc::new(Mutex::new(PaneStatus::default()));
+    let status = Arc::new(Mutex::new(PaneStatus {
+        cwd: initial_cwd,
+        ..Default::default()
+    }));
     let region_index = Arc::new(Mutex::new(RegionIndex::new()));
 
     // ── 3. Spawn the worker thread that runs advance_with_interceptor ─

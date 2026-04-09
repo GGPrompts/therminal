@@ -286,7 +286,11 @@ fn set_common_env(cmd: &mut CommandBuilder) {
 /// - **Fish**: `--init-command "source <integration_script>"`.
 /// - **PowerShell**: `-NoExit -Command ". <integration_script>"`.
 /// - **Unknown**: Falls back to `BASH_ENV` (works if shell is sh-compatible).
-fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuilder, PtyError> {
+fn build_shell_command(
+    shell: &str,
+    shell_type: ShellType,
+    initial_cwd: Option<&str>,
+) -> Result<CommandBuilder, PtyError> {
     let integration_dir = shell_integration_dir();
 
     match shell_type {
@@ -354,9 +358,10 @@ fn build_shell_command(shell: &str, shell_type: ShellType) -> Result<CommandBuil
             // by generating a bash rcfile wrapper and passing it via
             // `wsl -- bash --rcfile <wrapper>`.
             let mut cmd = CommandBuilder::new(shell);
-            // Start in the Linux home directory instead of /mnt/c/...
+            // Use the provided Linux cwd if available (split inheritance),
+            // otherwise fall back to the Linux home directory.
             cmd.arg("--cd");
-            cmd.arg("~");
+            cmd.arg(initial_cwd.unwrap_or("~"));
             cmd.env("TERM_PROGRAM", "therminal");
             cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
@@ -452,7 +457,12 @@ pub fn spawn_shell_with_options(
     let shell_type = detect_shell_type(&shell);
     debug!(?shell, ?shell_type, "detected shell for PTY spawn");
 
-    let mut cmd = build_shell_command(&shell, shell_type)?;
+    let cwd_for_cmd = if options.cwd.is_empty() {
+        None
+    } else {
+        Some(options.cwd.as_str())
+    };
+    let mut cmd = build_shell_command(&shell, shell_type, cwd_for_cmd)?;
 
     // Merge extra env vars from config.
     for (k, v) in &options.env {
@@ -592,7 +602,7 @@ mod tests {
 
     #[test]
     fn build_shell_command_bash() {
-        let cmd = build_shell_command("/bin/bash", ShellType::Bash)
+        let cmd = build_shell_command("/bin/bash", ShellType::Bash, None)
             .expect("failed to build bash command");
         // The command should not be a default_prog (it has explicit args).
         assert!(
@@ -601,9 +611,57 @@ mod tests {
         );
     }
 
+    /// When splitting a WSL pane, the inherited Linux cwd (e.g.
+    /// `/home/marci/projects`) must be forwarded as `wsl.exe --cd <path>`.
+    /// Previously this was hardcoded to `--cd ~`, which always started the
+    /// new pane in the Linux home directory regardless of where the source
+    /// pane was.
+    #[cfg(windows)]
+    #[test]
+    fn build_shell_command_wsl_uses_provided_cwd() {
+        let cmd = build_shell_command("wsl.exe", ShellType::Wsl, Some("/home/marci/projects"))
+            .expect("failed to build wsl command");
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        // Find the --cd argument and assert its value is the Linux path.
+        let cd_pos = argv
+            .iter()
+            .position(|a| a == "--cd")
+            .expect("wsl command should contain --cd");
+        assert_eq!(
+            argv.get(cd_pos + 1).map(String::as_str),
+            Some("/home/marci/projects"),
+            "wsl.exe --cd should receive the Linux cwd, not ~ or a UNC path"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_shell_command_wsl_falls_back_to_home_when_no_cwd() {
+        let cmd = build_shell_command("wsl.exe", ShellType::Wsl, None)
+            .expect("failed to build wsl command");
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let cd_pos = argv
+            .iter()
+            .position(|a| a == "--cd")
+            .expect("wsl command should contain --cd");
+        assert_eq!(
+            argv.get(cd_pos + 1).map(String::as_str),
+            Some("~"),
+            "wsl.exe --cd should fall back to ~ when no cwd is provided"
+        );
+    }
+
     #[test]
     fn build_shell_command_unknown_uses_configured_shell() {
-        let cmd = build_shell_command("/bin/sh", ShellType::Unknown)
+        let cmd = build_shell_command("/bin/sh", ShellType::Unknown, None)
             .expect("failed to build unknown shell command");
         // Unknown shell should use the configured shell path, not default_prog.
         assert!(

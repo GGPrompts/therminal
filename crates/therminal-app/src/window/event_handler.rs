@@ -283,10 +283,22 @@ impl App {
 
     /// Execute the currently selected menu action and close the menu.
     pub(super) fn execute_menu_action(&mut self) {
-        let action = match self.active_menu.as_ref().and_then(|m| m.selected_action()) {
-            Some(a) => a,
+        let (action, menu_pane_id) = match self.active_menu.as_ref() {
+            Some(m) => {
+                let action = match m.selected_action() {
+                    Some(a) => a,
+                    None => {
+                        self.active_menu = None;
+                        return;
+                    }
+                };
+                let pane_id = match m.context {
+                    crate::menu::MenuContext::Pane { pane_id } => Some(pane_id),
+                    _ => None,
+                };
+                (action, pane_id)
+            }
             None => {
-                self.active_menu = None;
                 return;
             }
         };
@@ -296,7 +308,13 @@ impl App {
             KeyAction::SplitHorizontal => self.split_focused_pane(SplitDirection::Horizontal),
             KeyAction::SplitVertical => self.split_focused_pane(SplitDirection::Vertical),
             KeyAction::SplitAuto => self.split_focused_pane_auto(),
-            KeyAction::ClosePane => self.close_focused_pane(),
+            KeyAction::ClosePane => {
+                if let Some(id) = menu_pane_id {
+                    self.close_pane_by_id(id);
+                } else {
+                    self.close_focused_pane();
+                }
+            }
             KeyAction::CloseAllPanes => self.close_all_panes(),
             KeyAction::RestoreLayout => self.restore_layout(),
             KeyAction::Copy => self.copy_selection(),

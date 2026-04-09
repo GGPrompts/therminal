@@ -825,6 +825,7 @@ impl App {
                         handle_for_leaf.clone(),
                         socket_for_leaf.clone(),
                         callbacks,
+                        None,
                     ) {
                         Ok(state) => {
                             id_pairs.push((local_id, daemon_pane_id));
