@@ -13,9 +13,13 @@ use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_displ
 use crate::pane::{LayoutNode, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
+use therminal_harness_claude::tool_call_hotspots::detect_claude_tool_call_hotspots;
+use therminal_terminal::agent_registry::AgentRegistry;
 use therminal_terminal::hotspot_detection::{
     TextHotspot, detect_hotspots_from_text_with_wrap, promote_directory_hotspots,
 };
+
+use crate::claude_cwd::ClaudeCwdTracker;
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 
@@ -135,6 +139,8 @@ pub(crate) fn render_panes_recursive(
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
+    agent_registry: &std::sync::Mutex<AgentRegistry>,
+    claude_cwd: &ClaudeCwdTracker,
 ) {
     match node {
         LayoutNode::Leaf(pane) => {
@@ -156,6 +162,8 @@ pub(crate) fn render_panes_recursive(
                 view,
                 surface_width,
                 surface_height,
+                agent_registry,
+                claude_cwd,
             );
             queue.submit(std::iter::once(encoder.finish()));
         }
@@ -178,6 +186,8 @@ pub(crate) fn render_panes_recursive(
                 view,
                 surface_width,
                 surface_height,
+                agent_registry,
+                claude_cwd,
             );
             render_panes_recursive(
                 second,
@@ -192,6 +202,8 @@ pub(crate) fn render_panes_recursive(
                 view,
                 surface_width,
                 surface_height,
+                agent_registry,
+                claude_cwd,
             );
 
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -232,7 +244,20 @@ fn render_single_pane(
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
+    agent_registry: &std::sync::Mutex<AgentRegistry>,
+    claude_cwd: &ClaudeCwdTracker,
 ) {
+    // Look up the Claude agent cwd for this pane once per frame (tn-ykxb).
+    // Two layers of Option because the pane might not have an agent at
+    // all, and an agent might not be a Claude process with a live state
+    // file. When `None`, the Claude tool-call hotspot extension below
+    // becomes a no-op and clicks fall through to the generic detector.
+    let claude_agent_cwd: Option<std::path::PathBuf> = {
+        let reg = agent_registry.lock().unwrap_or_else(|e| e.into_inner());
+        reg.get(pane.id)
+            .and_then(|entry| entry.pid)
+            .and_then(|pid| claude_cwd.cwd_for_pid(pid))
+    };
     let vp = pane.viewport;
     let term = match pane.backend.term() {
         Some(t) => t,
@@ -384,6 +409,9 @@ fn render_single_pane(
         let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
         let mut hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
         promote_directory_hotspots_from_fs(&mut hotspots);
+        if let Some(ref cwd) = claude_agent_cwd {
+            hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
+        }
 
         // O(1) copy-back: build a HashMap from detected URLs keyed by (row, col),
         // then single-pass over `cells` to apply. Avoids O(N*M) linear search.
@@ -419,6 +447,9 @@ fn render_single_pane(
         let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
         let mut hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
         promote_directory_hotspots_from_fs(&mut hotspots);
+        if let Some(ref cwd) = claude_agent_cwd {
+            hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
+        }
 
         // Row-indexed hotspot application: O(C + H) instead of O(H*C).
         apply_hotspots_to_cells(&mut cells, &hotspots);

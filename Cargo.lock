@@ -3423,6 +3423,7 @@ dependencies = [
  "sysinfo",
  "therminal-core",
  "therminal-daemon-client",
+ "therminal-harness-claude",
  "therminal-protocol",
  "therminal-runtime",
  "therminal-terminal",

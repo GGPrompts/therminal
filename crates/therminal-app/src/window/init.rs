@@ -103,6 +103,12 @@ impl App {
 
         let agent_registry = Arc::new(std::sync::Mutex::new(agent_registry));
 
+        // Spawn the Claude session cwd tracker (tn-ykxb). The background
+        // thread polls `/tmp/claude-code-state/*.json` and keeps a
+        // pid->session->cwd index the renderer reads when building
+        // Claude tool-call hotspots for a pane.
+        let claude_cwd = crate::claude_cwd::ClaudeCwdTracker::spawn();
+
         // Start the swarm watcher: a background thread that polls
         // ~/.claude/projects/*/*/subagents/agent-*.jsonl and emits spawn/reclaim
         // events when Claude subagents start and finish. Gated on the same
@@ -161,6 +167,7 @@ impl App {
             grid_renderer: None,
             workspaces: None,
             agent_registry,
+            claude_cwd,
             event_proxy,
             modifiers: Default::default(),
             pending_resize: None,

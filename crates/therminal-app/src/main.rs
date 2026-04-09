@@ -1,3 +1,4 @@
+mod claude_cwd;
 mod cli;
 mod clipboard;
 mod color_mapping;

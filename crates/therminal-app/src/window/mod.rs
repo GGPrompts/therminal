@@ -156,6 +156,12 @@ pub struct App {
     /// Shared agent registry for auto-tiling (reader threads register/unregister agents).
     agent_registry: Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
 
+    /// Claude Code session cwd tracker (tn-ykxb). Background thread
+    /// polls `/tmp/claude-code-state/*.json` and exposes a pid->cwd
+    /// lookup consumed by the renderer to resolve Claude tool-call
+    /// hotspots against the agent's working directory.
+    pub(crate) claude_cwd: Arc<crate::claude_cwd::ClaudeCwdTracker>,
+
     /// Proxy to wake the event loop from PTY reader threads.
     event_proxy: EventLoopProxy<UserEvent>,
 

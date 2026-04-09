@@ -113,6 +113,8 @@ impl App {
             &view,
             gpu.config.width,
             gpu.config.height,
+            &self.agent_registry,
+            &self.claude_cwd,
         );
 
         // ── Overlay pass: chrome backgrounds ────────────────────────────
