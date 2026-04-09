@@ -46,6 +46,8 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 - Mouse-drag separator resize (click and drag pane borders)
 - Auto-tiling for agent swarms — panes spawn/reclaim as agents start and exit (debounced)
 - PaneBackend abstraction (Terminal | WebView — WebView stubbed for future hybrid panes)
+- Per-pane headers showing the real daemon `PaneId`, plus Claude session title or cwd basename when available
+- Status bar pane identity and smarter workspace-tab labels based on the focused pane context
 - Workspace tabs (Alt+1..9 to switch, Alt+Shift+1..9 to send pane)
 - Pane swap (Alt+Shift+Arrow)
 - Font size keybindings (Ctrl+Shift+=/-/0)
@@ -60,7 +62,7 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 **MCP server & trust**
 - MCP server in the daemon with stdio bridge (`therminal mcp`) for Claude Code integration
 - Cross-platform IPC: Unix sockets (Linux/macOS), named pipes (Windows)
-- 18 tools across 5 domains (sessions, panes, semantic, workspaces, agents)
+- 29 tools covering sessions, panes, semantic queries, workspaces, agents, and event stats
 - MCP Resources with subscription-based pane content streaming (`terminal://pane/{id}/output`) and live Claude Code event streaming (`therminal://claude/events`)
 - Per-agent trust tiers (Sandboxed / Supervised / Trusted) enforced at the MCP handler layer
 - Sliding-window rate limiter for destructive tools; all decisions audit-logged
@@ -132,22 +134,22 @@ A small CLI subscriber that connects to the running daemon, subscribes to the `t
 
 ```bash
 # Basic run — prints tool use, results, thinking, progress
-cargo run -p therminal-daemon --bin claude-events
+cargo run -p therminal-harness-claude --bin claude-events
 
 # Include UserMessage + AssistantMessage (noisy)
-cargo run -p therminal-daemon --bin claude-events -- --verbose
+cargo run -p therminal-harness-claude --bin claude-events -- --verbose
 
 # Only show subagent events
-cargo run -p therminal-daemon --bin claude-events -- --filter sub
+cargo run -p therminal-harness-claude --bin claude-events -- --filter sub
 
 # Filter to one top-level session and its subagents
-cargo run -p therminal-daemon --bin claude-events -- --session <session-uuid>
+cargo run -p therminal-harness-claude --bin claude-events -- --session <session-uuid>
 
 # Machine-readable JSON per line, pipe to jq
-cargo run -p therminal-daemon --bin claude-events -- --json | jq .
+cargo run -p therminal-harness-claude --bin claude-events -- --json | jq .
 
 # Disable ANSI colors (for logs / non-tty output)
-cargo run -p therminal-daemon --bin claude-events -- --no-color
+cargo run -p therminal-harness-claude --bin claude-events -- --no-color
 ```
 
 Output format (non-`--json`):
@@ -198,7 +200,7 @@ shell = "powershell.exe"  # or "wsl.exe", "pwsh.exe", "cmd.exe"
 
 ## Architecture
 
-Cargo workspace with six crates:
+Cargo workspace with nine crates:
 
 ```
 crates/
@@ -207,7 +209,10 @@ crates/
   therminal-core/        Color palette, wgpu context, text renderer, TOML config, hot-reload
   therminal-runtime/     Cross-platform paths, runtime dir management
   therminal-daemon/      Session manager, event bus, multiplexer, IPC server, MCP server, trust enforcement
+  therminal-daemon-client/ Lightweight IPC client shared by the GUI, CLI, and harnesses
+  therminal-harness-claude/ Claude Code integration, state watcher, and `claude-events` dev tool
   therminal-app/         winit window, grid renderer, mouse input, PTY wiring
+  therminal-integration-tests/ End-to-end daemon + PTY scenarios
 vendor/
   alacritty_terminal/    Vendored v0.25.1
   vte/                   Vendored with SequenceInterceptor trait

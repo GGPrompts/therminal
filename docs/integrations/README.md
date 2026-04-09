@@ -17,10 +17,23 @@ The principle: pick MCP when the structured shape materially matters; pick
 the CLI for everything else. Both are thin wrappers over
 `therminal-daemon-client`, so the daemon never knows which one called it.
 
+Current high-value MCP surfaces include:
+
+- `terminal://pane/{id}/output` for live pane output subscriptions
+- `therminal://claude/events` for live Claude Code parent/subagent event streams
+- semantic queries and pane summary/peek calls where typed structure matters
+
+Current high-value CLI surfaces include:
+
+- `therminal pane list|peek|send|tag` for low-overhead polling and writes
+- `therminal agents list` for conductor-side swarm inspection
+- `therminal events --follow` for JSON Lines event streaming into shell tools
+
 ## Guides
 
 - [`../cli.md`](../cli.md) — `therminal pane|session|workspace|agents|events|semantic`
   cache-friendly CLI surface (tn-k13n).
+- `crates/therminal-daemon/CLAUDE.md` — daemon MCP tool and resource reference.
 - [Cheap Polling](cheap-polling.md) — Use `terminal.panes.get_summary`, `terminal.panes.peek`,
   and `content_hash` to poll many panes without burning conductor cache (tn-sp3n).
 - [Streaming Pane Output](streaming-pane-output.md) — Subscribe to live PTY output via

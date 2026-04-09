@@ -5,6 +5,11 @@ existing `therminal-daemon-client` so any MCP client (Claude Code, Codex,
 shell scripts) can drive the same daemon the GUI talks to without paying
 MCP framing costs.
 
+Use the CLI for polling, writes, pane tagging, scripted fan-out, and other
+small repeated operations. Use MCP when you need typed resources,
+subscriptions, or structured semantic queries to flow back into an agent
+tool loop.
+
 ## Why a CLI alongside MCP
 
 - **MCP** is the right tool when the structured shape materially matters:
@@ -28,6 +33,10 @@ a multi-kB JSON tool result.
 
 The CLI auto-spawns `therminal-daemon` via the same chain the GUI uses
 (`[daemon] binary_path`, sibling exe, `$PATH`) when no daemon is running.
+
+This document covers the lightweight CLI surface. For the daemon MCP
+surface and resource URIs, see [integrations README](integrations/README.md)
+and `crates/therminal-daemon/CLAUDE.md`.
 
 ## Subcommand reference
 
