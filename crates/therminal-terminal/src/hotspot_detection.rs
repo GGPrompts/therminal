@@ -67,6 +67,16 @@ pub struct TextHotspot {
     /// (resolve-against-cwd plus editor-fallback chain) when the pattern
     /// already resolved a target URL.
     pub pattern_source: Option<PatternHotspotSource>,
+    /// Optional pre-resolved absolute path used by the click handler in
+    /// preference to the visible `text` (tn-gidy). Harness crates set this
+    /// when they can resolve a relative path using information that's not
+    /// available to the generic hotspot detector — e.g. the Claude Code
+    /// harness joins `Update(crates/foo.rs)` against the *agent's* cwd,
+    /// which may differ from the shell's OSC 7 cwd during a worktree hop.
+    ///
+    /// `None` for the generic detectors: the click handler falls back to
+    /// resolving `text` against the pane's cwd (its existing behaviour).
+    pub resolved_text: Option<String>,
 }
 
 /// Provenance data attached to a pattern-pack-sourced hotspot.
@@ -444,6 +454,7 @@ pub fn detect_hotspots_from_text_with_wrap(
                     end_col: ec,
                     is_dir: false,
                     pattern_source: None,
+                    resolved_text: None,
                 });
             }
         };
@@ -547,6 +558,7 @@ pub fn detect_hotspots_from_text_with_wrap(
                         end_col: ec,
                         is_dir: false,
                         pattern_source: None,
+                        resolved_text: None,
                     });
                 }
             }
@@ -926,6 +938,7 @@ where
             start_col,
             end_col,
             is_dir: false,
+            resolved_text: None,
             pattern_source: Some(PatternHotspotSource {
                 pack_name: m.pack_name.clone(),
                 rule_name: m.pattern_name.clone(),
@@ -1300,6 +1313,7 @@ mod tests {
                 end_col: 13,
                 is_dir: false,
                 pattern_source: None,
+                resolved_text: None,
             },
             TextHotspot {
                 kind: HotspotKind::FilePath,
@@ -1309,6 +1323,7 @@ mod tests {
                 end_col: 17,
                 is_dir: false,
                 pattern_source: None,
+                resolved_text: None,
             },
             TextHotspot {
                 kind: HotspotKind::Url,
@@ -1318,6 +1333,7 @@ mod tests {
                 end_col: 19,
                 is_dir: false,
                 pattern_source: None,
+                resolved_text: None,
             },
         ];
         promote_directory_hotspots(&mut hotspots, |p| Ok(p == "/tmp/some-dir"));
@@ -1338,6 +1354,7 @@ mod tests {
             end_col: 12,
             is_dir: false,
             pattern_source: None,
+            resolved_text: None,
         }];
         let mut seen = String::new();
         promote_directory_hotspots(&mut hotspots, |p| {
@@ -1362,6 +1379,7 @@ mod tests {
             end_col: 16,
             is_dir: false,
             pattern_source: None,
+            resolved_text: None,
         }];
         promote_directory_hotspots(&mut hotspots, |_| Err(std::io::Error::other("nope")));
         assert!(!hotspots[0].is_dir);
@@ -1379,6 +1397,7 @@ mod tests {
             end_col: 30,
             is_dir: false,
             pattern_source: None,
+            resolved_text: None,
         }];
         promote_directory_hotspots(&mut hotspots, |_| {
             Err(std::io::Error::other("cross-fs stat failure"))
@@ -1401,6 +1420,7 @@ mod tests {
             end_col: 23,
             is_dir: false,
             pattern_source: None,
+            resolved_text: None,
         }];
         promote_directory_hotspots(&mut hotspots, |_| Ok(false));
         assert!(

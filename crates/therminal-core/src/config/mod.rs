@@ -197,6 +197,8 @@ pub struct TherminalConfig {
     pub hotspots: HotspotsConfig,
     /// Semantic pattern-matching engine settings (tn-yrjd).
     pub patterns: PatternsConfig,
+    /// Sibling delegate profiles for spawning isolated AI agent siblings (tn-ztv3).
+    pub delegate: DelegateConfig,
     /// Result of the template-version scan performed by [`Self::load_from`].
     ///
     /// Computed in-process and never round-tripped through TOML
@@ -360,6 +362,16 @@ impl TherminalConfig {
                         "profile working_directory does not exist"
                     );
                 }
+            }
+        }
+
+        // Validate delegate profile commands (must be non-empty).
+        for (name, profile) in &self.delegate.profiles {
+            if profile.command.is_empty() {
+                warn!(
+                    profile = %name,
+                    "delegate profile has an empty command; it will be unusable"
+                );
             }
         }
     }
@@ -989,6 +1001,95 @@ pub struct PatternsConfig {
     /// Number of consecutive slow strikes before a pattern is disabled
     /// for the remainder of the daemon session. SPEC §3.2 default: 3.
     pub slow_strike_limit: u32,
+}
+
+// ── Section: Delegate ────────────────────────────────────────────────────
+
+/// Top-level container for sibling delegate configuration (tn-ztv3).
+///
+/// Sibling delegates are isolated AI agent processes (e.g. Claude Code
+/// sub-instances) that can be spawned into a new pane with a known role,
+/// working directory policy, and MCP/permission envelope.  Each named
+/// profile under `[delegate.profiles.<name>]` describes one such role.
+///
+/// At config load time the profiles are deserialized and validated (empty
+/// `command` is warned); no runtime spawning happens here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DelegateConfig {
+    /// Named delegate profiles, keyed by a short identifier (e.g.
+    /// `"planner"`, `"browser-research"`, `"adversarial-review"`).
+    pub profiles: HashMap<String, DelegateProfileConfig>,
+}
+
+/// Working-directory policy for a delegate profile.
+///
+/// Controls where the delegate process's cwd is set when it is spawned.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkingDirMode {
+    /// Inherit the cwd of the pane that triggered the spawn.
+    #[default]
+    Same,
+    /// Use the nearest git worktree root discovered by walking up from the
+    /// triggering pane's cwd. Falls back to `Same` if no `.git` is found.
+    Worktree,
+    /// Create a temporary directory under `<runtime_dir>/scratch/<random>`
+    /// and use that as the cwd. The directory is removed when the delegate
+    /// exits.
+    #[serde(rename = "scratch/{random}")]
+    ScratchRandom,
+}
+
+/// Configuration for a single sibling delegate profile (tn-ztv3).
+///
+/// All fields except `command` are optional and fall back to safe defaults.
+/// Unknown fields produce a deserialization error (`deny_unknown_fields`)
+/// so typos surface immediately at config load time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DelegateProfileConfig {
+    /// Human-readable description shown in the UI and in `therminal agents` output.
+    pub description: String,
+    /// Command template used to launch the delegate process.
+    ///
+    /// This is a **required** field — an empty string will produce a
+    /// load-time warning and the profile will be unusable. Template tokens:
+    ///
+    /// - `{pane_id}` — the ID of the pane that triggered the spawn
+    /// - `{session_id}` — the daemon session ID
+    /// - `{cwd}` — the resolved working directory (after `working_dir` policy)
+    ///
+    /// Example: `"claude --pane {pane_id} --role planner"`
+    pub command: String,
+    /// Working-directory policy for the spawned process.
+    ///
+    /// Defaults to `"same"` (inherit caller's cwd).
+    pub working_dir: WorkingDirMode,
+    /// Allowlist of MCP tool domains that the delegate may call.
+    ///
+    /// An empty list means no additional MCP capabilities beyond what the
+    /// daemon's trust tier already grants.  Each entry is a tool-name prefix
+    /// (e.g. `"terminal.panes"`, `"terminal.sessions"`).
+    pub mcp_enabled: Vec<String>,
+    /// Permission mode string forwarded to the delegate at spawn time (e.g.
+    /// `"bypassPermissions"`, `"default"`, `"plan"`).
+    ///
+    /// The value is passed verbatim; no validation is performed beyond
+    /// ensuring it is a non-null string.
+    pub permission_mode: String,
+}
+
+impl Default for DelegateProfileConfig {
+    fn default() -> Self {
+        Self {
+            description: String::new(),
+            command: String::new(),
+            working_dir: WorkingDirMode::default(),
+            mcp_enabled: Vec::new(),
+            permission_mode: "default".to_string(),
+        }
+    }
 }
 
 impl Default for PatternsConfig {
@@ -2092,5 +2193,126 @@ EDITOR = "nvim"
             },
         );
         config.validate_paths(); // should not warn
+    }
+
+    // ── Delegate profile tests ────────────────────────────────────────────
+
+    #[test]
+    fn delegate_profiles_deserialize() {
+        let toml_str = r#"
+[delegate.profiles.planner]
+description = "Strategic planner"
+command = "claude --pane {pane_id} --role planner"
+working_dir = "worktree"
+mcp_enabled = ["terminal.panes", "terminal.sessions"]
+permission_mode = "plan"
+
+[delegate.profiles.researcher]
+description = "Web researcher"
+command = "claude --pane {pane_id} --role researcher"
+working_dir = "scratch/{random}"
+mcp_enabled = ["browser"]
+permission_mode = "default"
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.delegate.profiles.len(), 2);
+
+        let planner = &config.delegate.profiles["planner"];
+        assert_eq!(planner.description, "Strategic planner");
+        assert_eq!(planner.command, "claude --pane {pane_id} --role planner");
+        assert_eq!(planner.working_dir, WorkingDirMode::Worktree);
+        assert_eq!(
+            planner.mcp_enabled,
+            vec!["terminal.panes", "terminal.sessions"]
+        );
+        assert_eq!(planner.permission_mode, "plan");
+
+        let researcher = &config.delegate.profiles["researcher"];
+        assert_eq!(researcher.working_dir, WorkingDirMode::ScratchRandom);
+        assert_eq!(researcher.mcp_enabled, vec!["browser"]);
+    }
+
+    #[test]
+    fn delegate_profile_defaults_apply_when_fields_absent() {
+        let toml_str = r#"
+[delegate.profiles.minimal]
+command = "claude --pane {pane_id}"
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        let profile = &config.delegate.profiles["minimal"];
+        assert_eq!(profile.working_dir, WorkingDirMode::Same);
+        assert!(profile.mcp_enabled.is_empty());
+        assert_eq!(profile.permission_mode, "default");
+        assert!(profile.description.is_empty());
+    }
+
+    #[test]
+    fn delegate_profile_unknown_field_produces_error() {
+        let toml_str = r#"
+[delegate.profiles.bad]
+command = "claude"
+unknown_field = "oops"
+"#;
+        let result = toml::from_str::<TherminalConfig>(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown field in delegate profile must produce a deserialization error"
+        );
+    }
+
+    #[test]
+    fn delegate_unknown_top_level_field_produces_error() {
+        let toml_str = r#"
+[delegate]
+not_a_real_field = true
+"#;
+        let result = toml::from_str::<TherminalConfig>(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown field in [delegate] must produce a deserialization error"
+        );
+    }
+
+    #[test]
+    fn delegate_config_round_trips_through_toml() {
+        let mut config = TherminalConfig::default();
+        let mut profile = DelegateProfileConfig::default();
+        profile.description = "Test delegate".to_string();
+        profile.command = "claude --role test".to_string();
+        profile.working_dir = WorkingDirMode::Worktree;
+        profile.mcp_enabled = vec!["terminal.panes".to_string()];
+        profile.permission_mode = "plan".to_string();
+        config.delegate.profiles.insert("test".to_string(), profile);
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+
+        let p = &decoded.delegate.profiles["test"];
+        assert_eq!(p.description, "Test delegate");
+        assert_eq!(p.command, "claude --role test");
+        assert_eq!(p.working_dir, WorkingDirMode::Worktree);
+        assert_eq!(p.mcp_enabled, vec!["terminal.panes"]);
+        assert_eq!(p.permission_mode, "plan");
+    }
+
+    #[test]
+    fn working_dir_mode_same_is_default() {
+        let mode = WorkingDirMode::default();
+        assert_eq!(mode, WorkingDirMode::Same);
+    }
+
+    #[test]
+    fn working_dir_mode_scratch_random_serializes_correctly() {
+        // The TOML key for ScratchRandom is the literal string "scratch/{random}".
+        let toml_str = r#"
+[delegate.profiles.isolated]
+command = "claude"
+working_dir = "scratch/{random}"
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.delegate.profiles["isolated"].working_dir,
+            WorkingDirMode::ScratchRandom
+        );
     }
 }

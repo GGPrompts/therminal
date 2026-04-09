@@ -10,7 +10,7 @@ use super::{TherminalConfig, TrustTier};
 /// [`super::check_config_template_status`] to detect when a user's
 /// `therminal.toml` predates the current template — without polluting the
 /// parsed config struct.
-pub const CONFIG_TEMPLATE_VERSION: u32 = 2;
+pub const CONFIG_TEMPLATE_VERSION: u32 = 3;
 
 /// Return the fully-commented default config as a TOML string.
 ///
@@ -342,6 +342,50 @@ pub(super) fn default_config_text() -> String {
         "# slow_strike_limit = {}\n",
         d.patterns.slow_strike_limit
     ));
+    out.push('\n');
+
+    // ── [delegate] ──────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [delegate] — Sibling delegate profiles (tn-ztv3).\n");
+    out.push_str("# Each profile under [delegate.profiles.<name>] describes an isolated AI\n");
+    out.push_str("# agent sibling that can be spawned into a new pane with a defined role,\n");
+    out.push_str("# working-directory policy, and MCP/permission envelope.\n");
+    out.push_str("#\n");
+    out.push_str("# Fields per profile:\n");
+    out.push_str("#   description     — human-readable label shown in agent listings\n");
+    out.push_str(
+        "#   command         — REQUIRED launch template; tokens: {pane_id}, {session_id}, {cwd}\n",
+    );
+    out.push_str("#   working_dir     — \"same\" | \"worktree\" | \"scratch/{random}\" (default: \"same\")\n");
+    out.push_str(
+        "#   mcp_enabled     — list of MCP tool-domain prefixes granted to the delegate\n",
+    );
+    out.push_str(
+        "#   permission_mode — forwarded verbatim to the delegate (default: \"default\")\n",
+    );
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [delegate.profiles.planner]\n");
+    out.push_str("# description = \"Strategic planning agent — read-only, no shell execution\"\n");
+    out.push_str("# command = \"claude --pane {pane_id} --role planner\"\n");
+    out.push_str("# working_dir = \"worktree\"\n");
+    out.push_str("# mcp_enabled = [\"terminal.panes\", \"terminal.sessions\"]\n");
+    out.push_str("# permission_mode = \"plan\"\n");
+    out.push('\n');
+    out.push_str("# [delegate.profiles.browser-research]\n");
+    out.push_str(
+        "# description = \"Web research agent — browser MCP only, no local file writes\"\n",
+    );
+    out.push_str("# command = \"claude --pane {pane_id} --role researcher\"\n");
+    out.push_str("# working_dir = \"scratch/{random}\"\n");
+    out.push_str("# mcp_enabled = [\"browser\"]\n");
+    out.push_str("# permission_mode = \"default\"\n");
+    out.push('\n');
+    out.push_str("# [delegate.profiles.adversarial-review]\n");
+    out.push_str("# description = \"Adversarial code reviewer — full read access, no writes\"\n");
+    out.push_str("# command = \"claude --pane {pane_id} --role adversarial-reviewer\"\n");
+    out.push_str("# working_dir = \"same\"\n");
+    out.push_str("# mcp_enabled = [\"terminal.panes\", \"terminal.semantic\"]\n");
+    out.push_str("# permission_mode = \"default\"\n");
     out.push('\n');
 
     out
