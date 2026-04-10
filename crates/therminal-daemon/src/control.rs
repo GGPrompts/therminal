@@ -381,6 +381,14 @@ pub fn format_notification(event: &DaemonEvent) -> String {
         } => {
             format!("%pane-resized {session_id} {pane_id} {cols} {rows}\n")
         }
+        DaemonEvent::TrustEscalation {
+            escalation_id,
+            agent_name,
+            tool_name,
+            ..
+        } => {
+            format!("%trust-escalation {escalation_id} {agent_name} {tool_name}\n")
+        }
     }
 }
 

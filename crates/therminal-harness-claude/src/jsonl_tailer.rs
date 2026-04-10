@@ -42,6 +42,12 @@ pub enum EventSource {
         parent_session_id: String,
         agent_id: String,
     },
+    /// Event pushed directly by a Claude Code hook script via the CLI
+    /// (hook-push path). Used when the JSONL tailer is unavailable, e.g. a
+    /// Windows-native daemon whose `~/.claude/projects/` lives on the WSL
+    /// filesystem. `session_id` comes from the hook script's
+    /// `$CLAUDE_SESSION_ID` environment variable.
+    Hook { session_id: String },
 }
 
 /// An [`AgentEvent`] paired with the source stream it came from.

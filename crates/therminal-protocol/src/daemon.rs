@@ -276,6 +276,8 @@ pub enum IpcRequest {
     },
     /// Execute multiple layout mutations as a single atomic transaction (tn-j3ke).
     BatchLayoutOps { ops: Vec<IpcRequest> },
+    /// Resolve a pending trust escalation (tn-b99).
+    ResolveTrustEscalation { escalation_id: u64, approved: bool },
 }
 
 /// Typed IPC responses.
@@ -406,6 +408,8 @@ pub enum IpcResponse {
     /// Hook-push agent event accepted and forwarded to the harness broadcast
     /// channel. Paired with IpcRequest::PushAgentEvent.
     AgentEventPushed,
+    /// Trust escalation resolved (tn-b99).
+    TrustEscalationResolved { escalation_id: u64 },
     /// Generic error response.
     Error { message: String },
 }
@@ -580,6 +584,14 @@ pub enum DaemonEvent {
         cols: u16,
         rows: u16,
     },
+    /// Trust escalation prompt (tn-b99).
+    TrustEscalation {
+        escalation_id: u64,
+        agent_name: String,
+        tool_name: String,
+        current_tier: String,
+        required_tier: String,
+    },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -595,6 +607,8 @@ pub enum EventKind {
     /// authoritative daemon-side resizes from `ResizePane`, `SplitPane`,
     /// and `KillPane` cascade paths.
     PaneResized,
+    /// tn-b99: trust escalation prompt pending.
+    TrustEscalation,
 }
 
 impl DaemonEvent {
@@ -608,6 +622,7 @@ impl DaemonEvent {
             DaemonEvent::WorkspaceChanged { .. } => EventKind::WorkspaceChanged,
             DaemonEvent::PaneExited { .. } => EventKind::PaneExited,
             DaemonEvent::PaneResized { .. } => EventKind::PaneResized,
+            DaemonEvent::TrustEscalation { .. } => EventKind::TrustEscalation,
         }
     }
 }

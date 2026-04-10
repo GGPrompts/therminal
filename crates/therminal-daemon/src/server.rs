@@ -86,9 +86,7 @@ impl IpcServer {
             next_conn_id: AtomicU64::new(1),
             session_mgr,
             hook_push_sink: None,
-            escalation_responses: Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            escalation_responses: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -199,6 +197,7 @@ impl Drop for IpcServer {
 ///    and optional event streaming.
 ///
 /// Mode is detected by peeking at the first bytes on the connection.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: IpcServerStream,
     lifecycle: Arc<Lifecycle>,
@@ -207,6 +206,7 @@ async fn handle_connection(
     event_tx: broadcast::Sender<DaemonEvent>,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: Option<Arc<HookPushSink>>,
+    escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
     conn_id: u64,
 ) -> Result<()> {
     // Read the first 4 bytes. For binary protocols this is the length prefix.
@@ -266,6 +266,7 @@ async fn handle_connection(
                 event_tx,
                 session_mgr,
                 hook_push_sink,
+                escalation_responses,
                 conn_id,
                 ipc_msg,
             )
@@ -288,6 +289,7 @@ async fn handle_ipc_connection(
     event_tx: broadcast::Sender<DaemonEvent>,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: Option<Arc<HookPushSink>>,
+    escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
     conn_id: u64,
     first_msg: IpcMessage,
 ) -> Result<()> {
@@ -304,6 +306,7 @@ async fn handle_ipc_connection(
         &event_tx,
         &session_mgr,
         &hook_push_sink,
+        &escalation_responses,
         &mut subscribed_kinds,
         &mut event_rx,
         conn_id,
@@ -323,7 +326,8 @@ async fn handle_ipc_connection(
                             process_ipc_message(
                                 stream, &msg, &lifecycle, &build_hash, &version,
                                 &event_tx, &session_mgr, &hook_push_sink,
-                                &mut subscribed_kinds, &mut event_rx, conn_id,
+                                &escalation_responses, &mut subscribed_kinds,
+                                &mut event_rx, conn_id,
                             ).await?;
                         }
                         None => break, // Clean disconnect
@@ -359,6 +363,7 @@ async fn handle_ipc_connection(
                         &event_tx,
                         &session_mgr,
                         &hook_push_sink,
+                        &escalation_responses,
                         &mut subscribed_kinds,
                         &mut event_rx,
                         conn_id,
@@ -385,6 +390,7 @@ async fn process_ipc_message(
     event_tx: &broadcast::Sender<DaemonEvent>,
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: &Option<Arc<HookPushSink>>,
+    escalation_responses: &Arc<crate::mcp::EscalationResponseMap>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -402,6 +408,7 @@ async fn process_ipc_message(
                 event_tx,
                 session_mgr,
                 hook_push_sink,
+                escalation_responses,
                 subscribed_kinds,
                 event_rx,
                 conn_id,
@@ -434,6 +441,7 @@ async fn dispatch_ipc(
     event_tx: &broadcast::Sender<DaemonEvent>,
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: &Option<Arc<HookPushSink>>,
+    escalation_responses: &Arc<crate::mcp::EscalationResponseMap>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -922,23 +930,27 @@ async fn dispatch_ipc(
         IpcRequest::BatchLayoutOps { ops } => {
             batch_layout_ops(ops, lifecycle, event_tx, session_mgr).await
         }
-        IpcRequest::PushAgentEvent { signal } => match hook_push_sink {
-            Some(sink) => {
-                match serde_json::from_value::<therminal_harness_claude::HookSignal>(signal.clone())
-                {
-                    Ok(hook_signal) => {
-                        sink.inject(hook_signal);
-                        IpcResponse::AgentEventPushed
-                    }
-                    Err(e) => IpcResponse::Error {
-                        message: format!("PushAgentEvent: invalid HookSignal payload: {e}"),
-                    },
+        IpcRequest::ResolveTrustEscalation {
+            escalation_id,
+            approved,
+        } => {
+            let sender = {
+                let mut map = escalation_responses
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                map.remove(escalation_id)
+            };
+            if let Some(tx) = sender {
+                let _ = tx.send(*approved);
+                IpcResponse::TrustEscalationResolved {
+                    escalation_id: *escalation_id,
+                }
+            } else {
+                IpcResponse::Error {
+                    message: format!("unknown or expired escalation_id: {}", escalation_id),
                 }
             }
-            None => IpcResponse::Error {
-                message: "PushAgentEvent: hook-push sink not wired (harness disabled)".to_string(),
-            },
-        },
+        }
     }
 }
 

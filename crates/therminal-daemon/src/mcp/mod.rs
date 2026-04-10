@@ -36,9 +36,16 @@ use therminal_core::config::TrustConfig;
 
 use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
 
+/// Map from escalation_id -> oneshot sender for trust escalation responses.
+/// Inserted when a trust escalation is raised; removed on resolution via
+/// IpcRequest::ResolveTrustEscalation.
+pub type EscalationResponseMap =
+    std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<bool>>>;
+
 use crate::session::SessionManager;
 use crate::trust::{
-    AgentIdentity, RateLimiter, TrustCheckResult, check_resource_access, check_tool_access,
+    AgentIdentity, RateLimiter, SessionGrants, TrustCheckResult, check_resource_access,
+    check_tool_access_with_grants,
 };
 use therminal_terminal::agent_registry::TaggedAgentEvent as TaggedAgentLifecycleEvent;
 use therminal_terminal::semantic_patterns::PatternEngine;
@@ -101,10 +108,20 @@ pub struct TherminalMcpServer {
     /// Unified event bus (tn-xula). `None` only in legacy unit tests that
     /// construct the server through the historical 6-arg `new`.
     pub(super) event_bus: Option<Arc<crate::event_bus::EventBus>>,
+    /// Session-scoped grants for trust escalation approvals (tn-b99).
+    pub(super) session_grants: Arc<SessionGrants>,
+    /// Pending escalation response channels (tn-b99).
+    pub(super) escalation_responses: Arc<EscalationResponseMap>,
+    /// Broadcast sender for TrustEscalation events to the GUI (tn-b99).
+    pub(super) daemon_event_tx:
+        Option<tokio::sync::broadcast::Sender<therminal_protocol::DaemonEvent>>,
 }
 
 pub(super) const CLAUDE_EVENT_BUFFER_CAP: usize = 256;
 pub(super) const AGENT_EVENT_BUFFER_CAP: usize = 256;
+
+/// Monotonic counter for escalation IDs (tn-b99).
+static ESCALATION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// URI for the global Claude agent-event stream.
 pub(super) const CLAUDE_EVENTS_URI: &str = "therminal://claude/events";
@@ -161,6 +178,9 @@ impl TherminalMcpServer {
             )),
             pattern_engine,
             event_bus,
+            session_grants: Arc::new(SessionGrants::new()),
+            escalation_responses: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            daemon_event_tx: None,
         }
     }
 
@@ -168,22 +188,94 @@ impl TherminalMcpServer {
     ///
     /// Returns `Ok(())` if allowed, or an `Err(CallToolResult)` with
     /// a permission-denied error to return to the client.
-    pub(super) fn enforce_trust(
+    pub(super) async fn enforce_trust(
         &self,
         tool_name: &str,
         agent: &AgentIdentity,
     ) -> Result<(), CallToolResult> {
+        match check_tool_access_with_grants(
+            tool_name,
+            agent,
+            &self.trust_config,
+            &self.rate_limiter,
+            Some(&self.session_grants),
+        ) {
+            TrustCheckResult::Allowed => Ok(()),
+            TrustCheckResult::Denied(reason) => {
+                Err(CallToolResult::error(vec![Content::text(reason)]))
+            }
+            TrustCheckResult::Escalation {
+                agent_name,
+                tool_name: tn,
+                current_tier,
+                required_tier,
+            } => {
+                if let Some(ref tx) = self.daemon_event_tx {
+                    let esc_id =
+                        ESCALATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                    {
+                        let mut map = self
+                            .escalation_responses
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        map.insert(esc_id, resp_tx);
+                    }
+                    let event = therminal_protocol::DaemonEvent::TrustEscalation {
+                        escalation_id: esc_id,
+                        agent_name: agent_name.clone(),
+                        tool_name: tn.clone(),
+                        current_tier: current_tier.to_string(),
+                        required_tier: required_tier.to_string(),
+                    };
+                    let _ = tx.send(event);
+                    match tokio::time::timeout(std::time::Duration::from_secs(60), resp_rx).await {
+                        Ok(Ok(true)) => {
+                            self.session_grants.grant(&agent_name, &tn);
+                            Ok(())
+                        }
+                        _ => {
+                            let mut map = self
+                                .escalation_responses
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            map.remove(&esc_id);
+                            Err(CallToolResult::error(vec![Content::text(format!(
+                                "trust escalation denied: agent {:?} requested {:?} (requires {})",
+                                agent_name, tn, required_tier,
+                            ))]))
+                        }
+                    }
+                } else {
+                    Err(CallToolResult::error(vec![Content::text(format!(
+                        "permission denied: agent {:?} has tier {}, tool {:?} requires {}",
+                        agent_name, current_tier, tn, required_tier,
+                    ))]))
+                }
+            }
+        }
+    }
+
+    /// Synchronous trust check for tests (no escalation support).
+    #[cfg(test)]
+    pub(crate) fn enforce_trust_sync(
+        &self,
+        tool_name: &str,
+        agent: &AgentIdentity,
+    ) -> Result<(), CallToolResult> {
+        use crate::trust::check_tool_access;
         match check_tool_access(tool_name, agent, &self.trust_config, &self.rate_limiter) {
             TrustCheckResult::Allowed => Ok(()),
             TrustCheckResult::Denied(reason) => {
                 Err(CallToolResult::error(vec![Content::text(reason)]))
             }
+            TrustCheckResult::Escalation {
+                tool_name: reason, ..
+            } => Err(CallToolResult::error(vec![Content::text(reason)])),
         }
     }
 
     /// Enforce trust tier for a resource read.
-    ///
-    /// All resource reads are Observer-tier (Sandboxed minimum).
     pub(super) fn enforce_resource_trust(
         &self,
         uri: &str,
@@ -191,10 +283,12 @@ impl TherminalMcpServer {
     ) -> Result<(), ErrorData> {
         match check_resource_access(uri, agent, &self.trust_config) {
             TrustCheckResult::Allowed => Ok(()),
-            TrustCheckResult::Denied(reason) => Err(ErrorData::new(
-                // JSON-RPC has no standard FORBIDDEN code; use a custom application error.
+            TrustCheckResult::Denied(reason) => {
+                Err(ErrorData::new(ErrorCode(-32001), reason, None))
+            }
+            TrustCheckResult::Escalation { .. } => Err(ErrorData::new(
                 ErrorCode(-32001),
-                reason,
+                "trust escalation not supported for resource reads".to_string(),
                 None,
             )),
         }
@@ -297,7 +391,7 @@ impl ServerHandler for TherminalMcpServer {
         let agent = extract_agent_identity(&context);
 
         // Enforce trust tier and rate limiting.
-        if let Err(denied_result) = self.enforce_trust(name, &agent) {
+        if let Err(denied_result) = self.enforce_trust(name, &agent).await {
             return Ok(denied_result);
         }
 
@@ -355,7 +449,7 @@ impl ServerHandler for TherminalMcpServer {
                 let params: PeekPaneParam = parse_args(args)?;
                 self.handle_peek_pane(params).await
             }
-                        "terminal.panes.capture_result" => {
+            "terminal.panes.capture_result" => {
                 let params: CaptureResultParam = parse_args(args)?;
                 self.handle_capture_result(params).await
             }
@@ -844,7 +938,7 @@ pub(crate) mod tests {
         ];
         for tool in &observer_tools {
             assert!(
-                server.enforce_trust(tool, &agent).is_ok(),
+                server.enforce_trust_sync(tool, &agent).is_ok(),
                 "expected Sandboxed to be allowed for Observer tool: {tool}"
             );
         }
@@ -863,7 +957,7 @@ pub(crate) mod tests {
             "terminal.panes.create",
         ];
         for tool in &writer_tools {
-            let result = server.enforce_trust(tool, &agent);
+            let result = server.enforce_trust_sync(tool, &agent);
             assert!(
                 result.is_err(),
                 "expected Sandboxed to be denied for Writer tool: {tool}"
@@ -883,7 +977,7 @@ pub(crate) mod tests {
         ];
         for tool in &writer_tools {
             assert!(
-                server.enforce_trust(tool, &agent).is_ok(),
+                server.enforce_trust_sync(tool, &agent).is_ok(),
                 "expected Supervised to be allowed for Writer tool: {tool}"
             );
         }
@@ -897,7 +991,7 @@ pub(crate) mod tests {
         let server = make_server(sandboxed_config());
         let agent = agent("sandboxed-bot");
         for tool in &["terminal.sessions.destroy", "terminal.panes.destroy"] {
-            let result = server.enforce_trust(tool, &agent);
+            let result = server.enforce_trust_sync(tool, &agent);
             assert!(
                 result.is_err(),
                 "expected Sandboxed to be denied for Admin tool: {tool}"
@@ -911,7 +1005,7 @@ pub(crate) mod tests {
         let server = make_server(supervised_config());
         let agent = agent("supervised-bot");
         for tool in &["terminal.sessions.destroy", "terminal.panes.destroy"] {
-            let result = server.enforce_trust(tool, &agent);
+            let result = server.enforce_trust_sync(tool, &agent);
             assert!(
                 result.is_err(),
                 "expected Supervised to be denied for Admin tool: {tool}"
@@ -926,7 +1020,7 @@ pub(crate) mod tests {
         let agent = agent("trusted-bot");
         for tool in &["terminal.sessions.destroy", "terminal.panes.destroy"] {
             assert!(
-                server.enforce_trust(tool, &agent).is_ok(),
+                server.enforce_trust_sync(tool, &agent).is_ok(),
                 "expected Trusted to be allowed for Admin tool: {tool}"
             );
         }
@@ -974,7 +1068,7 @@ pub(crate) mod tests {
         assert_eq!(all_tools.len(), 27, "expected exactly 27 tools");
         for tool in &all_tools {
             assert!(
-                server.enforce_trust(tool, &agent).is_ok(),
+                server.enforce_trust_sync(tool, &agent).is_ok(),
                 "expected Trusted to be allowed for: {tool}"
             );
         }
@@ -1001,7 +1095,7 @@ pub(crate) mod tests {
         // Allowed tool must pass.
         assert!(
             server
-                .enforce_trust("terminal.sessions.list", &agent)
+                .enforce_trust_sync("terminal.sessions.list", &agent)
                 .is_ok()
         );
 
@@ -1015,7 +1109,7 @@ pub(crate) mod tests {
             "terminal.panes.destroy",
         ] {
             assert!(
-                server.enforce_trust(tool, &agent).is_err(),
+                server.enforce_trust_sync(tool, &agent).is_err(),
                 "expected allowlist to deny: {tool}"
             );
         }
@@ -1040,7 +1134,7 @@ pub(crate) mod tests {
             "terminal.sessions.destroy",
         ] {
             assert!(
-                server.enforce_trust(tool, &agent).is_err(),
+                server.enforce_trust_sync(tool, &agent).is_err(),
                 "expected empty allowlist to deny: {tool}"
             );
         }
@@ -1063,13 +1157,13 @@ pub(crate) mod tests {
         // First call allowed.
         assert!(
             server
-                .enforce_trust("terminal.sessions.destroy", &agent)
+                .enforce_trust_sync("terminal.sessions.destroy", &agent)
                 .is_ok()
         );
         // Second call denied due to rate limit.
         assert!(
             server
-                .enforce_trust("terminal.sessions.destroy", &agent)
+                .enforce_trust_sync("terminal.sessions.destroy", &agent)
                 .is_err()
         );
     }
@@ -1147,9 +1241,9 @@ pub(crate) mod tests {
     /// 27 to 29: +1 in tn-ifee (`terminal.agents.get_session_detail`),
     /// +1 in tn-xula (`terminal.events.stats`).
     #[test]
-    fn tool_definitions_returns_29_tools() {
+    fn tool_definitions_returns_30_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 29, "expected exactly 29 tool definitions");
+        assert_eq!(tools.len(), 30, "expected exactly 30 tool definitions");
     }
 
     /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -1603,7 +1697,7 @@ pub(crate) mod tests {
         let agent = agent("sandboxed-bot");
         assert!(
             server
-                .enforce_trust("terminal.agents.get_details", &agent)
+                .enforce_trust_sync("terminal.agents.get_details", &agent)
                 .is_ok()
         );
     }
@@ -1628,7 +1722,7 @@ pub(crate) mod tests {
         let agent = agent("sandboxed-bot");
         assert!(
             server
-                .enforce_trust("terminal.agents.get_status", &agent)
+                .enforce_trust_sync("terminal.agents.get_status", &agent)
                 .is_ok()
         );
     }
@@ -1682,7 +1776,7 @@ pub(crate) mod tests {
         let agent = agent("sandboxed-bot");
         assert!(
             server
-                .enforce_trust("terminal.agents.get_cadence", &agent)
+                .enforce_trust_sync("terminal.agents.get_cadence", &agent)
                 .is_ok()
         );
     }
@@ -1818,7 +1912,7 @@ pub(crate) mod tests {
         let agent = agent("sandboxed-bot");
         assert!(
             server
-                .enforce_trust("terminal.agents.find_with_capacity", &agent)
+                .enforce_trust_sync("terminal.agents.find_with_capacity", &agent)
                 .is_ok()
         );
     }
@@ -2008,7 +2102,7 @@ pub(crate) mod tests {
         let agent = agent("sandboxed-bot");
         assert!(
             server
-                .enforce_trust("terminal.semantic.query_commands", &agent)
+                .enforce_trust_sync("terminal.semantic.query_commands", &agent)
                 .is_ok()
         );
     }
@@ -2147,7 +2241,7 @@ pub(crate) mod tests {
         let agent = agent("sandboxed-bot");
         assert!(
             server
-                .enforce_trust("terminal.panes.query_events", &agent)
+                .enforce_trust_sync("terminal.panes.query_events", &agent)
                 .is_ok()
         );
     }
@@ -2158,7 +2252,7 @@ pub(crate) mod tests {
         let agent = agent("supervised-bot");
         assert!(
             server
-                .enforce_trust("terminal.panes.query_events", &agent)
+                .enforce_trust_sync("terminal.panes.query_events", &agent)
                 .is_ok()
         );
     }

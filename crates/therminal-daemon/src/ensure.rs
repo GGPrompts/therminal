@@ -156,7 +156,7 @@ async fn start_daemon(
     // Starting -> Binding
     lifecycle.transition(DaemonState::Binding)?;
 
-    let server = DaemonServer::bind(
+    let mut server = DaemonServer::bind(
         socket_path,
         Arc::clone(&lifecycle),
         BUILD_HASH.to_string(),
@@ -361,6 +361,14 @@ async fn start_daemon(
         lifecycle.shutdown_notify(),
         Some(capacity_observer),
     );
+    // Wire the hook-push sink so IpcRequest::PushAgentEvent signals from WSL
+    // hook scripts are forwarded to the harness broadcast channel. When the
+    // harness is disabled (notify watcher init failure), the sink is None and
+    // PushAgentEvent returns IpcResponse::Error with a clear message.
+    if let Some(events_tx) = claude_harness.event_stream() {
+        let sink = therminal_harness_claude::HookPushSink::new(events_tx.clone());
+        server.set_hook_push_sink(sink);
+    }
     let claude_events_tx = claude_harness.into_event_stream();
 
     // Spawn the daemon-side process-tree agent detector ticker (tn-pehl).

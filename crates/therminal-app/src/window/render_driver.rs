@@ -8,6 +8,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use super::settings_overlay::{self, SettingsRenderValues};
+use super::trust_escalation_overlay;
 use super::{App, OverlayMode, chrome, help_overlay, render};
 
 /// Direction for [`App::jump_to_region`].
@@ -330,6 +331,19 @@ impl App {
                     gpu.config.width,
                     gpu.config.height,
                 );
+            }
+            Some(OverlayMode::TrustEscalation) => {
+                if let Some(ref state) = self.trust_escalation {
+                    trust_escalation_overlay::draw_trust_escalation_overlay(
+                        state,
+                        renderer,
+                        &gpu.device,
+                        &gpu.queue,
+                        &view,
+                        gpu.config.width,
+                        gpu.config.height,
+                    );
+                }
             }
             None => {}
         }

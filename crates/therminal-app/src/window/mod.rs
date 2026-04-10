@@ -25,6 +25,7 @@ mod render;
 mod render_driver;
 mod settings_overlay;
 pub(crate) mod toast;
+pub(crate) mod trust_escalation_overlay;
 pub(crate) mod wsl_paths;
 
 use std::collections::HashMap;
@@ -140,9 +141,11 @@ pub enum NotificationSource {
 
 /// Active top-level overlay mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum OverlayMode {
     Help,
     Settings,
+    TrustEscalation,
 }
 
 // ── Platform-aware home directory ────────────────────────────────────────
@@ -271,6 +274,9 @@ pub struct App {
 
     /// Settings overlay registry + keyboard navigation state.
     settings_overlay: settings_overlay::SettingsOverlayState,
+
+    /// Pending trust escalation modal state (tn-b99).
+    trust_escalation: Option<trust_escalation_overlay::TrustEscalationState>,
 
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,

@@ -900,7 +900,6 @@ pub(crate) struct QueryEventsResult {
     pub(crate) events: Vec<EventInfo>,
 }
 
-
 // -- Delegate result capture (tn-ztv3.5) ------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]

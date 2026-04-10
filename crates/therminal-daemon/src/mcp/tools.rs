@@ -57,20 +57,19 @@ use tracing::debug;
 use super::{
     AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentSessionDetail,
     AgentStatusResult, CadenceSampleResult, CaptureResultParam, CaptureResultResult, CommandInfo,
-    CreateSessionParam, DestroyPaneResult,
-    EmptyParams, EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetContentParam,
-    GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
-    GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson,
-    ListAgentsParam, ListAgentsResult, ListPanesParam, ListPanesResult, ListWorkspacesParam,
-    ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo,
-    PanePeekResult, PaneSummaryResult, PaneTagsResult, PeekPaneParam, QueryCommandsParam,
-    QueryCommandsResult, QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam,
-    QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
-    SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
-    TagPaneParam, TherminalMcpServer, UntagPaneParam, WaitForOutputParam, WaitForOutputResult,
-    WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult, build_content_preview,
-    find_first_pane_in_session, find_pane_info, json_content, now_unix_secs, pane_content_hash,
-    render_grid_lines,
+    CreateSessionParam, DestroyPaneResult, EmptyParams, EventInfo, FindWithCapacityParam,
+    FindWithCapacityResult, GetContentParam, GetHotspotsParam, GetHotspotsResult,
+    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
+    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
+    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
+    PaneContentResult, PaneIdParam, PaneInfo, PanePeekResult, PaneSummaryResult, PaneTagsResult,
+    PeekPaneParam, QueryCommandsParam, QueryCommandsResult, QueryEventsParam, QueryEventsResult,
+    QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
+    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
+    SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam, TherminalMcpServer,
+    UntagPaneParam, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
+    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
+    json_content, now_unix_secs, pane_content_hash, render_grid_lines,
 };
 
 impl TherminalMcpServer {
@@ -756,7 +755,6 @@ impl TherminalMcpServer {
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
-
 
     /// Capture the final output of the last finished command in a pane.
     pub(super) async fn handle_capture_result(

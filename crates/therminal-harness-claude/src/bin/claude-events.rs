@@ -227,6 +227,7 @@ fn event_passes(cli: &Cli, ev: &TaggedAgentEvent) -> bool {
             EventSource::Subagent {
                 parent_session_id, ..
             } => parent_session_id == sid,
+            EventSource::Hook { session_id } => session_id == sid,
         };
         if !matched {
             return false;
@@ -312,6 +313,7 @@ fn format_event_line(cli: &Cli, ev: &TaggedAgentEvent, now_hms: &str) -> String 
     let (tag_label, indent, id_short) = match &ev.source {
         EventSource::TopLevel { session_id } => ("top", "", short8(session_id)),
         EventSource::Subagent { agent_id, .. } => ("sub", "  ", short8(agent_id)),
+        EventSource::Hook { session_id } => ("hook", "", short8(session_id)),
     };
     let tag_raw = format!("[{tag_label} {id_short}]");
     let tag = if matches!(ev.source, EventSource::Subagent { .. }) {
@@ -366,7 +368,66 @@ fn format_event_line(cli: &Cli, ev: &TaggedAgentEvent, now_hms: &str) -> String 
             ..
         } => (
             paint(&format!("{:<12}", tool), CYAN, no_color),
-            truncate(&format!("{display_path} → {resolved_path}"), 80),
+            truncate(&format!("{display_path} -> {resolved_path}"), 80),
+        ),
+        // Hook-push variants
+        AgentEvent::SessionStart {
+            session_id,
+            project_dir,
+            ..
+        } => (
+            paint(&format!("{:<12}", "session+"), GREEN, no_color),
+            truncate(
+                &format!(
+                    "sid={} dir={}",
+                    &session_id[..8.min(session_id.len())],
+                    project_dir
+                ),
+                80,
+            ),
+        ),
+        AgentEvent::SessionStop { session_id, reason } => (
+            paint(&format!("{:<12}", "session-"), DIM, no_color),
+            truncate(
+                &format!(
+                    "sid={} reason={}",
+                    &session_id[..8.min(session_id.len())],
+                    reason.as_deref().unwrap_or("none")
+                ),
+                80,
+            ),
+        ),
+        AgentEvent::ToolState {
+            status, tool_name, ..
+        } => (
+            paint(&format!("{:<12}", "state"), CYAN, no_color),
+            truncate(
+                &format!("{} tool={}", status, tool_name.as_deref().unwrap_or("-")),
+                80,
+            ),
+        ),
+        AgentEvent::SubagentStart {
+            agent_id,
+            agent_type,
+            ..
+        } => (
+            paint(&format!("{:<12}", "sub+"), GREEN, no_color),
+            truncate(
+                &format!(
+                    "agent={} type={}",
+                    &agent_id[..8.min(agent_id.len())],
+                    agent_type.as_deref().unwrap_or("-")
+                ),
+                80,
+            ),
+        ),
+        AgentEvent::SubagentStop { agent_id, .. } => (
+            paint(&format!("{:<12}", "sub-"), DIM, no_color),
+            truncate(&format!("agent={}", &agent_id[..8.min(agent_id.len())]), 80),
+        ),
+        AgentEvent::StopFailure { error_type, .. } => (
+            paint(&format!("{:<12}", "error"), RED, no_color),
+            truncate(error_type, 80),
         ),
     };
 

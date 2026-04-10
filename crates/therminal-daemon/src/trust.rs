@@ -4,7 +4,7 @@
 //! agent's tier from config, and enforces access control with audit logging
 //! and rate limiting for destructive operations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -210,6 +210,57 @@ pub enum TrustCheckResult {
     Allowed,
     /// Tool call is denied with a reason.
     Denied(String),
+    /// Tool call requires user approval via the GUI modal (tn-b99).
+    Escalation {
+        /// Agent name requesting the tool.
+        agent_name: String,
+        /// The MCP tool being requested.
+        tool_name: String,
+        /// The agent's current trust tier.
+        current_tier: TrustTier,
+        /// The tier required by the tool.
+        required_tier: TrustTier,
+    },
+}
+
+// -- Session-scoped grants (tn-b99) --
+
+/// Tracks tools temporarily approved for specific agents during this
+/// daemon session. Populated by user approval via the trust escalation modal.
+pub struct SessionGrants {
+    grants: Mutex<HashSet<(String, String)>>,
+}
+
+impl Default for SessionGrants {
+    fn default() -> Self {
+        Self {
+            grants: Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+impl SessionGrants {
+    /// Create an empty grant set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a session-scoped grant for the given agent + tool.
+    pub fn grant(&self, agent_name: &str, tool_name: &str) {
+        let mut g = self.grants.lock().unwrap_or_else(|e| e.into_inner());
+        g.insert((agent_name.to_string(), tool_name.to_string()));
+        info!(
+            agent = %agent_name,
+            tool = %tool_name,
+            "trust escalation approved (session grant)"
+        );
+    }
+
+    /// Check whether the agent has a session-scoped grant for this tool.
+    pub fn has_grant(&self, agent_name: &str, tool_name: &str) -> bool {
+        let g = self.grants.lock().unwrap_or_else(|e| e.into_inner());
+        g.contains(&(agent_name.to_string(), tool_name.to_string()))
+    }
 }
 
 /// Run the full trust gate for an MCP tool invocation.
@@ -224,11 +275,21 @@ pub fn check_tool_access(
     config: &TrustConfig,
     rate_limiter: &RateLimiter,
 ) -> TrustCheckResult {
+    check_tool_access_with_grants(tool_name, agent, config, rate_limiter, None)
+}
+
+/// Like [`check_tool_access`] but checks session grants and emits
+/// [`TrustCheckResult::Escalation`] when the GUI can prompt the user.
+pub fn check_tool_access_with_grants(
+    tool_name: &str,
+    agent: &AgentIdentity,
+    config: &TrustConfig,
+    rate_limiter: &RateLimiter,
+    session_grants: Option<&SessionGrants>,
+) -> TrustCheckResult {
     let category = match tool_category(tool_name) {
         Some(c) => c,
         None => {
-            // Unknown tool — will be handled as "unknown tool" error by dispatch.
-            // Still audit-log it.
             audit_log(agent, tool_name, "unknown_tool");
             return TrustCheckResult::Allowed;
         }
@@ -238,16 +299,40 @@ pub fn check_tool_access(
     let required = category.required_tier();
 
     if !agent_tier.has_access(required) {
-        let reason = format!(
-            "permission denied: agent {:?} has tier {:?}, tool {:?} requires {:?}",
-            agent.name, agent_tier, tool_name, required,
-        );
-        audit_log_denied(agent, tool_name, &reason);
-        return TrustCheckResult::Denied(reason);
+        if let Some(grants) = session_grants {
+            if grants.has_grant(&agent.name, tool_name) {
+                audit_log(agent, tool_name, "allowed_via_session_grant");
+            } else if let Some(auto_tier) = config.auto_approve_tier {
+                if auto_tier.has_access(required) {
+                    audit_log(agent, tool_name, "auto_approved");
+                } else {
+                    audit_log(agent, tool_name, "escalation_requested");
+                    return TrustCheckResult::Escalation {
+                        agent_name: agent.name.clone(),
+                        tool_name: tool_name.to_string(),
+                        current_tier: agent_tier,
+                        required_tier: required,
+                    };
+                }
+            } else {
+                audit_log(agent, tool_name, "escalation_requested");
+                return TrustCheckResult::Escalation {
+                    agent_name: agent.name.clone(),
+                    tool_name: tool_name.to_string(),
+                    current_tier: agent_tier,
+                    required_tier: required,
+                };
+            }
+        } else {
+            let reason = format!(
+                "permission denied: agent {:?} has tier {:?}, tool {:?} requires {:?}",
+                agent.name, agent_tier, tool_name, required,
+            );
+            audit_log_denied(agent, tool_name, &reason);
+            return TrustCheckResult::Denied(reason);
+        }
     }
 
-    // Per-agent tool allowlist: if set on the agent's config entry, the
-    // tool name must appear in the list. `None` means "no restriction".
     if let Some(agent_cfg) = config.agents.get(&agent.name)
         && let Some(allowed) = &agent_cfg.allowed_tools
         && !allowed.iter().any(|t| t == tool_name)
@@ -260,7 +345,6 @@ pub fn check_tool_access(
         return TrustCheckResult::Denied(reason);
     }
 
-    // Rate-limit destructive operations.
     if category == ToolCategory::Admin
         && let Err(reason) = rate_limiter.check_and_record(&agent.name)
     {

@@ -56,6 +56,64 @@ impl App {
         self.help_overlay_scroll_rows = 0;
     }
 
+    /// Show the trust escalation modal overlay (tn-b99).
+    #[allow(dead_code)]
+    pub(crate) fn show_trust_escalation(
+        &mut self,
+        escalation_id: u64,
+        agent_name: String,
+        tool_name: String,
+        current_tier: String,
+        required_tier: String,
+    ) {
+        self.trust_escalation = Some(super::trust_escalation_overlay::TrustEscalationState {
+            escalation_id,
+            agent_name,
+            tool_name,
+            current_tier,
+            required_tier,
+            approve_focused: true,
+        });
+        self.overlay_mode = Some(OverlayMode::TrustEscalation);
+        self.active_menu = None;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Resolve the pending trust escalation and send the response to the daemon.
+    fn resolve_trust_escalation(&mut self, approved: bool) {
+        if let Some(state) = self.trust_escalation.take() {
+            info!(
+                escalation_id = state.escalation_id,
+                approved,
+                agent = %state.agent_name,
+                tool = %state.tool_name,
+                "trust escalation resolved"
+            );
+            // Send IPC response to daemon via the daemon client.
+            if let (Some(client), Some(handle)) = (&self.daemon_client, &self.daemon_runtime) {
+                let esc_id = state.escalation_id;
+                let client = client.clone();
+                let handle = handle.clone();
+                handle.spawn(async move {
+                    use therminal_protocol::daemon::IpcRequest;
+                    let req = IpcRequest::ResolveTrustEscalation {
+                        escalation_id: esc_id,
+                        approved,
+                    };
+                    if let Err(e) = client.send_request(req).await {
+                        tracing::warn!(%e, "failed to send trust escalation response");
+                    }
+                });
+            }
+        }
+        self.close_overlay();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     fn persist_settings_overlay_edits(&mut self) {
         let mut edit = ConfigEditSession::from_saved(self.config.clone());
         let path = config_path();
@@ -636,6 +694,10 @@ impl App {
                 }
                 return;
             }
+            Some(OverlayMode::TrustEscalation) => {
+                // No scrolling for trust escalation modal.
+                return;
+            }
             None => {}
         }
         self.handle_mouse_wheel(delta);
@@ -1201,6 +1263,31 @@ impl App {
                         show_status_bar: self.config.general.show_status_bar,
                         show_tab_bar: self.config.general.show_tab_bar,
                     });
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
+            }
+            Some(OverlayMode::TrustEscalation) => {
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.resolve_trust_escalation(false);
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(ref state) = self.trust_escalation {
+                            let approved = state.approve_focused;
+                            self.resolve_trust_escalation(approved);
+                        }
+                    }
+                    Key::Named(NamedKey::Tab)
+                    | Key::Named(NamedKey::ArrowLeft)
+                    | Key::Named(NamedKey::ArrowRight) => {
+                        if let Some(ref mut state) = self.trust_escalation {
+                            state.toggle_focus();
+                        }
+                    }
+                    _ => {}
+                }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }

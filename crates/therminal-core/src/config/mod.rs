@@ -813,6 +813,16 @@ impl Ord for TrustTier {
     }
 }
 
+impl std::fmt::Display for TrustTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sandboxed => write!(f, "Sandboxed"),
+            Self::Supervised => write!(f, "Supervised"),
+            Self::Trusted => write!(f, "Trusted"),
+        }
+    }
+}
+
 /// Agent trust tier configuration.
 ///
 /// Controls what level of access AI agents have when detected in the
@@ -842,6 +852,8 @@ pub struct TrustConfig {
     /// allowed per agent per minute. Set to `0` to disable rate limiting.
     /// Default is `5`.
     pub destructive_rate_limit: u32,
+    /// Auto-approve trust escalations up to this tier without prompting.
+    pub auto_approve_tier: Option<TrustTier>,
 }
 
 impl Default for TrustConfig {
@@ -852,6 +864,7 @@ impl Default for TrustConfig {
             show_agent_indicator: true,
             agent_scan_interval: 3,
             destructive_rate_limit: 5,
+            auto_approve_tier: None,
         }
     }
 }

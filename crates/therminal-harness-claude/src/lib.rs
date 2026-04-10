@@ -49,6 +49,7 @@
 //! binary) can still do so.
 
 pub mod agent_events;
+pub mod hook_push;
 pub mod jsonl_tailer;
 pub mod markers;
 pub mod pipeline;
@@ -57,6 +58,7 @@ pub mod state;
 pub mod tool_call_hotspots;
 
 pub use agent_events::AgentEvent;
+pub use hook_push::{HookPushSink, HookSignal};
 pub use jsonl_tailer::{ClaudeJsonlRegistry, EventSource, SessionJsonlTailer, TaggedAgentEvent};
 pub use markers::{CLAUDE_OSC_CODE, CLAUDE_OWNER, CLAUDE_STATE_KIND, activate as activate_markers};
 pub use pipeline::{BROADCAST_CAPACITY, DEFAULT_POLL_INTERVAL, StateUpdateObserver};
