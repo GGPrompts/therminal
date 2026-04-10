@@ -15,11 +15,11 @@ pub const PANE_HEADER_HEIGHT: f32 = 20.0;
 /// - there is only a single pane (single-pane layouts never show a header).
 ///
 /// Otherwise returns [`PANE_HEADER_HEIGHT`].
-pub fn effective_header_height(pane_count: usize, show_pane_headers: bool) -> f32 {
-    if !show_pane_headers || pane_count <= 1 {
-        0.0
-    } else {
+pub fn effective_header_height(_pane_count: usize, show_pane_headers: bool) -> f32 {
+    if show_pane_headers {
         PANE_HEADER_HEIGHT
+    } else {
+        0.0
     }
 }
 
@@ -110,13 +110,13 @@ mod tests {
     // ── effective_header_height ────────────────────────────────────────
 
     #[test]
-    fn header_height_zero_for_single_pane() {
-        assert_eq!(effective_header_height(1, true), 0.0);
+    fn header_height_present_for_single_pane_when_enabled() {
+        assert_eq!(effective_header_height(1, true), PANE_HEADER_HEIGHT);
     }
 
     #[test]
-    fn header_height_zero_for_zero_panes() {
-        assert_eq!(effective_header_height(0, true), 0.0);
+    fn header_height_present_for_zero_panes_when_enabled() {
+        assert_eq!(effective_header_height(0, true), PANE_HEADER_HEIGHT);
     }
 
     #[test]
