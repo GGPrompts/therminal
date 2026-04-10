@@ -59,6 +59,14 @@ fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
     }
 }
 
+fn damaged_rows_any(damaged_rows: Option<&[bool]>) -> bool {
+    damaged_rows.is_some_and(|rows| rows.iter().any(|&damaged| damaged))
+}
+
+fn should_force_full_rebuild(cache_matches_viewport: bool, damaged_rows: Option<&[bool]>) -> bool {
+    !cache_matches_viewport && matches!(damaged_rows, Some(rows) if !rows.iter().any(|&d| d))
+}
+
 /// Promote `FilePath` hotspots whose target stat'd as a directory using
 /// the real filesystem (tn-zqwg). Wraps `std::fs::metadata` so the click
 /// handler can route directory hotspots through `folder_pane_command`
@@ -336,10 +344,17 @@ fn render_single_pane(
     // When partial damage reports an empty set, nothing changed — use
     // the existing cached state without collecting cells or running
     // URL/hotspot detection.
-    if let Some(ref damaged) = damaged_rows
-        && !damaged.iter().any(|&d| d)
-        && renderer.pane_cache_matches_viewport(pane.id, screen_lines, display_offset)
-    {
+    let cache_matches_viewport =
+        renderer.pane_cache_matches_viewport(pane.id, screen_lines, display_offset);
+    let force_full_rebuild =
+        should_force_full_rebuild(cache_matches_viewport, damaged_rows.as_deref());
+    let damaged_rows_for_render = if force_full_rebuild {
+        None
+    } else {
+        damaged_rows.as_deref()
+    };
+
+    if !damaged_rows_any(damaged_rows.as_deref()) && cache_matches_viewport {
         term_guard.reset_damage();
         drop(term_guard);
 
@@ -436,7 +451,7 @@ fn render_single_pane(
     // ── Damage-aware URL/hotspot detection ───────────────────────────────
     // When partial damage is available, only run detection on damaged rows
     // to avoid re-scanning the entire visible area every frame.
-    if let Some(ref damage_vec) = damaged_rows {
+    if let Some(damage_vec) = damaged_rows_for_render {
         // Collect indices of damaged-row cells to avoid cloning entire cells.
         // We build a separate vec of references for detection, then write
         // results back via a HashMap for O(1) lookup.  Complexity: O(D)
@@ -535,7 +550,7 @@ fn render_single_pane(
         screen_lines,
         selection_range.as_ref(),
         display_offset,
-        damaged_rows.as_deref(),
+        damaged_rows_for_render,
         device,
         queue,
         encoder,
@@ -557,5 +572,27 @@ fn render_single_pane(
             surface_width,
             surface_height,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{damaged_rows_any, should_force_full_rebuild};
+
+    #[test]
+    fn damaged_rows_any_detects_nonempty_damage() {
+        assert!(!damaged_rows_any(None));
+        assert!(!damaged_rows_any(Some(&[])));
+        assert!(!damaged_rows_any(Some(&[false, false])));
+        assert!(damaged_rows_any(Some(&[false, true, false])));
+    }
+
+    #[test]
+    fn force_full_rebuild_when_cache_invalid_but_damage_empty() {
+        assert!(should_force_full_rebuild(false, Some(&[])));
+        assert!(should_force_full_rebuild(false, Some(&[false, false])));
+        assert!(!should_force_full_rebuild(true, Some(&[false, false])));
+        assert!(!should_force_full_rebuild(false, Some(&[false, true])));
+        assert!(!should_force_full_rebuild(false, None));
     }
 }
