@@ -92,8 +92,8 @@ fn should_force_full_rebuild(cache_matches_viewport: bool, _damaged_rows: Option
 /// in the editor path. We transparently stat via the `\\wsl.localhost\…`
 /// UNC form instead, which Windows can resolve through the WSL virtual
 /// filesystem provider. On Linux/macOS the translator is a no-op.
-fn promote_directory_hotspots_from_fs(hotspots: &mut [TextHotspot]) {
-    promote_directory_hotspots(hotspots, |p| {
+fn promote_directory_hotspots_from_fs(hotspots: &mut [TextHotspot], pane_cwd: Option<&str>) {
+    promote_directory_hotspots(hotspots, pane_cwd, |p| {
         let translated = crate::window::wsl_paths::translate_if_wsl_windows(p);
         std::fs::metadata(translated.as_ref()).map(|m| m.is_dir())
     });
@@ -492,6 +492,16 @@ fn render_single_pane(
     term_guard.reset_damage();
     drop(term_guard);
 
+    // Extract the pane's OSC 7 cwd so relative hotspot paths are resolved
+    // against the shell's actual working directory, not therminal's process
+    // cwd (tn-318q).
+    let pane_cwd: Option<String> = pane
+        .status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cwd
+        .clone();
+
     // Pre-compute pane viewport pixel origin for widget placement (tn-068b).
     let header_h_early = crate::pane::effective_header_height(pane_count, show_pane_headers);
     let pane_vp_x = vp.x() + renderer.padding_x();
@@ -517,7 +527,7 @@ fn render_single_pane(
         // not include the previous row's last cell (where WRAPLINE lives).
         let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
         let mut hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
-        promote_directory_hotspots_from_fs(&mut hotspots);
+        promote_directory_hotspots_from_fs(&mut hotspots, pane_cwd.as_deref());
         if let Some(ref cwd) = claude_agent_cwd {
             hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
         }
@@ -566,7 +576,7 @@ fn render_single_pane(
         let row_texts = extract_row_text_from_cells(&cells, screen_lines);
         let wrap_cont = compute_wrap_continuation(&cells, screen_lines);
         let mut hotspots = detect_hotspots_from_text_with_wrap(&row_texts, &wrap_cont);
-        promote_directory_hotspots_from_fs(&mut hotspots);
+        promote_directory_hotspots_from_fs(&mut hotspots, pane_cwd.as_deref());
         if let Some(ref cwd) = claude_agent_cwd {
             hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
         }

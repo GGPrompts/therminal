@@ -612,8 +612,11 @@ pub fn detect_hotspots_from_text_with_wrap(
 /// The callback is generic so tests can stub it without touching the
 /// real filesystem. Production callers pass a closure that wraps
 /// `std::fs::metadata(p).map(|m| m.is_dir())`.
-pub fn promote_directory_hotspots<F>(hotspots: &mut [TextHotspot], mut is_dir_fn: F)
-where
+pub fn promote_directory_hotspots<F>(
+    hotspots: &mut [TextHotspot],
+    pane_cwd: Option<&str>,
+    mut is_dir_fn: F,
+) where
     F: FnMut(&str) -> std::io::Result<bool>,
 {
     // Resolve `$HOME` once per call so tilde-prefixed hotspots stat
@@ -640,7 +643,8 @@ where
         }
         let path = strip_line_col_suffix(&h.text);
         let expanded = expand_tilde(path, home.as_deref());
-        match is_dir_fn(expanded.as_ref()) {
+        let resolved = resolve_relative_to_cwd(expanded.as_ref(), pane_cwd);
+        match is_dir_fn(resolved.as_ref()) {
             Ok(true) => h.is_dir = true,
             Ok(false) => {} // filesystem says no — trust it
             Err(_) => {
@@ -1336,7 +1340,7 @@ mod tests {
                 resolved_text: None,
             },
         ];
-        promote_directory_hotspots(&mut hotspots, |p| Ok(p == "/tmp/some-dir"));
+        promote_directory_hotspots(&mut hotspots, None, |p| Ok(p == "/tmp/some-dir"));
         assert!(hotspots[0].is_dir, "directory should be promoted");
         assert!(!hotspots[1].is_dir, "file should not be promoted");
         assert!(!hotspots[2].is_dir, "URL must never be promoted");
@@ -1357,7 +1361,7 @@ mod tests {
             resolved_text: None,
         }];
         let mut seen = String::new();
-        promote_directory_hotspots(&mut hotspots, |p| {
+        promote_directory_hotspots(&mut hotspots, None, |p| {
             seen.clear();
             seen.push_str(p);
             Ok(true)
@@ -1381,7 +1385,7 @@ mod tests {
             pattern_source: None,
             resolved_text: None,
         }];
-        promote_directory_hotspots(&mut hotspots, |_| Err(std::io::Error::other("nope")));
+        promote_directory_hotspots(&mut hotspots, None, |_| Err(std::io::Error::other("nope")));
         assert!(!hotspots[0].is_dir);
     }
 
@@ -1399,7 +1403,7 @@ mod tests {
             pattern_source: None,
             resolved_text: None,
         }];
-        promote_directory_hotspots(&mut hotspots, |_| {
+        promote_directory_hotspots(&mut hotspots, None, |_| {
             Err(std::io::Error::other("cross-fs stat failure"))
         });
         assert!(
@@ -1422,7 +1426,7 @@ mod tests {
             pattern_source: None,
             resolved_text: None,
         }];
-        promote_directory_hotspots(&mut hotspots, |_| Ok(false));
+        promote_directory_hotspots(&mut hotspots, None, |_| Ok(false));
         assert!(
             !hotspots[0].is_dir,
             "Ok(false) from stat must be trusted over the heuristic"
