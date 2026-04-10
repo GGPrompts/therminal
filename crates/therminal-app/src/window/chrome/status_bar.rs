@@ -109,7 +109,7 @@ pub(crate) fn draw_status_bar(
     }
 
     // ── Status bar text ──
-    let font_size = (bar_h * 0.55).max(10.0);
+    let font_size = renderer.chrome_font_size((bar_h * 0.55).max(10.0));
     let line_height = bar_h;
     let metrics = Metrics::new(font_size, line_height);
 

@@ -293,7 +293,7 @@ pub(crate) fn draw_pane_header(
     }
 
     // ── Header text ──
-    let font_size = (header_h * 0.6).max(9.0);
+    let font_size = renderer.chrome_font_size((header_h * 0.6).max(9.0));
     let line_height = header_h;
     let metrics = Metrics::new(font_size, line_height);
 

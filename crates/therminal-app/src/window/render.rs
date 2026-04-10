@@ -413,7 +413,7 @@ fn render_single_pane(
         if show_pane_headers {
             draw_pane_header(
                 pane,
-                draw_focus_border,
+                draw_focus_border || pane_count == 1,
                 is_zoomed,
                 claude_header_title.as_deref(),
                 claude_badge.as_deref(),
@@ -610,7 +610,7 @@ fn render_single_pane(
     if show_pane_headers {
         draw_pane_header(
             pane,
-            draw_focus_border,
+            draw_focus_border || pane_count == 1,
             is_zoomed,
             claude_header_title.as_deref(),
             claude_badge.as_deref(),

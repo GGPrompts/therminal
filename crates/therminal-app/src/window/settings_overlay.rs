@@ -314,14 +314,26 @@ impl SettingsOverlayState {
     pub(crate) fn arrow_up(&mut self) {
         match self.focus {
             SettingsFocus::Navigation => self.move_section(-1),
-            SettingsFocus::Controls => self.move_control(-1),
+            SettingsFocus::Controls => {
+                if self.active_control_is_select() {
+                    self.cycle_select(-1);
+                } else {
+                    self.move_control(-1);
+                }
+            }
         }
     }
 
     pub(crate) fn arrow_down(&mut self) {
         match self.focus {
             SettingsFocus::Navigation => self.move_section(1),
-            SettingsFocus::Controls => self.move_control(1),
+            SettingsFocus::Controls => {
+                if self.active_control_is_select() {
+                    self.cycle_select(1);
+                } else {
+                    self.move_control(1);
+                }
+            }
         }
     }
 
@@ -1740,6 +1752,38 @@ mod tests {
             assert_eq!(*selected, 1);
         }
         state.arrow_left();
+        if let ControlType::Select { selected, .. } =
+            &state.sections[state.selected_section].controls[0].control_type
+        {
+            assert_eq!(*selected, 0);
+        }
+    }
+    #[test]
+    fn select_up_down_arrows_cycle_options() {
+        let mut state = SettingsOverlayState::new();
+        state.register_section(SettingsSection::new(
+            "ts2",
+            "TS2",
+            vec![SettingsControl::with_type(
+                "D",
+                ControlBinding::ToggleStatusBar,
+                ControlType::select(vec!["X".into(), "Y".into(), "Z".into()], 0),
+            )],
+        ));
+        let target = state.sections().len() - 1;
+        for _ in 0..target {
+            state.arrow_down();
+        }
+        state.tab(false);
+        // Down arrow should cycle forward.
+        state.arrow_down();
+        if let ControlType::Select { selected, .. } =
+            &state.sections[state.selected_section].controls[0].control_type
+        {
+            assert_eq!(*selected, 1);
+        }
+        // Up arrow should cycle backward.
+        state.arrow_up();
         if let ControlType::Select { selected, .. } =
             &state.sections[state.selected_section].controls[0].control_type
         {
