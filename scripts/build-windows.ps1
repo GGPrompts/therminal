@@ -33,6 +33,17 @@ if ($repoRoot -match '^\\\\') {
     # but we need Cargo.lock for reproducible builds)
     $cargoLock = Join-Path $repoRoot "Cargo.lock"
     & robocopy (Split-Path $cargoLock) $localBuildDir "Cargo.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
+    # Invalidate stale cargo fingerprints for workspace crates so incremental
+    # compilation picks up all mirrored source changes.  The target/ dir is
+    # excluded from robocopy (/XD target) so old fingerprints can survive
+    # across syncs and confuse rustc into skipping changed crates.
+    $fingerprintDir = Join-Path $localBuildDir "target"
+    foreach ($profile in @("release", "debug")) {
+        $fpDir = Join-Path $fingerprintDir "$profile\.fingerprint"
+        if (Test-Path $fpDir) {
+            Get-ChildItem -Directory $fpDir -Filter "therminal-*" | Remove-Item -Recurse -Force
+        }
+    }
     $repoRoot = $localBuildDir
     Write-Host "=== building from $repoRoot ==="
 }
