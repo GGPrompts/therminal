@@ -472,7 +472,10 @@ pub(crate) fn build_remote_pane_state(
                     break;
                 }
                 Some(DaemonEvent::PaneResized {
-                    pane_id, cols, rows, ..
+                    pane_id,
+                    cols,
+                    rows,
+                    ..
                 }) if pane_id == remote_pane_id => {
                     apply_remote_resize(&term_for_forwarder, cols as usize, rows as usize);
                 }

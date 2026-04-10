@@ -1486,8 +1486,7 @@ impl GridRenderer {
             .insert(pane_id, (cursor_row, cursor_col));
         self.pane_last_display_offset
             .insert(pane_id, display_offset);
-        self.pane_last_column_count
-            .insert(pane_id, columns);
+        self.pane_last_column_count.insert(pane_id, columns);
 
         // ── Update viewport ──────────────────────────────────────────────
         self.viewport.update(
@@ -1700,10 +1699,45 @@ mod tests {
 
     #[test]
     fn viewport_cache_matches_only_same_offset_line_count_and_columns() {
-        assert!(super::viewport_cache_matches(Some(3), Some(80), Some(5), 80, 3, 5));
-        assert!(!super::viewport_cache_matches(Some(3), Some(81), Some(5), 80, 3, 5));
-        assert!(!super::viewport_cache_matches(Some(3), Some(80), Some(6), 80, 3, 5));
-        assert!(!super::viewport_cache_matches(Some(4), Some(80), Some(5), 80, 3, 5));
-        assert!(!super::viewport_cache_matches(None, Some(80), Some(5), 80, 3, 5));
+        assert!(super::viewport_cache_matches(
+            Some(3),
+            Some(80),
+            Some(5),
+            80,
+            3,
+            5
+        ));
+        assert!(!super::viewport_cache_matches(
+            Some(3),
+            Some(81),
+            Some(5),
+            80,
+            3,
+            5
+        ));
+        assert!(!super::viewport_cache_matches(
+            Some(3),
+            Some(80),
+            Some(6),
+            80,
+            3,
+            5
+        ));
+        assert!(!super::viewport_cache_matches(
+            Some(4),
+            Some(80),
+            Some(5),
+            80,
+            3,
+            5
+        ));
+        assert!(!super::viewport_cache_matches(
+            None,
+            Some(80),
+            Some(5),
+            80,
+            3,
+            5
+        ));
     }
 }

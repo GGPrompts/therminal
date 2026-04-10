@@ -24,8 +24,18 @@ use therminal_protocol::daemon::{
 use crate::framing::read_frame;
 use crate::ipc_transport::{IpcClientStream, connect_client};
 
-/// Default timeout for daemon communication.
+/// Default timeout for one-shot daemon requests (health checks, handoff, CLI).
+/// Keep short — these are single-connection fire-and-read calls where a
+/// non-responsive daemon should fail fast.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Timeout for persistent `DaemonClient` connections used by the GUI.
+///
+/// `SplitPane` holds the session_mgr lock while spawning a PTY and waiting up
+/// to 300ms for the first shell prompt. On WSL2 under load this can exceed 2s
+/// and produce spurious timeout failures. The GUI connects via
+/// `DaemonClient::connect_with_timeout(path, GUI_REQUEST_TIMEOUT)`.
+pub const GUI_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Single-shot IPC helpers ───────────────────────────────────────────────
 

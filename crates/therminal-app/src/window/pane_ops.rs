@@ -22,6 +22,38 @@ use super::{App, EventLoopProxy, NotificationSource, UserEvent};
 /// hung daemon rolls back to a local error instead of freezing the GUI.
 const DAEMON_OP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Context carried from the async `SplitPane` RPC back to the main thread
+/// so the layout insert can complete without blocking the event loop.
+#[derive(Debug)]
+pub struct DaemonSplitResult {
+    /// Local pane id that was being split.
+    pub source_local: PaneId,
+    /// Split direction requested.
+    pub direction: SplitDirection,
+    /// Result of the daemon RPC — `Ok(daemon_pane_id)` or `Err(message)`.
+    pub rpc_result: Result<therminal_protocol::PaneId, String>,
+    /// Inherited cwd passed to the daemon (needed to wire the remote PTY).
+    pub inherited_cwd: Option<String>,
+    /// Optional post-split action to perform once the local pane is mounted.
+    pub on_complete: DaemonSplitOnComplete,
+}
+
+/// What to do after `finish_split_pane_remote` successfully mounts the new pane.
+#[derive(Debug, Default)]
+pub enum DaemonSplitOnComplete {
+    /// Focus the new pane, relayout, publish — the standard path.
+    #[default]
+    FocusAndRelayout,
+    /// Auto-tile: register the new pane with the auto-tile debouncer and relayout.
+    /// `parent_pane_id` is the pane whose agent spawned the split.
+    AutoTile { parent_pane_id: PaneId },
+    /// Swarm: send a `tail` command into the new pane and register it in `swarm_panes`.
+    SwarmTail {
+        agent_id: String,
+        jsonl_path: std::path::PathBuf,
+    },
+}
+
 impl App {
     /// Returns `true` if the GUI should drive pane lifecycle through the
     /// daemon (tn-beez Phase B). Requires `attach_mode = Remote`, an
@@ -60,19 +92,19 @@ impl App {
         }
     }
 
-    /// Phase B split path: ask the daemon to split `source_local`'s
-    /// daemon-side pane, then materialise a new `RemotePty` leaf locally
-    /// and insert it into the layout tree.
+    /// Phase B split path: fire the daemon `SplitPane` RPC asynchronously so
+    /// the event loop never blocks. The RPC result is delivered back to the
+    /// main thread via `UserEvent::DaemonSplitComplete`; `finish_split_pane_remote`
+    /// handles the layout insert there.
     ///
-    /// Returns `Some(new_local_id)` on success, `None` on any failure
-    /// (with a warn!-level log). Callers should NOT mutate the layout
-    /// themselves — this helper owns both the RPC and the tree insert.
-    ///
+    /// Callers should NOT mutate the layout themselves — the two-part
+    /// async/finish pair owns both the RPC and the tree insert.
     pub(crate) fn split_pane_remote(
         &mut self,
         source_local: PaneId,
         direction: SplitDirection,
-    ) -> Option<PaneId> {
+        on_complete: DaemonSplitOnComplete,
+    ) {
         let daemon_source = match self.pane_id_map.daemon_for_local(source_local) {
             Some(d) => d,
             None => {
@@ -80,7 +112,7 @@ impl App {
                     source_local,
                     "split_pane_remote: no daemon id mapping (local-mode pane pre-cutover); bailing"
                 );
-                return None;
+                return;
             }
         };
         let horizontal = matches!(direction, SplitDirection::Horizontal);
@@ -88,29 +120,61 @@ impl App {
             .get_layout()
             .and_then(|layout| cwd_from_source_pane(layout, source_local));
 
-        let resp = match self.daemon_rpc_blocking(IpcRequest::SplitPane {
-            pane_id: daemon_source,
-            horizontal,
-            cwd: inherited_cwd.clone(),
-            startup_command: None,
-        }) {
-            Ok(r) => r,
+        let Some(client) = self.daemon_client.as_ref() else {
+            return;
+        };
+        let Some(handle) = self.daemon_runtime.as_ref() else {
+            return;
+        };
+        let client = Arc::clone(client);
+        let proxy = self.event_proxy.clone();
+        let cwd_clone = inherited_cwd.clone();
+
+        handle.spawn(async move {
+            let rpc_result = match tokio::time::timeout(
+                DAEMON_OP_TIMEOUT,
+                client.send_request(IpcRequest::SplitPane {
+                    pane_id: daemon_source,
+                    horizontal,
+                    cwd: cwd_clone,
+                    startup_command: None,
+                }),
+            )
+            .await
+            {
+                Ok(Ok(IpcResponse::PaneSplit { new_pane_id })) => Ok(new_pane_id),
+                Ok(Ok(IpcResponse::Error { message })) => Err(message),
+                Ok(Ok(other)) => Err(format!("unexpected response: {other:?}")),
+                Ok(Err(e)) => Err(format!("rpc error: {e}")),
+                Err(_) => Err(format!("rpc timed out after {DAEMON_OP_TIMEOUT:?}")),
+            };
+            let _ = proxy.send_event(UserEvent::DaemonSplitComplete(DaemonSplitResult {
+                source_local,
+                direction,
+                rpc_result,
+                inherited_cwd,
+                on_complete,
+            }));
+        });
+    }
+
+    /// Called on the main thread when the async `SplitPane` RPC resolves.
+    /// Performs the local layout insert (or orphan cleanup on failure).
+    pub(crate) fn finish_split_pane_remote(&mut self, result: DaemonSplitResult) {
+        let DaemonSplitResult {
+            source_local,
+            direction,
+            rpc_result,
+            inherited_cwd,
+            on_complete,
+        } = result;
+
+        let new_daemon_pane_id = match rpc_result {
+            Ok(id) => id,
             Err(e) => {
                 warn!(error = %e, "split_pane_remote: RPC failed — NOT mutating local layout");
                 self.show_toast("daemon split failed");
-                return None;
-            }
-        };
-        let new_daemon_pane_id = match resp {
-            IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
-            IpcResponse::Error { message } => {
-                warn!(message, "split_pane_remote: daemon returned error");
-                self.show_toast(format!("split failed: {message}"));
-                return None;
-            }
-            other => {
-                warn!(?other, "split_pane_remote: unexpected response variant");
-                return None;
+                return;
             }
         };
 
@@ -124,17 +188,27 @@ impl App {
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
         };
-        let dc_for_closure = Arc::clone(self.daemon_client.as_ref()?);
-        let handle_for_closure = self.daemon_runtime.as_ref()?.clone();
+        let dc_for_closure = match self.daemon_client.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return,
+        };
+        let handle_for_closure = match self.daemon_runtime.as_ref() {
+            Some(h) => h.clone(),
+            None => return,
+        };
         let socket_for_closure = dc_for_closure.socket_path().to_path_buf();
         let proxy = self.event_proxy.clone();
 
         let local_id = crate::pane::next_pane_id();
 
-        // Build the PaneState inside the layout closure so we can use the
-        // viewport Rect assigned by `split_pane`.
-        let renderer_ref = self.grid_renderer.as_ref()?;
-        let layout = self.workspaces.as_mut().map(|wm| wm.layout_mut())?;
+        let renderer_ref = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
         let callbacks = make_pane_callbacks(&proxy, local_id);
         let build_result: std::cell::RefCell<Option<anyhow::Error>> = std::cell::RefCell::new(None);
         let new_id = layout.split_pane(source_local, direction, |viewport| {
@@ -171,30 +245,71 @@ impl App {
                 new_daemon = new_daemon_pane_id,
                 "split_pane_remote: daemon split + local mount complete"
             );
-            Some(new_id)
-        } else {
-            if let Some(e) = build_result.into_inner() {
-                warn!(error = %e, "split_pane_remote: build_remote_pane_state failed AFTER daemon split — daemon now has orphan pane");
-                // F2 (tn-97j6): best-effort kill the orphan pane we couldn't
-                // mount, and explicitly log the recovery RPC's outcome so
-                // operators see when cleanup itself fails.
-                match self.daemon_rpc_blocking(IpcRequest::KillPane {
-                    pane_id: new_daemon_pane_id,
-                }) {
-                    Ok(IpcResponse::PaneKilled { .. }) => {}
-                    Ok(other) => warn!(
-                        new_daemon_pane_id,
-                        ?other,
-                        "split_pane_remote: orphan KillPane recovery returned unexpected response"
-                    ),
-                    Err(e) => warn!(
-                        new_daemon_pane_id,
-                        error = %e,
-                        "split_pane_remote: orphan KillPane recovery RPC failed — daemon orphan persists"
-                    ),
+            match on_complete {
+                DaemonSplitOnComplete::FocusAndRelayout => {
+                    self.last_split_direction = direction;
+                    self.set_focused_pane(Some(new_id));
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
+                }
+                DaemonSplitOnComplete::AutoTile { parent_pane_id } => {
+                    if let Some(ref mut debouncer) = self.auto_tile_debouncer {
+                        debouncer.register_auto_tiled(parent_pane_id, new_id);
+                    }
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
+                }
+                DaemonSplitOnComplete::SwarmTail {
+                    agent_id,
+                    jsonl_path,
+                } => {
+                    let cmd = format!(
+                        "clear && tail --lines=+1 -F {}\n",
+                        shell_quote(&jsonl_path.display().to_string()),
+                    );
+                    if let Some(daemon_id) = self.pane_id_map.daemon_for_local(new_id) {
+                        match self.daemon_rpc_blocking(IpcRequest::SendKeys {
+                            pane_id: daemon_id,
+                            keys: cmd.into_bytes(),
+                        }) {
+                            Ok(_) => {}
+                            Err(e) => warn!(error = %e, "swarm: SendKeys for tail command failed"),
+                        }
+                    }
+                    self.swarm_panes.insert(agent_id, new_id);
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
                 }
             }
-            None
+        } else if let Some(e) = build_result.into_inner() {
+            warn!(error = %e, "split_pane_remote: build_remote_pane_state failed AFTER daemon split — daemon now has orphan pane");
+            // F2 (tn-97j6): best-effort kill the orphan pane we couldn't
+            // mount. Fire-and-forget since we're already on the happy path failure branch.
+            if let (Some(client), Some(handle)) =
+                (self.daemon_client.as_ref(), self.daemon_runtime.as_ref())
+            {
+                let client = Arc::clone(client);
+                handle.spawn(async move {
+                    match client
+                        .send_request(IpcRequest::KillPane {
+                            pane_id: new_daemon_pane_id,
+                        })
+                        .await
+                    {
+                        Ok(IpcResponse::PaneKilled { .. }) => {}
+                        Ok(other) => warn!(
+                            new_daemon_pane_id,
+                            ?other,
+                            "split_pane_remote: orphan KillPane recovery returned unexpected response"
+                        ),
+                        Err(e) => warn!(
+                            new_daemon_pane_id,
+                            error = %e,
+                            "split_pane_remote: orphan KillPane recovery RPC failed — daemon orphan persists"
+                        ),
+                    }
+                });
+            }
         }
     }
 
@@ -620,16 +735,10 @@ impl App {
         // tn-beez Phase B: in daemon mode, route splits through the daemon
         // so the resulting pane id is the canonical daemon id and shows up
         // in MCP `terminal.panes.list` + persists across daemon restart.
+        // The RPC is fired asynchronously; completion arrives via
+        // `UserEvent::DaemonSplitComplete` → `finish_split_pane_remote`.
         if self.is_daemon_mode() {
-            if let Some(new_id) = self.split_pane_remote(focused, direction) {
-                info!("split_focused_pane: daemon split {focused} -> {new_id}");
-                self.last_split_direction = direction;
-                self.set_focused_pane(Some(new_id));
-                self.relayout_and_redraw();
-                self.publish_workspace_state();
-            } else {
-                self.request_redraw();
-            }
+            self.split_pane_remote(focused, direction, DaemonSplitOnComplete::FocusAndRelayout);
             return;
         }
         let renderer = match self.grid_renderer.as_ref() {
@@ -906,15 +1015,11 @@ impl App {
         // tn-beez Phase B: daemon mode routes through the daemon so the
         // new pane carries a daemon id (visible to MCP / persisted).
         if self.is_daemon_mode() {
-            if let Some(new_id) = self.split_pane_remote(target_id, direction) {
-                info!("split_pane_by_id: daemon split {target_id} -> {new_id}");
-                self.last_split_direction = direction;
-                self.set_focused_pane(Some(new_id));
-                self.relayout_and_redraw();
-                self.publish_workspace_state();
-            } else {
-                self.request_redraw();
-            }
+            self.split_pane_remote(
+                target_id,
+                direction,
+                DaemonSplitOnComplete::FocusAndRelayout,
+            );
             return;
         }
         let renderer = match self.grid_renderer.as_ref() {
@@ -2286,14 +2391,11 @@ impl App {
                     // persisted across daemon restart) and the
                     // pane_id_map stays consistent for publish_workspace_state.
                     if self.is_daemon_mode() {
-                        if let Some(new_id) = self.split_pane_remote(target_pane_id, direction) {
-                            info!(parent_pane_id, new_id, "Auto-tile daemon split complete");
-                            if let Some(ref mut debouncer) = self.auto_tile_debouncer {
-                                debouncer.register_auto_tiled(parent_pane_id, new_id);
-                            }
-                            self.relayout_and_redraw();
-                            self.publish_workspace_state();
-                        }
+                        self.split_pane_remote(
+                            target_pane_id,
+                            direction,
+                            DaemonSplitOnComplete::AutoTile { parent_pane_id },
+                        );
                         continue;
                     }
 
@@ -2437,6 +2539,9 @@ impl App {
         // tn-ll6l: in daemon mode, route through split_pane_remote so the
         // new pane is daemon-managed. SplitPane has no command-override, so
         // we follow up with a SendKeys RPC carrying the `tail` command.
+        // Both the split and the SendKeys are deferred off the event loop;
+        // the SwarmTail on_complete handler fires them in sequence once the
+        // pane is mounted.
         if self.is_daemon_mode() {
             let direction = self
                 .get_layout()
@@ -2444,36 +2549,14 @@ impl App {
                 .map(|p| LayoutNode::auto_split_direction(p.viewport, SplitDirection::Horizontal))
                 .unwrap_or(SplitDirection::Horizontal);
 
-            let Some(new_id) = self.split_pane_remote(target_pane_id, direction) else {
-                return;
-            };
-
-            info!(
-                agent = %agent_id,
-                pane_id = new_id,
-                jsonl = %jsonl_path.display(),
-                "swarm: spawned daemon pane tailing subagent JSONL"
+            self.split_pane_remote(
+                target_pane_id,
+                direction,
+                DaemonSplitOnComplete::SwarmTail {
+                    agent_id,
+                    jsonl_path,
+                },
             );
-
-            let cmd = format!(
-                "clear && tail --lines=+1 -F {}\n",
-                shell_quote(&jsonl_path.display().to_string()),
-            );
-            if let Some(daemon_id) = self.pane_id_map.daemon_for_local(new_id) {
-                match self.daemon_rpc_blocking(IpcRequest::SendKeys {
-                    pane_id: daemon_id,
-                    keys: cmd.into_bytes(),
-                }) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(error = %e, "swarm: SendKeys for tail command failed");
-                    }
-                }
-            }
-
-            self.swarm_panes.insert(agent_id, new_id);
-            self.relayout_and_redraw();
-            self.publish_workspace_state();
             return;
         }
 

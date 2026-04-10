@@ -10,4 +10,7 @@ pub mod client;
 pub mod framing;
 pub mod ipc_transport;
 
-pub use client::{DaemonClient, ping, request_shutdown, send_request, send_request_with_timeout};
+pub use client::{
+    DaemonClient, GUI_REQUEST_TIMEOUT, ping, request_shutdown, send_request,
+    send_request_with_timeout,
+};

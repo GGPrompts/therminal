@@ -122,6 +122,10 @@ enum UserEvent {
     /// `SwarmDebouncer`. Triggers a `poll_swarm_watcher` pass on the main
     /// thread; actual spawn/reclaim happens once the debounce window expires.
     SwarmWatcherTick,
+    /// A daemon `SplitPane` RPC fired asynchronously has completed.
+    /// Carries everything needed to finish the local layout insert on the
+    /// main thread without ever blocking the event loop.
+    DaemonSplitComplete(crate::window::pane_ops::DaemonSplitResult),
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -858,29 +862,34 @@ impl App {
 
         // Use the stored daemon runtime handle (see main.rs::connect_daemon).
         // `Handle::try_current()` is None on the winit event-loop thread.
+        // Fire-and-forget: `SetWorkspaceState` is advisory (layout persistence
+        // for MCP / CLI callers). Blocking the event loop here stalls all
+        // window repaints for the duration of the RPC — visible as glitches
+        // in other windows. The daemon applies the update asynchronously and
+        // the GUI never reads the response.
         let Some(handle) = self.daemon_runtime.clone() else {
             tracing::warn!("publish_workspace_state: no daemon runtime handle");
             return true;
         };
         let client = Arc::clone(client);
-        let result = handle.block_on(async move {
-            tokio::time::timeout(
+        handle.spawn(async move {
+            match tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 client.send_request(request),
             )
             .await
+            {
+                Ok(Ok(_)) => {
+                    debug!(session_id, "published workspace state to daemon");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "publish_workspace_state: daemon request failed");
+                }
+                Err(_) => {
+                    tracing::warn!("publish_workspace_state: daemon request timed out (>500ms)");
+                }
+            }
         });
-        match result {
-            Ok(Ok(_)) => {
-                debug!(session_id, "published workspace state to daemon");
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "publish_workspace_state: daemon request failed");
-            }
-            Err(_) => {
-                tracing::warn!("publish_workspace_state: daemon request timed out (>500ms)");
-            }
-        }
         true
     }
 
@@ -1021,6 +1030,9 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     w.request_redraw();
                 }
+            }
+            UserEvent::DaemonSplitComplete(result) => {
+                self.finish_split_pane_remote(result);
             }
             UserEvent::DesktopNotification {
                 title,

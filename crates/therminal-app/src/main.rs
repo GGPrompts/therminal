@@ -198,7 +198,7 @@ fn connect_daemon() -> Result<(
     std::sync::Arc<therminal_daemon_client::DaemonClient>,
     tokio::runtime::Handle,
 )> {
-    use therminal_daemon_client::DaemonClient;
+    use therminal_daemon_client::{DaemonClient, GUI_REQUEST_TIMEOUT};
     use therminal_protocol::daemon::IpcResponse;
 
     let socket_path = therminal_runtime::paths::socket_path("daemon");
@@ -219,7 +219,7 @@ fn connect_daemon() -> Result<(
     let handle = rt.handle().clone();
 
     let (client, pong) = rt.block_on(async {
-        let client = DaemonClient::connect(&socket_path).await?;
+        let client = DaemonClient::connect_with_timeout(&socket_path, GUI_REQUEST_TIMEOUT).await?;
         let pong = client.ping().await?;
         Ok::<_, anyhow::Error>((client, pong))
     })?;

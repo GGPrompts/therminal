@@ -352,8 +352,9 @@ fn render_single_pane(
     // URL/hotspot detection.
     let cache_matches_viewport =
         renderer.pane_cache_matches_viewport(pane.id, columns, screen_lines, display_offset);
-    let force_full_rebuild = should_force_full_rebuild(cache_matches_viewport, damaged_rows.as_deref())
-        || (is_remote_pane && damage_rows_empty(damaged_rows.as_deref()));
+    let force_full_rebuild =
+        should_force_full_rebuild(cache_matches_viewport, damaged_rows.as_deref())
+            || (is_remote_pane && damage_rows_empty(damaged_rows.as_deref()));
     let damaged_rows_for_render = if force_full_rebuild {
         None
     } else {
