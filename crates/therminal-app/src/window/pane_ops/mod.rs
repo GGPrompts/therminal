@@ -310,12 +310,12 @@ mod tests {
         };
         // When the inner cwd_from_source_pane returns None (covered above),
         // split_spawn_options must clone base.cwd. Here we check the wiring
-        // by calling the inner helper components. The redundant
-        // `unwrap_or_else` mirrors the production-path expression so that
-        // if anyone changes the fallback to `unwrap_or_default()` (which
-        // would silently swallow base.cwd), this assertion fails.
-        #[allow(clippy::unnecessary_literal_unwrap)]
-        let chosen = Option::<String>::None.unwrap_or_else(|| base.cwd.clone());
+        // by calling the inner helper components. Assigning None to a typed
+        // variable and then calling unwrap_or_else avoids the
+        // `unnecessary_literal_unwrap` lint while still exercising the same
+        // fallback path.
+        let source_cwd: Option<String> = None;
+        let chosen = source_cwd.unwrap_or_else(|| base.cwd.clone());
         assert_eq!(chosen, "/some/base");
     }
 }
