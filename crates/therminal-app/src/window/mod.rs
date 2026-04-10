@@ -154,6 +154,23 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
 }
 
+/// Stashed context for a deferred remote pane spawn (tn-ou30).
+///
+/// The remote fresh-spawn path in `init_gpu` now defers the actual
+/// `spawn_remote_pane` call until the first authoritative window size
+/// lands, just like the local path. This struct holds the arguments that
+/// were previously passed eagerly.
+pub(crate) struct DeferredRemoteSpawn {
+    pub(crate) local_id: PaneId,
+    pub(crate) daemon_client: Arc<therminal_daemon_client::DaemonClient>,
+    pub(crate) tokio_handle: tokio::runtime::Handle,
+    pub(crate) daemon_socket: std::path::PathBuf,
+    pub(crate) callbacks: crate::pane::PaneCallbacks,
+    pub(crate) scrollback: usize,
+    pub(crate) interceptor_cfg: therminal_terminal::interceptor::InterceptorConfig,
+    pub(crate) reuse_session_id: Option<therminal_protocol::SessionId>,
+}
+
 // ── Main application ─────────────────────────────────────────────────────
 
 /// Main application struct implementing winit's `ApplicationHandler`.
@@ -339,7 +356,7 @@ pub struct App {
     /// no GPU handles until the first `upsert`.
     pub(crate) widget_manager: crate::widgets::WidgetManager,
 
-    /// tn-ou30: deferred local-mode initial pane spawn.
+    /// tn-ou30: deferred initial pane spawn (local or remote).
     ///
     /// On Windows native builds the size reported by `Window::inner_size()`
     /// immediately after `create_window()` does not always match the size
@@ -349,15 +366,26 @@ pub struct App {
     /// prompt against a stale row count, which alacritty's resize cannot
     /// retroactively fix (the prompt has already landed at the wrong row).
     ///
-    /// To avoid this, the local fresh-spawn branch in `init_gpu` defers
-    /// the actual `spawn_pane` call. It stores window/gpu/grid_renderer
-    /// and sets this flag to `true`. The first authoritative size — either
+    /// To avoid this, both local and remote fresh-spawn branches in
+    /// `init_gpu` defer the actual spawn. They store window/gpu/grid_renderer
+    /// and set this flag to `true`. The first authoritative size — either
     /// the first `WindowEvent::Resized` or, as a fallback, the first
-    /// `RedrawRequested` — calls `ensure_initial_local_pane_spawned()`,
+    /// `RedrawRequested` — calls `ensure_initial_pane_spawned()`,
     /// which builds the pane against the current GPU surface dims and
-    /// clears the flag. Remote attach / remote fresh-spawn paths still
-    /// spawn synchronously inside `init_gpu` and never set this flag.
+    /// clears the flag.
     pub(crate) initial_pane_pending: bool,
+
+    /// Stashed state for a deferred remote fresh-spawn. `None` when the
+    /// deferred spawn is local-mode or when no spawn is pending.
+    pub(crate) deferred_remote_spawn: Option<DeferredRemoteSpawn>,
+
+    /// tn-ou30: countdown (in redraw frames) until the initial scrollback
+    /// compaction fires. After the initial pane spawn, the shell may emit
+    /// a leading newline or other startup output that creates a spurious
+    /// scrollback row before the first prompt. A synthetic resize-down-
+    /// then-up "trick" compacts that row away. We wait a few frames so
+    /// the shell's first output has landed in the Term.
+    pub(crate) scrollback_compact_countdown: u8,
 }
 
 /// Rewrite a `LayoutSnapshot` tree, translating every leaf pane id from

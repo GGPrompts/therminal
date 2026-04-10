@@ -53,7 +53,11 @@ fn list(ctx: &CliCtx, out: OutputFlags) -> Result<()> {
 }
 
 fn create(ctx: &CliCtx, name: Option<String>, out: OutputFlags) -> Result<()> {
-    let resp = ctx.send(IpcRequest::CreateSession { name })?;
+    let resp = ctx.send(IpcRequest::CreateSession {
+        name,
+        cols: None,
+        rows: None,
+    })?;
     let session_id = match resp {
         IpcResponse::SessionCreated { session_id } => session_id,
         other => bail!("unexpected daemon response: {other:?}"),

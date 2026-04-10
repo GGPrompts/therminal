@@ -8,7 +8,6 @@ use therminal_terminal::region_index::RegionIndex;
 
 use super::PaneId;
 use super::backend::{PaneBackend, PaneBackendKind};
-use super::geometry::PANE_HEADER_HEIGHT;
 use crate::grid_renderer::GridRenderer;
 
 // ── Dimensions adapter ──────────────────────────────────────────────────
@@ -62,9 +61,12 @@ pub struct PaneState {
 
 impl PaneState {
     /// Resize this pane's terminal and PTY to match a new viewport rect.
+    ///
+    /// Uses header_h = 0. Callers needing a header should use
+    /// `resize_to_viewport_with_header` directly.
     #[allow(dead_code)]
     pub fn resize_to_viewport(&mut self, rect: Rect, renderer: &GridRenderer) {
-        self.resize_to_viewport_with_header(rect, renderer, PANE_HEADER_HEIGHT);
+        self.resize_to_viewport_with_header(rect, renderer, 0.0);
     }
 
     /// Resize with an explicit header height (0 for single pane).
@@ -97,9 +99,14 @@ impl PaneState {
 }
 
 /// Compute (cols, rows) for a viewport rect using the renderer's cell metrics.
-/// `header_h` is the effective header height (0 for single pane, PANE_HEADER_HEIGHT for multi).
+///
+/// Uses header_h = 0 (no header). Callers spawning into a multi-pane layout
+/// should use `grid_size_for_rect_with_header` with `PANE_HEADER_HEIGHT`, but
+/// in practice `resize_all_panes` always runs after spawn and applies the
+/// correct effective header height, so using 0 here avoids a 1-row overshoot
+/// on single-pane initial spawns where the header doesn't exist.
 pub fn grid_size_for_rect(rect: Rect, renderer: &GridRenderer) -> (usize, usize) {
-    grid_size_for_rect_with_header(rect, renderer, PANE_HEADER_HEIGHT)
+    grid_size_for_rect_with_header(rect, renderer, 0.0)
 }
 
 /// Like `grid_size_for_rect` but with an explicit header height.

@@ -82,6 +82,13 @@ pub fn spawn_remote_pane(
     let (cols, rows) = grid_size_for_rect(viewport, renderer);
     let cols = cols.max(2);
     let rows = rows.max(1);
+    info!(
+        cols,
+        rows,
+        viewport_w = viewport.width(),
+        viewport_h = viewport.height(),
+        "spawn_remote_pane: computed grid size for CreateSession"
+    );
 
     // ── 1. Create the remote session/pane and discover its real pane id ─
     //
@@ -101,7 +108,11 @@ pub fn spawn_remote_pane(
         let create_resp = tokio_handle.block_on(async {
             tokio::time::timeout(
                 rpc_timeout,
-                daemon_client.send_request(IpcRequest::CreateSession { name: None }),
+                daemon_client.send_request(IpcRequest::CreateSession {
+                    name: None,
+                    cols: Some(cols as u16),
+                    rows: Some(rows as u16),
+                }),
             )
             .await
         });

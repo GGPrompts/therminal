@@ -1028,9 +1028,11 @@ impl Session {
 pub struct SessionManager {
     sessions: HashMap<SessionId, Session>,
     event_tx: broadcast::Sender<DaemonEvent>,
-    /// Default pane dimensions for new sessions.
-    default_cols: u16,
-    default_rows: u16,
+    /// Default pane dimensions for new sessions. Updated by `CreateSession`
+    /// when the GUI passes its viewport size, so subsequent splits inherit
+    /// the same dimensions until the next resize.
+    pub(crate) default_cols: u16,
+    pub(crate) default_rows: u16,
     /// Optional persistence handle for debounced state saving.
     persistence: Option<crate::persistence::PersistenceHandle>,
     /// Central registry of all detected agents across panes.

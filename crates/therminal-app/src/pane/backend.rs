@@ -290,6 +290,56 @@ impl PaneBackendKind {
         }
     }
 
+    /// tn-ou30: clear spurious scrollback history that accumulates during
+    /// shell startup or snapshot replay. Only clears if every scrollback
+    /// row is blank (spaces / NUL) — real scrollback content is preserved.
+    /// No-op on WebView backends.
+    pub fn compact_scrollback(&mut self) {
+        let term = match self {
+            PaneBackendKind::Terminal { term, .. } | PaneBackendKind::RemotePty { term, .. } => {
+                term
+            }
+            PaneBackendKind::WebView { .. } => return,
+        };
+        let mut guard = term.lock();
+        use alacritty_terminal::grid::Dimensions;
+        let cols = guard.columns();
+        let history = guard.grid().history_size();
+        if history == 0 {
+            tracing::info!(cols, "compact_scrollback: no scrollback history");
+            return;
+        }
+
+        // Check if ALL scrollback rows are blank. If any has content,
+        // this is real scrollback and we leave it alone.
+        let grid = guard.grid();
+        let all_blank = (0..history).all(|offset| {
+            // History rows use negative Line indices: -1 is the most
+            // recent scrollback row, -(history) is the oldest.
+            let line = alacritty_terminal::index::Line(-1 - offset as i32);
+            (0..cols).all(|c| {
+                let ch = grid[line][alacritty_terminal::index::Column(c)].c;
+                ch == ' ' || ch == '\0'
+            })
+        });
+
+        if !all_blank {
+            tracing::info!(
+                cols,
+                history,
+                "compact_scrollback: scrollback has content, keeping"
+            );
+            return;
+        }
+
+        guard.grid_mut().clear_history();
+        tracing::info!(
+            cols,
+            history,
+            "compact_scrollback: cleared blank scrollback"
+        );
+    }
+
     /// Resize the backend to match new grid dimensions, with access to renderer
     /// metrics for the terminal case.
     pub fn resize_to_viewport(

@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -101,7 +101,14 @@ pub enum IpcRequest {
     /// Get details about a specific session.
     GetSession { session_id: SessionId },
     /// Create a new session.
-    CreateSession { name: Option<String> },
+    ///
+    /// `cols` and `rows` set the initial PTY dimensions. When `None`, the
+    /// daemon falls back to its built-in defaults (80×24).
+    CreateSession {
+        name: Option<String>,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    },
     /// Destroy a session.
     DestroySession { session_id: SessionId },
     /// Query daemon state.
@@ -733,11 +740,14 @@ impl PaneStateSnapshot {
             out.extend_from_slice(b"\x1b>");
         }
 
-        // Clear screen + home.
-        out.extend_from_slice(b"\x1b[2J\x1b[H");
+        // Home cursor. We intentionally skip ESC[2J (clear screen)
+        // because it pushes the blank viewport into scrollback history
+        // on a freshly-created local Term, creating spurious scrollback
+        // rows. The row-by-row CUP painting below overwrites every cell
+        // anyway, so clearing first is unnecessary.
+        out.extend_from_slice(b"\x1b[H");
 
         // Paint grid rows. Use CUP (ESC[<row>;<col>H) per row, 1-based.
-        // Trailing spaces on each row are preserved verbatim.
         for (i, row) in self.grid_chars.iter().enumerate() {
             let line_no = i + 1;
             out.extend_from_slice(format!("\x1b[{line_no};1H").as_bytes());
@@ -1187,8 +1197,8 @@ mod tests {
         assert!(bytes.windows(8).any(|w| w == b"\x1b[?1000h"));
         // SGR mouse on.
         assert!(bytes.windows(8).any(|w| w == b"\x1b[?1006h"));
-        // Clear screen.
-        assert!(bytes.windows(4).any(|w| w == b"\x1b[2J"));
+        // Home cursor (ESC[2J intentionally removed to avoid scrollback pollution).
+        assert!(bytes.windows(3).any(|w| w == b"\x1b[H"));
     }
 
     #[test]

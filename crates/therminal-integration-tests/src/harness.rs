@@ -180,6 +180,8 @@ impl DaemonHarness {
             .client
             .send_request(IpcRequest::CreateSession {
                 name: name.map(str::to_string),
+                cols: None,
+                rows: None,
             })
             .await?;
         let session_id = match resp {

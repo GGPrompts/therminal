@@ -461,8 +461,23 @@ async fn dispatch_ipc(
                 },
             }
         }
-        IpcRequest::CreateSession { name } => {
+        IpcRequest::CreateSession { name, cols, rows } => {
             let mut mgr = session_mgr.lock().await;
+            // Apply caller-supplied PTY dimensions before spawn so the
+            // daemon's PTY matches the GUI viewport from the first byte.
+            if let Some(c) = cols {
+                mgr.default_cols = *c;
+            }
+            if let Some(r) = rows {
+                mgr.default_rows = *r;
+            }
+            tracing::info!(
+                default_cols = mgr.default_cols,
+                default_rows = mgr.default_rows,
+                req_cols = ?cols,
+                req_rows = ?rows,
+                "CreateSession: PTY dimensions"
+            );
             match mgr.create_session(name.clone()) {
                 Ok(session_id) => {
                     // Update lifecycle session count

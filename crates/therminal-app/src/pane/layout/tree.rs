@@ -64,6 +64,28 @@ impl LayoutNode {
         self.resize_all_panes_with_header(renderer, header_h);
     }
 
+    /// tn-ou30: compact spurious scrollback from initial shell output.
+    ///
+    /// Performs a resize-down-then-up cycle on each pane's local Term.
+    /// This triggers alacritty's `shrink_lines` (which scrolls content
+    /// up, consuming trailing blank scrollback) followed by `grow_lines`
+    /// (which pulls history back and decreases the scroll limit). Net
+    /// effect: blank scrollback rows created by a shell's leading newline
+    /// or startup text are absorbed. The PTY is NOT resized — only the
+    /// in-memory Term changes briefly and returns to its original size.
+    pub fn compact_scrollback(&mut self) {
+        match self {
+            LayoutNode::Leaf(pane) => {
+                pane.backend.compact_scrollback();
+            }
+            LayoutNode::Split { first, second, .. } => {
+                first.compact_scrollback();
+                second.compact_scrollback();
+            }
+            LayoutNode::Empty => {}
+        }
+    }
+
     /// Resize all panes with an explicit header height.
     pub fn resize_all_panes_with_header(&mut self, renderer: &GridRenderer, header_h: f32) {
         match self {

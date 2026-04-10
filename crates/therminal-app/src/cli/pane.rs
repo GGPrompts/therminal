@@ -209,7 +209,11 @@ fn find_seed_pane(ctx: &CliCtx, session: Option<u64>) -> Result<u64> {
         bail!("session has no panes — pass --from <pane_id> explicitly");
     }
     // No panes at all → spin up a session.
-    let resp = ctx.send(IpcRequest::CreateSession { name: None })?;
+    let resp = ctx.send(IpcRequest::CreateSession {
+        name: None,
+        cols: None,
+        rows: None,
+    })?;
     let session_id = match resp {
         IpcResponse::SessionCreated { session_id } => session_id,
         other => bail!("unexpected daemon response: {other:?}"),

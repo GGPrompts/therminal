@@ -210,9 +210,19 @@ impl App {
             None => return,
         };
         let callbacks = make_pane_callbacks(&proxy, local_id);
+        // tn-ou30: compute post-split header height so the local Term starts
+        // at the correct size, avoiding a shrink→scrollback row on relayout.
+        let post_split_header_h = crate::pane::effective_header_height(
+            layout.pane_count() + 1,
+            self.config.general.show_pane_headers,
+        );
         let build_result: std::cell::RefCell<Option<anyhow::Error>> = std::cell::RefCell::new(None);
         let new_id = layout.split_pane(source_local, direction, |viewport| {
-            let (cols, rows) = crate::pane::grid_size_for_rect(viewport, renderer_ref);
+            let (cols, rows) = crate::pane::grid_size_for_rect_with_header(
+                viewport,
+                renderer_ref,
+                post_split_header_h,
+            );
             let cols = cols.max(2);
             let rows = rows.max(1);
             match crate::pane::remote_spawn::build_remote_pane_state(
@@ -239,6 +249,8 @@ impl App {
 
         if let Some(new_id) = new_id {
             self.pane_id_map.insert(new_id, new_daemon_pane_id);
+            // tn-ou30: schedule scrollback compaction for the new pane.
+            self.scrollback_compact_countdown = 30;
             info!(
                 source_local,
                 new_local = new_id,
@@ -771,6 +783,13 @@ impl App {
         // the same directory the user was working in.
         let spawn_options = split_spawn_options(&base_spawn_options, layout, focused);
 
+        // tn-ou30: compute the header height that resize_all_panes will apply
+        // AFTER the split so the PTY starts at the correct size.
+        let post_split_header_h = crate::pane::effective_header_height(
+            layout.pane_count() + 1,
+            self.config.general.show_pane_headers,
+        );
+
         let new_id = layout.split_pane(
             focused,
             direction,
@@ -783,6 +802,7 @@ impl App {
                 &spawn_options,
                 registry.clone(),
                 |pane_id| make_pane_callbacks(&proxy, pane_id),
+                post_split_header_h,
             ) {
                 Ok(pane) => Some(pane),
                 Err(e) => {
@@ -1051,6 +1071,11 @@ impl App {
         // Inherit source pane's cwd (from OSC 7).
         let spawn_options = split_spawn_options(&base_spawn_options, layout, target_id);
 
+        let post_split_header_h = crate::pane::effective_header_height(
+            layout.pane_count() + 1,
+            self.config.general.show_pane_headers,
+        );
+
         let new_id =
             layout.split_pane(
                 target_id,
@@ -1064,6 +1089,7 @@ impl App {
                     &spawn_options,
                     registry.clone(),
                     |pane_id| make_pane_callbacks(&proxy, pane_id),
+                    post_split_header_h,
                 ) {
                     Ok(pane) => Some(pane),
                     Err(e) => {
@@ -1877,6 +1903,7 @@ impl App {
                     spawn_options,
                     registry,
                     |pane_id| make_pane_callbacks(proxy, pane_id),
+                    0.0, // restore: relayout_and_redraw will correct
                 ) {
                     Ok(pane) => Some(LayoutNode::Leaf(pane)),
                     Err(e) => {
@@ -2115,6 +2142,7 @@ impl App {
                 &spawn_options,
                 registry.clone(),
                 |pane_id| make_pane_callbacks(&proxy, pane_id),
+                0.0, // new workspace: single pane, no header
             ) {
                 Ok(pane) => {
                     let id = pane.id;
@@ -2330,6 +2358,7 @@ impl App {
                 &spawn_options,
                 registry.clone(),
                 |pane_id| make_pane_callbacks(&proxy, pane_id),
+                0.0, // replacement pane: single pane, no header
             ) {
                 Ok(pane) => {
                     let id = pane.id;
@@ -2429,6 +2458,11 @@ impl App {
                     let spawn_options =
                         split_spawn_options(&base_spawn_options, layout, target_pane_id);
 
+                    let post_split_header_h = crate::pane::effective_header_height(
+                        layout.pane_count() + 1,
+                        self.config.general.show_pane_headers,
+                    );
+
                     let new_id = layout.split_pane(target_pane_id, direction, |viewport| {
                         match crate::pane::spawn_pane(
                             viewport,
@@ -2439,6 +2473,7 @@ impl App {
                             &spawn_options,
                             registry.clone(),
                             |pane_id| make_pane_callbacks(&proxy, pane_id),
+                            post_split_header_h,
                         ) {
                             Ok(pane) => Some(pane),
                             Err(e) => {
@@ -2595,6 +2630,11 @@ impl App {
         // Inherit source pane's cwd (from OSC 7).
         let spawn_options = split_spawn_options(&base_spawn_options, layout, target_pane_id);
 
+        let post_split_header_h = crate::pane::effective_header_height(
+            layout.pane_count() + 1,
+            self.config.general.show_pane_headers,
+        );
+
         let new_id =
             layout.split_pane(
                 target_pane_id,
@@ -2608,6 +2648,7 @@ impl App {
                     &spawn_options,
                     registry.clone(),
                     |pane_id| make_pane_callbacks(&proxy, pane_id),
+                    post_split_header_h,
                 ) {
                     Ok(pane) => Some(pane),
                     Err(e) => {

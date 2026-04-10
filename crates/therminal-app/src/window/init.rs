@@ -228,6 +228,8 @@ impl App {
             widget_renderer: None,
             widget_manager: crate::widgets::WidgetManager::new(),
             initial_pane_pending: false,
+            deferred_remote_spawn: None,
+            scrollback_compact_countdown: 0,
         }
     }
 
@@ -362,7 +364,7 @@ impl App {
         // by the remote attach + remote fresh-spawn paths below. The local
         // fresh-spawn path (after both remote branches fall through) is
         // deferred via `initial_pane_pending`, so it rederives them inside
-        // `ensure_initial_local_pane_spawned`. `scan_interval_secs`,
+        // `ensure_initial_pane_spawned`. `scan_interval_secs`,
         // `spawn_options`, and `registry` were only used by the (now
         // deferred) local path, so they have been removed here.
         let scrollback = self.config.general.scrollback_lines;
@@ -495,46 +497,34 @@ impl App {
             // session id (empty-workspace daemon session), reuse it instead
             // of creating a fresh one and orphaning the empty one.
             let reuse_session_id = self.daemon_session_id;
-            match crate::pane::remote_spawn::spawn_remote_pane(
+
+            // tn-ou30: defer the remote fresh-spawn until the first
+            // authoritative window size, same as the local path. The
+            // stale `inner_size()` race affects remote panes equally —
+            // the daemon PTY gets the wrong row count, the prompt lands
+            // at the wrong position, and resize cannot retroactively
+            // move it.
+            self.deferred_remote_spawn = Some(super::DeferredRemoteSpawn {
                 local_id,
-                full_rect,
-                &grid_renderer,
-                scrollback,
-                interceptor_cfg.clone(),
-                Arc::clone(&dc),
-                handle,
-                socket,
+                daemon_client: Arc::clone(&dc),
+                tokio_handle: handle,
+                daemon_socket: socket,
                 callbacks,
+                scrollback,
+                interceptor_cfg: interceptor_cfg.clone(),
                 reuse_session_id,
-            ) {
-                Ok((pane, daemon_session_id, daemon_pane_id)) => {
-                    let pane_id = pane.id;
-                    self.pane_id_map.insert(pane_id, daemon_pane_id);
-                    self.daemon_session_id = Some(daemon_session_id);
-                    info!(pane_id, "spawned initial pane in REMOTE attach mode");
-                    let layout = LayoutNode::Leaf(pane);
-                    let wm = WorkspaceManager::new(layout, Some(pane_id));
-                    self.window = Some(window);
-                    self.gpu = Some(GpuState {
-                        surface,
-                        device,
-                        queue,
-                        config,
-                    });
-                    self.grid_renderer = Some(grid_renderer);
-                    self.workspaces = Some(wm);
-                    if let Some(wm) = self.workspaces.as_mut()
-                        && let Some(renderer) = self.grid_renderer.as_ref()
-                    {
-                        wm.layout_mut()
-                            .resize_all_panes(renderer, self.config.general.show_pane_headers);
-                    }
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "remote pane spawn failed; falling back to local");
-                }
-            }
+            });
+            self.window = Some(window);
+            self.gpu = Some(GpuState {
+                surface,
+                device,
+                queue,
+                config,
+            });
+            self.grid_renderer = Some(grid_renderer);
+            self.initial_pane_pending = true;
+            info!("remote-mode initial pane deferred until first authoritative resize (tn-ou30)");
+            return;
         }
 
         // tn-ou30: defer the local fresh-spawn pane until the first
@@ -550,7 +540,7 @@ impl App {
         //
         // We commit the GPU/renderer state now (so the first redraw can
         // clear the surface) and stash the pending flag. The actual
-        // `spawn_pane` call happens in `ensure_initial_local_pane_spawned`,
+        // spawn call happens in `ensure_initial_pane_spawned`,
         // invoked from `handle_resized` (the first authoritative size) and
         // from `handle_redraw_requested` as a fallback for platforms that
         // do not synthesize an initial `Resized` event.
@@ -566,15 +556,15 @@ impl App {
         info!("local-mode initial pane deferred until first authoritative resize (tn-ou30)");
     }
 
-    /// tn-ou30: spawn the deferred local-mode initial pane against the
-    /// current GPU surface dimensions.
+    /// tn-ou30: spawn the deferred initial pane (local or remote) against
+    /// the current GPU surface dimensions.
     ///
     /// No-op unless `initial_pane_pending` is true. Called from
     /// `handle_resized` (preferred path: first authoritative size) and from
     /// `handle_redraw_requested` (fallback for platforms that do not fire
     /// an early `Resized`). Idempotent — clears the flag on success and on
     /// the first failure so we don't spin forever.
-    pub(super) fn ensure_initial_local_pane_spawned(&mut self) {
+    pub(super) fn ensure_initial_pane_spawned(&mut self) {
         if !self.initial_pane_pending {
             return;
         }
@@ -596,6 +586,95 @@ impl App {
         // spawn returning an error) doesn't loop forever on every redraw.
         self.initial_pane_pending = false;
 
+        // ── Remote deferred spawn ────────────────────────────────────────
+        if let Some(deferred) = self.deferred_remote_spawn.take() {
+            let (spawn_cols, spawn_rows) = crate::pane::grid_size_for_rect(full_rect, renderer);
+            info!(
+                rect_w = full_rect.width(),
+                rect_h = full_rect.height(),
+                spawn_cols,
+                spawn_rows,
+                cell_w = renderer.cell_width,
+                cell_h = renderer.cell_height,
+                pad_x = renderer.padding_x(),
+                pad_y = renderer.padding_y(),
+                "deferred remote spawn: rect and grid dims"
+            );
+            match crate::pane::remote_spawn::spawn_remote_pane(
+                deferred.local_id,
+                full_rect,
+                renderer,
+                deferred.scrollback,
+                deferred.interceptor_cfg,
+                deferred.daemon_client,
+                deferred.tokio_handle,
+                deferred.daemon_socket,
+                deferred.callbacks,
+                deferred.reuse_session_id,
+            ) {
+                Ok((pane, daemon_session_id, daemon_pane_id)) => {
+                    let pane_id = pane.id;
+                    self.pane_id_map.insert(pane_id, daemon_pane_id);
+                    self.daemon_session_id = Some(daemon_session_id);
+                    let layout = LayoutNode::Leaf(pane);
+                    let wm = WorkspaceManager::new(layout, Some(pane_id));
+                    self.workspaces = Some(wm);
+
+                    if let Some(wm) = self.workspaces.as_mut()
+                        && let Some(renderer) = self.grid_renderer.as_ref()
+                    {
+                        let pane_count = wm.layout().pane_count();
+                        let header_h = crate::pane::effective_header_height(
+                            pane_count,
+                            self.config.general.show_pane_headers,
+                        );
+                        info!(
+                            pane_count,
+                            header_h,
+                            show_pane_headers = self.config.general.show_pane_headers,
+                            "resize_all_panes: effective header"
+                        );
+                        wm.layout_mut()
+                            .resize_all_panes(renderer, self.config.general.show_pane_headers);
+                    }
+
+                    // Log actual pane viewport after resize
+                    if let Some(wm) = self.workspaces.as_ref()
+                        && let crate::pane::LayoutNode::Leaf(pane) = wm.layout()
+                        && let Some(renderer) = self.grid_renderer.as_ref()
+                    {
+                        let (post_cols, post_rows) =
+                            crate::pane::grid_size_for_rect(pane.viewport, renderer);
+                        info!(
+                            pane_id,
+                            post_cols,
+                            post_rows,
+                            viewport_w = pane.viewport.width(),
+                            viewport_h = pane.viewport.height(),
+                            "post-resize_all_panes: pane viewport grid dims"
+                        );
+                    }
+
+                    // tn-ou30: schedule scrollback compaction after a few
+                    // frames so the shell's initial output has landed.
+                    self.scrollback_compact_countdown = 30;
+
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "deferred remote pane spawn failed; falling back to local"
+                    );
+                    // Fall through to the local spawn below.
+                }
+            }
+        }
+
+        // ── Local deferred spawn ─────────────────────────────────────────
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
             osc_633: self.config.terminal.osc_633,
@@ -642,6 +721,7 @@ impl App {
                     }),
                 }
             },
+            0.0, // initial pane: no header
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -672,6 +752,10 @@ impl App {
                 cols, rows, "initial local pane spawned (deferred, tn-ou30)"
             );
         }
+
+        // tn-ou30: schedule scrollback compaction after a few frames so
+        // the shell's initial output has landed.
+        self.scrollback_compact_countdown = 30;
 
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();

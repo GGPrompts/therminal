@@ -14,7 +14,7 @@ use tracing::info;
 use super::PaneId;
 use super::PaneListener;
 use super::backend::PaneBackendKind;
-use super::state::{PaneState, PaneStatus, grid_size_for_rect};
+use super::state::{PaneState, PaneStatus, grid_size_for_rect_with_header};
 use crate::grid_renderer::GridRenderer;
 
 /// Counter for generating unique pane IDs.
@@ -241,12 +241,13 @@ pub fn spawn_pane<F>(
     spawn_options: &therminal_terminal::pty::SpawnOptions,
     agent_registry: Option<Arc<Mutex<therminal_terminal::agent_registry::AgentRegistry>>>,
     callback_fn: F,
+    header_h: f32,
 ) -> Result<PaneState, anyhow::Error>
 where
     F: FnOnce(PaneId) -> PaneCallbacks,
 {
     let id = next_pane_id();
-    let (cols, rows) = grid_size_for_rect(viewport, renderer);
+    let (cols, rows) = grid_size_for_rect_with_header(viewport, renderer, header_h);
     let cols = cols.max(2);
     let rows = rows.max(1);
 

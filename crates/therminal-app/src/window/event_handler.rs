@@ -447,6 +447,13 @@ impl App {
     // ── window_event sub-handlers ───────────────────────────────────────
 
     pub(super) fn handle_resized(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        info!(
+            width = new_size.width,
+            height = new_size.height,
+            pane_pending = self.initial_pane_pending,
+            has_panes = self.workspaces.is_some(),
+            "handle_resized"
+        );
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
@@ -459,12 +466,14 @@ impl App {
             self.last_resize_at = Some(now);
             self.pending_resize = None;
             self.resize(new_size);
-            // tn-ou30: the first authoritative `Resized` arrives shortly
-            // after window creation. If the local-mode initial pane spawn
-            // was deferred (Windows DPI/DWM-reshape race), spawn it now —
-            // *after* `self.resize` has committed the new surface dims so
-            // `compute_layout_rect` returns the real rect.
-            self.ensure_initial_local_pane_spawned();
+            // tn-ou30: do NOT spawn the deferred pane from handle_resized.
+            // On Windows the OS can fire multiple resize events in rapid
+            // succession before settling on the final size (e.g. maximized
+            // → actual default). Spawning on the first resize would create
+            // the PTY at the wrong dimensions, then the subsequent shrink
+            // pushes content into scrollback. The spawn happens instead in
+            // handle_redraw_requested, which runs after the event batch is
+            // drained and gpu.config reflects the settled size.
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -500,7 +509,7 @@ impl App {
         // resize event has fired yet. On the typical Windows path the
         // first `Resized` already covered this; this call is then a
         // no-op (the flag was cleared there).
-        self.ensure_initial_local_pane_spawned();
+        self.ensure_initial_pane_spawned();
 
         // workspaces == None means all panes are gone and no restore
         // is pending — exit the window. Gate on `initial_pane_pending`
@@ -509,6 +518,24 @@ impl App {
         if self.workspaces.is_none() && !self.initial_pane_pending {
             event_loop.exit();
             return;
+        }
+
+        // tn-ou30: scrollback compaction after initial pane spawn.
+        // The shell may emit a leading newline or startup text that
+        // creates spurious scrollback before the first prompt. A
+        // resize-down-then-up cycle compacts it away — same technique
+        // as xterm.js "resize trick".
+        if self.scrollback_compact_countdown > 0 {
+            self.scrollback_compact_countdown -= 1;
+            if self.scrollback_compact_countdown == 0
+                && let Some(wm) = self.workspaces.as_mut()
+            {
+                wm.layout_mut().compact_scrollback();
+            }
+            // Keep requesting redraws until the countdown expires.
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
 
         // Poll auto-tile debouncer for agent spawn/exit actions.
