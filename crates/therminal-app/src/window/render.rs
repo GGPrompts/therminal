@@ -317,6 +317,7 @@ fn render_single_pane(
     };
     let mut term_guard = term.lock();
 
+    let columns = term_guard.columns();
     let screen_lines = term_guard.screen_lines();
     let damaged_rows = match term_guard.damage() {
         TermDamage::Full => None,
@@ -345,7 +346,7 @@ fn render_single_pane(
     // the existing cached state without collecting cells or running
     // URL/hotspot detection.
     let cache_matches_viewport =
-        renderer.pane_cache_matches_viewport(pane.id, screen_lines, display_offset);
+        renderer.pane_cache_matches_viewport(pane.id, columns, screen_lines, display_offset);
     let force_full_rebuild =
         should_force_full_rebuild(cache_matches_viewport, damaged_rows.as_deref());
     let damaged_rows_for_render = if force_full_rebuild {
@@ -381,6 +382,7 @@ fn render_single_pane(
 
         renderer.render_cached(
             &cursor,
+            columns,
             screen_lines,
             selection_range.as_ref(),
             display_offset,
@@ -547,6 +549,7 @@ fn render_single_pane(
     renderer.render(
         &cells,
         &cursor,
+        columns,
         screen_lines,
         selection_range.as_ref(),
         display_offset,

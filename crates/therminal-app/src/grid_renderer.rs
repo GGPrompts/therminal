@@ -264,11 +264,15 @@ fn resolve_bg_color(ansi_override: Option<&[[f32; 4]; 16]>, color: &AnsiColor) -
 
 fn viewport_cache_matches(
     cached_line_count: Option<usize>,
+    last_column_count: Option<usize>,
     last_display_offset: Option<usize>,
+    columns: usize,
     screen_lines: usize,
     display_offset: usize,
 ) -> bool {
-    cached_line_count == Some(screen_lines) && last_display_offset == Some(display_offset)
+    cached_line_count == Some(screen_lines)
+        && last_column_count == Some(columns)
+        && last_display_offset == Some(display_offset)
 }
 
 /// Build the full rendered text for a terminal cell.
@@ -420,6 +424,11 @@ pub struct GridRenderer {
     // Per-pane last rendered display offset. Row caches are viewport-relative,
     // so a scrollback change invalidates the cached visible rows.
     pane_last_display_offset: HashMap<PaneId, usize>,
+
+    // Per-pane last rendered column count. Width-only pane resizes can keep
+    // the same row count, so line-count checks alone are not enough to decide
+    // whether cached row/cell buffers are still valid after a split.
+    pane_last_column_count: HashMap<PaneId, usize>,
 
     // The pane whose caches are currently active. Set via `set_current_pane()`.
     current_pane: Option<PaneId>,
@@ -644,6 +653,7 @@ impl GridRenderer {
             pane_cell_shape_keys: HashMap::new(),
             pane_last_cursor_pos: HashMap::new(),
             pane_last_display_offset: HashMap::new(),
+            pane_last_column_count: HashMap::new(),
             current_pane: None,
             frame_count: 0,
             rect_verts_cpu: Vec::new(),
@@ -760,6 +770,7 @@ impl GridRenderer {
         self.pane_cell_shape_keys.clear();
         self.pane_last_cursor_pos.clear();
         self.pane_last_display_offset.clear();
+        self.pane_last_column_count.clear();
     }
 
     /// Returns true when the cached viewport rows for `pane_id` match the
@@ -767,12 +778,15 @@ impl GridRenderer {
     pub fn pane_cache_matches_viewport(
         &self,
         pane_id: PaneId,
+        columns: usize,
         screen_lines: usize,
         display_offset: usize,
     ) -> bool {
         viewport_cache_matches(
             self.pane_row_cache.get(&pane_id).map(Vec::len),
+            self.pane_last_column_count.get(&pane_id).copied(),
             self.pane_last_display_offset.get(&pane_id).copied(),
+            columns,
             screen_lines,
             display_offset,
         )
@@ -891,6 +905,7 @@ impl GridRenderer {
         self.hotspot_map.retain(|&(pid, _, _), _| pid != pane_id);
         self.pane_last_cursor_pos.remove(&pane_id);
         self.pane_last_display_offset.remove(&pane_id);
+        self.pane_last_column_count.remove(&pane_id);
     }
 
     /// Clear per-frame maps at the start of a new frame, before any panes
@@ -946,6 +961,7 @@ impl GridRenderer {
         &mut self,
         cells: &[RenderCell],
         cursor: &RenderableCursor,
+        columns: usize,
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
@@ -998,6 +1014,7 @@ impl GridRenderer {
 
         self.render_from_cache(
             cursor,
+            columns,
             screen_lines,
             selection,
             display_offset,
@@ -1015,6 +1032,7 @@ impl GridRenderer {
     pub fn render_cached(
         &mut self,
         cursor: &RenderableCursor,
+        columns: usize,
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
@@ -1028,6 +1046,7 @@ impl GridRenderer {
         let empty: Vec<bool> = Vec::new();
         self.render_from_cache(
             cursor,
+            columns,
             screen_lines,
             selection,
             display_offset,
@@ -1045,6 +1064,7 @@ impl GridRenderer {
     fn render_from_cache(
         &mut self,
         cursor: &RenderableCursor,
+        columns: usize,
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
@@ -1466,6 +1486,8 @@ impl GridRenderer {
             .insert(pane_id, (cursor_row, cursor_col));
         self.pane_last_display_offset
             .insert(pane_id, display_offset);
+        self.pane_last_column_count
+            .insert(pane_id, columns);
 
         // ── Update viewport ──────────────────────────────────────────────
         self.viewport.update(
@@ -1677,10 +1699,11 @@ mod tests {
     }
 
     #[test]
-    fn viewport_cache_matches_only_same_offset_and_line_count() {
-        assert!(super::viewport_cache_matches(Some(3), Some(5), 3, 5));
-        assert!(!super::viewport_cache_matches(Some(3), Some(6), 3, 5));
-        assert!(!super::viewport_cache_matches(Some(4), Some(5), 3, 5));
-        assert!(!super::viewport_cache_matches(None, Some(5), 3, 5));
+    fn viewport_cache_matches_only_same_offset_line_count_and_columns() {
+        assert!(super::viewport_cache_matches(Some(3), Some(80), Some(5), 80, 3, 5));
+        assert!(!super::viewport_cache_matches(Some(3), Some(81), Some(5), 80, 3, 5));
+        assert!(!super::viewport_cache_matches(Some(3), Some(80), Some(6), 80, 3, 5));
+        assert!(!super::viewport_cache_matches(Some(4), Some(80), Some(5), 80, 3, 5));
+        assert!(!super::viewport_cache_matches(None, Some(80), Some(5), 80, 3, 5));
     }
 }
