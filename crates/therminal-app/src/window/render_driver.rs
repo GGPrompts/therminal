@@ -309,7 +309,7 @@ impl App {
             }
             Some(OverlayMode::Settings) => {
                 settings_overlay::draw_settings_overlay(
-                    &self.settings_overlay,
+                    &mut self.settings_overlay,
                     SettingsRenderValues {
                         show_pane_headers: self.config.general.show_pane_headers,
                         show_status_bar: self.config.general.show_status_bar,

@@ -619,6 +619,21 @@ impl App {
                 return;
             }
             Some(OverlayMode::Settings) => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
+                };
+                // Scroll through controls: wheel up moves selection up.
+                for _ in 0..lines.unsigned_abs() {
+                    if lines < 0 {
+                        self.settings_overlay.arrow_down();
+                    } else {
+                        self.settings_overlay.arrow_up();
+                    }
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
                 return;
             }
             None => {}
@@ -638,8 +653,17 @@ impl App {
             self.commit_rename();
         }
 
-        // Dismiss active overlays on mouse press.
+        // Overlay mouse interaction: click inside the settings panel is
+        // consumed (don't pass to terminal), click outside closes overlay.
+        // Help overlay still uses dismiss-on-any-click.
         if self.overlay_mode.is_some() && state == ElementState::Pressed {
+            if let Some(OverlayMode::Settings) = self.overlay_mode {
+                let (px, py) = self.cursor_position.unwrap_or((0.0, 0.0));
+                if self.settings_overlay.contains_point(px as f32, py as f32) {
+                    // Click inside the panel — consume without closing.
+                    return;
+                }
+            }
             self.close_overlay();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();

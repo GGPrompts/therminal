@@ -192,6 +192,8 @@ pub(crate) struct SettingsOverlayState {
     selected_section: usize,
     selected_control_by_section: Vec<usize>,
     focus: SettingsFocus,
+    /// Cached panel bounds from the last render, used for mouse hit-testing.
+    panel_rect: Option<[f32; 4]>,
 }
 
 impl SettingsOverlayState {
@@ -201,9 +203,25 @@ impl SettingsOverlayState {
             selected_section: 0,
             selected_control_by_section: Vec::new(),
             focus: SettingsFocus::Navigation,
+            panel_rect: None,
         };
         s.seed_defaults();
         s
+    }
+
+    /// Store the panel bounds computed during rendering so the event handler
+    /// can distinguish clicks inside the panel from clicks on the scrim.
+    pub(crate) fn set_panel_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.panel_rect = Some([x, y, w, h]);
+    }
+
+    /// Returns `true` if the pixel coordinate falls inside the panel.
+    pub(crate) fn contains_point(&self, px: f32, py: f32) -> bool {
+        if let Some([x, y, w, h]) = self.panel_rect {
+            px >= x && px <= x + w && py >= y && py <= y + h
+        } else {
+            false
+        }
     }
 
     pub(crate) fn reset_navigation(&mut self) {
@@ -773,7 +791,7 @@ pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset)
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_settings_overlay(
-    state: &SettingsOverlayState,
+    state: &mut SettingsOverlayState,
     _values: SettingsRenderValues,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
@@ -795,6 +813,8 @@ pub(crate) fn draw_settings_overlay(
     let panel_y = (sh - panel_h) * 0.5;
     let nav_w = (panel_w * 0.30).clamp(180.0, 320.0);
     let content_x = panel_x + nav_w;
+
+    state.set_panel_rect(panel_x, panel_y, panel_w, panel_h);
 
     let scrim_color = [0.0, 0.0, 0.0, 0.64];
     let panel_bg = [
