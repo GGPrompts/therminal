@@ -407,11 +407,14 @@ impl App {
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
 
-        // ── Selection logic (only when the terminal is NOT in mouse mode) ──
-        if button == MouseButton::Left && !mouse_mode {
-            if state == ElementState::Pressed {
-                let shift_held = self.modifiers.state().shift_key();
+        let shift_held = self.modifiers.state().shift_key();
 
+        // ── Selection logic (when NOT in mouse mode, or Shift bypasses it) ──
+        // Standard terminal convention: Shift+Click bypasses TUI mouse capture
+        // so the terminal emulator handles hotspots and text selection instead
+        // of forwarding the click to the PTY (tn-vevc).
+        if button == MouseButton::Left && (!mouse_mode || shift_held) {
+            if state == ElementState::Pressed {
                 // Detect multi-click (double/triple) by timing and position.
                 let now = Instant::now();
                 let same_pos = self.last_click_pos == Some((col, row));
@@ -627,8 +630,12 @@ impl App {
         let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(TermMode::MOUSE_DRAG)
             || mode.contains(TermMode::MOUSE_MOTION);
+        let shift_held = self.modifiers.state().shift_key();
 
-        if mouse_mode {
+        // Shift+Scroll bypasses TUI mouse capture so the user can scroll
+        // through terminal scrollback even when a TUI has mouse mode
+        // enabled (tn-vevc).
+        if mouse_mode && !shift_held {
             let mods = self.input_mods();
             let button = if lines > 0.0 {
                 InputMouseButton::ScrollUp
@@ -641,7 +648,10 @@ impl App {
                 seq.extend_from_slice(&input::encode_mouse_press(button, col, row, &mods));
             }
             self.pty_write_to_pane(&seq, target_pane);
-        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        } else if !shift_held
+            && mode.contains(TermMode::ALT_SCREEN)
+            && mode.contains(TermMode::ALTERNATE_SCROLL)
+        {
             let steps = lines.abs().ceil() as usize;
             let arrow = if lines > 0.0 { b"\x1b[A" } else { b"\x1b[B" };
             let mut seq = Vec::with_capacity(steps * 3);

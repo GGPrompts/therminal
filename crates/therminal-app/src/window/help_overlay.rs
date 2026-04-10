@@ -43,6 +43,7 @@ fn section_order(name: &str) -> u8 {
         "Pane Management" => 0,
         "Font" => 1,
         "General" => 2,
+        "Mouse" => 4,
         _ => 3,
     }
 }
@@ -609,6 +610,26 @@ pub(crate) fn build_help_categories(
         entry.1.push((row_shortcut, row_description));
     }
 
+    // ── Hardcoded "Mouse" section for non-keybinding mouse conventions ──
+    // These are implicit modifier behaviours, not configurable keybindings,
+    // but users need to discover them (tn-vevc).
+    let mouse_order = section_order("Mouse");
+    let mouse_section = sections
+        .entry(mouse_order)
+        .or_insert_with(|| ("Mouse".to_string(), Vec::new()));
+    mouse_section.1.push((
+        "Shift+Click".to_string(),
+        "Bypass TUI mouse capture (select text / open hotspot)".to_string(),
+    ));
+    mouse_section.1.push((
+        "Shift+RightClick".to_string(),
+        "Context menu in TUI mouse mode".to_string(),
+    ));
+    mouse_section.1.push((
+        "Shift+Scroll".to_string(),
+        "Scrollback in TUI mouse mode".to_string(),
+    ));
+
     sections.values().cloned().collect()
 }
 
@@ -821,8 +842,8 @@ mod tests {
             ],
         };
         let cats = build_help_categories(&kb);
-        // Exactly one section ("General") with exactly one row.
-        assert_eq!(cats.len(), 1, "expected one section, got {cats:?}");
+        // Two sections: "General" (keybindings) + "Mouse" (hardcoded).
+        assert_eq!(cats.len(), 2, "expected two sections, got {cats:?}");
         let (section, rows) = &cats[0];
         assert_eq!(section, "General");
         assert_eq!(
@@ -831,6 +852,7 @@ mod tests {
             "ctrl+shift+/ and ctrl+shift+? should collapse to one row, got {rows:?}"
         );
         assert_eq!(rows[0].0, "Ctrl+Shift+?");
+        assert_eq!(cats[1].0, "Mouse");
     }
 
     /// Two bindings that render with the same shortcut but different
@@ -855,7 +877,8 @@ mod tests {
             ],
         };
         let cats = build_help_categories(&kb);
-        assert_eq!(cats.len(), 1);
+        // Two sections: "General" (keybindings) + "Mouse" (hardcoded).
+        assert_eq!(cats.len(), 2);
         let (_, rows) = &cats[0];
         assert_eq!(rows.len(), 2, "distinct actions must not be collapsed");
     }

@@ -149,6 +149,45 @@ impl App {
                     w.request_redraw();
                 }
             }
+            // -- Hotspot mutations (tn-avjv.5) --
+            SettingsCommand::EditorChainRemove(idx) => {
+                if idx < self.config.hotspots.editor_chain.len() {
+                    let removed = self.config.hotspots.editor_chain.remove(idx);
+                    self.show_toast(format!("removed editor: {removed}"));
+                }
+            }
+            SettingsCommand::EditorChainMoveUp(idx) => {
+                if idx > 0 && idx < self.config.hotspots.editor_chain.len() {
+                    self.config.hotspots.editor_chain.swap(idx, idx - 1);
+                }
+            }
+            SettingsCommand::EditorChainMoveDown(idx) => {
+                if idx + 1 < self.config.hotspots.editor_chain.len() {
+                    self.config.hotspots.editor_chain.swap(idx, idx + 1);
+                }
+            }
+            SettingsCommand::SetFolderPaneCommand(text) => {
+                let parts: Vec<String> =
+                    text.split_whitespace().map(String::from).collect();
+                self.config.hotspots.folder_pane_command = parts;
+                self.show_toast("folder pane command updated");
+            }
+            SettingsCommand::FolderOpenerRemove(idx) => {
+                if idx < self.config.hotspots.folder_opener.len() {
+                    let removed = self.config.hotspots.folder_opener.remove(idx);
+                    self.show_toast(format!("removed opener: {removed}"));
+                }
+            }
+            SettingsCommand::FolderOpenerMoveUp(idx) => {
+                if idx > 0 && idx < self.config.hotspots.folder_opener.len() {
+                    self.config.hotspots.folder_opener.swap(idx, idx - 1);
+                }
+            }
+            SettingsCommand::FolderOpenerMoveDown(idx) => {
+                if idx + 1 < self.config.hotspots.folder_opener.len() {
+                    self.config.hotspots.folder_opener.swap(idx, idx + 1);
+                }
+            }
         }
         self.persist_settings_overlay_edits();
     }
@@ -1262,6 +1301,9 @@ impl App {
                         show_pane_headers: self.config.general.show_pane_headers,
                         show_status_bar: self.config.general.show_status_bar,
                         show_tab_bar: self.config.general.show_tab_bar,
+                        editor_chain: self.config.hotspots.editor_chain.clone(),
+                        folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
+                        folder_opener: self.config.hotspots.folder_opener.clone(),
                     });
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
