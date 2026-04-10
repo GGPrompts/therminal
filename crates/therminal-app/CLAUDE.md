@@ -49,7 +49,7 @@ src/
 
 ## App-Side Pattern Engine (tn-f9cl)
 
-The app owns a read-only `PatternEngine` sibling to the daemon's engine, stored as `App.pattern_engine: Option<PatternEngine>`. Both instantiate from the same `[patterns]` config. The app runs `process_finalized_line` per visible row during each render frame, converting `Hotspot`-action matches into `TextHotspot`s. Widget-action matches are skipped (deferred follow-up). On `ConfigChanged` the app re-instantiates its engine.
+The app owns a read-only `PatternEngine` sibling to the daemon's engine, stored as `App.pattern_engine: Option<PatternEngine>`. Both instantiate from the same `[patterns]` config. The app runs `process_finalized_line` per visible row during each render frame, converting `Hotspot`-action matches into `TextHotspot`s and `Widget`-action matches into `PatternWidgetMatch`es routed through `GridRenderer.pattern_widget_sink` to `WidgetManager` (tn-068b). On `ConfigChanged` the app re-instantiates its engine.
 
 ## Window Controller Facade
 
@@ -96,7 +96,21 @@ Pre-rasterized overlay widgets use the tn-npd substrate: data source produces a 
 6. Add a `KeyAction` toggle if the widget should be user-toggleable.
 7. Every config field must be read by the rendering code (no dead config).
 
-Shipped widgets: `badge.rs` (agent status pill), `agent_timeline.rs` (tool activity bar).
+Shipped widgets: `badge.rs` (agent status pill), `agent_timeline.rs` (tool activity bar), `pattern_widget.rs` (pattern-engine bridge, tn-068b).
+
+## Pattern-Engine Widget Bridge (tn-068b)
+
+Pattern packs can declare `action = "widget"` rules that produce `ResolvedAction::Widget` matches. The app-side bridge in `widgets/pattern_widget.rs` converts these into `WidgetSpec` (Pill rasterization) and routes them through `WidgetManager::upsert` for visible placement.
+
+**Data flow**: `extend_hotspots_from_patterns` in `render.rs` collects Widget-action matches into `GridRenderer.pattern_widget_sink` (a `Vec<PatternWidgetMatch>`) alongside the existing hotspot path. After `render_panes_recursive` completes, `draw_widget_overlays` in `render_driver.rs` drains the sink and calls `WidgetManager::upsert` + `WidgetRenderer::draw` for each match.
+
+**Widget ID allocation**: Pattern-sourced widgets use a deterministic ID derived from `(pane_id, row, start_col)` so the same match at the same screen position reuses the same cache entry. IDs are offset into the `0x5057...` range to avoid collisions with hard-coded widget IDs.
+
+**Lifecycle rules**:
+- Widget matches are per-frame: they exist only while the matched text is visible in the pane viewport. Matches that scroll off-screen simply stop being upserted; stale `WidgetManager` entries are retained but not drawn.
+- The `pattern_widget_sink` is cleared every frame in `clear_frame_maps()`. Do not assume matches persist across frames.
+- v1 maps all pattern `WidgetKind` variants (Badge, Gauge, Sparkline, Card) to `Pill`. Follow-up issues should add native rasterizer variants.
+- The daemon's bus publication (`pattern_dispatch.rs`) is unaffected; both the daemon and app process widget matches independently.
 
 ## Status Bar
 
