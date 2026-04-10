@@ -3,6 +3,7 @@ mod cli;
 mod clipboard;
 mod color_mapping;
 mod daemon_spawn;
+pub(crate) mod git_state;
 mod grid_renderer;
 mod mcp_stdio;
 mod menu;

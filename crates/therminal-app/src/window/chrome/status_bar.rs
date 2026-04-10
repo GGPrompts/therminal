@@ -37,6 +37,8 @@ pub(crate) struct StatusBarInfo {
     /// headers are hidden via `show_pane_headers = false`. Matches the value
     /// copied by "Copy pane ID" in the context menu (tn-5wrx).
     pub focused_pane_id: Option<u64>,
+    /// Git branch display text for the focused pane (tn-e97n).
+    pub git_branch: Option<String>,
     /// Result of the template-version scan performed at config load time
     /// (tn-3ge3). When non-`UpToDate`, the status bar shows a small muted
     /// hint nudging the user to regenerate via `therminal --print-config`.
@@ -169,6 +171,7 @@ pub(crate) fn draw_status_bar(
     let center_text = compose_center_text(
         info.claude_title.as_deref(),
         info.cwd.as_deref(),
+        info.git_branch.as_deref(),
         info.focused_pane_id,
     );
     let center_color = GlyphColor::rgba(
@@ -520,6 +523,7 @@ pub(super) fn compose_template_hint(status: &ConfigTemplateStatus) -> String {
 pub(super) fn compose_center_text(
     claude_title: Option<&str>,
     cwd: Option<&str>,
+    git_branch: Option<&str>,
     focused_pane_id: Option<u64>,
 ) -> String {
     let cwd_text = cwd.map(abbreviate_path).unwrap_or_default();
@@ -527,6 +531,12 @@ pub(super) fn compose_center_text(
         (Some(title), false) => format!("{title}  ·  {cwd_text}"),
         (Some(title), true) => title.to_string(),
         (None, _) => cwd_text,
+    };
+    // Append git branch after cwd if available (tn-e97n).
+    let base = match (git_branch, base.is_empty()) {
+        (Some(branch), false) => format!("{base}  {branch}"),
+        (Some(branch), true) => branch.to_string(),
+        (None, _) => base,
     };
     match (focused_pane_id, base.is_empty()) {
         (Some(n), false) => format!("{base}  ·  pane {n}"),
@@ -614,6 +624,7 @@ mod tests {
             active_workspace: 1,
             is_zoomed: false,
             focused_pane_id,
+            git_branch: None,
             template_status: ConfigTemplateStatus::UpToDate,
         }
     }
@@ -653,7 +664,7 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
-        let s = compose_center_text(None, Some("/tmp/foo"), Some(2));
+        let s = compose_center_text(None, Some("/tmp/foo"), None, Some(2));
         assert!(s.contains("/tmp/foo"));
         assert!(s.contains("pane 2"));
         if let Some(v) = prev {
@@ -665,7 +676,7 @@ mod tests {
 
     #[test]
     fn center_text_falls_back_to_pane_only_without_cwd() {
-        let s = compose_center_text(None, None, Some(7));
+        let s = compose_center_text(None, None, None, Some(7));
         assert_eq!(s, "pane 7");
     }
 
@@ -675,7 +686,7 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
-        let s = compose_center_text(None, Some("/tmp/foo"), None);
+        let s = compose_center_text(None, Some("/tmp/foo"), None, None);
         assert_eq!(s, "/tmp/foo");
         if let Some(v) = prev {
             unsafe {
@@ -686,13 +697,13 @@ mod tests {
 
     #[test]
     fn center_text_prefers_claude_title_when_present() {
-        let s = compose_center_text(Some("fix login bug"), Some("/tmp/foo"), Some(2));
+        let s = compose_center_text(Some("fix login bug"), Some("/tmp/foo"), None, Some(2));
         assert_eq!(s, "fix login bug  ·  /tmp/foo  ·  pane 2");
     }
 
     #[test]
     fn center_text_uses_claude_title_without_cwd() {
-        let s = compose_center_text(Some("fix login bug"), None, Some(2));
+        let s = compose_center_text(Some("fix login bug"), None, None, Some(2));
         assert_eq!(s, "fix login bug  ·  pane 2");
     }
 }

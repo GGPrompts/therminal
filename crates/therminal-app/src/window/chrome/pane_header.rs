@@ -325,9 +325,42 @@ pub(crate) fn draw_pane_header(
         )
     };
 
-    // tn-166y: tag badges
-    let tags = pane.status.lock().unwrap().tags.clone();
+    // tn-166y: tag badges + tn-e97n: git branch
+    let (tags, git_state) = {
+        let s = pane.status.lock().unwrap();
+        (s.tags.clone(), s.git_state.clone())
+    };
     let badge_text = format_tag_badges(&tags);
+    let git_branch_text = git_state
+        .as_ref()
+        .map(crate::git_state::format_for_header)
+        .unwrap_or_default();
+    let git_branch_color = if let Some(ref gs) = git_state {
+        if gs.detached {
+            GlyphColor::rgba(
+                PaletteColor::WARN.r,
+                PaletteColor::WARN.g,
+                PaletteColor::WARN.b,
+                if is_focused { 230 } else { 170 },
+            )
+        } else if crate::git_state::is_default_branch(&gs.branch) {
+            GlyphColor::rgba(
+                PaletteColor::INK_MUTED.r,
+                PaletteColor::INK_MUTED.g,
+                PaletteColor::INK_MUTED.b,
+                if is_focused { 220 } else { 160 },
+            )
+        } else {
+            GlyphColor::rgba(
+                PaletteColor::FOCUS.r,
+                PaletteColor::FOCUS.g,
+                PaletteColor::FOCUS.b,
+                if is_focused { 230 } else { 170 },
+            )
+        }
+    } else {
+        index_color
+    };
 
     let close_color = GlyphColor::rgba(
         PaletteColor::ALERT.r,
@@ -367,6 +400,8 @@ pub(crate) fn draw_pane_header(
     let hsplit_key = format!("H|{focus_tag}");
     let badge_slot = format!("hdr_badge_{pane_id}");
     let badge_key = format!("{badge_text}|{:.0}|{focus_tag}", vp.width());
+    let git_slot = format!("hdr_git_{pane_id}");
+    let git_key = format!("{git_branch_text}|{:.0}|{focus_tag}", vp.width());
 
     // Phase 1: shape all buffers.
     let family = renderer.font_config.family.clone();
@@ -407,6 +442,21 @@ pub(crate) fn draw_pane_header(
             Attrs::new()
                 .family(Family::Name(&family))
                 .color(index_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+    if !git_branch_text.is_empty() {
+        ensure_shaped(
+            &git_slot,
+            &git_key,
+            metrics,
+            vp.width(),
+            header_h,
+            &git_branch_text,
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(git_branch_color),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
@@ -528,6 +578,26 @@ pub(crate) fn draw_pane_header(
             scale: 1.0,
             bounds,
             default_color: index_color,
+            custom_glyphs: &[],
+        });
+    }
+    // tn-e97n: git branch, right-aligned before the button cluster.
+    if !git_branch_text.is_empty()
+        && let Some(git_buf) = cached_buf(&renderer.overlay_cache, &git_slot)
+    {
+        let git_text_width = git_buf
+            .layout_runs()
+            .next()
+            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            .unwrap_or(0.0);
+        let git_left = (btn_x_hsplit - git_text_width - 8.0).max(vp.x());
+        text_areas.push(TextArea {
+            buffer: git_buf,
+            left: git_left,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: git_branch_color,
             custom_glyphs: &[],
         });
     }

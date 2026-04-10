@@ -139,6 +139,7 @@ impl PtyReaderHandler for AppPtyHandler {
             match event {
                 InterceptedEvent::CurrentDirectory(path) => {
                     if let Ok(mut s) = self.status.lock() {
+                        s.git_state = crate::git_state::detect(std::path::Path::new(&path));
                         s.cwd = Some(path);
                     }
                 }

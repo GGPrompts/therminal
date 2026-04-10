@@ -9,6 +9,7 @@ use therminal_terminal::region_index::RegionIndex;
 
 use super::PaneId;
 use super::backend::{PaneBackend, PaneBackendKind};
+use crate::git_state::GitState;
 use crate::grid_renderer::GridRenderer;
 
 // ── Dimensions adapter ──────────────────────────────────────────────────
@@ -42,6 +43,8 @@ pub struct PaneStatus {
     pub last_exit_code: Option<i32>,
     /// Name of a detected AI agent (from ProcessDetector).
     pub agent_name: Option<String>,
+    /// Git repository state for the pane's cwd (branch, dirty, detached).
+    pub git_state: Option<GitState>,
     /// Opaque key/value tags from the daemon (tn-bbvf).
     pub tags: HashMap<String, String>,
 }
