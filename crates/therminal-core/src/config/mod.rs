@@ -1302,14 +1302,10 @@ impl Default for PatternsConfig {
 
 impl Default for HotspotsConfig {
     fn default() -> Self {
-        // On WSL2, prefer VS Code first — most users have it installed via
-        // the Windows host and `$EDITOR` is frequently unset in GUI launches.
-        let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
-        let chain: Vec<&str> = if is_wsl {
-            vec!["code", "$VISUAL", "$EDITOR", "nvim", "vim", "nano"]
-        } else {
-            vec!["$VISUAL", "$EDITOR", "code", "nvim", "vim", "nano"]
-        };
+        // $VISUAL / $EDITOR always win when set — they represent an explicit
+        // user preference.  `code` is a popular fallback but should never
+        // override the user's chosen editor.
+        let chain: Vec<&str> = vec!["$VISUAL", "$EDITOR", "code", "nvim", "vim", "nano"];
 
         // Cross-platform external folder-open chain. The platform `open`
         // crate covers the last-resort fallback (xdg-open / open / explorer);
