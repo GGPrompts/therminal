@@ -3,6 +3,51 @@
 //! Each `handle_*` method implements one of the tools advertised by the
 //! Therminal MCP server. Trust enforcement and argument parsing happen in
 //! `mod.rs::call_tool`; these methods assume the call is already authorised.
+//!
+//! ## CLI-preferred vs MCP-required classification
+//!
+//! Most read operations have a CLI counterpart (`therminal pane list`, etc.).
+//! **Prefer the CLI for any tool in the "CLI-preferred" column below** —
+//! it returns the same data with dramatically less prompt-cache churn.
+//! Reserve MCP for the "MCP-required" column where the structured shape or
+//! subscription contract is essential.
+//!
+//! | Tool | Preferred surface | Reason |
+//! |------|------------------|--------|
+//! | `terminal.sessions.list` | CLI (`therminal session list`) | Simple read; TSV << JSON-RPC |
+//! | `terminal.sessions.get` | CLI (wrap with `session list --json \| jq`) | Rarely needed standalone |
+//! | `terminal.sessions.create` | CLI (`therminal session create`) | Fire-and-forget write |
+//! | `terminal.sessions.destroy` | MCP (Admin tier; trust enforcement needed) | Destructive |
+//! | `terminal.panes.list` | CLI (`therminal pane list`) | Most frequent read; ~50–150 bytes TSV |
+//! | `terminal.panes.create` | CLI (`therminal pane create`) | Fire-and-forget write |
+//! | `terminal.panes.destroy` | MCP (Admin tier; trust enforcement needed) | Destructive |
+//! | `terminal.panes.get_content` | MCP or CLI peek | Use CLI `pane peek` for quick tail; MCP for full grid with optional params |
+//! | `terminal.panes.get_summary` | MCP (`get_summary` is MCP-only, no CLI peer) | Cheapest polling primitive; use in conductor tick loops |
+//! | `terminal.panes.peek` | CLI (`therminal pane peek`) | Warm-path polling; TSV tail is cache-friendlier |
+//! | `terminal.panes.get_geometry` | CLI (`pane list` includes cols×rows) | Rarely needed standalone |
+//! | `terminal.panes.write` | CLI (`therminal pane send`) | Keystroke delivery; round-trip bytes dominate |
+//! | `terminal.panes.tag` | CLI (`therminal pane tag`) | Metadata write; one-liner |
+//! | `terminal.panes.untag` | CLI (`therminal pane untag`) | Metadata write; one-liner |
+//! | `terminal.panes.wait_for_output` | MCP | Blocking wait; needs async MCP contract |
+//! | `terminal.panes.query_events` | MCP | Structured ring-buffer; shape matters |
+//! | `terminal.semantic.query_history` | MCP | Structured region index; shape matters |
+//! | `terminal.semantic.query_commands` | CLI (`therminal semantic commands`) | TSV is sufficient for most callers |
+//! | `terminal.semantic.get_hotspots` | CLI (`therminal semantic hotspots`) | TSV is sufficient for most callers |
+//! | `terminal.workspaces.list` | CLI (`therminal workspace list`) | Simple read; TSV << JSON-RPC |
+//! | `terminal.workspaces.get_layout` | MCP | Binary layout tree; structured shape essential |
+//! | `terminal.agents.list` | CLI (`therminal agents list`) | Swarm polling; TSV is cache-friendlier |
+//! | `terminal.agents.find_with_capacity` | MCP | Structured capacity sort; shape matters |
+//! | `terminal.agents.get_status` | MCP | Sibling-agent coordination; typed contract |
+//! | `terminal.agents.get_details` | MCP | Rich inference snapshot; typed contract |
+//! | `terminal.agents.get_cadence` | MCP | Timing metrics; structured shape essential |
+//! | `terminal.patterns.stats` | MCP | Pattern engine diagnostics; rarely called |
+//! | `terminal.events.stats` | MCP | Event bus diagnostics; rarely called |
+//!
+//! **Decision rule for agents**: if you would call the same tool more than
+//! once per agent turn (polling, fan-out, swarm inspection), or if you do not
+//! need typed fields fed back into the tool-use loop, **use the CLI**.
+//! Use MCP when you need subscriptions, `wait_for_output`, or a structured
+//! response that drives downstream tool calls.
 
 use rmcp::ErrorData;
 use rmcp::handler::server::tool::schema_for_type;

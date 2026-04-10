@@ -93,6 +93,35 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## CLI-vs-MCP Usage Policy (for agents and orchestrators)
+
+When driving therminal from an agent (Claude Code, Codex, scripts), pick the
+right surface to preserve prompt-cache health:
+
+**Use `therminal` CLI (or the `tn` short alias in `scripts/tn`) for:**
+- Polling: `pane list`, `pane peek`, `agents list` — called N times per turn
+- Writes: `pane send`, `pane tag/untag`, `session/pane create`
+- Shell dashboards: `events --follow | jq`
+
+**Use MCP for:**
+- Subscriptions: `terminal://pane/{id}/output`, `therminal://claude/events`
+- Blocking waits: `terminal.panes.wait_for_output`
+- Conductor tick: `terminal.panes.get_summary` (MCP-only, ~120 B/call)
+- Typed structure feeding downstream tool calls: `get_details`, `get_cadence`,
+  `find_with_capacity`
+- Destructive / Admin operations: `sessions.destroy`, `panes.destroy`
+
+The `tn` alias in `scripts/tn` is a thin wrapper around `therminal`; copy it
+to any directory on `$PATH`. Run `tn --help-policy` for a compact reminder.
+
+Full decision table: `docs/cli.md`. Tool-by-tool classification:
+`crates/therminal-daemon/src/mcp/tools.rs` module-level doc comment.
+
+**Cache health constraint**: MCP tool calls each create a distinct cache key
+segment. A single `terminal.panes.get_content` call on a 80×24 pane returns
+~2 KB; five calls = 10 KB/tick. Use `tn pane peek` (~90–500 bytes) for the
+common case and reserve `get_content` for when you need the full grid.
+
 ## Scope Boundary: Terminal vs Integration
 
 The core architectural decision: **"Does this need bytes-in-flight, or can it work from stored state?"**

@@ -77,6 +77,29 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 `src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
+### CLI-vs-MCP routing (agents: read this first)
+
+Most read operations have a CLI counterpart that is dramatically cheaper for
+prompt-cache health. The `tools.rs` module-level doc comment carries the
+per-tool classification table. The short version:
+
+**Use CLI (`therminal` / `tn` wrapper) for:**
+- `pane list`, `pane peek`, `pane send`, `pane tag/untag` — the hot path for
+  conductor polling and write operations.
+- `agents list`, `workspace list`, `session list/create` — simple reads.
+- `semantic commands/hotspots` — TSV is sufficient for most callers.
+
+**Use MCP for:**
+- Any **subscription** (`terminal://pane/{id}/output`, `therminal://claude/events`,
+  `therminal://agents/events`) — no CLI peer.
+- `terminal.panes.wait_for_output` — blocking async wait; no CLI peer.
+- `terminal.panes.get_summary` — MCP-only conductor tick primitive (~120 B).
+- `terminal.agents.find_with_capacity`, `get_status`, `get_details`,
+  `get_cadence` — typed shape feeds downstream tool calls.
+- `terminal.workspaces.get_layout` — binary tree; structured shape required.
+- `terminal.sessions.destroy`, `terminal.panes.destroy` — Admin tier; trust
+  enforcement is enforced at the MCP layer, not the CLI layer.
+
 Tools exposed (26 tools):
 
 | Tool | Category | Description |

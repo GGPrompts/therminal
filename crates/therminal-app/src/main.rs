@@ -20,7 +20,27 @@ use clap::{Parser, Subcommand};
 use therminal_core::config::TherminalConfig;
 
 #[derive(Parser, Debug)]
-#[command(name = "therminal", about = "The AI-native terminal emulator")]
+#[command(
+    name = "therminal",
+    about = "The AI-native terminal emulator",
+    long_about = "The AI-native terminal emulator.\n\
+\n\
+CLI-vs-MCP POLICY (for agents and orchestrators)\n\
+-------------------------------------------------\n\
+Use the CLI (`therminal` / `tn`) for frequent reads and writes:\n\
+  pane list, pane peek, pane send, pane tag/untag,\n\
+  agents list, workspace list, session list/create,\n\
+  semantic commands/hotspots, events --follow.\n\
+\n\
+Use MCP when you need:\n\
+  - Subscriptions  (terminal://pane/{id}/output, therminal://claude/events)\n\
+  - Blocking waits (terminal.panes.wait_for_output)\n\
+  - Conductor tick (terminal.panes.get_summary — MCP-only, ~120 B)\n\
+  - Typed shape    (get_details, get_cadence, find_with_capacity)\n\
+  - Admin ops      (sessions.destroy, panes.destroy — trust-tier enforced)\n\
+\n\
+See docs/cli.md for the full decision table and the `tn` short alias."
+)]
 struct Cli {
     /// Enable verbose logging
     #[arg(short, long)]

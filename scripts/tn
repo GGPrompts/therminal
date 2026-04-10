@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# tn — short wrapper around the `therminal` CLI for agent ergonomics.
+#
+# Goal: reduce token/typing overhead for frequent read flows while keeping
+# the full `therminal` binary as the stable contract.
+#
+# Usage: same as `therminal`, e.g.
+#
+#   tn pane list              # list panes (terse TSV by default)
+#   tn pane peek 3            # tail last 10 lines of pane 3
+#   tn agents list            # list detected agents
+#   tn workspace list         # list workspace tabs
+#   tn events --follow        # stream daemon events as JSON Lines
+#   tn semantic commands 1    # recent OSC 633 commands for pane 1
+#   tn semantic hotspots 1    # file/URL/git hotspots in pane 1
+#
+# CLI-vs-MCP policy (encoded here so `tn --help-policy` surfaces it):
+#
+#   Use CLI (tn) for:
+#     - Polling: pane list, pane peek, agents list — called N times per turn
+#     - Writes: pane send, pane tag/untag, session/pane create
+#     - Fire-and-forget: workspace switch
+#     - Shell dashboards: events --follow piped to jq
+#
+#   Use MCP for:
+#     - Subscriptions: terminal://pane/{id}/output, therminal://claude/events
+#     - Blocking waits: terminal.panes.wait_for_output
+#     - Conductor tick: terminal.panes.get_summary (MCP-only, ~120 B/call)
+#     - Structured shape: get_details, get_cadence, find_with_capacity
+#     - Destructive ops: sessions.destroy, panes.destroy (Admin tier)
+#
+# See docs/cli.md for the full decision table.
+#
+# Installation: copy this script to a directory on $PATH and chmod +x.
+# This file is intentionally decoupled from the product name so it can be
+# renamed without touching conductor call sites.
+
+set -euo pipefail
+
+if [[ "${1:-}" == "--help-policy" ]]; then
+    grep -A 100 "CLI-vs-MCP policy" "$0" | grep -B 100 "^# See docs"
+    exit 0
+fi
+
+exec therminal "$@"

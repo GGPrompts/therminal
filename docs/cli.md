@@ -10,6 +10,97 @@ small repeated operations. Use MCP when you need typed resources,
 subscriptions, or structured semantic queries to flow back into an agent
 tool loop.
 
+## `tn` short alias
+
+`tn` is a thin shell wrapper around `therminal` for agent ergonomics —
+it reduces typing overhead for high-frequency read/write flows without
+changing any contract.
+
+```sh
+# One-time setup (add to ~/.bashrc or ~/.zshrc):
+export PATH="$HOME/.config/therminal/bin:$PATH"
+# or, if therminal scripts/ directory is in PATH:
+# ln -s "$(which therminal)" ~/.local/bin/tn
+```
+
+The recommended way to install the alias is via the bundled wrapper:
+
+```sh
+# Copy scripts/tn to a directory on $PATH:
+cp /path/to/therminal/scripts/tn ~/.local/bin/tn
+chmod +x ~/.local/bin/tn
+```
+
+Once installed, all `therminal` subcommands work as `tn` subcommands:
+
+```sh
+tn pane list            # same as: therminal pane list
+tn pane peek 3          # same as: therminal pane peek 3
+tn agents list          # same as: therminal agents list
+tn workspace list       # same as: therminal workspace list
+tn events --follow      # same as: therminal events --follow
+tn semantic commands 1  # same as: therminal semantic commands 1
+```
+
+The wrapper is intentionally decoupled from the final product name so it
+can be renamed later without touching call sites in conductor scripts.
+
+## CLI-vs-MCP decision policy
+
+Use this table to pick the right surface for each operation. If you would
+call the same operation more than once per agent turn (polling, fan-out,
+swarm inspection), or if you do not need typed fields fed back into the
+tool-use loop, **use the CLI**. Reserve MCP for subscriptions, blocking
+waits, and structured responses that drive downstream tool calls.
+
+| Operation | Preferred surface | Notes |
+|-----------|------------------|-------|
+| List sessions | `tn session list` | TSV; use MCP only if schema-introspecting clients need it |
+| Get session detail | `tn session list --json \| jq` | Rarely needed alone |
+| Create session | `tn session create` | Fire-and-forget |
+| Destroy session | MCP `terminal.sessions.destroy` | Admin tier; destructive |
+| List panes | `tn pane list` | Most frequent read; ~50–150 bytes TSV |
+| Create pane | `tn pane create` | Fire-and-forget |
+| Destroy pane | MCP `terminal.panes.destroy` | Admin tier; destructive |
+| Peek pane tail | `tn pane peek <id>` | Cheapest "what just happened?" |
+| Full grid snapshot | MCP `terminal.panes.get_content` | Use when structured `content_hash` / compact params matter |
+| Conductor tick poll | MCP `terminal.panes.get_summary` | ~120 bytes; no CLI peer; cheapest MCP poll primitive |
+| Send keystrokes | `tn pane send <id> <keys>` | Round-trip bytes dominate; CLI wins |
+| Tag pane | `tn pane tag <id> <k=v>` | Metadata write |
+| Untag pane | `tn pane untag <id> <k>` | Metadata write |
+| Wait for output | MCP `terminal.panes.wait_for_output` | Blocking async; no CLI peer |
+| Pane event log | MCP `terminal.panes.query_events` | Structured ring-buffer; no CLI peer |
+| Semantic history | MCP `terminal.semantic.query_history` | Structured region index; no CLI peer |
+| Semantic commands | `tn semantic commands <id>` | TSV sufficient for most callers |
+| Hotspots | `tn semantic hotspots <id>` | TSV sufficient for most callers |
+| List workspaces | `tn workspace list` | Simple read |
+| Workspace layout tree | MCP `terminal.workspaces.get_layout` | Binary layout; structured shape essential |
+| List agents | `tn agents list` | Swarm polling; TSV is cache-friendlier |
+| Agent capacity search | MCP `terminal.agents.find_with_capacity` | Structured sort; no CLI peer |
+| Agent status (sibling) | MCP `terminal.agents.get_status` | Sibling-coordination typed contract |
+| Agent inference details | MCP `terminal.agents.get_details` | Rich snapshot; structured shape matters |
+| Agent cadence metrics | MCP `terminal.agents.get_cadence` | Timing data; structured shape essential |
+| Event stream | `tn events --follow` | JSON Lines piped to `jq`; lower overhead than MCP subscription for shell dashboards |
+| Live pane output sub | MCP `terminal://pane/{id}/output` | Subscription needed; no CLI peer |
+| Claude Code events | MCP `therminal://claude/events` | Subscription; no CLI peer |
+| Agent lifecycle events | MCP `therminal://agents/events` | Subscription; no CLI peer |
+
+### When MCP is always the right choice
+
+- **Subscriptions** — `terminal://pane/{id}/output`, `therminal://claude/events`,
+  `therminal://agents/events`. No CLI equivalent; the CLI `events --follow` is
+  a stream of daemon broadcast events, not a resource subscription.
+- **Blocking waits** — `terminal.panes.wait_for_output` needs async back-pressure;
+  no CLI peer.
+- **Conductor tick polling** — `terminal.panes.get_summary` is MCP-only and is
+  the cheapest single-tool poll for "did anything change?". Use it in tight loops
+  over `therminal pane peek` when you need the `content_hash` short-circuit.
+- **Structured shape feeding downstream tools** — when the JSON response fields
+  drive follow-on tool calls (capacity sort, agent coordination), pay the MCP
+  framing cost once and process the typed result.
+- **Admin/destructive operations** — `terminal.sessions.destroy`,
+  `terminal.panes.destroy`. Trust-tier enforcement runs at MCP layer.
+
 ## Why a CLI alongside MCP
 
 - **MCP** is the right tool when the structured shape materially matters:
