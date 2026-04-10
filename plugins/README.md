@@ -53,13 +53,36 @@ the right edge of the line. Also publishes a context-usage event so orchestrator
 can track context consumption over time. Active only when Claude Code is running
 in the pane.
 
-### `examples/glossary.toml`
+### `examples/glossary.toml` + `examples/data/glossary.terms.toml` + `examples/glossary-lookup.sh`
 
-Emits a lookup event whenever a common technical acronym (OSC, PTY, MCP) appears
-in terminal output. Demonstrates the minimal `emit_event` pattern: two named
-captures, no widget, no click handler. A tooltip overlay or chat-op notifier
-subscribed to `therminal://events?source_class=pattern` can surface the
-definition however it likes.
+Makes common technical terms (monad, BFS, mutex, kernel, semaphore, OSC, PTY,
+MCP, deadlock, syscall) clickable hotspots. Clicking a highlighted term emits a
+`hotspot.explain` event carrying the term and up to 200 characters of
+surrounding context. A paired `emit_event` pattern publishes the same data to
+the event bus for orchestrators that don't watch the GUI.
+
+`examples/data/glossary.terms.toml` is the companion data file containing the
+canonical word, optional aliases, and a plain-English definition for each term.
+Copy it to `~/.config/therminal/glossary.terms.toml` and edit freely — new
+terms require matching `[[pattern]]` blocks added to the pack (or a new pack
+file in `~/.config/therminal/patterns/`).
+
+`examples/glossary-lookup.sh` is the example hook that completes the loop:
+
+```
+pane output → glossary.toml matches → hotspot.explain event
+    → glossary-lookup.sh reads event → looks up term in terms file
+    → emits OSC card widget marker back to the originating pane
+```
+
+Run it in a spare therminal pane:
+
+```bash
+bash plugins/examples/glossary-lookup.sh
+```
+
+Requires `therminal` on `$PATH` and `jq` installed. Override the terms file
+path with `GLOSSARY_TERMS=/path/to/file.toml`.
 
 ### `examples/github-urls.toml`
 

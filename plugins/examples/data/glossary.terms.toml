@@ -1,0 +1,70 @@
+# glossary.terms.toml — starter glossary for the `glossary` pattern pack.
+#
+# This file is data-only. The pattern pack (glossary.toml) ships with regexes
+# for all terms listed here. To add a term, add it here AND add the
+# corresponding hotspot + event patterns to glossary.toml (or to your own
+# override pack in ~/.config/therminal/patterns/).
+#
+# Format:
+#   [[term]]
+#   word       = "canonical form shown in the card widget"
+#   aliases    = ["alt1", "Alt2"]   # optional list of extra surface forms
+#   definition = "One or two sentence plain-English explanation."
+#   see_also   = ["related-term"]   # optional cross-references
+
+[[term]]
+word = "monad"
+definition = "A design pattern from functional programming. A monad wraps a value in a context (e.g., Maybe, IO, Future) and provides `bind`/`flatMap` for chaining operations without unwrapping the value manually. Think of it as a composable box with rules."
+see_also = ["functor", "applicative"]
+
+[[term]]
+word = "BFS"
+aliases = ["breadth-first search"]
+definition = "Breadth-First Search — a graph traversal algorithm that visits all neighbors at the current depth before moving to the next level. Uses a queue. Finds shortest paths in unweighted graphs."
+see_also = ["DFS"]
+
+[[term]]
+word = "mutex"
+aliases = ["Mutex", "mutual exclusion lock"]
+definition = "Mutual Exclusion lock. A synchronisation primitive that allows only one thread to hold it at a time. Any other thread trying to acquire it blocks until the holder releases it, preventing data races."
+see_also = ["semaphore", "deadlock", "RwLock"]
+
+[[term]]
+word = "kernel"
+aliases = ["Kernel"]
+definition = "The core of an operating system. It manages hardware resources (CPU scheduling, memory, device I/O) and exposes them to user-space programs via system calls. Runs in a privileged CPU mode that user programs cannot access directly."
+see_also = ["syscall", "PTY"]
+
+[[term]]
+word = "semaphore"
+aliases = ["Semaphore"]
+definition = "A synchronisation primitive with an integer counter. `wait` decrements it (blocking if it reaches zero); `signal` increments it. A binary semaphore (counter 0 or 1) behaves like a mutex but without ownership — any thread can release it."
+see_also = ["mutex", "deadlock"]
+
+[[term]]
+word = "OSC"
+definition = "Operating System Command — an ANSI/VT escape sequence family introduced by DEC. The byte sequence is ESC ] <code> ; <data> BEL (or ST). Terminals use OSC codes for setting the window title (OSC 0), reporting the current directory (OSC 7), shell integration markers (OSC 133, OSC 633), and many other out-of-band signals."
+see_also = ["PTY"]
+
+[[term]]
+word = "PTY"
+aliases = ["pseudo-terminal", "pseudo-TTY"]
+definition = "Pseudo-Terminal — a kernel device pair (master + slave) that emulates a serial terminal in software. A terminal emulator opens the master end; the shell opens the slave end and sees a real TTY. This lets the emulator intercept, reshape, and record all I/O between the user and the shell."
+see_also = ["OSC", "kernel", "syscall"]
+
+[[term]]
+word = "MCP"
+definition = "Model Context Protocol — the open standard (published by Anthropic, 2024) that AI agents use to discover and call tool servers. An MCP server exposes Tools, Resources, and Prompts over JSON-RPC 2.0; the client (an LLM host) calls them as structured function calls."
+see_also = []
+
+[[term]]
+word = "deadlock"
+aliases = ["Deadlock"]
+definition = "A situation where two or more concurrent processes each hold a resource the other needs, and neither can proceed. Classic example: thread A holds lock 1 waiting for lock 2; thread B holds lock 2 waiting for lock 1. The system halts unless external intervention (timeout or kill) breaks the cycle."
+see_also = ["mutex", "semaphore"]
+
+[[term]]
+word = "syscall"
+aliases = ["system call", "Syscall"]
+definition = "System call — the mechanism by which user-space programs request privileged operations from the kernel (e.g., `read`, `write`, `fork`, `mmap`). The CPU switches from user mode to kernel mode, the kernel validates and services the request, then returns to user mode."
+see_also = ["kernel", "PTY"]

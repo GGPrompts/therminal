@@ -1,42 +1,276 @@
 pack_name = "glossary"
-pack_description = "Emit lookup events for common technical acronyms and jargon"
+pack_description = "Click-to-explain hotspots for common technical terms"
 
-# Minimal glossary: when one of these tokens appears in a finalized line,
-# emit an event carrying the matched term plus a canned short definition
-# via the `extra` map. External consumers (a tooltip overlay, a chat-op
-# notifier, etc.) subscribe to `therminal://events?source_class=pattern`
-# and render the definition however they like. This is the simplest
-# possible `emit_event` demo — two captures, no widget, no click.
+# Glossary pack: when a known technical term appears in terminal output, the
+# word becomes a hotspot. Clicking it emits a `hotspot.explain` event carrying
+# the matched term and up to 200 characters of surrounding context. External
+# consumers — a tooltip overlay, the bundled glossary-lookup.sh hook, a chat
+# notifier — subscribe to that event and surface the definition however they
+# like.
+#
+# How to configure the terms file path:
+#   Add the following to your therminal.toml:
+#
+#     [patterns.glossary]
+#     terms_file = "~/.config/therminal/glossary.terms.toml"
+#
+#   The shipped default terms live in plugins/examples/data/glossary.terms.toml.
+#   Copy that file to the path above and edit it to add or remove terms.
+#   Each term becomes one pattern entry below — regenerate with:
+#
+#     therminal semantic patterns rebuild glossary
+#
+# Two patterns per term (§2.3 "one pattern, one action"):
+#   - A `hotspot` pattern makes the word clickable and records the context.
+#   - A paired `emit_event` pattern publishes the same data to the event bus
+#     so orchestrators can subscribe without the GUI needing to be focused.
+
+# ── monad ────────────────────────────────────────────────────────────────────
 
 [[pattern]]
-name = "osc"
-description = "Operating System Command (ANSI escape family)"
-match = '\b(?P<term>OSC)\b'
+name = "hotspot-monad"
+description = "Clickable hotspot for the term 'monad'"
+match = '\b(?P<term>[Mm]onad)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-monad"
+description = "Emit explain event for the term 'monad'"
+match = '\b(?P<term>[Mm]onad)\b(?P<ctx>.{0,200})'
 scope = "finalized_line"
 action = "emit_event"
 
 [pattern.emit_event]
 extra.term = "{term}"
-extra.definition = "Operating System Command — ANSI escape sequence family (ESC ] code;data BEL)"
+extra.ctx = "{ctx}"
+
+# ── BFS ──────────────────────────────────────────────────────────────────────
 
 [[pattern]]
-name = "pty"
-description = "Pseudo-Terminal — the kernel device backing a shell session"
-match = '\b(?P<term>PTY)\b'
+name = "hotspot-bfs"
+description = "Clickable hotspot for the term 'BFS'"
+match = '\b(?P<term>BFS)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-bfs"
+description = "Emit explain event for the term 'BFS'"
+match = '\b(?P<term>BFS)\b(?P<ctx>.{0,200})'
 scope = "finalized_line"
 action = "emit_event"
 
 [pattern.emit_event]
 extra.term = "{term}"
-extra.definition = "Pseudo-Terminal — kernel device pair (master/slave) that backs a shell session"
+extra.ctx = "{ctx}"
+
+# ── mutex ─────────────────────────────────────────────────────────────────────
 
 [[pattern]]
-name = "mcp"
-description = "Model Context Protocol — the AI-agent tool protocol therminal speaks"
-match = '\b(?P<term>MCP)\b'
+name = "hotspot-mutex"
+description = "Clickable hotspot for the term 'mutex'"
+match = '\b(?P<term>[Mm]utex)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-mutex"
+description = "Emit explain event for the term 'mutex'"
+match = '\b(?P<term>[Mm]utex)\b(?P<ctx>.{0,200})'
 scope = "finalized_line"
 action = "emit_event"
 
 [pattern.emit_event]
 extra.term = "{term}"
-extra.definition = "Model Context Protocol — the standard agents use to discover and call tool servers"
+extra.ctx = "{ctx}"
+
+# ── kernel ────────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-kernel"
+description = "Clickable hotspot for the term 'kernel'"
+match = '\b(?P<term>[Kk]ernel)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-kernel"
+description = "Emit explain event for the term 'kernel'"
+match = '\b(?P<term>[Kk]ernel)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
+
+# ── semaphore ─────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-semaphore"
+description = "Clickable hotspot for the term 'semaphore'"
+match = '\b(?P<term>[Ss]emaphore)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-semaphore"
+description = "Emit explain event for the term 'semaphore'"
+match = '\b(?P<term>[Ss]emaphore)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
+
+# ── OSC ───────────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-osc"
+description = "Clickable hotspot for the term 'OSC'"
+match = '\b(?P<term>OSC)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-osc"
+description = "Emit explain event for the term 'OSC'"
+match = '\b(?P<term>OSC)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
+
+# ── PTY ───────────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-pty"
+description = "Clickable hotspot for the term 'PTY'"
+match = '\b(?P<term>PTY)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-pty"
+description = "Emit explain event for the term 'PTY'"
+match = '\b(?P<term>PTY)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
+
+# ── MCP ───────────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-mcp"
+description = "Clickable hotspot for the term 'MCP'"
+match = '\b(?P<term>MCP)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-mcp"
+description = "Emit explain event for the term 'MCP'"
+match = '\b(?P<term>MCP)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
+
+# ── deadlock ──────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-deadlock"
+description = "Clickable hotspot for the term 'deadlock'"
+match = '\b(?P<term>[Dd]eadlock)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-deadlock"
+description = "Emit explain event for the term 'deadlock'"
+match = '\b(?P<term>[Dd]eadlock)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
+
+# ── syscall ───────────────────────────────────────────────────────────────────
+
+[[pattern]]
+name = "hotspot-syscall"
+description = "Clickable hotspot for the term 'syscall'"
+match = '\b(?P<term>[Ss]yscall)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+
+[[pattern]]
+name = "event-syscall"
+description = "Emit explain event for the term 'syscall'"
+match = '\b(?P<term>[Ss]yscall)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "emit_event"
+
+[pattern.emit_event]
+extra.term = "{term}"
+extra.ctx = "{ctx}"
