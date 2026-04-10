@@ -43,6 +43,13 @@ pub enum DaemonSplitOnComplete {
         agent_id: String,
         jsonl_path: std::path::PathBuf,
     },
+    /// Write bytes to the new pane after it mounts (used by hotspot "Open in
+    /// new pane" and WSL editor open, which need the daemon split to complete
+    /// before the PTY is ready to accept input).
+    WriteBytesAndFocus {
+        bytes: Vec<u8>,
+        toast: Option<String>,
+    },
 }
 
 impl App {
@@ -247,6 +254,24 @@ impl App {
                     self.swarm_panes.insert(agent_id, new_id);
                     self.relayout_and_redraw();
                     self.publish_workspace_state();
+                }
+                DaemonSplitOnComplete::WriteBytesAndFocus { bytes, toast } => {
+                    self.last_split_direction = direction;
+                    self.set_focused_pane(Some(new_id));
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
+                    if let Some(msg) = toast {
+                        self.show_toast(msg);
+                    }
+                    if let Some(daemon_id) = self.pane_id_map.daemon_for_local(new_id) {
+                        match self.daemon_rpc_blocking(IpcRequest::SendKeys {
+                            pane_id: daemon_id,
+                            keys: bytes,
+                        }) {
+                            Ok(_) => {}
+                            Err(e) => warn!(error = %e, "WriteBytesAndFocus: SendKeys failed"),
+                        }
+                    }
                 }
             }
         } else if let Some(e) = build_result.into_inner() {
@@ -475,6 +500,12 @@ impl App {
 
     /// Split the currently focused pane with auto-detected direction.
     pub(crate) fn split_focused_pane_auto(&mut self) {
+        self.split_focused_pane_auto_with(DaemonSplitOnComplete::FocusAndRelayout);
+    }
+
+    /// Split the currently focused pane with auto-detected direction and a
+    /// custom daemon-mode completion action.
+    pub(crate) fn split_focused_pane_auto_with(&mut self, on_complete: DaemonSplitOnComplete) {
         // Restore layout before splitting so the new pane joins the full tree.
         if self.zoomed_layout.is_some() {
             self.zoom_toggle_focused_pane();
@@ -496,11 +527,20 @@ impl App {
             SplitDirection::Vertical => SplitDirection::Horizontal,
         };
         let direction = LayoutNode::auto_split_direction(pane.viewport, fallback);
-        self.split_focused_pane(direction);
+        self.split_focused_pane_with(direction, on_complete);
     }
 
     /// Split the currently focused pane.
     pub(crate) fn split_focused_pane(&mut self, direction: SplitDirection) {
+        self.split_focused_pane_with(direction, DaemonSplitOnComplete::FocusAndRelayout);
+    }
+
+    /// Split the currently focused pane with a custom daemon-mode completion action.
+    pub(crate) fn split_focused_pane_with(
+        &mut self,
+        direction: SplitDirection,
+        on_complete: DaemonSplitOnComplete,
+    ) {
         let focused = match self.focused_pane() {
             Some(id) => id,
             None => return,
@@ -511,7 +551,7 @@ impl App {
         // The RPC is fired asynchronously; completion arrives via
         // `UserEvent::DaemonSplitComplete` → `finish_split_pane_remote`.
         if self.is_daemon_mode() {
-            self.split_pane_remote(focused, direction, DaemonSplitOnComplete::FocusAndRelayout);
+            self.split_pane_remote(focused, direction, on_complete);
             return;
         }
         let renderer = match self.grid_renderer.as_ref() {
@@ -613,10 +653,27 @@ impl App {
             focused, log_path_str
         );
 
+        // `tail -F` follows file rotation/recreation and tolerates a
+        // non-existent file (it will retry until the file appears).
+        let cmd = format!("tail -F {log_path_str}\n");
+
+        // In daemon mode the split is async — carry the command bytes in the
+        // completion callback so they're written after the PTY is live.
+        if self.is_daemon_mode() {
+            self.split_focused_pane_with(
+                SplitDirection::Horizontal,
+                DaemonSplitOnComplete::WriteBytesAndFocus {
+                    bytes: cmd.into_bytes(),
+                    toast: None,
+                },
+            );
+            return;
+        }
+
+        // Local mode: split is synchronous — write immediately.
         // Horizontal split keeps the tail pane narrow (top/bottom layout).
         self.split_focused_pane(SplitDirection::Horizontal);
 
-        // After split, the new pane is focused. Send the tail command.
         let new_pane = match self.focused_pane() {
             Some(id) if id != focused => id,
             _ => {
@@ -625,9 +682,6 @@ impl App {
             }
         };
 
-        // `tail -F` follows file rotation/recreation and tolerates a
-        // non-existent file (it will retry until the file appears).
-        let cmd = format!("tail -F {log_path_str}\n");
         self.pty_write_to_pane(cmd.as_bytes(), new_pane);
     }
 

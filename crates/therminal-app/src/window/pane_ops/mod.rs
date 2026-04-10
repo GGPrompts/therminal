@@ -18,7 +18,7 @@ use therminal_protocol::daemon::{IpcRequest, IpcResponse};
 use super::{App, EventLoopProxy, NotificationSource, UserEvent};
 
 // Re-export public types so external `crate::window::pane_ops::Foo` paths keep working.
-pub use split_ops::DaemonSplitResult;
+pub use split_ops::{DaemonSplitOnComplete, DaemonSplitResult};
 
 /// Timeout for daemon pane-op RPCs driven from the UI thread. Chosen so a
 /// hung daemon rolls back to a local error instead of freezing the GUI.

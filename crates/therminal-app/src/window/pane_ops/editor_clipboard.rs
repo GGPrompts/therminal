@@ -275,7 +275,20 @@ impl App {
         cmd.push_str(line);
         cmd.push('\n');
 
-        // Capture original focus so we can detect split failure.
+        tracing::info!(path = %path, line = %line, "open_in_wsl_pane_editor: spawning editor in new WSL pane");
+
+        // In daemon mode the split is async — carry the command bytes in the
+        // completion callback so they're written after the PTY is live.
+        if self.is_daemon_mode() {
+            use super::DaemonSplitOnComplete;
+            self.split_focused_pane_auto_with(DaemonSplitOnComplete::WriteBytesAndFocus {
+                bytes: cmd.into_bytes(),
+                toast: None,
+            });
+            return;
+        }
+
+        // Local mode: split is synchronous — write immediately.
         let original_focus = self.focused_pane();
         self.split_focused_pane_auto();
         let new_pane = match self.focused_pane() {
@@ -287,7 +300,6 @@ impl App {
             }
         };
 
-        tracing::info!(path = %path, line = %line, "open_in_wsl_pane_editor: spawning editor in new WSL pane");
         self.pty_write_to_pane(cmd.as_bytes(), new_pane);
     }
 

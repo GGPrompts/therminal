@@ -27,7 +27,6 @@ use tracing::{debug, info, warn};
 
 use therminal_terminal::hotspot_detection::{expand_tilde, resolve_relative_to_cwd};
 
-
 use super::App;
 
 // ── Pure planning ────────────────────────────────────────────────────────
@@ -227,8 +226,19 @@ impl App {
             }
         };
 
-        // Capture the originally focused pane id so we can detect that the
-        // split actually produced a new one.
+        // In daemon mode the split is async — the new pane doesn't exist
+        // until `finish_split_pane_remote` runs. Carry the bytes in the
+        // completion callback so they're written after the PTY is live.
+        if self.is_daemon_mode() {
+            use super::pane_ops::DaemonSplitOnComplete;
+            self.split_focused_pane_auto_with(DaemonSplitOnComplete::WriteBytesAndFocus {
+                bytes,
+                toast: fallback_msg,
+            });
+            return;
+        }
+
+        // Local mode: split is synchronous — write immediately.
         let original_focus = self.focused_pane();
         self.split_focused_pane_auto();
         let new_pane = match self.focused_pane() {
@@ -298,6 +308,20 @@ impl App {
         cmd.push_str(&args_line);
         cmd.push('\n');
 
+        info!(%path, cmd = %args_line, "open_folder_in_wsl_pane: spawning command in new WSL pane");
+
+        // In daemon mode the split is async — carry the command bytes in the
+        // completion callback so they're written after the PTY is live.
+        if self.is_daemon_mode() {
+            use super::pane_ops::DaemonSplitOnComplete;
+            self.split_focused_pane_auto_with(DaemonSplitOnComplete::WriteBytesAndFocus {
+                bytes: cmd.into_bytes(),
+                toast: None,
+            });
+            return;
+        }
+
+        // Local mode: split is synchronous — write immediately.
         let original_focus = self.focused_pane();
         self.split_focused_pane_auto();
         let new_pane = match self.focused_pane() {
@@ -308,7 +332,6 @@ impl App {
             }
         };
 
-        info!(%path, cmd = %args_line, "open_folder_in_wsl_pane: spawning command in new WSL pane");
         self.pty_write_to_pane(cmd.as_bytes(), new_pane);
     }
 
