@@ -22,5 +22,6 @@ install_skill() {
 
 mkdir -p "$DEST"
 install_skill "therminal-plugin"
+install_skill "gg-delegate"
 
 echo "Done. Skills installed in ${DEST}"

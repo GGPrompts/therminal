@@ -1,13 +1,15 @@
 # Delegate Profiles
 
-Delegate profiles are currently **schema-only** configuration for planned
-sibling-agent spawning. Therminal parses and validates
-`[delegate.profiles.<name>]` in `therminal.toml`, but there is not yet a
-runtime command or UI flow that launches delegates from these profiles.
+Delegate profiles define isolated AI agent siblings that can be spawned into
+a new therminal pane with a known role, working-directory policy, and
+MCP/permission envelope. Therminal parses and validates
+`[delegate.profiles.<name>]` in `therminal.toml` at config load time.
 
-When runtime spawning lands, these profiles will define isolated AI agent
-processes — each with a role, working-directory policy, and
-MCP/permission envelope.
+**Runtime spawning** is available via the `/gg-delegate` Claude Code skill
+(`resources/skills/gg-delegate/`). The skill resolves a named profile into a
+concrete `terminal.panes.create` invocation with `startup_command`, enforces
+per-profile active-sibling limits, polls for completion, and captures the
+result via `terminal.panes.capture_result`.
 
 See also: [tn-ztv3 epic](../../.beads/) — sibling Claude delegation pattern
 and the [architecture note](../../CLAUDE.md#integration-taxonomy) on when to
@@ -40,10 +42,10 @@ permission_mode = "default"      # forwarded verbatim to the delegate
 | `mcp_enabled` | list of strings | no | `[]` | MCP tool-domain prefix allowlist; empty = no extra grants |
 | `permission_mode` | string | no | `"default"` | Passed verbatim to the delegate process at spawn time |
 
-### Command template tokens (planned runtime behavior)
+### Command template tokens
 
-The `command` field is a shell-style string. Once runtime spawning is
-implemented, the following tokens are substituted at spawn time:
+The `command` field is a shell-style string. The `/gg-delegate` skill
+substitutes the following tokens at spawn time:
 
 | Token | Replaced with |
 |---|---|
@@ -51,7 +53,7 @@ implemented, the following tokens are substituted at spawn time:
 | `{session_id}` | The daemon session ID |
 | `{cwd}` | The resolved working directory (after `working_dir` policy) |
 
-### Working-directory modes (planned runtime behavior)
+### Working-directory modes
 
 | Value | Behaviour |
 |---|---|
@@ -59,8 +61,9 @@ implemented, the following tokens are substituted at spawn time:
 | `"worktree"` | Walk up from the triggering pane's cwd to find the nearest `.git` root; fall back to `"same"` if none found |
 | `"scratch/{random}"` | Create a temporary directory under `<runtime_dir>/scratch/<uuid>`; removed when the delegate exits |
 
-Today these values are validated and round-tripped by config parsing, but
-no delegate process is spawned yet.
+These values are validated at config load time. The `/gg-delegate` skill
+resolves them at spawn time (e.g. `worktree` runs
+`git rev-parse --show-toplevel`).
 
 ### Validation
 
