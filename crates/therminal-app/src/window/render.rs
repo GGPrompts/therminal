@@ -180,9 +180,7 @@ fn extend_hotspots_from_patterns(
 
         // Collect Widget-action matches for the widget rendering pass (tn-068b).
         for m in &matches {
-            if let therminal_terminal::semantic_patterns::ResolvedAction::Widget(ref w) =
-                m.action
-            {
+            if let therminal_terminal::semantic_patterns::ResolvedAction::Widget(ref w) = m.action {
                 let start_col = byte_to_col_map
                     .get(m.byte_start)
                     .copied()
