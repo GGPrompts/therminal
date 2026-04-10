@@ -861,10 +861,16 @@ impl App {
             "reconstructed workspace manager from daemon state"
         );
 
-        // 5. Layout the tree against full_rect so each leaf gets a viewport.
+        // 5. Layout the tree against full_rect so each leaf gets a viewport,
+        // then resize every Term to match its actual viewport. Without the
+        // resize step the Terms are still sized to full_rect (from make_leaf)
+        // so split panes have the wrong dimensions until the first window-resize
+        // event fires, producing a phantom extra row and a detached cursor.
         self.workspaces = Some(wm);
         if let Some(wm) = self.workspaces.as_mut() {
-            wm.layout_mut().layout(full_rect);
+            let layout = wm.layout_mut();
+            layout.layout(full_rect);
+            layout.resize_all_panes(renderer, self.config.general.show_pane_headers);
         }
         self.daemon_session_id = Some(session_id);
         Ok(true)
