@@ -2,14 +2,31 @@ pack_name = "claude-usage"
 pack_description = "Live context-usage gauge widget from Claude Code statusline output"
 
 # Claude Code's statusline prints its current context-window usage as
-# `Context: NN%` — we turn that into a line-right gauge widget so users
-# can see at a glance how full the context is without reading text. The
-# pattern is harness-scoped to claude so it doesn't fire on bash output
-# that happens to contain "Context: 42%" as plain prose.
+# `Context: NN%` (integer 0-100). Three gauge patterns cover the three
+# colour bands so the bar changes colour as context fills up:
+#
+#   green  --  0-49 %   (plenty of headroom)
+#   amber  -- 50-75 %   (approaching midpoint, worth watching)
+#   red    -- 76-100 %  (context window filling up, consider compacting)
+#
+# All three patterns are harness-scoped to `claude` so they fire only on
+# panes where Claude Code is the detected process -- not on any other
+# shell output that happens to contain "Context: NN%".
+#
+# Each pattern targets a non-overlapping numeric range via regex alternation:
+#   0-49   -- [0-9] | [1-3][0-9] | 4[0-9]
+#   50-75  -- 5[0-9] | 6[0-9] | 7[0-5]
+#   76-100 -- 7[6-9] | [89][0-9] | 100
+#
+# The `context-event` pattern at the bottom duplicates the same full match
+# (all values) as an emit_event so orchestrators can subscribe to
+# context-usage telemetry without polling. Per the "one pattern, one action"
+# rule it is a separate entry.
+
 [[pattern]]
-name = "context-gauge"
-description = "Gauge widget showing Claude Code's current context usage"
-match = 'Context:\s+(?P<pct>\d{1,3})%'
+name = "context-gauge-low"
+description = "Green gauge: Claude Code context usage 0-49 %"
+match = 'Context:\s+(?P<pct>[0-9]|[1-3][0-9]|4[0-9])%'
 scope = "finalized_line"
 action = "widget"
 applies_to = "claude"
@@ -19,14 +36,41 @@ kind = "gauge"
 anchor = "line_right"
 value = "{pct}"
 max = "100"
-# The engine picks a color per capture value; `default` is the fallback
-# when no specific capture value matches. Users who want a red bar
-# above 90% should add a separate prompt_boundary pattern with a badge.
-color.default = "#4a9eff"
+color.default = "green"
 
-# A second rule emits an event on the same line so orchestrators can
-# subscribe to context-usage telemetry without polling. Two patterns per
-# SPEC §2.3's "one pattern, one action" rule.
+[[pattern]]
+name = "context-gauge-mid"
+description = "Amber gauge: Claude Code context usage 50-75 %"
+match = 'Context:\s+(?P<pct>5[0-9]|6[0-9]|7[0-5])%'
+scope = "finalized_line"
+action = "widget"
+applies_to = "claude"
+
+[pattern.widget]
+kind = "gauge"
+anchor = "line_right"
+value = "{pct}"
+max = "100"
+color.default = "#f5a623"
+
+[[pattern]]
+name = "context-gauge-high"
+description = "Red gauge: Claude Code context usage 76-100 %"
+match = 'Context:\s+(?P<pct>7[6-9]|[89][0-9]|100)%'
+scope = "finalized_line"
+action = "widget"
+applies_to = "claude"
+
+[pattern.widget]
+kind = "gauge"
+anchor = "line_right"
+value = "{pct}"
+max = "100"
+color.default = "#e74c3c"
+
+# Emit a context-usage event for every value so orchestrators can subscribe
+# to telemetry without polling. Fires alongside whichever gauge pattern above
+# matched the same line.
 [[pattern]]
 name = "context-event"
 description = "Publish a context-usage event for orchestrator consumption"

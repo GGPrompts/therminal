@@ -492,10 +492,14 @@ fn claude_usage_pack_matches_statusline_with_harness_active() {
     let inactive = engine.process_finalized_line(1, "Context: 42%", None, None);
     assert!(inactive.is_empty());
 
-    // Harness active: both the gauge widget and the emit_event rule fire.
+    // Harness active: the gauge widget (42% falls in the green/low band) and
+    // the emit_event rule fire. The pack has three colour-banded gauge
+    // patterns; accept any of the three names so the test is not brittle if
+    // thresholds shift.
     let active = engine.process_finalized_line(1, "Context: 42%", Some("claude"), None);
     let names: Vec<&str> = active.iter().map(|m| m.pattern_name.as_str()).collect();
-    assert!(names.contains(&"context-gauge"), "got {names:?}");
+    let has_gauge = names.iter().any(|n| n.starts_with("context-gauge"));
+    assert!(has_gauge, "expected a context-gauge-* match, got {names:?}");
     assert!(names.contains(&"context-event"), "got {names:?}");
 }
 
