@@ -136,7 +136,7 @@ impl App {
                 .and_then(|wm| wm.focused_pane())
                 .and_then(|fid| layout.find_pane(fid));
 
-            let (cwd, claude_title, last_exit_code, agent_name, dimensions) =
+            let (cwd, claude_title, last_exit_code, agent_name, git_branch, dimensions) =
                 if let Some(pane) = focused_pane {
                     let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
                     let agent_pid = {
@@ -165,10 +165,14 @@ impl App {
                         claude_meta.and_then(|meta| meta.session_title),
                         status.last_exit_code,
                         status.agent_name.clone(),
+                        status
+                            .git_state
+                            .as_ref()
+                            .map(crate::git_state::format_for_status_bar),
                         dims,
                     )
                 } else {
-                    (None, None, None, None, (80, 24))
+                    (None, None, None, None, None, (80, 24))
                 };
 
             let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
@@ -192,6 +196,7 @@ impl App {
                 active_workspace,
                 is_zoomed: self.zoomed_layout.is_some(),
                 focused_pane_id,
+                git_branch,
                 template_status: self.config.template_status.clone(),
             };
 
@@ -323,6 +328,9 @@ impl App {
                         show_pane_headers: self.config.general.show_pane_headers,
                         show_status_bar: self.config.general.show_status_bar,
                         show_tab_bar: self.config.general.show_tab_bar,
+                        editor_chain: self.config.hotspots.editor_chain.clone(),
+                        folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
+                        folder_opener: self.config.hotspots.folder_opener.clone(),
                     },
                     renderer,
                     &gpu.device,

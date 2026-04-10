@@ -56,23 +56,39 @@ pub(crate) enum ControlBinding {
     ToggleStatusBar,
     ToggleTabBar,
     ApplyThemePreset(ThemePreset),
+    // Hotspot controls (tn-avjv.5)
+    EditorChainEntry(usize),
+    FolderPaneCommand,
+    FolderOpenerEntry(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // MoveUp/MoveDown wired in future keyboard shortcut pass.
 pub(crate) enum SettingsCommand {
     TogglePaneHeaders,
     ToggleStatusBar,
     ToggleTabBar,
     ApplyThemePreset(ThemePreset),
+    // Hotspot mutations (tn-avjv.5)
+    EditorChainRemove(usize),
+    EditorChainMoveUp(usize),
+    EditorChainMoveDown(usize),
+    SetFolderPaneCommand(String),
+    FolderOpenerRemove(usize),
+    FolderOpenerMoveUp(usize),
+    FolderOpenerMoveDown(usize),
 }
 
 impl ControlBinding {
-    fn command(self) -> SettingsCommand {
+    fn command(&self) -> SettingsCommand {
         match self {
             Self::TogglePaneHeaders => SettingsCommand::TogglePaneHeaders,
             Self::ToggleStatusBar => SettingsCommand::ToggleStatusBar,
             Self::ToggleTabBar => SettingsCommand::ToggleTabBar,
-            Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(preset),
+            Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(*preset),
+            Self::EditorChainEntry(idx) => SettingsCommand::EditorChainRemove(*idx),
+            Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerRemove(*idx),
+            Self::FolderPaneCommand => SettingsCommand::SetFolderPaneCommand(String::new()),
         }
     }
 }
@@ -83,26 +99,25 @@ impl ControlBinding {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Variants used by downstream settings sections (tn-avjv.5, tn-avjv.6).
 pub(crate) enum ControlType {
-    /// Boolean on/off toggle (renders as a pill).
-    Toggle { value: bool },
-    /// Single-choice selector cycling through a fixed list of options.
+    Toggle {
+        value: bool,
+    },
     Select {
         options: Vec<String>,
         selected: usize,
     },
-    /// Single-line editable text field with a visible cursor.
     TextInput {
         value: String,
         cursor: usize,
         editing: bool,
     },
-    /// Read-only clickable row displaying a label and a current value string.
-    ListRow { display_value: String },
-    /// Legacy action-only control with no interactive widget state.
+    ListRow {
+        display_value: String,
+    },
     Action,
 }
 
-#[allow(dead_code)] // Constructors used by downstream settings sections and tests.
+#[allow(dead_code)]
 impl ControlType {
     pub(crate) fn toggle(initial: bool) -> Self {
         Self::Toggle { value: initial }
@@ -127,7 +142,6 @@ impl ControlType {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn list_row(display_value: impl Into<String>) -> Self {
         Self::ListRow {
             display_value: display_value.into(),
@@ -166,7 +180,7 @@ impl SettingsControl {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsSection {
-    #[allow(dead_code)] // Used for section lookup by downstream settings sections.
+    #[allow(dead_code)]
     pub id: &'static str,
     pub title: &'static str,
     pub controls: Vec<SettingsControl>,
@@ -192,7 +206,6 @@ pub(crate) struct SettingsOverlayState {
     selected_section: usize,
     selected_control_by_section: Vec<usize>,
     focus: SettingsFocus,
-    /// Cached panel bounds from the last render, used for mouse hit-testing.
     panel_rect: Option<[f32; 4]>,
 }
 
@@ -209,13 +222,10 @@ impl SettingsOverlayState {
         s
     }
 
-    /// Store the panel bounds computed during rendering so the event handler
-    /// can distinguish clicks inside the panel from clicks on the scrim.
     pub(crate) fn set_panel_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
         self.panel_rect = Some([x, y, w, h]);
     }
 
-    /// Returns `true` if the pixel coordinate falls inside the panel.
     pub(crate) fn contains_point(&self, px: f32, py: f32) -> bool {
         if let Some([x, y, w, h]) = self.panel_rect {
             px >= x && px <= x + w && py >= y && py <= y + h
@@ -248,15 +258,12 @@ impl SettingsOverlayState {
     pub(crate) fn sections(&self) -> &[SettingsSection] {
         &self.sections
     }
-
     pub(crate) fn focus(&self) -> SettingsFocus {
         self.focus
     }
-
     pub(crate) fn active_section_index(&self) -> usize {
         self.selected_section
     }
-
     pub(crate) fn active_section(&self) -> Option<&SettingsSection> {
         self.sections.get(self.selected_section)
     }
@@ -343,10 +350,15 @@ impl SettingsOverlayState {
                         let control = section.controls.get(idx)?;
                         Some(control.binding.command())
                     }
-                    ControlType::TextInput { editing, .. } => {
+                    ControlType::TextInput { value, editing, .. } => {
                         if *editing {
                             *editing = false;
-                            Some(control.binding.command())
+                            Some(match &control.binding {
+                                ControlBinding::FolderPaneCommand => {
+                                    SettingsCommand::SetFolderPaneCommand(value.clone())
+                                }
+                                other => other.command(),
+                            })
                         } else {
                             *editing = true;
                             None
@@ -602,6 +614,45 @@ impl SettingsOverlayState {
                 }
             }
         }
+        self.rebuild_hotspots_section(values);
+    }
+
+    fn rebuild_hotspots_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "hotspots") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let mut controls = Vec::new();
+        for (i, entry) in values.editor_chain.iter().enumerate() {
+            controls.push(SettingsControl::with_type(
+                editor_chain_label(i),
+                ControlBinding::EditorChainEntry(i),
+                ControlType::list_row(entry.clone()),
+            ));
+        }
+        let cmd_text = values.folder_pane_command.join(" ");
+        controls.push(SettingsControl::with_type(
+            "Folder pane command",
+            ControlBinding::FolderPaneCommand,
+            ControlType::text_input(cmd_text),
+        ));
+        for (i, entry) in values.folder_opener.iter().enumerate() {
+            controls.push(SettingsControl::with_type(
+                folder_opener_label(i),
+                ControlBinding::FolderOpenerEntry(i),
+                ControlType::list_row(entry.clone()),
+            ));
+        }
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
     }
 
     fn move_section(&mut self, delta: i32) {
@@ -675,7 +726,7 @@ impl SettingsOverlayState {
                 ),
             ],
         ));
-
+        self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
         self.register_section(SettingsSection::new(
             "themes",
             "Theme Presets",
@@ -711,11 +762,58 @@ impl Default for SettingsOverlayState {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct SettingsRenderValues {
     pub show_pane_headers: bool,
     pub show_status_bar: bool,
     pub show_tab_bar: bool,
+    pub editor_chain: Vec<String>,
+    pub folder_pane_command: Vec<String>,
+    pub folder_opener: Vec<String>,
+}
+
+fn editor_chain_label(index: usize) -> &'static str {
+    const L: [&str; 16] = [
+        "Editor #1",
+        "Editor #2",
+        "Editor #3",
+        "Editor #4",
+        "Editor #5",
+        "Editor #6",
+        "Editor #7",
+        "Editor #8",
+        "Editor #9",
+        "Editor #10",
+        "Editor #11",
+        "Editor #12",
+        "Editor #13",
+        "Editor #14",
+        "Editor #15",
+        "Editor #16",
+    ];
+    L.get(index).copied().unwrap_or("Editor #?")
+}
+
+fn folder_opener_label(index: usize) -> &'static str {
+    const L: [&str; 16] = [
+        "Opener #1",
+        "Opener #2",
+        "Opener #3",
+        "Opener #4",
+        "Opener #5",
+        "Opener #6",
+        "Opener #7",
+        "Opener #8",
+        "Opener #9",
+        "Opener #10",
+        "Opener #11",
+        "Opener #12",
+        "Opener #13",
+        "Opener #14",
+        "Opener #15",
+        "Opener #16",
+    ];
+    L.get(index).copied().unwrap_or("Opener #?")
 }
 
 fn truncate_for_width(text: &str, width_px: f32) -> String {
@@ -813,7 +911,6 @@ pub(crate) fn draw_settings_overlay(
     let panel_y = (sh - panel_h) * 0.5;
     let nav_w = (panel_w * 0.30).clamp(180.0, 320.0);
     let content_x = panel_x + nav_w;
-
     state.set_panel_rect(panel_x, panel_y, panel_w, panel_h);
 
     let scrim_color = [0.0, 0.0, 0.0, 0.64];
@@ -871,7 +968,6 @@ pub(crate) fn draw_settings_overlay(
     let ctrl_row_h = 36.0_f32;
     let ctrl_start_y = panel_y + 112.0;
     let focus_ring_border = [0.34, 0.65, 1.0, 0.6];
-
     if state.focus() == SettingsFocus::Controls {
         let y = ctrl_start_y + state.active_control_index() as f32 * ctrl_row_h;
         let row_x = content_x + 22.0;
@@ -926,7 +1022,6 @@ pub(crate) fn draw_settings_overlay(
         let text_field_editing_bg = [0.0, 0.0, 0.0, 0.50];
         let text_cursor_color = [0.34, 0.65, 1.0, 0.9];
         let value_col_x = content_x + 28.0 + (panel_w - nav_w - 56.0) * 0.55;
-
         for (i, control) in section.controls.iter().enumerate() {
             let row_y = ctrl_start_y + i as f32 * ctrl_row_h;
             match &control.control_type {
@@ -1039,7 +1134,6 @@ pub(crate) fn draw_settings_overlay(
             height: surface_height,
         },
     );
-
     let ink = GlyphColor::rgba(
         PaletteColor::INK.r,
         PaletteColor::INK.g,
@@ -1062,7 +1156,6 @@ pub(crate) fn draw_settings_overlay(
 
     let mut buffers: Vec<Buffer> = Vec::new();
     let mut placements: Vec<(usize, f32, f32, GlyphColor, TextBounds)> = Vec::new();
-
     let mut add_text = |text: String,
                         left: f32,
                         top: f32,
@@ -1114,7 +1207,6 @@ pub(crate) fn draw_settings_overlay(
         ink,
         Weight::SEMIBOLD,
     );
-
     let hint = if state.is_text_editing() {
         "Type to edit, Enter to confirm, Esc to cancel"
     } else {
@@ -1170,7 +1262,6 @@ pub(crate) fn draw_settings_overlay(
         let label_width = row_width * 0.52;
         let value_col_x = content_x + 28.0 + row_width * 0.55;
         let value_width = row_width * 0.42;
-
         for (i, control) in section.controls.iter().enumerate() {
             let selected = i == state.active_control_index();
             let marker = if selected { ">" } else { " " };
@@ -1180,7 +1271,6 @@ pub(crate) fn draw_settings_overlay(
                 ink
             };
             let row_y = panel_y + 118.0 + i as f32 * 36.0;
-
             match &control.control_type {
                 ControlType::Toggle { value } => {
                     add_text(
@@ -1321,7 +1411,6 @@ pub(crate) fn draw_settings_overlay(
     let mut text_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("settings_overlay_text_encoder"),
     });
-
     if let Err(e) = renderer.overlay_text_renderer.prepare(
         device,
         queue,
@@ -1396,6 +1485,17 @@ mod tests {
         }
     }
 
+    fn test_render_values() -> SettingsRenderValues {
+        SettingsRenderValues {
+            show_pane_headers: true,
+            show_status_bar: true,
+            show_tab_bar: true,
+            editor_chain: vec!["$VISUAL".into(), "$EDITOR".into(), "code".into()],
+            folder_pane_command: vec!["tfe".into(), "{path}".into()],
+            folder_opener: vec!["$FILE_MANAGER".into(), "xdg-open".into()],
+        }
+    }
+
     #[test]
     fn tab_switches_focus_between_nav_and_controls() {
         let mut state = SettingsOverlayState::new();
@@ -1405,10 +1505,10 @@ mod tests {
         state.tab(true);
         assert_eq!(state.focus(), SettingsFocus::Navigation);
     }
-
     #[test]
     fn arrows_navigate_sections_and_controls() {
         let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
         assert_eq!(state.active_section_index(), 0);
         state.arrow_down();
         assert_eq!(state.active_section_index(), 1);
@@ -1419,7 +1519,6 @@ mod tests {
         state.arrow_up();
         assert_eq!(state.active_control_index(), 0);
     }
-
     #[test]
     fn enter_from_nav_then_enter_toggles() {
         let mut state = SettingsOverlayState::new();
@@ -1427,7 +1526,6 @@ mod tests {
         assert_eq!(state.focus(), SettingsFocus::Controls);
         assert_eq!(state.enter(), Some(SettingsCommand::TogglePaneHeaders));
     }
-
     #[test]
     fn register_section_extends_navigation_model() {
         let mut state = SettingsOverlayState::new();
@@ -1441,18 +1539,17 @@ mod tests {
             )],
         ));
         assert_eq!(state.sections().len(), base + 1);
-        state.arrow_down();
-        state.arrow_down();
+        for _ in 0..base {
+            state.arrow_down();
+        }
         assert_eq!(state.active_section().map(|s| s.id), Some("test"));
     }
-
     #[test]
     fn toggle_space_flips_value() {
         let mut state = SettingsOverlayState::new();
         state.tab(false);
         assert_eq!(state.space(), Some(SettingsCommand::TogglePaneHeaders));
     }
-
     #[test]
     fn select_arrows_cycle_options() {
         let mut state = SettingsOverlayState::new();
@@ -1465,8 +1562,10 @@ mod tests {
                 ControlType::select(vec!["A".into(), "B".into(), "C".into()], 0),
             )],
         ));
-        state.arrow_down();
-        state.arrow_down();
+        let target = state.sections().len() - 1;
+        for _ in 0..target {
+            state.arrow_down();
+        }
         state.tab(false);
         state.arrow_right();
         if let ControlType::Select { selected, .. } =
@@ -1481,7 +1580,6 @@ mod tests {
             assert_eq!(*selected, 0);
         }
     }
-
     #[test]
     fn text_input_enter_edits_then_confirms() {
         let mut state = SettingsOverlayState::new();
@@ -1494,8 +1592,10 @@ mod tests {
                 ControlType::text_input("hello"),
             )],
         ));
-        state.arrow_down();
-        state.arrow_down();
+        let target = state.sections().len() - 1;
+        for _ in 0..target {
+            state.arrow_down();
+        }
         state.tab(false);
         assert!(!state.is_text_editing());
         assert_eq!(state.enter(), None);
@@ -1509,7 +1609,6 @@ mod tests {
             assert_eq!(value, "hello!");
         }
     }
-
     #[test]
     fn text_input_backspace() {
         let mut state = SettingsOverlayState::new();
@@ -1522,8 +1621,10 @@ mod tests {
                 ControlType::text_input("abc"),
             )],
         ));
-        state.arrow_down();
-        state.arrow_down();
+        let target = state.sections().len() - 1;
+        for _ in 0..target {
+            state.arrow_down();
+        }
         state.tab(false);
         state.enter();
         assert!(state.backspace());
@@ -1535,7 +1636,6 @@ mod tests {
         }
         assert!(!state.delete());
     }
-
     #[test]
     fn escape_cancels_text_editing() {
         let mut state = SettingsOverlayState::new();
@@ -1548,15 +1648,16 @@ mod tests {
                 ControlType::text_input(""),
             )],
         ));
-        state.arrow_down();
-        state.arrow_down();
+        let target = state.sections().len() - 1;
+        for _ in 0..target {
+            state.arrow_down();
+        }
         state.tab(false);
         state.enter();
         assert!(state.is_text_editing());
         assert!(state.cancel_text_editing());
         assert!(!state.is_text_editing());
     }
-
     #[test]
     fn theme_preset_writes_expected_palette_fields() {
         let mut colors = ColorsConfig::default();
@@ -1586,7 +1687,6 @@ mod tests {
         assert_eq!(colors.cursor.as_deref(), Some("#000000"));
         assert_eq!(colors.ansi.as_ref().map(|v| v.len()), Some(16));
     }
-
     #[test]
     fn theme_presets_keep_readable_fg_bg_contrast() {
         const MIN_CONTRAST: f64 = 4.5;
@@ -1613,5 +1713,62 @@ mod tests {
         assert_min_ansi_contrast(&colors, MIN_CONTRAST, "Paper");
         apply_theme_preset(&mut colors, ThemePreset::TokyoNightLight);
         assert_min_ansi_contrast(&colors, MIN_CONTRAST, "TokyoNightLight");
+    }
+    #[test]
+    fn hotspots_section_is_registered() {
+        let state = SettingsOverlayState::new();
+        assert!(state.sections().iter().any(|s| s.id == "hotspots"));
+    }
+    #[test]
+    fn hotspots_section_rebuilds_from_config() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        let hotspots = state
+            .sections()
+            .iter()
+            .find(|s| s.id == "hotspots")
+            .unwrap();
+        assert_eq!(hotspots.controls.len(), 6);
+        assert!(matches!(
+            hotspots.controls[0].control_type,
+            ControlType::ListRow { .. }
+        ));
+        assert_eq!(hotspots.controls[0].label, "Editor #1");
+        assert!(matches!(
+            hotspots.controls[3].control_type,
+            ControlType::TextInput { .. }
+        ));
+        assert_eq!(hotspots.controls[3].label, "Folder pane command");
+        assert!(matches!(
+            hotspots.controls[4].control_type,
+            ControlType::ListRow { .. }
+        ));
+        assert_eq!(hotspots.controls[4].label, "Opener #1");
+    }
+    #[test]
+    fn editor_chain_remove_produces_command() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        state.arrow_down();
+        state.tab(false);
+        let cmd = state.enter();
+        assert_eq!(cmd, Some(SettingsCommand::EditorChainRemove(0)));
+    }
+    #[test]
+    fn folder_pane_command_text_edit_produces_command() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        state.arrow_down();
+        state.tab(false);
+        state.arrow_down();
+        state.arrow_down();
+        state.arrow_down();
+        assert_eq!(state.enter(), None);
+        assert!(state.is_text_editing());
+        let cmd = state.enter();
+        assert!(matches!(
+            cmd,
+            Some(SettingsCommand::SetFolderPaneCommand(_))
+        ));
     }
 }

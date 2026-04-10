@@ -167,8 +167,7 @@ impl App {
                 }
             }
             SettingsCommand::SetFolderPaneCommand(text) => {
-                let parts: Vec<String> =
-                    text.split_whitespace().map(String::from).collect();
+                let parts: Vec<String> = text.split_whitespace().map(String::from).collect();
                 self.config.hotspots.folder_pane_command = parts;
                 self.show_toast("folder pane command updated");
             }
