@@ -184,4 +184,16 @@ if (-not $NoCopy) {
     } else {
         Write-Host "WARNING: resources/ not found in repo, shell integration will not work"
     }
+
+    # --- Copy bundled pattern packs alongside resources ---
+    # The pattern engine resolves shipped packs from
+    # <THERMINAL_RESOURCES_DIR>/plugins/examples. Copy them into the
+    # resources tree so they're found at runtime.
+    $pluginsSrc = Join-Path $repoRoot "plugins\examples"
+    $pluginsDst = Join-Path $resourcesDst "plugins\examples"
+    if (Test-Path $pluginsSrc) {
+        New-Item -ItemType Directory -Force -Path $pluginsDst | Out-Null
+        Copy-Item -Recurse -Force (Join-Path $pluginsSrc "*") $pluginsDst
+        Write-Host "Pattern packs copied to: $pluginsDst"
+    }
 }
