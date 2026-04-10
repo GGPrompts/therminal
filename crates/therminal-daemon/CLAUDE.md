@@ -113,7 +113,7 @@ per-tool classification table. The short version:
 - `terminal.sessions.destroy`, `terminal.panes.destroy` — Admin tier; trust
   enforcement is enforced at the MCP layer, not the CLI layer.
 
-Tools exposed (27 tools):
+Tools exposed (30 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -144,6 +144,9 @@ Tools exposed (27 tools):
 | `terminal.agents.get_status` | Observer | Dynamic mode + capacity snapshot for a single pane's agent: `pane_id`, `agent_type`, `status`, `current_tool`, `context_percent`, `model`. Strict subset of `get_details` intended for sibling-agent coordination. Combines `AgentRegistry` (mode) with `pane_capacity()` (capacity). Errors when neither lookup yields anything for the pane. |
 | `terminal.agents.get_details` | Observer | Get inference details for a pane's agent: `agent_type`, `model`, `context_percent`, `consecutive_failures`, `last_command`, `last_exit_code`, `last_command_duration_ms`. Backed by a per-pane `AgentStateInference` engine fed from the PTY reader thread; `agent_type` falls back from `AgentRegistry` to the engine's own detection when no registry entry exists. |
 | `terminal.agents.get_cadence` | Observer | Get output cadence metrics for a pane's agent: `chunk_count`, `avg_arrival_ms`, `max_gap_ms`, `is_spinner`, `is_streaming`, plus `recent_samples` (oldest first, capped at 50). Backed by the per-pane `AgentStateInference` engine's chunk-stats sliding window. Sample timestamps are converted from monotonic `Instant` to wall-clock Unix seconds at snapshot time. Useful for predicting time-to-completion, animating progress, and distinguishing stalled vs thinking agents. Returns an error only if the pane does not exist; panes with no streaming activity return zero / false / empty defaults. |
+| `terminal.agents.get_session_detail` | Observer | Get the enriched Claude Code session detail for a pane (tn-ifee): session_title, current_tool, working_dir, context_percent, model. Sourced from the per-pane `PaneCapacityCache` populated by the Claude state poller from `/tmp/claude-code-state/`. Every field is nullable — absence is normal when hooks aren't installed or haven't ticked yet. Returns an error only if the pane does not exist. |
+| `terminal.events.stats` | Observer | Return aggregate stats for the unified event bus (tn-xula): total events published, per-source-class counts (harness/pattern/core), dropped-subscriber count, current ring buffer fill, and the current monotonic cursor. |
+| `terminal.patterns.stats` | Observer | Return match statistics for every loaded semantic pattern pack (tn-yrjd): per-pattern match_count/miss_count/avg_match_ms/slow_count/status, per-pack active/disabled/error counts plus load_errors, and global total_loaded/total_active/total_disabled/cap_reached/cap_limit plus pack_load_errors. |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.
 
@@ -183,7 +186,9 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 | `terminal.panes` | Pane I/O, state, and geometry (list, create, destroy, get_content, get_geometry, write, wait_for_output) |
 | `terminal.semantic` | Semantic region queries (query_history, get_hotspots) |
 | `terminal.workspaces` | Workspace tab introspection (list) |
-| `terminal.agents` | Agent detection, status, and cadence (list, find_with_capacity, get_status, get_details, get_cadence) |
+| `terminal.agents` | Agent detection, status, and cadence (list, find_with_capacity, get_status, get_details, get_cadence, get_session_detail) |
+| `terminal.events` | Unified event bus diagnostics (stats) |
+| `terminal.patterns` | Semantic pattern engine diagnostics (stats) |
 
 ### Standard Verbs
 

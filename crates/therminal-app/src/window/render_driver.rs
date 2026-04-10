@@ -371,33 +371,8 @@ impl App {
                 gpu.queue.submit(std::iter::once(encoder.finish()));
             }
             Some(OverlayMode::Settings) => {
-                // Build values inline to avoid borrowing all of `self`
-                // (renderer already holds a mutable borrow on self.grid_renderer).
-                let values = {
-                    use therminal_core::config::NewPaneCwd;
-                    settings_overlay::SettingsRenderValues {
-                        show_pane_headers: self.config.general.show_pane_headers,
-                        show_status_bar: self.config.general.show_status_bar,
-                        show_tab_bar: self.config.general.show_tab_bar,
-                        editor_chain: self.config.hotspots.editor_chain.clone(),
-                        folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
-                        folder_opener: self.config.hotspots.folder_opener.clone(),
-                        shell: self.config.general.shell.clone(),
-                        shell_args: self.config.general.shell_args.join(" "),
-                        new_pane_cwd_index: match self.config.general.new_pane_cwd {
-                            NewPaneCwd::Inherit => 0,
-                            NewPaneCwd::Home => 1,
-                        },
-                        high_contrast: self.config.accessibility.high_contrast,
-                        reduced_motion: self.config.accessibility.reduced_motion,
-                        ui_text_scale_index: settings_overlay::ui_text_scale_index(
-                            self.config.accessibility.ui_text_scale,
-                        ),
-                    }
-                };
                 settings_overlay::draw_settings_overlay(
                     &mut self.settings_overlay,
-                    values,
                     renderer,
                     &gpu.device,
                     &gpu.queue,

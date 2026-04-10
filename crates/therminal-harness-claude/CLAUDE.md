@@ -10,23 +10,24 @@ Where the daemon's `AgentRegistry` answers "is a Claude process running in this 
 /tmp/claude-code-state/*.json      (written by Claude Code hooks)
           │
           ▼
-ClaudeStatePoller  (src/state.rs)
-  notify-based file watcher → ClaudeSessionState updates
-  (includes parent_session_id: Option<String> for subagent tracking)
-          │
-          ▼
-ClaudeJsonlRegistry  (src/jsonl_tailer.rs)
-  ├─ SessionJsonlTailer per top-level session
-  │    byte-offset incremental reader over
-  │    ~/.claude/projects/{hash}/{sid}.jsonl
-  │
-  └─ Per-subagent SessionJsonlTailer (discovered by polling
-     ~/.claude/projects/{hash}/{parent-sid}/subagents/agent-*.jsonl
-     on each tick, read from offset 0 to capture full lifecycle)
-          │
-          ▼ TaggedAgentEvent { event: AgentEvent, source: EventSource }
-          ▼
-pipeline::spawn  (src/pipeline.rs)
+ClaudeStatePoller  (src/state.rs)                       Hook scripts (Claude Code)
+  notify-based file watcher →                                    │
+  ClaudeSessionState updates                      therminal agent-event push
+  (includes parent_session_id                      (IpcRequest::PushAgentEvent)
+   for subagent tracking)                                        │
+          │                                                      ▼
+          ▼                                          HookPushSink (src/hook_push.rs)
+ClaudeJsonlRegistry  (src/jsonl_tailer.rs)             HookSignal → TaggedAgentEvent
+  ├─ SessionJsonlTailer per top-level session                    │
+  │    byte-offset incremental reader over                       │
+  │    ~/.claude/projects/{hash}/{sid}.jsonl                     │
+  │                                                              │
+  └─ Per-subagent SessionJsonlTailer (discovered by              │
+     polling on each tick, read from offset 0)                   │
+          │                                                      │
+          ▼ TaggedAgentEvent { event, source }                   │
+          ▼                                                      ▼
+pipeline::spawn  (src/pipeline.rs)  ◄────── both publish to broadcast channel
   150ms tick driving poll_all, tokio::sync::broadcast fan-out
           │
           ▼
@@ -96,15 +97,17 @@ Every emitted `TaggedAgentEvent` carries an `EventSource` so consumers can rebui
 
 ```
 src/
-├── lib.rs              # Crate root + ClaudeHarness facade
-├── agent_events.rs     # AgentEvent enum (UserMessage, AssistantMessage, ToolUse, ...)
-├── markers.rs          # OSC 1341 handler + activate() (tn-hkpz)
-├── state.rs            # ClaudeSessionState, ClaudeStatePoller, ClaudeStateUpdate
-├── session_log.rs      # SessionEvent + parse_session_event (pure parser)
-├── jsonl_tailer.rs     # SessionJsonlTailer, ClaudeJsonlRegistry, TaggedAgentEvent, EventSource
-├── pipeline.rs         # spawn() + spawn_with() tick loop + broadcast fan-out
+├── lib.rs                  # Crate root + ClaudeHarness facade
+├── agent_events.rs         # AgentEvent enum (UserMessage, AssistantMessage, ToolUse, ...)
+├── markers.rs              # OSC 1341 handler + activate() (tn-hkpz)
+├── state.rs                # ClaudeSessionState, ClaudeStatePoller, ClaudeStateUpdate
+├── session_log.rs          # SessionEvent + parse_session_event (pure parser)
+├── jsonl_tailer.rs         # SessionJsonlTailer, ClaudeJsonlRegistry, TaggedAgentEvent, EventSource
+├── pipeline.rs             # spawn() + spawn_with() tick loop + broadcast fan-out
+├── hook_push.rs            # HookSignal + HookPushSink — push-based input path
+├── tool_call_hotspots.rs   # Claude Code tool-call hotspot detector (tn-gidy)
 └── bin/
-    └── claude-events.rs  # Dev CLI: connects to MCP socket, subscribes, prints styled events
+    └── claude-events.rs    # Dev CLI: connects to MCP socket, subscribes, prints styled events
 ```
 
 ## Public surface
@@ -161,6 +164,16 @@ Not in scope for this crate:
 
 - Pattern matching on rendered terminal text — that's for `plugins/` pattern packs, not this crate.
 - Other harnesses — Codex, Copilot, and OpenCode will each live in their own `therminal-harness-<name>/` crate. The `/tmp/{codex,copilot}-state/` directories are watched by this crate's poller for historical reasons; that wiring will move out of here when the corresponding harness crates land.
+
+## Hook-push input path
+
+The file-polling pipeline (state poller + JSONL tailer) is the primary data source, but it requires the daemon to have filesystem access to `~/.claude/projects/` and `/tmp/claude-code-state/`. When this is not possible — notably when the daemon runs as a Windows native process and Claude Code runs inside WSL2 — the **hook-push path** (`src/hook_push.rs`) inverts the data flow.
+
+Claude Code hook scripts call the `therminal` CLI from within WSL, which delivers structured `HookSignal`s to the daemon via `IpcRequest::PushAgentEvent`. The daemon dispatches them to the harness's broadcast channel via `HookPushSink::inject`, producing the same `TaggedAgentEvent`s as the file-polling path.
+
+**Wire type**: `HookSignal` is intentionally flat (all fields `Option<String>`) so new hook events can be added without a protocol version bump. Supported events: `session_start`, `session_stop` (`Stop` / `SessionEnd`), `tool_state` (`PreToolUse` / `PostToolUse`), `subagent_start`, `subagent_stop`, `stop_failure`.
+
+**Graceful degradation**: On Linux/WSL-hosted daemons, both paths run simultaneously. The JSONL tailer remains authoritative for historical data and capacity metrics; hook events provide lower-latency lifecycle signals. On Windows native (where JSONL files are unreachable), hook-push becomes the only source of observability.
 
 ## `claude-events` dev binary
 

@@ -68,6 +68,7 @@ waits, and structured responses that drive downstream tool calls.
 | Send keystrokes | `tn pane send <id> <keys>` | Round-trip bytes dominate; CLI wins |
 | Tag pane | `tn pane tag <id> <k=v>` | Metadata write |
 | Untag pane | `tn pane untag <id> <k>` | Metadata write |
+| Capture delegate result | MCP `terminal.panes.capture_result` | Transcript-first with grid fallback; no CLI peer |
 | Wait for output | MCP `terminal.panes.wait_for_output` | Blocking async; no CLI peer |
 | Pane event log | MCP `terminal.panes.query_events` | Structured ring-buffer; no CLI peer |
 | Semantic history | MCP `terminal.semantic.query_history` | Structured region index; no CLI peer |
@@ -135,10 +136,12 @@ and `crates/therminal-daemon/CLAUDE.md`.
 
 ```text
 therminal pane list [--session N] [--json]
-therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--json]
+therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--ratio 0.1..0.9] [--json]
 therminal pane destroy <pane_id>
 therminal pane send <pane_id> <keys> [--raw]
 therminal pane peek <pane_id> [--last N] [--trim] [--json]
+therminal pane focus <pane_id>
+therminal pane move <pane_id> --workspace <N>
 therminal pane tag <pane_id> <key=value>...
 therminal pane untag <pane_id> <key>... [--all]
 therminal pane swap <a> <b>
@@ -163,6 +166,11 @@ rows. `--trim` (on by default) strips trailing whitespace per row.
 
 `pane create` without `--from` walks the daemon for an existing pane to
 split. If no panes exist anywhere, it spawns a fresh session first.
+`--ratio` controls the split proportion (clamped 0.1..0.9, default 0.5).
+
+`pane focus` selects the given pane as the focused pane in its workspace.
+
+`pane move` moves a pane to the specified workspace slot.
 
 ### `session`
 
@@ -176,6 +184,8 @@ therminal session destroy <session_id>
 
 ```text
 therminal workspace list [--session N] [--json]
+therminal workspace create [--session N] [--name <name>] [--json]
+therminal workspace rename <workspace_id> <new_name>
 therminal workspace switch --session N <workspace_id>
 ```
 
@@ -230,6 +240,20 @@ URLs, error locations, git refs, issue refs) over a `CapturePane` snapshot.
 `semantic commands` queries daemon-side OSC 633 command summaries through
 lightweight IPC (`QueryCommands`) and prints TSV by default or JSON with
 `--json`.
+
+### `layout`
+
+```text
+therminal layout batch [--json]
+```
+
+`layout batch` reads newline-delimited commands from stdin, parses each
+into an IPC request, and sends them as one atomic `BatchLayoutOps` call.
+This eliminates intermediate redraws when scripting complex layout setups.
+Each line is a space-separated command matching the existing CLI surface:
+`split`, `kill`, `focus`, `swap`, `move`, `create-workspace`,
+`switch-workspace`, `rename-workspace`. Returns one JSON result per
+operation on stdout.
 
 ## Cache-friendliness notes
 

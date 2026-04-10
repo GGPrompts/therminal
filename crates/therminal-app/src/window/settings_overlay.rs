@@ -1062,7 +1062,6 @@ pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_settings_overlay(
     state: &mut SettingsOverlayState,
-    _values: SettingsRenderValues,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,

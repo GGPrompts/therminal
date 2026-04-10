@@ -11,8 +11,22 @@ src/
 │   ├── mod.rs           # Event loop, App struct, facade methods
 │   ├── mouse.rs         # Mouse input, separator drag, hit-testing
 │   ├── keybindings.rs   # Key event dispatch
-│   ├── chrome.rs        # Status bar, tab bar, pane headers, separators
+│   ├── chrome/
+│   │   ├── mod.rs           # Chrome trait, re-exports
+│   │   ├── status_bar.rs    # Status bar rendering
+│   │   ├── pane_header.rs   # Pane header rendering
+│   │   ├── tab_bar.rs       # Workspace tab bar rendering
+│   │   ├── csd.rs           # Client-side decorations
+│   │   ├── colors.rs        # Chrome color helpers
+│   │   ├── text_cache.rs    # Chrome text caching
+│   │   └── overlays.rs      # Chrome overlay helpers
 │   ├── help_overlay.rs  # Keybinding help overlay
+│   ├── settings_overlay.rs  # Settings panel overlay
+│   ├── trust_escalation_overlay.rs # Trust tier escalation dialog
+│   ├── toast.rs         # Toast notification overlay
+│   ├── event_handler.rs # winit event handler dispatch
+│   ├── init.rs          # Window initialization
+│   ├── render_driver.rs # Render orchestration, widget overlay drawing
 │   ├── pane_ops/
 │   │   ├── mod.rs              # Shared helpers (daemon_rpc, make_pane_callbacks), re-exports
 │   │   ├── split_ops.rs        # split_focused_pane, split_pane_by_id, split_pane_remote, finish_split_pane_remote
@@ -21,14 +35,20 @@ src/
 │   │   ├── workspace_ops.rs    # restore_layout, switch_workspace, send_to_workspace, poll_auto_tile, poll_swarm_watcher
 │   │   └── editor_clipboard.rs # copy/paste, open_in_editor, plan_open_in_editor, shell_quote
 │   ├── folder_open.rs   # Directory hotspot routing (tn-zqwg)
+│   ├── wsl_paths.rs     # WSL2 path translation helpers
 │   └── render.rs        # Per-frame rendering, damage tracking
 ├── pane/
 │   ├── mod.rs           # PaneListener, re-exports
 │   ├── geometry.rs      # Layout constants, content_area_rect()
-│   ├── layout.rs        # LayoutNode binary tree, split/merge/focus
+│   ├── layout/
+│   │   ├── mod.rs       # LayoutNode binary tree, split/merge/focus
+│   │   ├── tree.rs      # Tree traversal and manipulation
+│   │   └── snapshot.rs  # Layout snapshot serialization
 │   ├── workspace.rs     # WorkspaceManager, saved layout snapshots
 │   ├── state.rs         # PaneState, PaneStatus, PaneTermSize
 │   ├── spawn.rs         # spawn_pane(), PTY reader loop
+│   ├── remote_spawn.rs  # Remote pane spawn via daemon IPC
+│   ├── swarm_watcher.rs # Agent swarm monitoring
 │   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView)
 │   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
 ├── widgets/
@@ -36,14 +56,28 @@ src/
 │   ├── gpu.rs              # WidgetRenderer + WidgetManager (freshness cache)
 │   ├── rasterizer.rs       # WidgetSpec, WidgetKind, tiny-skia rasterization
 │   ├── badge.rs            # AgentBadgeSource (agent status pill, PoC)
-│   └── agent_timeline.rs   # AgentTimelineSource (tool activity bar, tn-x85k)
+│   ├── agent_timeline.rs   # AgentTimelineSource (tool activity bar, tn-x85k)
+│   └── pattern_widget.rs   # Pattern-engine widget bridge (tn-068b)
+├── cli/
+│   ├── mod.rs           # CLI subcommand dispatch
+│   ├── pane.rs          # pane subcommands
+│   ├── session.rs       # session subcommands
+│   ├── workspace.rs     # workspace subcommands
+│   ├── agents.rs        # agents subcommands
+│   ├── events.rs        # events subcommand
+│   ├── semantic.rs       # semantic subcommands
+│   ├── layout.rs        # layout subcommands
+│   ├── runtime.rs       # runtime helpers
+│   └── format.rs        # Output formatting (TSV/JSON)
 ├── grid_renderer.rs     # wgpu text rendering, glyph cache, rect drawing
 ├── overlay.rs           # OverlayLayer: two-pass alpha-blended overlay compositor
 ├── color_mapping.rs     # ANSI color to thermal palette / glyphon RGBA conversion
-├── hotspot_detection.rs # File paths, errors, git refs, issue refs
 ├── url_detection.rs     # HTTP(S) URL regex detection
 ├── clipboard.rs         # OSC 52 clipboard integration
 ├── menu.rs              # Right-click context menu
+├── git_state.rs         # Git branch/status detection
+├── daemon_spawn.rs      # Daemon auto-spawn logic
+├── claude_cwd.rs        # Claude Code cwd resolution
 └── mcp_stdio.rs         # MCP stdio bridge to daemon
 ```
 
@@ -80,7 +114,7 @@ Each frame is composited in two GPU passes, both writing to the same swapchain t
 
 Tiers are sorted before vertex generation so higher tiers always composite on top of lower tiers. Within a tier, submission order is preserved.
 
-Currently the status bar background and visual bell are routed through `OverlayLayer` as the proof of concept. Foundation helpers `push_focus_border_overlay`, `push_header_bg_overlay`, and `push_separator_overlay` exist in `chrome.rs` for future migration of pane chrome backgrounds -- they will be wired in once the corresponding text rendering can also be batched. New Phase 6 widgets should push their backgrounds via `OverlayLayer::push_rect` with the `Widget` tier.
+Currently the status bar background and visual bell are routed through `OverlayLayer` as the proof of concept. Foundation helpers `push_focus_border_overlay`, `push_header_bg_overlay`, and `push_separator_overlay` exist in `chrome/overlays.rs` for future migration of pane chrome backgrounds -- they will be wired in once the corresponding text rendering can also be batched. New Phase 6 widgets should push their backgrounds via `OverlayLayer::push_rect` with the `Widget` tier.
 
 ## Widget Config Pattern (tn-x85k)
 
@@ -120,7 +154,7 @@ A full-width status bar at the bottom of the window (24px tall) with three secti
 - **Center**: Current working directory (from OSC 7), with home directory abbreviated to `~`.
 - **Right**: Pane dimensions (`cols x rows`) and last command exit code (from OSC 633 D mark), color-coded green (exit 0) or red (non-zero).
 
-**Data flow**: The PTY reader thread in `pane/spawn.rs` drains `InterceptedEvent`s from the `TherminalInterceptor` and `ProcessDetector` results into a shared `Arc<Mutex<PaneStatus>>` on `PaneState`. The render loop reads this to populate `StatusBarInfo` passed to `draw_status_bar()` in `chrome.rs`.
+**Data flow**: The PTY reader thread in `pane/spawn.rs` drains `InterceptedEvent`s from the `TherminalInterceptor` and `ProcessDetector` results into a shared `Arc<Mutex<PaneStatus>>` on `PaneState`. The render loop reads this to populate `StatusBarInfo` passed to `draw_status_bar()` in `chrome/status_bar.rs`.
 
 **Config**: `general.show_status_bar` (default `true`) controls visibility. `trust.show_agent_indicator` controls the agent name in the left section.
 

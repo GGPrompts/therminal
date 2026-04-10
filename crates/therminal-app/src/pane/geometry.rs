@@ -10,11 +10,8 @@ pub const PANE_HEADER_HEIGHT: f32 = 20.0;
 
 /// Return the effective header height.
 ///
-/// Returns 0 when:
-/// - `show_pane_headers` is `false` (user disabled headers globally), or
-/// - there is only a single pane (single-pane layouts never show a header).
-///
-/// Otherwise returns [`PANE_HEADER_HEIGHT`].
+/// Returns [`PANE_HEADER_HEIGHT`] when `show_pane_headers` is `true`, `0.0`
+/// otherwise. `pane_count` is unused and kept only for call-site compatibility.
 pub fn effective_header_height(_pane_count: usize, show_pane_headers: bool) -> f32 {
     if show_pane_headers {
         PANE_HEADER_HEIGHT

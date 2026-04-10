@@ -253,7 +253,7 @@ pub(crate) fn draw_pane_header(
 
     // ── Exit-code indicator stripe (left edge) ──
     {
-        let exit_code = pane.status.lock().unwrap().last_exit_code;
+        let exit_code = pane.status.lock().unwrap_or_else(|e| e.into_inner()).last_exit_code;
         if let Some(code) = exit_code {
             let stripe_w = 4.0_f32;
             let stripe_color = if code == 0 {
@@ -328,7 +328,7 @@ pub(crate) fn draw_pane_header(
 
     // tn-166y: tag badges + tn-e97n: git branch
     let (tags, git_state) = {
-        let s = pane.status.lock().unwrap();
+        let s = pane.status.lock().unwrap_or_else(|e| e.into_inner());
         (s.tags.clone(), s.git_state.clone())
     };
     let badge_text = format_tag_badges(&tags);

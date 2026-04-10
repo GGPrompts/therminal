@@ -1287,6 +1287,12 @@ impl App {
                 Key::Named(NamedKey::Enter) => {
                     self.execute_menu_action();
                 }
+                // Modifier-only keys (Shift, Ctrl, Alt, Super) should not
+                // dismiss the menu — Shift+Click opens the hotspot palette and
+                // the Shift release arrives as a key event after the menu opens.
+                Key::Named(
+                    NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super,
+                ) => {}
                 _ => {
                     // Any other key closes the menu.
                     self.active_menu = None;
