@@ -356,6 +356,10 @@ pub struct App {
     /// no GPU handles until the first `upsert`.
     pub(crate) widget_manager: crate::widgets::WidgetManager,
 
+    /// Agent timeline overlay widget (tn-x85k). Maintains a ring buffer
+    /// of tool entries and rasterizes a colored bar on demand.
+    pub(crate) agent_timeline: crate::widgets::agent_timeline::AgentTimelineSource,
+
     /// tn-ou30: deferred initial pane spawn (local or remote).
     ///
     /// On Windows native builds the size reported by `Window::inner_size()`
@@ -562,7 +566,8 @@ impl App {
         let colors_changed = self.config.colors.background != old_config.colors.background
             || self.config.colors.foreground != old_config.colors.foreground
             || self.config.colors.cursor != old_config.colors.cursor
-            || self.config.colors.selection != old_config.colors.selection;
+            || self.config.colors.selection != old_config.colors.selection
+            || self.config.colors.ansi != old_config.colors.ansi;
 
         if colors_changed && let Some(renderer) = self.grid_renderer.as_mut() {
             renderer.apply_color_overrides(&self.config.colors);

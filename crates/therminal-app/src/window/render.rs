@@ -67,8 +67,15 @@ fn damage_rows_empty(damaged_rows: Option<&[bool]>) -> bool {
     matches!(damaged_rows, Some(rows) if !rows.iter().any(|&damaged| damaged))
 }
 
-fn should_force_full_rebuild(cache_matches_viewport: bool, damaged_rows: Option<&[bool]>) -> bool {
-    !cache_matches_viewport && damage_rows_empty(damaged_rows)
+/// Force a full rebuild when the row cache doesn't match the current viewport.
+///
+/// When the cache is invalid (different dimensions, display offset, or freshly
+/// cleared after a theme/font change), partial damage cannot reconstruct the
+/// full screen — non-cached rows would remain None and disappear. A full rebuild
+/// is always safe and correct; the `damaged_rows` partial optimisation only
+/// applies when the existing cache is still valid.
+fn should_force_full_rebuild(cache_matches_viewport: bool, _damaged_rows: Option<&[bool]>) -> bool {
+    !cache_matches_viewport
 }
 
 /// Promote `FilePath` hotspots whose target stat'd as a directory using
@@ -605,11 +612,16 @@ mod tests {
     }
 
     #[test]
-    fn force_full_rebuild_when_cache_invalid_but_damage_empty() {
+    fn force_full_rebuild_whenever_cache_invalid() {
+        // Cache invalid → always force full rebuild regardless of damage state.
         assert!(should_force_full_rebuild(false, Some(&[])));
         assert!(should_force_full_rebuild(false, Some(&[false, false])));
+        // Cache invalid with partial damage → still force full rebuild (theme-change fix).
+        assert!(should_force_full_rebuild(false, Some(&[false, true])));
+        assert!(should_force_full_rebuild(false, None));
+        // Cache valid → do not force full rebuild.
         assert!(!should_force_full_rebuild(true, Some(&[false, false])));
-        assert!(!should_force_full_rebuild(false, Some(&[false, true])));
-        assert!(!should_force_full_rebuild(false, None));
+        assert!(!should_force_full_rebuild(true, Some(&[false, true])));
+        assert!(!should_force_full_rebuild(true, None));
     }
 }
