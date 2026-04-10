@@ -63,6 +63,28 @@ pub(crate) const HEADER_BUTTON_WIDTH: f32 = 24.0;
 /// Right-side margin for header buttons.
 pub(crate) const HEADER_BUTTON_MARGIN: f32 = 4.0;
 
+/// Exit-code indicator color: last command exited 0 (success).
+pub(super) const EXIT_OK_COLOR: [f32; 4] = {
+    let c = PaletteColor::STATUS_OK;
+    [
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        0.90,
+    ]
+};
+
+/// Exit-code indicator color: last command exited non-zero (failure).
+pub(super) const EXIT_ERROR_COLOR: [f32; 4] = {
+    let c = PaletteColor::STATUS_ERROR;
+    [
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        0.90,
+    ]
+};
+
 /// Status bar background color.
 pub(super) const STATUS_BAR_BG_COLOR: [f32; 4] = {
     let c = PaletteColor::VOID_0;

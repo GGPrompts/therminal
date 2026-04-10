@@ -8,8 +8,8 @@ use crate::pane::{LayoutNode, PaneId, PaneState, SplitDirection};
 use therminal_core::palette::Color as PaletteColor;
 
 use super::colors::{
-    FOCUS_BORDER_COLOR, HEADER_BG_COLOR, HEADER_BG_DIM_COLOR, HEADER_BUTTON_MARGIN,
-    HEADER_BUTTON_WIDTH, SEPARATOR_COLOR, SEPARATOR_FOCUS_COLOR,
+    EXIT_ERROR_COLOR, EXIT_OK_COLOR, FOCUS_BORDER_COLOR, HEADER_BG_COLOR, HEADER_BG_DIM_COLOR,
+    HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH, SEPARATOR_COLOR, SEPARATOR_FOCUS_COLOR,
 };
 use super::text_cache::{cached_buf, ensure_shaped};
 
@@ -245,6 +245,47 @@ pub(crate) fn draw_pane_header(
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.draw(0..6, 0..1);
+    }
+
+    // ── Exit-code indicator stripe (left edge) ──
+    {
+        let exit_code = pane.status.lock().unwrap().last_exit_code;
+        if let Some(code) = exit_code {
+            let stripe_w = 4.0_f32;
+            let stripe_color = if code == 0 {
+                EXIT_OK_COLOR
+            } else {
+                EXIT_ERROR_COLOR
+            };
+            let stripe_verts =
+                pixel_rect_to_ndc(vp.x(), vp.y(), stripe_w, header_h, sw, sh, stripe_color);
+
+            let stripe_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("header_exit_stripe_vbuf"),
+                contents: bytemuck::cast_slice(&stripe_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("header_exit_stripe_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&renderer.rect_pipeline);
+            pass.set_vertex_buffer(0, stripe_buf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
     }
 
     // ── Header text ──
