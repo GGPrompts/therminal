@@ -414,6 +414,9 @@ fn build_shell_command(
 pub struct SpawnOptions {
     /// Shell command to use instead of the user's default. Empty = use default.
     pub shell: String,
+    /// Extra arguments to append to the shell command line after shell-integration
+    /// args. These are appended verbatim, so they must be valid for the target shell.
+    pub shell_args: Vec<String>,
     /// Extra environment variables to merge into the PTY environment.
     pub env: std::collections::HashMap<String, String>,
     /// Working directory for the spawned shell. Empty = inherit current directory.
@@ -463,6 +466,12 @@ pub fn spawn_shell_with_options(
         Some(options.cwd.as_str())
     };
     let mut cmd = build_shell_command(&shell, shell_type, cwd_for_cmd)?;
+
+    // Append user-configured shell args after shell-integration args.
+    if !options.shell_args.is_empty() {
+        let args: Vec<&str> = options.shell_args.iter().map(|s| s.as_str()).collect();
+        cmd.args(&args);
+    }
 
     // Merge extra env vars from config.
     for (k, v) in &options.env {

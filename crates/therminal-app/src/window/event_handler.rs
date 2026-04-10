@@ -114,6 +114,29 @@ impl App {
         }
     }
 
+    pub(super) fn build_settings_render_values(&self) -> settings_overlay::SettingsRenderValues {
+        use therminal_core::config::NewPaneCwd;
+        settings_overlay::SettingsRenderValues {
+            show_pane_headers: self.config.general.show_pane_headers,
+            show_status_bar: self.config.general.show_status_bar,
+            show_tab_bar: self.config.general.show_tab_bar,
+            editor_chain: self.config.hotspots.editor_chain.clone(),
+            folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
+            folder_opener: self.config.hotspots.folder_opener.clone(),
+            shell: self.config.general.shell.clone(),
+            shell_args: self.config.general.shell_args.join(" "),
+            new_pane_cwd_index: match self.config.general.new_pane_cwd {
+                NewPaneCwd::Inherit => 0,
+                NewPaneCwd::Home => 1,
+            },
+            high_contrast: self.config.accessibility.high_contrast,
+            reduced_motion: self.config.accessibility.reduced_motion,
+            ui_text_scale_index: settings_overlay::ui_text_scale_index(
+                self.config.accessibility.ui_text_scale,
+            ),
+        }
+    }
+
     fn persist_settings_overlay_edits(&mut self) {
         let mut edit = ConfigEditSession::from_saved(self.config.clone());
         let path = config_path();
@@ -186,6 +209,50 @@ impl App {
                 if idx + 1 < self.config.hotspots.folder_opener.len() {
                     self.config.hotspots.folder_opener.swap(idx, idx + 1);
                 }
+            }
+            // -- Shell mutations (tn-avjv.6) --
+            SettingsCommand::SetDefaultShell(shell) => {
+                self.config.general.shell = shell;
+                self.show_toast("default shell updated");
+            }
+            SettingsCommand::SetShellArgs(args_str) => {
+                let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
+                self.config.general.shell_args = args;
+                self.show_toast("shell args updated");
+            }
+            SettingsCommand::SetNewPaneCwd(idx) => {
+                use therminal_core::config::NewPaneCwd;
+                self.config.general.new_pane_cwd = match idx {
+                    0 => NewPaneCwd::Inherit,
+                    _ => NewPaneCwd::Home,
+                };
+                self.show_toast(format!(
+                    "new pane cwd: {:?}",
+                    self.config.general.new_pane_cwd
+                ));
+            }
+            // -- Accessibility mutations (tn-avjv.6) --
+            SettingsCommand::ToggleHighContrast => {
+                self.config.accessibility.high_contrast = !self.config.accessibility.high_contrast;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            SettingsCommand::ToggleReducedMotion => {
+                self.config.accessibility.reduced_motion =
+                    !self.config.accessibility.reduced_motion;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            SettingsCommand::SetUiTextScale(idx) => {
+                let scale = settings_overlay::UI_TEXT_SCALE_OPTIONS
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(1.0);
+                self.config.accessibility.ui_text_scale = scale;
+                self.show_toast(format!("UI text scale: {:.0}%", scale * 100.0));
+                self.relayout_and_redraw();
             }
         }
         self.persist_settings_overlay_edits();
@@ -1296,14 +1363,7 @@ impl App {
                     _ => {}
                 }
                 self.settings_overlay
-                    .sync_toggle_values(&settings_overlay::SettingsRenderValues {
-                        show_pane_headers: self.config.general.show_pane_headers,
-                        show_status_bar: self.config.general.show_status_bar,
-                        show_tab_bar: self.config.general.show_tab_bar,
-                        editor_chain: self.config.hotspots.editor_chain.clone(),
-                        folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
-                        folder_opener: self.config.hotspots.folder_opener.clone(),
-                    });
+                    .sync_toggle_values(&self.build_settings_render_values());
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }

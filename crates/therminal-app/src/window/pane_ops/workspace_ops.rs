@@ -92,6 +92,7 @@ impl App {
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
+            shell_args: self.config.general.shell_args.clone(),
             env: self.config.general.env.clone(),
             ..Default::default()
         };
@@ -377,6 +378,7 @@ impl App {
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
+            shell_args: self.config.general.shell_args.clone(),
             env: self.config.general.env.clone(),
             ..Default::default()
         };
@@ -593,6 +595,7 @@ impl App {
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
+            shell_args: self.config.general.shell_args.clone(),
             env: self.config.general.env.clone(),
             ..Default::default()
         };
@@ -705,9 +708,13 @@ impl App {
                         Some(l) => l,
                         None => continue,
                     };
-                    // Inherit source pane's cwd (from OSC 7).
-                    let spawn_options =
-                        split_spawn_options(&base_spawn_options, layout, target_pane_id);
+                    // Inherit source pane's cwd (from OSC 7) or use home depending on config.
+                    let spawn_options = split_spawn_options(
+                        &base_spawn_options,
+                        layout,
+                        target_pane_id,
+                        self.config.general.new_pane_cwd,
+                    );
 
                     let post_split_header_h = crate::pane::effective_header_height(
                         layout.pane_count() + 1,
@@ -862,6 +869,7 @@ impl App {
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let base_spawn_options = therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
+            shell_args: self.config.general.shell_args.clone(),
             env: self.config.general.env.clone(),
             ..Default::default()
         };
@@ -878,8 +886,13 @@ impl App {
             Some(l) => l,
             None => return,
         };
-        // Inherit source pane's cwd (from OSC 7).
-        let spawn_options = split_spawn_options(&base_spawn_options, layout, target_pane_id);
+        // Inherit source pane's cwd (from OSC 7) or use home depending on config.
+        let spawn_options = split_spawn_options(
+            &base_spawn_options,
+            layout,
+            target_pane_id,
+            self.config.general.new_pane_cwd,
+        );
 
         let post_split_header_h = crate::pane::effective_header_height(
             layout.pane_count() + 1,

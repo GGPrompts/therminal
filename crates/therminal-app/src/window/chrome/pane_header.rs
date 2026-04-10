@@ -375,11 +375,15 @@ pub(crate) fn draw_pane_header(
         if is_focused { 230 } else { 170 },
     );
 
-    // Button positions right-to-left: [H] [V] [Z] [X]
+    // Button positions right-to-left.
+    // When zoomed, split buttons are hidden: [Z] [X]
+    // When not zoomed: [H] [V] [Z] [X]
     let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
     let btn_x_zoom = btn_x_close - HEADER_BUTTON_WIDTH;
     let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
     let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
+    // The leftmost button edge determines where git branch text is anchored.
+    let leftmost_btn_x = if is_zoomed { btn_x_zoom } else { btn_x_hsplit };
 
     // Zoom glyph: filled square when zoomed (restore), empty square when normal (maximize).
     let zoom_label = if is_zoomed { " \u{25a3}" } else { " \u{25a1}" };
@@ -487,32 +491,35 @@ pub(crate) fn draw_pane_header(
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
-    ensure_shaped(
-        &vsplit_slot,
-        &vsplit_key,
-        metrics,
-        HEADER_BUTTON_WIDTH,
-        header_h,
-        " V",
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(button_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    ensure_shaped(
-        &hsplit_slot,
-        &hsplit_key,
-        metrics,
-        HEADER_BUTTON_WIDTH,
-        header_h,
-        " H",
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(button_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
+    // Split buttons are hidden when the pane is zoomed — no room to split into.
+    if !is_zoomed {
+        ensure_shaped(
+            &vsplit_slot,
+            &vsplit_key,
+            metrics,
+            HEADER_BUTTON_WIDTH,
+            header_h,
+            " V",
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(button_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+        ensure_shaped(
+            &hsplit_slot,
+            &hsplit_key,
+            metrics,
+            HEADER_BUTTON_WIDTH,
+            header_h,
+            " H",
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(button_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
 
     // Phase 2: immutable borrow for TextArea references.
     // If any slot is missing from the cache (shaping failure / programming error),
@@ -590,7 +597,7 @@ pub(crate) fn draw_pane_header(
             .next()
             .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
             .unwrap_or(0.0);
-        let git_left = (btn_x_hsplit - git_text_width - 8.0).max(vp.x());
+        let git_left = (leftmost_btn_x - git_text_width - 8.0).max(vp.x());
         text_areas.push(TextArea {
             buffer: git_buf,
             left: git_left,
@@ -601,27 +608,30 @@ pub(crate) fn draw_pane_header(
             custom_glyphs: &[],
         });
     }
-    if let Some(buf) = cached_buf(&renderer.overlay_cache, &hsplit_slot) {
-        text_areas.push(TextArea {
-            buffer: buf,
-            left: btn_x_hsplit,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: button_color,
-            custom_glyphs: &[],
-        });
-    }
-    if let Some(buf) = cached_buf(&renderer.overlay_cache, &vsplit_slot) {
-        text_areas.push(TextArea {
-            buffer: buf,
-            left: btn_x_vsplit,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: button_color,
-            custom_glyphs: &[],
-        });
+    // Split buttons are hidden when zoomed.
+    if !is_zoomed {
+        if let Some(buf) = cached_buf(&renderer.overlay_cache, &hsplit_slot) {
+            text_areas.push(TextArea {
+                buffer: buf,
+                left: btn_x_hsplit,
+                top: vp.y(),
+                scale: 1.0,
+                bounds,
+                default_color: button_color,
+                custom_glyphs: &[],
+            });
+        }
+        if let Some(buf) = cached_buf(&renderer.overlay_cache, &vsplit_slot) {
+            text_areas.push(TextArea {
+                buffer: buf,
+                left: btn_x_vsplit,
+                top: vp.y(),
+                scale: 1.0,
+                bounds,
+                default_color: button_color,
+                custom_glyphs: &[],
+            });
+        }
     }
     if let Some(buf) = cached_buf(&renderer.overlay_cache, &zoom_slot) {
         text_areas.push(TextArea {

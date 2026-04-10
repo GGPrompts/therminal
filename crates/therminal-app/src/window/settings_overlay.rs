@@ -60,9 +60,17 @@ pub(crate) enum ControlBinding {
     EditorChainEntry(usize),
     FolderPaneCommand,
     FolderOpenerEntry(usize),
+    // Shell controls (tn-avjv.6)
+    DefaultShell,
+    ShellArgs,
+    NewPaneCwd,
+    // Accessibility controls (tn-avjv.6)
+    ToggleHighContrast,
+    ToggleReducedMotion,
+    UiTextScale,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)] // MoveUp/MoveDown wired in future keyboard shortcut pass.
 pub(crate) enum SettingsCommand {
     TogglePaneHeaders,
@@ -77,6 +85,14 @@ pub(crate) enum SettingsCommand {
     FolderOpenerRemove(usize),
     FolderOpenerMoveUp(usize),
     FolderOpenerMoveDown(usize),
+    // Shell mutations (tn-avjv.6)
+    SetDefaultShell(String),
+    SetShellArgs(String),
+    SetNewPaneCwd(usize),
+    // Accessibility mutations (tn-avjv.6)
+    ToggleHighContrast,
+    ToggleReducedMotion,
+    SetUiTextScale(usize),
 }
 
 impl ControlBinding {
@@ -89,6 +105,12 @@ impl ControlBinding {
             Self::EditorChainEntry(idx) => SettingsCommand::EditorChainRemove(*idx),
             Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerRemove(*idx),
             Self::FolderPaneCommand => SettingsCommand::SetFolderPaneCommand(String::new()),
+            Self::DefaultShell => SettingsCommand::SetDefaultShell(String::new()),
+            Self::ShellArgs => SettingsCommand::SetShellArgs(String::new()),
+            Self::NewPaneCwd => SettingsCommand::SetNewPaneCwd(0),
+            Self::ToggleHighContrast => SettingsCommand::ToggleHighContrast,
+            Self::ToggleReducedMotion => SettingsCommand::ToggleReducedMotion,
+            Self::UiTextScale => SettingsCommand::SetUiTextScale(0),
         }
     }
 }
@@ -348,7 +370,7 @@ impl SettingsOverlayState {
                         self.cycle_select(1);
                         let section = self.sections.get(self.selected_section)?;
                         let control = section.controls.get(idx)?;
-                        Some(control.binding.command())
+                        Some(self.select_command_for(control))
                     }
                     ControlType::TextInput { value, editing, .. } => {
                         if *editing {
@@ -356,6 +378,12 @@ impl SettingsOverlayState {
                             Some(match &control.binding {
                                 ControlBinding::FolderPaneCommand => {
                                     SettingsCommand::SetFolderPaneCommand(value.clone())
+                                }
+                                ControlBinding::DefaultShell => {
+                                    SettingsCommand::SetDefaultShell(value.clone())
+                                }
+                                ControlBinding::ShellArgs => {
+                                    SettingsCommand::SetShellArgs(value.clone())
                                 }
                                 other => other.command(),
                             })
@@ -388,7 +416,7 @@ impl SettingsOverlayState {
                 self.cycle_select(1);
                 let section = self.sections.get(self.selected_section)?;
                 let control = section.controls.get(idx)?;
-                Some(control.binding.command())
+                Some(self.select_command_for(control))
             }
             ControlType::TextInput {
                 value,
@@ -590,6 +618,20 @@ impl SettingsOverlayState {
         }
     }
 
+    /// Produce a [`SettingsCommand`] for a `Select` control, embedding the
+    /// current `selected` index into bindings that need it.
+    fn select_command_for(&self, control: &SettingsControl) -> SettingsCommand {
+        let selected = match &control.control_type {
+            ControlType::Select { selected, .. } => *selected,
+            _ => 0,
+        };
+        match &control.binding {
+            ControlBinding::NewPaneCwd => SettingsCommand::SetNewPaneCwd(selected),
+            ControlBinding::UiTextScale => SettingsCommand::SetUiTextScale(selected),
+            _ => control.binding.command(),
+        }
+    }
+
     fn active_control_is_select(&self) -> bool {
         self.sections
             .get(self.selected_section)
@@ -610,11 +652,19 @@ impl SettingsOverlayState {
                     (ControlBinding::ToggleTabBar, ControlType::Toggle { value }) => {
                         *value = values.show_tab_bar;
                     }
+                    (ControlBinding::ToggleHighContrast, ControlType::Toggle { value }) => {
+                        *value = values.high_contrast;
+                    }
+                    (ControlBinding::ToggleReducedMotion, ControlType::Toggle { value }) => {
+                        *value = values.reduced_motion;
+                    }
                     _ => {}
                 }
             }
         }
         self.rebuild_hotspots_section(values);
+        self.rebuild_shell_section(values);
+        self.rebuild_accessibility_section(values);
     }
 
     fn rebuild_hotspots_section(&mut self, values: &SettingsRenderValues) {
@@ -643,6 +693,84 @@ impl SettingsOverlayState {
                 ControlType::list_row(entry.clone()),
             ));
         }
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
+    fn rebuild_shell_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "shell") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let cwd_options = vec![
+            "Inherit from focused pane".to_string(),
+            "Home directory".to_string(),
+        ];
+        let cwd_selected = values.new_pane_cwd_index;
+        let controls = vec![
+            SettingsControl::with_type(
+                "Default shell",
+                ControlBinding::DefaultShell,
+                ControlType::text_input(&values.shell),
+            ),
+            SettingsControl::with_type(
+                "Shell arguments",
+                ControlBinding::ShellArgs,
+                ControlType::text_input(&values.shell_args),
+            ),
+            SettingsControl::with_type(
+                "New pane cwd",
+                ControlBinding::NewPaneCwd,
+                ControlType::select(cwd_options, cwd_selected),
+            ),
+        ];
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
+    fn rebuild_accessibility_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "accessibility") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let scale_options: Vec<String> = UI_TEXT_SCALE_OPTIONS
+            .iter()
+            .map(|s| format!("{:.0}%", s * 100.0))
+            .collect();
+        let scale_selected = values.ui_text_scale_index;
+        let controls = vec![
+            SettingsControl::with_type(
+                "High contrast mode",
+                ControlBinding::ToggleHighContrast,
+                ControlType::toggle(values.high_contrast),
+            ),
+            SettingsControl::with_type(
+                "Reduced motion",
+                ControlBinding::ToggleReducedMotion,
+                ControlType::toggle(values.reduced_motion),
+            ),
+            SettingsControl::with_type(
+                "UI text scale",
+                ControlBinding::UiTextScale,
+                ControlType::select(scale_options, scale_selected),
+            ),
+        ];
         let prev_sel = self
             .selected_control_by_section
             .get(section_idx)
@@ -726,6 +854,7 @@ impl SettingsOverlayState {
                 ),
             ],
         ));
+        self.register_section(SettingsSection::new("shell", "Shell", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
         self.register_section(SettingsSection::new(
             "themes",
@@ -753,7 +882,30 @@ impl SettingsOverlayState {
                 ),
             ],
         ));
+        self.register_section(SettingsSection::new(
+            "accessibility",
+            "Accessibility",
+            vec![],
+        ));
     }
+}
+
+/// Predefined UI text scale options (select control values).
+pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+
+/// Find the index in [`UI_TEXT_SCALE_OPTIONS`] closest to the given scale.
+pub(crate) fn ui_text_scale_index(scale: f32) -> usize {
+    UI_TEXT_SCALE_OPTIONS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (scale - **a)
+                .abs()
+                .partial_cmp(&(scale - **b).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(1) // default to 1.0 (index 1)
 }
 
 impl Default for SettingsOverlayState {
@@ -770,6 +922,14 @@ pub(crate) struct SettingsRenderValues {
     pub editor_chain: Vec<String>,
     pub folder_pane_command: Vec<String>,
     pub folder_opener: Vec<String>,
+    // Shell section (tn-avjv.6)
+    pub shell: String,
+    pub shell_args: String,
+    pub new_pane_cwd_index: usize,
+    // Accessibility section (tn-avjv.6)
+    pub high_contrast: bool,
+    pub reduced_motion: bool,
+    pub ui_text_scale_index: usize,
 }
 
 fn editor_chain_label(index: usize) -> &'static str {
@@ -1493,6 +1653,12 @@ mod tests {
             editor_chain: vec!["$VISUAL".into(), "$EDITOR".into(), "code".into()],
             folder_pane_command: vec!["tfe".into(), "{path}".into()],
             folder_opener: vec!["$FILE_MANAGER".into(), "xdg-open".into()],
+            shell: String::new(),
+            shell_args: String::new(),
+            new_pane_cwd_index: 0,
+            high_contrast: false,
+            reduced_motion: false,
+            ui_text_scale_index: 1,
         }
     }
 
@@ -1749,6 +1915,8 @@ mod tests {
     fn editor_chain_remove_produces_command() {
         let mut state = SettingsOverlayState::new();
         state.sync_toggle_values(&test_render_values());
+        // Navigate to "hotspots" section (index 2: layout=0, shell=1, hotspots=2).
+        state.arrow_down();
         state.arrow_down();
         state.tab(false);
         let cmd = state.enter();
@@ -1758,6 +1926,8 @@ mod tests {
     fn folder_pane_command_text_edit_produces_command() {
         let mut state = SettingsOverlayState::new();
         state.sync_toggle_values(&test_render_values());
+        // Navigate to "hotspots" section (index 2: layout=0, shell=1, hotspots=2).
+        state.arrow_down();
         state.arrow_down();
         state.tab(false);
         state.arrow_down();

@@ -224,7 +224,11 @@ impl App {
     pub(crate) fn header_hit_test(&self, px: f64, py: f64) -> Option<HeaderAction> {
         let layout = self.get_layout()?;
         let pane_count = layout.pane_count();
-        if pane_count <= 1 {
+        let is_zoomed = self.zoomed_layout.is_some();
+        // When there's only one pane and we're NOT zoomed, there are no
+        // headers to click. But when zoomed the header is still rendered
+        // (with zoom-restore + close buttons), so we must handle clicks.
+        if pane_count <= 1 && !is_zoomed {
             return None;
         }
         // When the user has disabled pane headers globally, there is no
@@ -250,20 +254,28 @@ impl App {
             return None;
         }
 
-        // Button hit regions (right-aligned): [H] [V] [Z] [X]
+        // When zoomed, only Close and Zoom (un-zoom) buttons are active;
+        // split buttons are hidden so the hit regions shift right.
+        // Layout: [Z] [X] (no H/V buttons when zoomed).
         let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
         let btn_x_zoom = btn_x_close - HEADER_BUTTON_WIDTH;
-        let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
-        let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
 
         if px >= btn_x_close && px < btn_x_close + HEADER_BUTTON_WIDTH {
             Some(HeaderAction::Close(pane_id))
         } else if px >= btn_x_zoom && px < btn_x_zoom + HEADER_BUTTON_WIDTH {
             Some(HeaderAction::Zoom(pane_id))
-        } else if px >= btn_x_vsplit && px < btn_x_vsplit + HEADER_BUTTON_WIDTH {
-            Some(HeaderAction::SplitV(pane_id))
-        } else if px >= btn_x_hsplit && px < btn_x_hsplit + HEADER_BUTTON_WIDTH {
-            Some(HeaderAction::SplitH(pane_id))
+        } else if !is_zoomed {
+            // Split buttons only present when not zoomed.
+            let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
+            let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
+
+            if px >= btn_x_vsplit && px < btn_x_vsplit + HEADER_BUTTON_WIDTH {
+                Some(HeaderAction::SplitV(pane_id))
+            } else if px >= btn_x_hsplit && px < btn_x_hsplit + HEADER_BUTTON_WIDTH {
+                Some(HeaderAction::SplitH(pane_id))
+            } else {
+                Some(HeaderAction::Focus(pane_id))
+            }
         } else {
             // Anywhere else in the header -> focus.
             Some(HeaderAction::Focus(pane_id))

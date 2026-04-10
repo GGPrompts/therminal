@@ -979,6 +979,7 @@ impl App {
     pub(super) fn build_spawn_options(&self) -> therminal_terminal::pty::SpawnOptions {
         therminal_terminal::pty::SpawnOptions {
             shell: self.config.general.shell.clone(),
+            shell_args: self.config.general.shell_args.clone(),
             env: self.config.general.env.clone(),
             ..Default::default()
         }

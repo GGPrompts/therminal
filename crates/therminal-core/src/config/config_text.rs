@@ -10,7 +10,7 @@ use super::{TherminalConfig, TrustTier};
 /// [`super::check_config_template_status`] to detect when a user's
 /// `therminal.toml` predates the current template — without polluting the
 /// parsed config struct.
-pub const CONFIG_TEMPLATE_VERSION: u32 = 3;
+pub const CONFIG_TEMPLATE_VERSION: u32 = 4;
 
 /// Return the fully-commented default config as a TOML string.
 ///
@@ -40,6 +40,10 @@ pub(super) fn default_config_text() -> String {
         d.general.scrollback_lines
     ));
     out.push_str("# shell = \"\"  # empty = user's default shell\n");
+    out.push_str("# shell_args = []  # extra arguments passed to the shell on startup\n");
+    out.push_str(
+        "# new_pane_cwd = \"inherit\"  # \"inherit\" (focused pane cwd) or \"home\" (home dir)\n",
+    );
     out.push_str(&format!("# padding = {}\n", d.general.padding));
     out.push_str(&format!(
         "# show_status_bar = {}\n",
@@ -387,6 +391,29 @@ pub(super) fn default_config_text() -> String {
     out.push_str("# working_dir = \"same\"\n");
     out.push_str("# mcp_enabled = [\"terminal.panes\", \"terminal.semantic\"]\n");
     out.push_str("# permission_mode = \"default\"\n");
+    out.push('\n');
+
+    // ── [accessibility] ─────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [accessibility] — Accessibility settings (tn-avjv.6).\n");
+    out.push_str("# high_contrast: boost UI chrome contrast (borders, headers, status bar).\n");
+    out.push_str("# reduced_motion: disable cursor blink and animated transitions.\n");
+    out.push_str("# ui_text_scale: scale factor for chrome text (1.0 = default, 0.5–3.0).\n");
+    out.push_str("#   Does NOT affect terminal cell text — use [font].size for that.\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[accessibility]\n");
+    out.push_str(&format!(
+        "# high_contrast = {}\n",
+        d.accessibility.high_contrast
+    ));
+    out.push_str(&format!(
+        "# reduced_motion = {}\n",
+        d.accessibility.reduced_motion
+    ));
+    out.push_str(&format!(
+        "# ui_text_scale = {:.1}  # scale factor for chrome text (0.5–3.0)\n",
+        d.accessibility.ui_text_scale
+    ));
     out.push('\n');
 
     out

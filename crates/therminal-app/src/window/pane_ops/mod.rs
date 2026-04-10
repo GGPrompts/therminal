@@ -126,17 +126,28 @@ fn cwd_from_source_pane(layout: &crate::pane::LayoutNode, source_id: PaneId) -> 
     validate_inherited_cwd(cwd)
 }
 
-/// Build a `SpawnOptions` for a split, inheriting the source pane's cwd
-/// when available. Falls back to the base options' cwd otherwise.
+/// Build a `SpawnOptions` for a split.
+///
+/// When `new_pane_cwd` is `Inherit`, the source pane's cwd is used (falling
+/// back to the base options' cwd if unknown). When `Home`, the base cwd
+/// (typically the user's home directory) is always used.
 fn split_spawn_options(
     base: &therminal_terminal::pty::SpawnOptions,
     layout: &crate::pane::LayoutNode,
     source_id: PaneId,
+    new_pane_cwd: therminal_core::config::NewPaneCwd,
 ) -> therminal_terminal::pty::SpawnOptions {
+    let cwd = match new_pane_cwd {
+        therminal_core::config::NewPaneCwd::Inherit => {
+            cwd_from_source_pane(layout, source_id).unwrap_or_else(|| base.cwd.clone())
+        }
+        therminal_core::config::NewPaneCwd::Home => base.cwd.clone(),
+    };
     therminal_terminal::pty::SpawnOptions {
         shell: base.shell.clone(),
+        shell_args: base.shell_args.clone(),
         env: base.env.clone(),
-        cwd: cwd_from_source_pane(layout, source_id).unwrap_or_else(|| base.cwd.clone()),
+        cwd,
     }
 }
 
@@ -305,6 +316,7 @@ mod tests {
         // base.cwd. We assert validate_inherited_cwd's None branch already.
         let base = therminal_terminal::pty::SpawnOptions {
             shell: "/bin/bash".to_string(),
+            shell_args: Vec::new(),
             env: Default::default(),
             cwd: "/some/base".to_string(),
         };

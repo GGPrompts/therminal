@@ -993,9 +993,12 @@ impl App {
                 }
             }
             BellStyle::Visual => {
-                self.visual_bell_start = Some(Instant::now());
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
+                // reduced_motion suppresses the visual bell animation (tn-avjv.6).
+                if !self.config.accessibility.reduced_motion {
+                    self.visual_bell_start = Some(Instant::now());
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
             BellStyle::Audible => {

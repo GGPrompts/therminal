@@ -313,6 +313,8 @@ pub struct TherminalConfig {
     pub delegate: DelegateConfig,
     /// Overlay widget settings (tn-x85k).
     pub widgets: WidgetsConfig,
+    /// Accessibility settings (tn-avjv.6).
+    pub accessibility: AccessibilityConfig,
     /// Result of the template-version scan performed by [`Self::load_from`].
     ///
     /// Computed in-process and never round-tripped through TOML
@@ -516,6 +518,17 @@ impl TherminalConfig {
 
 // ── Section: General ─────────────────────────────────────────────────────
 
+/// Working directory policy for newly split panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NewPaneCwd {
+    /// Inherit the cwd of the focused pane at split time.
+    #[default]
+    Inherit,
+    /// Always use the user's home directory.
+    Home,
+}
+
 /// General window and behavior settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -530,6 +543,10 @@ pub struct GeneralConfig {
     pub scrollback_lines: usize,
     /// Shell command to run. If empty, uses the user's default shell.
     pub shell: String,
+    /// Extra arguments passed to the shell on startup.
+    pub shell_args: Vec<String>,
+    /// Working directory policy for newly split panes.
+    pub new_pane_cwd: NewPaneCwd,
     /// Extra environment variables set in the PTY.
     pub env: HashMap<String, String>,
     /// Padding in pixels around the terminal grid.
@@ -583,6 +600,8 @@ impl Default for GeneralConfig {
             window_height: 800.0,
             scrollback_lines: 10_000,
             shell: String::new(),
+            shell_args: Vec::new(),
+            new_pane_cwd: NewPaneCwd::default(),
             env: HashMap::new(),
             padding: 4.0,
             show_status_bar: true,
@@ -1296,6 +1315,40 @@ impl Default for PatternsConfig {
             max_patterns: 500,
             slow_pattern_threshold_us: 1000,
             slow_strike_limit: 3,
+        }
+    }
+}
+
+// ── Section: Accessibility ─────────────────────────────────────────────
+
+/// Accessibility settings (tn-avjv.6).
+///
+/// Controls for high-contrast mode, reduced-motion preferences, and
+/// UI chrome text scaling. These settings affect the chrome layer
+/// (status bar, pane headers, tab bar, overlays) but NOT terminal cell
+/// text, which is governed by `[font]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccessibilityConfig {
+    /// Enable high-contrast mode. Increases contrast for UI chrome
+    /// elements (borders, headers, status bar text).
+    pub high_contrast: bool,
+    /// Reduce motion: disables cursor blink and any animated transitions.
+    pub reduced_motion: bool,
+    /// Scale factor for UI chrome text (status bar, pane headers, tab
+    /// bar, overlays). `1.0` is the default size. Does NOT affect
+    /// terminal cell text — use `[font].size` for that.
+    ///
+    /// Clamped to `0.5..=3.0` at load time.
+    pub ui_text_scale: f32,
+}
+
+impl Default for AccessibilityConfig {
+    fn default() -> Self {
+        Self {
+            high_contrast: false,
+            reduced_motion: false,
+            ui_text_scale: 1.0,
         }
     }
 }
