@@ -515,8 +515,8 @@ fn glossary_pack_emits_event_for_acronym() {
     let m = engine.process_finalized_line(1, "the MCP tool returned success", None, None);
     let mcp_match = m
         .iter()
-        .find(|m| m.pattern_name == "mcp")
-        .expect("glossary.mcp should match");
+        .find(|m| m.pattern_name == "event-mcp")
+        .expect("glossary.event-mcp should match");
     match &mcp_match.action {
         ResolvedAction::EmitEvent(e) => {
             assert_eq!(e.extra.get("term").map(|s| s.as_str()), Some("MCP"));

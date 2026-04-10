@@ -49,6 +49,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "A design pattern from functional programming that wraps a value in a context (e.g., Maybe, IO, Future) and provides bind/flatMap for chaining operations."
 
 # ── BFS ──────────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "Breadth-First Search — a graph traversal algorithm that visits all neighbors at the current depth before moving to the next level. Uses a queue."
 
 # ── mutex ─────────────────────────────────────────────────────────────────────
 
@@ -99,6 +101,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "Mutual Exclusion lock. A synchronisation primitive that allows only one thread to hold it at a time, preventing data races."
 
 # ── kernel ────────────────────────────────────────────────────────────────────
 
@@ -124,6 +127,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "The core of an operating system. Manages hardware resources (CPU, memory, I/O) and exposes them to user-space programs via system calls."
 
 # ── semaphore ─────────────────────────────────────────────────────────────────
 
@@ -149,6 +153,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "A synchronisation primitive with an integer counter. wait decrements (blocking at zero); signal increments. Binary semaphore behaves like a mutex without ownership."
 
 # ── OSC ───────────────────────────────────────────────────────────────────────
 
@@ -174,6 +179,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "Operating System Command — an ANSI/VT escape sequence family (ESC ] code ; data BEL). Used for window title, current directory, shell integration markers."
 
 # ── PTY ───────────────────────────────────────────────────────────────────────
 
@@ -199,6 +205,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "Pseudo-Terminal — a kernel device pair (master + slave) that emulates a serial terminal in software. The terminal emulator opens the master; the shell opens the slave."
 
 # ── MCP ───────────────────────────────────────────────────────────────────────
 
@@ -224,6 +231,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "Model Context Protocol — the open standard for AI agents to discover and call tool servers. Exposes Tools, Resources, and Prompts over JSON-RPC 2.0."
 
 # ── deadlock ──────────────────────────────────────────────────────────────────
 
@@ -249,6 +257,7 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "A situation where two or more concurrent processes each hold a resource the other needs, and neither can proceed. Requires external intervention to break."
 
 # ── syscall ───────────────────────────────────────────────────────────────────
 
@@ -274,3 +283,4 @@ action = "emit_event"
 [pattern.emit_event]
 extra.term = "{term}"
 extra.ctx = "{ctx}"
+extra.definition = "System call — the mechanism by which user-space programs request privileged operations from the kernel (e.g., read, write, fork, mmap)."
