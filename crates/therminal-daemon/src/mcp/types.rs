@@ -899,3 +899,35 @@ pub(crate) struct QueryEventsResult {
     /// Recent events, oldest-first within the truncated window.
     pub(crate) events: Vec<EventInfo>,
 }
+
+
+// -- Delegate result capture (tn-ztv3.5) ------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CaptureResultParam {
+    /// The numeric pane ID of the delegate pane whose result to capture.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
+    pub(crate) pane_id: u64,
+    /// Maximum number of output lines to return (default 200, capped at
+    /// 500). Applies to both transcript and fallback paths.
+    #[serde(default, deserialize_with = "deser_compat::usize_opt_flexible")]
+    pub(crate) max_lines: Option<usize>,
+}
+
+/// Result of `terminal.panes.capture_result`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CaptureResultResult {
+    pub(crate) pane_id: u64,
+    /// Which extraction path was used: `"transcript"` or `"grid_fallback"`.
+    pub(crate) source: String,
+    /// The captured output lines (oldest first, trimmed).
+    pub(crate) lines: Vec<String>,
+    /// The command text (from OSC 633 E mark), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) command: Option<String>,
+    /// Exit code of the captured command, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) exit_code: Option<i32>,
+    /// Number of lines that were truncated to fit `max_lines`.
+    pub(crate) truncated_lines: usize,
+}

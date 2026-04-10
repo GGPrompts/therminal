@@ -56,7 +56,8 @@ use tracing::debug;
 
 use super::{
     AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentSessionDetail,
-    AgentStatusResult, CadenceSampleResult, CommandInfo, CreateSessionParam, DestroyPaneResult,
+    AgentStatusResult, CadenceSampleResult, CaptureResultParam, CaptureResultResult, CommandInfo,
+    CreateSessionParam, DestroyPaneResult,
     EmptyParams, EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetContentParam,
     GetHotspotsParam, GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult,
     GetWorkspaceLayoutParam, GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson,
@@ -752,6 +753,114 @@ impl TherminalMcpServer {
         let result = QueryCommandsResult {
             pane_id: params.pane_id,
             commands,
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+
+    /// Capture the final output of the last finished command in a pane.
+    pub(super) async fn handle_capture_result(
+        &self,
+        params: CaptureResultParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let max_lines = params.max_lines.unwrap_or(200).min(500);
+        let mgr = self.session_mgr.lock().await;
+
+        let blocks = mgr.pane_command_blocks(params.pane_id);
+        let last_finished = blocks.as_ref().and_then(|bs| {
+            bs.iter()
+                .rev()
+                .find(|b| b.state == therminal_terminal::osc633::CommandState::Finished)
+        });
+
+        if let Some(block) = last_finished {
+            let snap = match mgr.capture_pane(params.pane_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "capture_result failed: {e}"
+                    ))]));
+                }
+            };
+            drop(mgr);
+
+            let all_rows: Vec<String> = snap
+                .scrollback
+                .iter()
+                .chain(snap.grid.iter())
+                .map(|row| {
+                    let raw: String = row.iter().map(|(ch, _)| ch).collect();
+                    raw.trim_end().to_string()
+                })
+                .collect();
+
+            let scroll_offset = snap.scrollback.len();
+            let output_start = scroll_offset + block.start_line + 1;
+            let output_end = block
+                .end_line
+                .map(|e| scroll_offset + e + 1)
+                .unwrap_or(all_rows.len());
+            let output_end = output_end.min(all_rows.len());
+            let output_start = output_start.min(output_end);
+
+            let mut lines: Vec<String> = all_rows[output_start..output_end]
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .cloned()
+                .collect();
+
+            let total = lines.len();
+            let truncated = total.saturating_sub(max_lines);
+            if truncated > 0 {
+                lines.drain(0..truncated);
+            }
+
+            let result = CaptureResultResult {
+                pane_id: params.pane_id,
+                source: "transcript".to_string(),
+                lines,
+                command: block.command.clone(),
+                exit_code: block.exit_code,
+                truncated_lines: truncated,
+            };
+            return Ok(CallToolResult::success(vec![json_content(&result)?]));
+        }
+
+        // Fallback: no usable transcript.
+        let snap = match mgr.capture_pane(params.pane_id) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "capture_result failed: {e}"
+                ))]));
+            }
+        };
+        drop(mgr);
+
+        let mut lines: Vec<String> = snap
+            .scrollback
+            .iter()
+            .chain(snap.grid.iter())
+            .map(|row| {
+                let raw: String = row.iter().map(|(ch, _)| ch).collect();
+                raw.trim_end().to_string()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+
+        let total = lines.len();
+        let truncated = total.saturating_sub(max_lines);
+        if truncated > 0 {
+            lines.drain(0..truncated);
+        }
+
+        let result = CaptureResultResult {
+            pane_id: params.pane_id,
+            source: "grid_fallback".to_string(),
+            lines,
+            command: None,
+            exit_code: None,
+            truncated_lines: truncated,
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
@@ -1455,6 +1564,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.panes.peek",
             "Cheap 'what just happened?' snapshot: returns the last N non-empty trimmed lines from a pane (default 10, capped at 50) plus the same `content_hash` as `get_content` and a Unix timestamp. ~500 bytes for a typical mostly-empty pane. Use this when `get_summary` says the screen changed and you want a quick look without paying for the full grid.",
             schema_for_type::<PeekPaneParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.capture_result",
+            "Capture the final output of the last finished command in a delegate pane. Primary path: extracts output lines from the OSC 633 command transcript. Fallback: returns the last N non-empty lines from visible grid + scrollback when no transcript data exists. The source field indicates which path was used.",
+            schema_for_type::<CaptureResultParam>(),
         ),
         Tool::new(
             "terminal.semantic.query_history",

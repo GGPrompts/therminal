@@ -355,6 +355,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: PeekPaneParam = parse_args(args)?;
                 self.handle_peek_pane(params).await
             }
+                        "terminal.panes.capture_result" => {
+                let params: CaptureResultParam = parse_args(args)?;
+                self.handle_capture_result(params).await
+            }
             "terminal.semantic.query_history" => {
                 let params: QuerySemanticHistoryParam = parse_args(args)?;
                 self.handle_query_semantic_history(params).await
