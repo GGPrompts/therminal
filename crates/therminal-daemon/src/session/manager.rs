@@ -5,6 +5,7 @@
 //! for sharing across IPC handler tasks.
 
 use std::collections::HashMap;
+#[cfg(any(unix, test))]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -33,7 +34,9 @@ use super::layout::{
 };
 use super::pane::{Pane, PaneDispatchCtx};
 use super::snapshots::{PaneSnapshot, SessionSnapshot};
+#[cfg(any(unix, test))]
 use super::window::Window;
+#[cfg(any(unix, test))]
 use super::{NEXT_PANE_ID, NEXT_SESSION_ID};
 
 /// Central registry of all sessions.
