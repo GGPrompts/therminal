@@ -152,6 +152,7 @@ impl TherminalMcpServer {
                 horizontal,
                 &spawn_options,
                 startup_command,
+                None,
             ) {
                 Ok(new_pane_id) => {
                     // Find the session and pane to get dimensions.
@@ -216,6 +217,7 @@ impl TherminalMcpServer {
                     horizontal,
                     &spawn_options,
                     startup_command,
+                    None,
                 ) {
                     Ok(new_pane_id) => {
                         let (_, cols, rows) =

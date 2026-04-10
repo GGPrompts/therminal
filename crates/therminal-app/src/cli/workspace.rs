@@ -31,6 +31,23 @@ pub enum WorkspaceCmd {
         session: u64,
         workspace_id: u64,
     },
+    /// Create a new empty workspace in a session.
+    Create {
+        #[arg(long)]
+        session: u64,
+        /// Human-readable workspace name (e.g. "build", "logs").
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        out: OutputFlags,
+    },
+    /// Rename an existing workspace.
+    Rename {
+        #[arg(long)]
+        session: u64,
+        workspace_id: u64,
+        name: String,
+    },
 }
 
 pub fn run(ctx: &CliCtx, cmd: WorkspaceCmd) -> Result<()> {
@@ -40,6 +57,12 @@ pub fn run(ctx: &CliCtx, cmd: WorkspaceCmd) -> Result<()> {
             session,
             workspace_id,
         } => switch(ctx, session, workspace_id),
+        WorkspaceCmd::Create { session, name, out } => create(ctx, session, name, out),
+        WorkspaceCmd::Rename {
+            session,
+            workspace_id,
+            name,
+        } => rename(ctx, session, workspace_id, &name),
     }
 }
 
@@ -116,6 +139,44 @@ fn switch(ctx: &CliCtx, session: u64, workspace_id: u64) -> Result<()> {
     })?;
     match resp {
         IpcResponse::WorkspaceSwitched { .. } => Ok(()),
+        IpcResponse::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn create(ctx: &CliCtx, session: u64, name: Option<String>, out: OutputFlags) -> Result<()> {
+    let resp = ctx.send(IpcRequest::CreateWorkspace {
+        session_id: session,
+        name,
+    })?;
+    match resp {
+        IpcResponse::WorkspaceCreated {
+            workspace_id,
+            session_id,
+        } => {
+            if out.json {
+                write_json(&serde_json::json!({
+                    "session_id": session_id,
+                    "workspace_id": workspace_id,
+                }))
+            } else {
+                println!("{workspace_id}");
+                Ok(())
+            }
+        }
+        IpcResponse::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn rename(ctx: &CliCtx, session: u64, workspace_id: u64, name: &str) -> Result<()> {
+    let resp = ctx.send(IpcRequest::RenameWorkspace {
+        session_id: session,
+        workspace_id,
+        name: name.to_string(),
+    })?;
+    match resp {
+        IpcResponse::WorkspaceRenamed { .. } => Ok(()),
         IpcResponse::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected daemon response: {other:?}"),
     }

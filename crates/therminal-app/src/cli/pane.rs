@@ -35,6 +35,9 @@ pub enum PaneCmd {
         /// Run this command in the new pane once the shell prompt is ready.
         #[arg(long = "spawn")]
         startup_command: Option<String>,
+        /// Split ratio for the source (first) child (0.1..0.9). Default 0.5.
+        #[arg(long)]
+        ratio: Option<f32>,
         #[command(flatten)]
         out: OutputFlags,
     },
@@ -84,6 +87,15 @@ pub enum PaneCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Focus (select) a pane.
+    Focus { pane_id: u64 },
+    /// Move a pane to a different workspace within the same session.
+    Move {
+        pane_id: u64,
+        /// Target workspace id (1-9).
+        #[arg(long)]
+        workspace: u64,
+    },
     /// Swap two panes' positions in the layout tree.
     Swap { a: u64, b: u64 },
     /// Resize a pane's PTY (`<cols>x<rows>`).
@@ -98,8 +110,9 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             split,
             session,
             startup_command,
+            ratio,
             out,
-        } => create(ctx, from, split, session, startup_command, out),
+        } => create(ctx, from, split, session, startup_command, ratio, out),
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
         PaneCmd::Send { pane_id, keys, raw } => send(ctx, pane_id, &keys, raw),
         PaneCmd::Peek {
@@ -110,6 +123,8 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
         } => peek(ctx, pane_id, last, trim, out),
         PaneCmd::Tag { pane_id, kvs } => tag(ctx, pane_id, &kvs),
         PaneCmd::Untag { pane_id, keys, all } => untag(ctx, pane_id, keys, all),
+        PaneCmd::Focus { pane_id } => focus(ctx, pane_id),
+        PaneCmd::Move { pane_id, workspace } => move_pane(ctx, pane_id, workspace),
         PaneCmd::Swap { a, b } => swap(ctx, a, b),
         PaneCmd::Resize { pane_id, dims } => resize(ctx, pane_id, &dims),
     }
@@ -154,6 +169,7 @@ fn create(
     split: Option<String>,
     session: Option<u64>,
     startup_command: Option<String>,
+    ratio: Option<f32>,
     out: OutputFlags,
 ) -> Result<()> {
     // Determine the source pane to split from. If `--from` is set we use it
@@ -172,6 +188,7 @@ fn create(
         horizontal,
         cwd: None,
         startup_command,
+        ratio,
     })?;
     let new_pane = match resp {
         IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
@@ -363,6 +380,37 @@ fn untag(ctx: &CliCtx, pane_id: u64, keys: Vec<String>, all: bool) -> Result<()>
             println!("{}", tags_compact(&tags));
             Ok(())
         }
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn focus(ctx: &CliCtx, pane_id: u64) -> Result<()> {
+    let resp = ctx.send(IpcRequest::SelectPane { pane_id })?;
+    match resp {
+        IpcResponse::PaneSelected { pane_id } => {
+            println!("{pane_id}");
+            Ok(())
+        }
+        IpcResponse::Error { message } => bail!("daemon error: {message}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn move_pane(ctx: &CliCtx, pane_id: u64, workspace: u64) -> Result<()> {
+    let resp = ctx.send(IpcRequest::MovePane {
+        pane_id,
+        target_workspace_id: workspace,
+    })?;
+    match resp {
+        IpcResponse::PaneMoved {
+            pane_id,
+            target_workspace_id,
+            ..
+        } => {
+            println!("{pane_id}\t{target_workspace_id}");
+            Ok(())
+        }
+        IpcResponse::Error { message } => bail!("daemon error: {message}"),
         other => bail!("unexpected daemon response: {other:?}"),
     }
 }

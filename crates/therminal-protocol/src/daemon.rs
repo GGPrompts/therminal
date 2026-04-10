@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -127,6 +127,10 @@ pub enum IpcRequest {
         /// prompt starts rendering. If the shell never emits OSC 133/633
         /// prompt marks, the daemon falls back to a short timeout.
         startup_command: Option<String>,
+        /// Split ratio for the first (source) child (0.0..1.0). `None`
+        /// defaults to 0.5 (equal halves). Values are clamped to
+        /// `0.1..=0.9` on the daemon side to prevent degenerate layouts.
+        ratio: Option<f32>,
     },
     /// Kill (destroy) a specific pane.
     KillPane { pane_id: PaneId },
@@ -231,6 +235,23 @@ pub enum IpcRequest {
     SwitchWorkspace {
         session_id: SessionId,
         workspace_id: WorkspaceId,
+    },
+    /// Create a new workspace in an existing session (tn-ceqw). The daemon
+    /// appends a `WorkspaceInfo` entry with the given name (or a generated
+    /// default), sets it as the active workspace, and broadcasts
+    /// `WorkspaceChanged`. The new workspace is empty — callers follow up
+    /// with `SplitPane` (using any existing pane as source) or `MovePane`
+    /// to populate it.
+    CreateWorkspace {
+        session_id: SessionId,
+        /// Human-readable name. `None` produces "Workspace N".
+        name: Option<String>,
+    },
+    /// Rename an existing workspace (tn-ceqw).
+    RenameWorkspace {
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+        name: String,
     },
     /// Query pattern engine stats (tn-86us). Returns the total number of
     /// dispatched matches plus the total loaded pattern count. Used by
@@ -346,6 +367,16 @@ pub enum IpcResponse {
     WorkspaceSwitched {
         session_id: SessionId,
         active_workspace: WorkspaceId,
+    },
+    /// A new workspace was created (tn-ceqw).
+    WorkspaceCreated {
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+    },
+    /// A workspace was renamed (tn-ceqw).
+    WorkspaceRenamed {
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
     },
     /// Pattern engine stats snapshot (tn-86us).
     PatternStats {

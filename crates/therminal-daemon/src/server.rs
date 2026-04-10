@@ -535,6 +535,7 @@ async fn dispatch_ipc(
             horizontal,
             cwd,
             startup_command,
+            ratio,
         } => {
             let mut mgr = session_mgr.lock().await;
             let spawn_options = therminal_terminal::pty::SpawnOptions {
@@ -546,6 +547,7 @@ async fn dispatch_ipc(
                 *horizontal,
                 &spawn_options,
                 startup_command.as_deref(),
+                *ratio,
             ) {
                 Ok(new_pane_id) => IpcResponse::PaneSplit { new_pane_id },
                 Err(e) => IpcResponse::Error { message: e },
@@ -763,6 +765,30 @@ async fn dispatch_ipc(
                 Ok(()) => IpcResponse::WorkspaceSwitched {
                     session_id: *session_id,
                     active_workspace: *workspace_id,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::CreateWorkspace { session_id, name } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.create_workspace(*session_id, name.clone()) {
+                Ok(workspace_id) => IpcResponse::WorkspaceCreated {
+                    session_id: *session_id,
+                    workspace_id,
+                },
+                Err(e) => IpcResponse::Error { message: e },
+            }
+        }
+        IpcRequest::RenameWorkspace {
+            session_id,
+            workspace_id,
+            name,
+        } => {
+            let mut mgr = session_mgr.lock().await;
+            match mgr.rename_workspace(*session_id, *workspace_id, name.clone()) {
+                Ok(()) => IpcResponse::WorkspaceRenamed {
+                    session_id: *session_id,
+                    workspace_id: *workspace_id,
                 },
                 Err(e) => IpcResponse::Error { message: e },
             }

@@ -43,7 +43,7 @@ The daemon exposes a multiplexed IPC protocol over Unix domain sockets with leng
 
 **Envelope** (`IpcMessage`): Three variants -- `Request { request_id, payload }`, `Response { request_id, payload }`, `Event { payload }`. The `request_id: u64` enables multiplexing multiple in-flight requests over one connection.
 
-**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`. `SplitPane` now accepts `startup_command` in addition to `pane_id`, `horizontal`, and `cwd`.
+**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`. `SplitPane` accepts `pane_id`, `horizontal`, `cwd`, `startup_command`, and `ratio: Option<f32>` (0.1..0.9, default 0.5). `CreateWorkspace` and `RenameWorkspace` provide CLI-driven workspace lifecycle without requiring the full `SetWorkspaceState` topology push.
 
 **Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
 

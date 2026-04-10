@@ -138,6 +138,7 @@ impl App {
                     horizontal,
                     cwd: cwd_clone,
                     startup_command: None,
+                    ratio: None,
                 }),
             )
             .await
@@ -407,6 +408,7 @@ impl App {
             horizontal: true,
             cwd: None,
             startup_command: None,
+            ratio: None,
         }) {
             Ok(r) => r,
             Err(e) => {

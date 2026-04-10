@@ -1159,11 +1159,12 @@ fn split_layout_leaf(
     source: PaneId,
     new_leaf: PaneId,
     direction: therminal_protocol::daemon::LayoutSplitDirection,
+    split_ratio: f32,
 ) -> LayoutSnapshot {
     match node {
         LayoutSnapshot::Leaf { pane_id } if pane_id == source => LayoutSnapshot::Split {
             direction,
-            ratio: 0.5,
+            ratio: split_ratio,
             first: Box::new(LayoutSnapshot::Leaf { pane_id: source }),
             second: Box::new(LayoutSnapshot::Leaf { pane_id: new_leaf }),
         },
@@ -1176,8 +1177,20 @@ fn split_layout_leaf(
         } => LayoutSnapshot::Split {
             direction: d,
             ratio,
-            first: Box::new(split_layout_leaf(*first, source, new_leaf, direction)),
-            second: Box::new(split_layout_leaf(*second, source, new_leaf, direction)),
+            first: Box::new(split_layout_leaf(
+                *first,
+                source,
+                new_leaf,
+                direction,
+                split_ratio,
+            )),
+            second: Box::new(split_layout_leaf(
+                *second,
+                source,
+                new_leaf,
+                direction,
+                split_ratio,
+            )),
         },
     }
 }
@@ -1724,7 +1737,7 @@ impl SessionManager {
     /// Returns the new pane's ID. `horizontal=true` splits cols
     /// (side-by-side), `horizontal=false` splits rows (stacked).
     pub fn split_pane(&mut self, pane_id: PaneId, horizontal: bool) -> Result<PaneId, String> {
-        self.split_pane_with_options(pane_id, horizontal, &Default::default(), None)
+        self.split_pane_with_options(pane_id, horizontal, &Default::default(), None, None)
     }
 
     /// Split a pane with custom spawn options for the new pane's PTY.
@@ -1752,6 +1765,7 @@ impl SessionManager {
         horizontal: bool,
         spawn_options: &therminal_terminal::pty::SpawnOptions,
         startup_command: Option<&str>,
+        ratio: Option<f32>,
     ) -> Result<PaneId, String> {
         use therminal_protocol::daemon::LayoutSplitDirection;
 
@@ -1795,14 +1809,16 @@ impl SessionManager {
                 .ok_or_else(|| format!("pane not found: {pane_id}"))?;
             (src.cols(), src.rows())
         };
+        // Clamp ratio to [0.1, 0.9] to prevent degenerate layouts.
+        let r = ratio.unwrap_or(0.5).clamp(0.1, 0.9);
         let (first_cols, first_rows, second_cols, second_rows) = if horizontal {
             let usable = src_cols.saturating_sub(1);
-            let first = (usable / 2).max(1);
+            let first = ((usable as f32 * r).round() as u16).max(1);
             let second = usable.saturating_sub(first).max(1);
             (first, src_rows, second, src_rows)
         } else {
             let usable = src_rows.saturating_sub(1);
-            let first = (usable / 2).max(1);
+            let first = ((usable as f32 * r).round() as u16).max(1);
             let second = usable.saturating_sub(first).max(1);
             (src_cols, first, src_cols, second)
         };
@@ -1871,10 +1887,10 @@ impl SessionManager {
                     ws.pane_ids.push(new_id);
                 }
                 ws.layout = Some(match ws.layout.take() {
-                    Some(existing) => split_layout_leaf(existing, pane_id, new_id, direction),
+                    Some(existing) => split_layout_leaf(existing, pane_id, new_id, direction, r),
                     None => LayoutSnapshot::Split {
                         direction,
-                        ratio: 0.5,
+                        ratio: r,
                         first: Box::new(LayoutSnapshot::Leaf { pane_id }),
                         second: Box::new(LayoutSnapshot::Leaf { pane_id: new_id }),
                     },
@@ -2364,6 +2380,68 @@ impl SessionManager {
             .get(&session_id)
             .ok_or_else(|| format!("session not found: {session_id}"))?;
         Ok((session.workspace_state.clone(), session.active_workspace))
+    }
+
+    /// Create a new empty workspace in a session (tn-ceqw).
+    ///
+    /// Picks the lowest unused workspace ID in 1..=9, appends a
+    /// `WorkspaceInfo` entry, sets the new workspace as active, and
+    /// broadcasts `WorkspaceChanged`.
+    pub fn create_workspace(
+        &mut self,
+        session_id: SessionId,
+        name: Option<String>,
+    ) -> Result<WorkspaceId, String> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+
+        // Pick the lowest unused workspace slot in 1..=9.
+        let used: std::collections::HashSet<WorkspaceId> =
+            session.workspace_state.iter().map(|w| w.id).collect();
+        let new_id = (1..=9u64)
+            .find(|id| !used.contains(id))
+            .ok_or_else(|| "all workspace slots 1-9 are occupied".to_string())?;
+
+        let ws_name = name.unwrap_or_else(|| format!("Workspace {new_id}"));
+        session.workspace_state.push(WorkspaceInfo {
+            id: new_id,
+            name: ws_name,
+            order: new_id as u32,
+            pane_ids: vec![],
+            focused_pane: None,
+            layout: None,
+        });
+        session.active_workspace = new_id;
+
+        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+            session_id,
+            active_workspace: new_id,
+        });
+        self.mark_dirty();
+        Ok(new_id)
+    }
+
+    /// Rename an existing workspace (tn-ceqw).
+    pub fn rename_workspace(
+        &mut self,
+        session_id: SessionId,
+        workspace_id: WorkspaceId,
+        name: String,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        let ws = session
+            .workspace_state
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or_else(|| format!("workspace {workspace_id} not found in session {session_id}"))?;
+        ws.name = name;
+        self.mark_dirty();
+        Ok(())
     }
 
     /// Return the ID of the first (default) session, if any.
@@ -3432,7 +3510,7 @@ mod tests {
     fn split_layout_leaf_replaces_leaf_with_split_node() {
         use therminal_protocol::daemon::LayoutSplitDirection;
         let tree = LayoutSnapshot::Leaf { pane_id: 1 };
-        let out = split_layout_leaf(tree, 1, 2, LayoutSplitDirection::Horizontal);
+        let out = split_layout_leaf(tree, 1, 2, LayoutSplitDirection::Horizontal, 0.5);
         if let LayoutSnapshot::Split {
             direction,
             first,
@@ -3463,7 +3541,7 @@ mod tests {
                 second: Box::new(LayoutSnapshot::Leaf { pane_id: 3 }),
             }),
         };
-        let out = split_layout_leaf(tree, 3, 99, LayoutSplitDirection::Vertical);
+        let out = split_layout_leaf(tree, 3, 99, LayoutSplitDirection::Vertical, 0.5);
         // Walk and assert: leaf 3 should now be a vertical split [3, 99].
         fn find_leaf(node: &LayoutSnapshot, target: PaneId) -> Option<&LayoutSnapshot> {
             match node {

@@ -90,7 +90,7 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 
 ## Pane Operations
 
-`therminal pane create` now accepts `--spawn '<cmd>'`, forwarding `startup_command` through daemon `SplitPane`. The daemon waits for the new pane's first OSC 133/633 `PromptStart` before injecting the command; if the shell never emits prompt integration, it falls back after 300ms. Delegate-style callers should rely on that daemon-side contract instead of sleeping client-side.
+`therminal pane create` accepts `--spawn '<cmd>'` (startup command injection) and `--ratio 0.6` (split proportion for the source pane, clamped 0.1..0.9, default 0.5). `therminal pane focus <id>` selects a pane. `therminal pane move <id> --workspace <N>` moves a pane between workspaces. `therminal workspace create --session <S>` creates an empty workspace, and `therminal workspace rename` renames one. Together these provide the minimal Hyprland-style layout scripting surface (tn-ceqw) -- a shell script can create sessions, workspaces, split panes with ratios, focus, and rename without MCP overhead.
 
 - **Pane Swap**: `LayoutNode::swap_pane(a, b)` swaps two leaves in the binary tree. `SwapNext` (`Alt+Shift+Right`) / `SwapPrev` (`Alt+Shift+Left`).
 - **Mouse-Drag Separator Resize**: Dragging a pane separator adjusts `split_ratio`. Implemented in `window/mouse.rs`. 6 px hit-test threshold.
