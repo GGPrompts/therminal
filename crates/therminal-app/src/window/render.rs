@@ -59,6 +59,7 @@ fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
     }
 }
 
+#[cfg(test)]
 fn damaged_rows_any(damaged_rows: Option<&[bool]>) -> bool {
     damaged_rows.is_some_and(|rows| rows.iter().any(|&damaged| damaged))
 }
@@ -368,7 +369,7 @@ fn render_single_pane(
         damaged_rows.as_deref()
     };
 
-    if !damaged_rows_any(damaged_rows.as_deref()) && cache_matches_viewport {
+    if damage_rows_empty(damaged_rows.as_deref()) && cache_matches_viewport {
         term_guard.reset_damage();
         drop(term_guard);
 
