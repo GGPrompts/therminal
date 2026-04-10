@@ -40,7 +40,22 @@ pub(crate) fn is_click_within_tolerance(press: (f64, f64), release: (f64, f64)) 
 ///
 /// Selections that ignore `display_offset` drift downward by one row per
 /// scrolled line, which is the bug fixed in tn-gfkr.
+///
+/// # Caller contract
+/// Both `row` and `display_offset` must be less than `i32::MAX as usize`
+/// (2 147 483 647). In practice `row` is bounded by the terminal screen height
+/// (≤ a few thousand) and `display_offset` by `scrollback_lines` (default
+/// 10 000), so this is never approached. The `debug_assert!`s below fire in
+/// debug builds if a caller ever violates this invariant.
 pub(crate) fn viewport_row_to_absolute_line(row: usize, display_offset: usize) -> i32 {
+    debug_assert!(
+        row < i32::MAX as usize,
+        "viewport_row_to_absolute_line: row {row} overflows i32"
+    );
+    debug_assert!(
+        display_offset < i32::MAX as usize,
+        "viewport_row_to_absolute_line: display_offset {display_offset} overflows i32"
+    );
     row as i32 - display_offset as i32
 }
 
