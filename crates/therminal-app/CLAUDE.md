@@ -13,7 +13,13 @@ src/
 │   ├── keybindings.rs   # Key event dispatch
 │   ├── chrome.rs        # Status bar, tab bar, pane headers, separators
 │   ├── help_overlay.rs  # Keybinding help overlay
-│   ├── pane_ops.rs      # Split, close, swap, restore operations
+│   ├── pane_ops/
+│   │   ├── mod.rs              # Shared helpers (daemon_rpc, make_pane_callbacks), re-exports
+│   │   ├── split_ops.rs        # split_focused_pane, split_pane_by_id, split_pane_remote, finish_split_pane_remote
+│   │   ├── close_ops.rs        # close_focused_pane, close_pane_by_id, close_all_panes, kill_pane_remote
+│   │   ├── focus_and_nav.rs    # move_focus, swap_focused_pane, zoom_toggle, adjust_ratio, select_pane_remote
+│   │   ├── workspace_ops.rs    # restore_layout, switch_workspace, send_to_workspace, poll_auto_tile, poll_swarm_watcher
+│   │   └── editor_clipboard.rs # copy/paste, open_in_editor, plan_open_in_editor, shell_quote
 │   ├── folder_open.rs   # Directory hotspot routing (tn-zqwg)
 │   └── render.rs        # Per-frame rendering, damage tracking
 ├── pane/
