@@ -354,6 +354,7 @@ impl App {
             padding,
         );
         grid_renderer.apply_color_overrides(&self.config.colors);
+        grid_renderer.set_ui_text_scale(self.config.accessibility.ui_text_scale);
 
         // ── Widget pipeline (tn-npd) ─────────────────────────────────────
         // Tiny textured-quad pipeline shared by all pre-rasterized widgets

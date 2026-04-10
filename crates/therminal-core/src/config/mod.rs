@@ -1481,6 +1481,48 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_config_round_trips() {
+        let mut config = TherminalConfig::default();
+        config.accessibility.high_contrast = true;
+        config.accessibility.reduced_motion = true;
+        config.accessibility.ui_text_scale = 1.5;
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert!(decoded.accessibility.high_contrast);
+        assert!(decoded.accessibility.reduced_motion);
+        assert!((decoded.accessibility.ui_text_scale - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn accessibility_defaults_are_sensible() {
+        let d = AccessibilityConfig::default();
+        assert!(!d.high_contrast);
+        assert!(!d.reduced_motion);
+        assert!((d.ui_text_scale - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn general_shell_args_round_trips() {
+        let mut config = TherminalConfig::default();
+        config.general.shell_args = vec!["--login".to_string(), "--norc".to_string()];
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            decoded.general.shell_args,
+            vec!["--login".to_string(), "--norc".to_string()]
+        );
+    }
+
+    #[test]
+    fn general_new_pane_cwd_round_trips() {
+        let mut config = TherminalConfig::default();
+        config.general.new_pane_cwd = NewPaneCwd::Home;
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(decoded.general.new_pane_cwd, NewPaneCwd::Home);
+    }
+
+    #[test]
     fn partial_toml_uses_defaults_for_missing_fields() {
         let toml_str = r#"
 [font]

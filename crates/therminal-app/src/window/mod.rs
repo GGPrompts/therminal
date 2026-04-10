@@ -603,6 +603,11 @@ impl App {
             info!("color overrides updated via hot-reload");
         }
 
+        // Apply accessibility ui_text_scale on every config change (tn-avjv.6).
+        if let Some(renderer) = self.grid_renderer.as_mut() {
+            renderer.set_ui_text_scale(self.config.accessibility.ui_text_scale);
+        }
+
         let status_bar_changed =
             self.config.general.show_status_bar != old_config.general.show_status_bar;
         let tab_bar_changed = self.config.general.show_tab_bar != old_config.general.show_tab_bar;

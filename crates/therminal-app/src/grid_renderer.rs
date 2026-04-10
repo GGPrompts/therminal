@@ -482,6 +482,11 @@ pub struct GridRenderer {
     /// in `render.rs`, consumed by `draw_widget_overlays` in
     /// `render_driver.rs`.
     pub(crate) pattern_widget_sink: Vec<crate::widgets::pattern_widget::PatternWidgetMatch>,
+
+    /// Scale factor for UI chrome text (status bar, pane headers, tab bar,
+    /// overlays). `1.0` is default. Applied by `chrome_font_size()`.
+    /// Set from `config.accessibility.ui_text_scale` (tn-avjv.6).
+    pub(crate) ui_text_scale: f32,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -677,7 +682,22 @@ impl GridRenderer {
             ansi_override: None,
             overlay_cache: HashMap::new(),
             pattern_widget_sink: Vec::new(),
+            ui_text_scale: 1.0,
         }
+    }
+
+    /// Update the UI text scale factor (from `config.accessibility.ui_text_scale`).
+    pub fn set_ui_text_scale(&mut self, scale: f32) {
+        self.ui_text_scale = scale.clamp(0.5, 3.0);
+    }
+
+    /// Return a font size scaled by `ui_text_scale` for chrome text rendering.
+    ///
+    /// Chrome renderers (status bar, pane headers, tab bar) should call this
+    /// instead of computing font size directly so that the accessibility
+    /// `ui_text_scale` setting takes effect.
+    pub fn chrome_font_size(&self, base_size: f32) -> f32 {
+        (base_size * self.ui_text_scale).max(8.0)
     }
 
     /// Set padding (both x and y) from config. Call before resize to take effect.

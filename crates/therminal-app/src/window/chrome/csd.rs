@@ -158,7 +158,7 @@ pub(crate) fn draw_csd_buttons(
     }
 
     // ── Button icons ──
-    let font_size = (bar_h * 0.45).max(10.0);
+    let font_size = renderer.chrome_font_size((bar_h * 0.45).max(10.0));
     let metrics = Metrics::new(font_size, bar_h);
     let bounds = TextBounds {
         left: 0,

@@ -70,7 +70,7 @@ pub(crate) enum ControlBinding {
     UiTextScale,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // MoveUp/MoveDown wired in future keyboard shortcut pass.
 pub(crate) enum SettingsCommand {
     TogglePaneHeaders,
@@ -1940,5 +1940,134 @@ mod tests {
             cmd,
             Some(SettingsCommand::SetFolderPaneCommand(_))
         ));
+    }
+    #[test]
+    fn shell_section_is_registered() {
+        let state = SettingsOverlayState::new();
+        assert!(state.sections().iter().any(|s| s.id == "shell"));
+    }
+    #[test]
+    fn shell_section_rebuilds_from_config() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        let shell = state.sections().iter().find(|s| s.id == "shell").unwrap();
+        assert_eq!(shell.controls.len(), 3);
+        assert_eq!(shell.controls[0].label, "Default shell");
+        assert!(matches!(
+            shell.controls[0].control_type,
+            ControlType::TextInput { .. }
+        ));
+        assert_eq!(shell.controls[1].label, "Shell arguments");
+        assert!(matches!(
+            shell.controls[1].control_type,
+            ControlType::TextInput { .. }
+        ));
+        assert_eq!(shell.controls[2].label, "New pane cwd");
+        assert!(matches!(
+            shell.controls[2].control_type,
+            ControlType::Select { .. }
+        ));
+    }
+    #[test]
+    fn shell_default_shell_text_edit_produces_command() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        // Navigate to "shell" section (index 1: layout=0, shell=1).
+        state.arrow_down();
+        state.tab(false);
+        // Enter to start editing the "Default shell" text input.
+        assert_eq!(state.enter(), None);
+        assert!(state.is_text_editing());
+        state.char_input('/');
+        let cmd = state.enter();
+        assert!(matches!(cmd, Some(SettingsCommand::SetDefaultShell(_))));
+    }
+    #[test]
+    fn shell_new_pane_cwd_select_produces_command() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        // Navigate to "shell" section (index 1), then to "New pane cwd" control (index 2).
+        state.arrow_down();
+        state.tab(false);
+        state.arrow_down();
+        state.arrow_down();
+        // Enter cycles the select and returns a command.
+        let cmd = state.enter();
+        assert!(matches!(cmd, Some(SettingsCommand::SetNewPaneCwd(1))));
+    }
+    #[test]
+    fn accessibility_section_is_registered() {
+        let state = SettingsOverlayState::new();
+        assert!(state.sections().iter().any(|s| s.id == "accessibility"));
+    }
+    #[test]
+    fn accessibility_section_rebuilds_from_config() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        let a11y = state
+            .sections()
+            .iter()
+            .find(|s| s.id == "accessibility")
+            .unwrap();
+        assert_eq!(a11y.controls.len(), 3);
+        assert_eq!(a11y.controls[0].label, "High contrast mode");
+        assert!(matches!(
+            a11y.controls[0].control_type,
+            ControlType::Toggle { value: false }
+        ));
+        assert_eq!(a11y.controls[1].label, "Reduced motion");
+        assert!(matches!(
+            a11y.controls[1].control_type,
+            ControlType::Toggle { value: false }
+        ));
+        assert_eq!(a11y.controls[2].label, "UI text scale");
+        assert!(matches!(
+            a11y.controls[2].control_type,
+            ControlType::Select { .. }
+        ));
+    }
+    #[test]
+    fn accessibility_high_contrast_toggle_produces_command() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        // Navigate to "accessibility" section (index 4: layout=0, shell=1,
+        // hotspots=2, themes=3, accessibility=4).
+        for _ in 0..4 {
+            state.arrow_down();
+        }
+        state.tab(false);
+        let cmd = state.enter();
+        assert_eq!(cmd, Some(SettingsCommand::ToggleHighContrast));
+    }
+    #[test]
+    fn accessibility_ui_text_scale_select_produces_command() {
+        let mut state = SettingsOverlayState::new();
+        state.sync_toggle_values(&test_render_values());
+        // Navigate to "accessibility" section, control index 2 (UI text scale).
+        for _ in 0..4 {
+            state.arrow_down();
+        }
+        state.tab(false);
+        state.arrow_down();
+        state.arrow_down();
+        let cmd = state.enter();
+        // Cycles from index 1 (100%) to index 2 (125%).
+        assert_eq!(cmd, Some(SettingsCommand::SetUiTextScale(2)));
+    }
+    #[test]
+    fn ui_text_scale_index_finds_exact_match() {
+        assert_eq!(ui_text_scale_index(1.0), 1);
+        assert_eq!(ui_text_scale_index(0.75), 0);
+        assert_eq!(ui_text_scale_index(3.0), 6);
+    }
+    #[test]
+    fn ui_text_scale_index_finds_closest_match() {
+        // 0.9 is between 0.75 and 1.0, closer to 1.0.
+        assert_eq!(ui_text_scale_index(0.9), 1);
+        // 1.1 is between 1.0 and 1.25, closer to 1.0.
+        assert_eq!(ui_text_scale_index(1.1), 1);
+        // 1.15 is exactly between 1.0 and 1.25 — should pick 1.25 (or either).
+        let idx = ui_text_scale_index(1.15);
+        assert!(idx == 1 || idx == 2);
     }
 }

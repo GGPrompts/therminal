@@ -251,6 +251,9 @@ impl App {
                     .copied()
                     .unwrap_or(1.0);
                 self.config.accessibility.ui_text_scale = scale;
+                if let Some(renderer) = self.grid_renderer.as_mut() {
+                    renderer.set_ui_text_scale(scale);
+                }
                 self.show_toast(format!("UI text scale: {:.0}%", scale * 100.0));
                 self.relayout_and_redraw();
             }
