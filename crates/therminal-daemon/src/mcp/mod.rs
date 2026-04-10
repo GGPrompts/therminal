@@ -302,6 +302,9 @@ pub(super) struct SpawnPaneParam {
     /// Optional command written to the pane after the first shell prompt
     /// starts rendering. Appends a trailing newline when missing.
     pub(super) startup_command: Option<String>,
+    /// Split ratio for the source (first) child (0.1..0.9). Default 0.5.
+    #[serde(default, deserialize_with = "deser_compat::f32_opt_flexible")]
+    pub(super) ratio: Option<f32>,
 }
 
 // ── Tool result types ───────────────────────────────────────────────────

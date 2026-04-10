@@ -1230,7 +1230,7 @@ pub struct WidgetsConfig {
 }
 
 /// Position of the agent timeline bar relative to the window.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TimelinePosition {
     /// Top-right corner of the window, below the tab bar.

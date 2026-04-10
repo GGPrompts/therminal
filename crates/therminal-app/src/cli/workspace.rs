@@ -45,7 +45,9 @@ pub enum WorkspaceCmd {
     Rename {
         #[arg(long)]
         session: u64,
+        #[arg(long)]
         workspace_id: u64,
+        #[arg(long)]
         name: String,
     },
 }

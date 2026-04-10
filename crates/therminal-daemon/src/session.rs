@@ -1810,7 +1810,11 @@ impl SessionManager {
             (src.cols(), src.rows())
         };
         // Clamp ratio to [0.1, 0.9] to prevent degenerate layouts.
-        let r = ratio.unwrap_or(0.5).clamp(0.1, 0.9);
+        // Guard against NaN/Inf before clamping — non-finite values would
+        // propagate through the arithmetic and corrupt column/row counts.
+        let r = ratio.unwrap_or(0.5);
+        let r = if r.is_finite() { r } else { 0.5 };
+        let r = r.clamp(0.1, 0.9);
         let (first_cols, first_rows, second_cols, second_rows) = if horizontal {
             let usable = src_cols.saturating_sub(1);
             let first = ((usable as f32 * r).round() as u16).max(1);
@@ -2440,6 +2444,11 @@ impl SessionManager {
             .find(|w| w.id == workspace_id)
             .ok_or_else(|| format!("workspace {workspace_id} not found in session {session_id}"))?;
         ws.name = name;
+        let active_workspace = session.active_workspace;
+        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+            session_id,
+            active_workspace,
+        });
         self.mark_dirty();
         Ok(())
     }

@@ -210,6 +210,66 @@ where
     deserializer.deserialize_any(V)
 }
 
+/// Deserialize an `Option<f32>` from a JSON number, stringified decimal,
+/// or null/missing. Mirrors `u64_opt_flexible` for the float case.
+pub(super) fn f32_opt_flexible<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<f32>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a finite number, a string containing one, or null")
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Option<f32>, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Option<f32>, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Option<f32>, D2::Error> {
+            f32_flexible(d).map(Some)
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Option<f32>, E> {
+            if v.is_finite() {
+                Ok(Some(v as f32))
+            } else {
+                Err(E::invalid_value(Unexpected::Float(v), &self))
+            }
+        }
+        fn visit_f32<E: de::Error>(self, v: f32) -> Result<Option<f32>, E> {
+            Ok(Some(v))
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<f32>, E> {
+            Ok(Some(v as f32))
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<f32>, E> {
+            Ok(Some(v as f32))
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Option<f32>, E> {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Err(E::invalid_value(Unexpected::Str(v), &self));
+            }
+            trimmed
+                .parse::<f32>()
+                .map_err(|_| E::invalid_value(Unexpected::Str(v), &self))
+                .and_then(|f| {
+                    if f.is_finite() {
+                        Ok(Some(f))
+                    } else {
+                        Err(E::invalid_value(Unexpected::Str(v), &self))
+                    }
+                })
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Option<f32>, E> {
+            self.visit_str(&v)
+        }
+    }
+    deserializer.deserialize_any(V)
+}
+
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;

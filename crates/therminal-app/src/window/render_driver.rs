@@ -479,7 +479,9 @@ impl App {
         // Feed the timeline with the current tool status, if an agent is
         // present. This drives the ring buffer from the same per-frame
         // status snapshot the badge already reads, so no new IPC is needed.
-        if let Some(ref status) = status_owned {
+        if self.agent_timeline.visible
+            && let Some(ref status) = status_owned
+        {
             use therminal_terminal::agent_registry::AgentStatus;
             let (tool_name, source) = match status {
                 AgentStatus::ToolUse { tool_name } => (

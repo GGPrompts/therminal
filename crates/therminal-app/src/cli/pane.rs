@@ -11,6 +11,19 @@ use super::OutputFlags;
 use super::format::{opt_i32, opt_str, tags_compact, write_json, write_tsv_row};
 use super::runtime::CliCtx;
 
+/// Validate the split ratio is in the range 0.1..=0.9.
+fn parse_ratio(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if !v.is_finite() {
+        return Err("ratio must be a finite number".into());
+    }
+    if (0.1..=0.9).contains(&v) {
+        Ok(v)
+    } else {
+        Err("ratio must be between 0.1 and 0.9".into())
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum PaneCmd {
     /// List all panes (one record per line, TSV).
@@ -36,7 +49,7 @@ pub enum PaneCmd {
         #[arg(long = "spawn")]
         startup_command: Option<String>,
         /// Split ratio for the source (first) child (0.1..0.9). Default 0.5.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_ratio)]
         ratio: Option<f32>,
         #[command(flatten)]
         out: OutputFlags,

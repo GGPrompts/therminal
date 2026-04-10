@@ -276,15 +276,19 @@ fn rasterize_timeline_bar(bar: &TimelineBarSpec) -> Option<Pixmap> {
         return Some(pixmap);
     }
 
-    // Check whether any subagent segments exist to decide row layout.
-    let has_subagent = bar.segments.iter().any(|s| s.is_subagent);
-    let top_row_h = if has_subagent { h * 0.5 } else { h };
-    let bottom_row_y = if has_subagent { h * 0.5 } else { 0.0 };
-    let bottom_row_h = if has_subagent { h * 0.5 } else { h };
-
     // Count top-level and subagent segments separately.
     let top_count = bar.segments.iter().filter(|s| !s.is_subagent).count();
     let sub_count = bar.segments.iter().filter(|s| s.is_subagent).count();
+
+    // Check whether both top-level and subagent segments exist to decide
+    // row layout. When only one kind is present it spans the full height.
+    let has_both = top_count > 0 && sub_count > 0;
+    let top_row_h = if has_both { h * 0.5 } else { h };
+    // When only subagent entries exist (top_count == 0), the bottom row
+    // spans the full bar height so segments aren't squished into the
+    // bottom half.
+    let bottom_row_y = if has_both { h * 0.5 } else { 0.0 };
+    let bottom_row_h = if has_both { h * 0.5 } else { h };
 
     // Inset: leave a small margin inside the pill.
     let inset = bar.corner_radius.min(4.0);
@@ -297,8 +301,8 @@ fn rasterize_timeline_bar(bar: &TimelineBarSpec) -> Option<Pixmap> {
             ((inner_w - gap * (top_count as f32 - 1.0).max(0.0)) / top_count as f32).max(1.0);
         let mut x = inset;
         for seg in bar.segments.iter().filter(|s| !s.is_subagent) {
-            let rect =
-                SkRect::from_xywh(x, inset.min(2.0), seg_w, top_row_h - inset.min(2.0) * 2.0);
+            let seg_h = (top_row_h - inset.min(2.0) * 2.0).max(1.0);
+            let rect = SkRect::from_xywh(x, inset.min(2.0), seg_w, seg_h);
             if let Some(rect) = rect {
                 let paint = Paint {
                     shader: Shader::SolidColor(ts_color(seg.color)),
@@ -317,12 +321,8 @@ fn rasterize_timeline_bar(bar: &TimelineBarSpec) -> Option<Pixmap> {
             ((inner_w - gap * (sub_count as f32 - 1.0).max(0.0)) / sub_count as f32).max(1.0);
         let mut x = inset;
         for seg in bar.segments.iter().filter(|s| s.is_subagent) {
-            let rect = SkRect::from_xywh(
-                x,
-                bottom_row_y + inset.min(2.0),
-                seg_w,
-                bottom_row_h - inset.min(2.0) * 2.0,
-            );
+            let seg_h = (bottom_row_h - inset.min(2.0) * 2.0).max(1.0);
+            let rect = SkRect::from_xywh(x, bottom_row_y + inset.min(2.0), seg_w, seg_h);
             if let Some(rect) = rect {
                 // Subagent segments are slightly dimmed (alpha * 0.7) to
                 // visually distinguish them from top-level entries.

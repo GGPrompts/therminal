@@ -145,6 +145,11 @@ impl TherminalMcpServer {
 
         let mut mgr = self.session_mgr.lock().await;
 
+        // Apply the same NaN/Inf guard as the daemon's split_pane_with_options.
+        let ratio = params
+            .ratio
+            .and_then(|r| if r.is_finite() { Some(r) } else { None });
+
         if let Some(split_from_id) = params.split_from {
             // Split from an existing pane.
             match mgr.split_pane_with_options(
@@ -152,7 +157,7 @@ impl TherminalMcpServer {
                 horizontal,
                 &spawn_options,
                 startup_command,
-                None,
+                ratio,
             ) {
                 Ok(new_pane_id) => {
                     // Find the session and pane to get dimensions.

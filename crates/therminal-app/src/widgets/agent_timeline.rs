@@ -153,19 +153,23 @@ pub struct AgentTimelineSource {
     last_tool: Option<String>,
     /// Whether the timeline bar is currently visible.
     pub visible: bool,
+    /// Last bar width passed to `spec()`, included in `data_hash()` so
+    /// the cached texture is invalidated on window resize.
+    last_bar_width: u32,
 }
 
 impl AgentTimelineSource {
     /// Create a new timeline source from config values.
     pub fn new(max_entries: usize, height_px: u32, position: TimelinePosition) -> Self {
         Self {
-            entries: VecDeque::with_capacity(max_entries.min(1024)),
+            entries: VecDeque::with_capacity(max_entries),
             max_entries,
             height_px,
             position,
             next_ts: 0,
             last_tool: None,
             visible: false,
+            last_bar_width: 0,
         }
     }
 
@@ -194,6 +198,22 @@ impl AgentTimelineSource {
         }
     }
 
+    /// Update config fields without losing existing entries or visibility.
+    pub fn update_config(
+        &mut self,
+        max_entries: usize,
+        height_px: u32,
+        position: TimelinePosition,
+    ) {
+        self.max_entries = max_entries;
+        self.height_px = height_px;
+        self.position = position;
+        // Trim the ring buffer if max_entries shrank.
+        while self.entries.len() > self.max_entries {
+            self.entries.pop_front();
+        }
+    }
+
     /// Toggle visibility.
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
@@ -208,6 +228,8 @@ impl AgentTimelineSource {
             entry.hash(&mut hasher);
         }
         self.height_px.hash(&mut hasher);
+        self.last_bar_width.hash(&mut hasher);
+        self.position.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -237,7 +259,8 @@ impl AgentTimelineSource {
     ///
     /// `bar_width` is the desired pixel width of the bar, computed by the
     /// caller based on the window size and position.
-    pub fn spec(&self, bar_width: u32) -> WidgetSpec {
+    pub fn spec(&mut self, bar_width: u32) -> WidgetSpec {
+        self.last_bar_width = bar_width;
         let segments: Vec<TimelineSegment> = self
             .entries
             .iter()
@@ -416,7 +439,7 @@ mod tests {
 
     #[test]
     fn empty_timeline_produces_valid_pixmap() {
-        let source = AgentTimelineSource::new(10, 48, TimelinePosition::BottomRight);
+        let mut source = AgentTimelineSource::new(10, 48, TimelinePosition::BottomRight);
         let spec = source.spec(200);
         let mut rasterizer = WidgetRasterizer::new();
         let pixmap = rasterizer.rasterize_to_pixmap(&spec).expect("pixmap");
@@ -426,7 +449,7 @@ mod tests {
 
     #[test]
     fn spec_reads_config_height() {
-        let source = AgentTimelineSource::new(10, 64, TimelinePosition::BottomRight);
+        let mut source = AgentTimelineSource::new(10, 64, TimelinePosition::BottomRight);
         let spec = source.spec(300);
         match spec.kind {
             WidgetKind::TimelineBar(ref bar) => {

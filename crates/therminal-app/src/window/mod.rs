@@ -654,6 +654,23 @@ impl App {
             info!("env config changed; takes effect on next PTY spawn (restart needed)");
         }
 
+        // ── Agent timeline hot-reload ────────────────────────────────────
+        {
+            let new_tc = &self.config.widgets.agent_timeline;
+            let old_tc = &old_config.widgets.agent_timeline;
+            if new_tc.height_px != old_tc.height_px
+                || new_tc.max_entries != old_tc.max_entries
+                || new_tc.position != old_tc.position
+            {
+                self.agent_timeline.update_config(
+                    new_tc.max_entries,
+                    new_tc.height_px,
+                    new_tc.position,
+                );
+                info!("agent timeline config updated via hot-reload");
+            }
+        }
+
         let patterns_changed = self.config.patterns != old_config.patterns;
         if patterns_changed {
             if self.config.patterns.enabled {

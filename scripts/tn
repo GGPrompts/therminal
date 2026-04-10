@@ -38,7 +38,7 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "--help-policy" ]]; then
-    grep -A 100 "CLI-vs-MCP policy" "$0" | grep -B 100 "^# See docs"
+    sed -n '/CLI-vs-MCP policy/,/^# See docs/p' "$0"
     exit 0
 fi
 
