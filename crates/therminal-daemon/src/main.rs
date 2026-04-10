@@ -53,6 +53,23 @@ async fn main() -> Result<()> {
         return run_control_mode().await;
     }
 
+    // On Windows the GUI launches us with DETACHED_PROCESS, so we have no
+    // console.  ConPTY's CreatePseudoConsole then spawns a fresh conhost.exe
+    // for every pane — each one briefly flashing a visible window.  Allocate
+    // a hidden console once so ConPTY can reuse it for all pseudoconsoles.
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+        unsafe {
+            AllocConsole();
+            let hwnd = GetConsoleWindow();
+            if !hwnd.is_null() {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+
     info!(
         build_hash = BUILD_HASH,
         version = VERSION,
