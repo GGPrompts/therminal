@@ -1265,13 +1265,16 @@ impl GridRenderer {
             }
 
             // Draw dotted underlines for all rows (damaged and undamaged).
-            let hotspot_color = PaletteColor::ACCENT_WARM.to_f32_array();
+            // Each hotspot kind gets a distinct underline color.
             let underline_h = 1.0_f32;
             let dot_on = 2.0_f32;
             let dot_off = 2.0_f32;
             for row in row_cache.iter().flatten() {
                 for cell in &row.cells {
-                    if cell.hotspot.is_some() && cell.hyperlink.is_none() {
+                    if let Some((ref kind, _, _, _)) = cell.hotspot
+                        && cell.hyperlink.is_none()
+                    {
+                        let hotspot_color = crate::color_mapping::hotspot_kind_color(kind);
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
                         let y =
                             self.padding_y + cell.row as f32 * self.cell_height + self.cell_height

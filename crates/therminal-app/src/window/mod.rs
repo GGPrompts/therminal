@@ -157,10 +157,10 @@ pub(crate) enum OverlayMode {
 /// directory even when no Unix-style `HOME` variable is present.
 pub(crate) fn platform_home_dir() -> Option<String> {
     // Fast path: $HOME is set — covers Linux, macOS, and WSL2.
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Some(home);
-        }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Some(home);
     }
     // Fallback: dirs::home_dir() queries the OS profile directory.
     // On Windows this returns {FOLDERID_Profile} (e.g. C:\Users\<user>)
