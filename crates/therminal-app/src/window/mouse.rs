@@ -111,6 +111,8 @@ pub(crate) enum HeaderAction {
     SplitH(PaneId),
     /// Split the pane vertically (click on V button).
     SplitV(PaneId),
+    /// Toggle zoom on the pane (click on Z button).
+    Zoom(PaneId),
 }
 
 // ── Coordinate conversion ──────────────────────────────────────────────
@@ -233,13 +235,16 @@ impl App {
             return None;
         }
 
-        // Button hit regions (right-aligned): [H] [V] [X]
+        // Button hit regions (right-aligned): [H] [V] [Z] [X]
         let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
-        let btn_x_vsplit = btn_x_close - HEADER_BUTTON_WIDTH;
+        let btn_x_zoom = btn_x_close - HEADER_BUTTON_WIDTH;
+        let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
         let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
 
         if px >= btn_x_close && px < btn_x_close + HEADER_BUTTON_WIDTH {
             Some(HeaderAction::Close(pane_id))
+        } else if px >= btn_x_zoom && px < btn_x_zoom + HEADER_BUTTON_WIDTH {
+            Some(HeaderAction::Zoom(pane_id))
         } else if px >= btn_x_vsplit && px < btn_x_vsplit + HEADER_BUTTON_WIDTH {
             Some(HeaderAction::SplitV(pane_id))
         } else if px >= btn_x_hsplit && px < btn_x_hsplit + HEADER_BUTTON_WIDTH {

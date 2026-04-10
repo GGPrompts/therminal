@@ -746,8 +746,13 @@ impl App {
                     .as_ref()
                     .map(|g| g.config.width as f32)
                     .unwrap_or(0.0);
+                let csd_reserved = if self.config.general.use_csd {
+                    crate::pane::CSD_BUTTONS_TOTAL_WIDTH
+                } else {
+                    0.0
+                };
                 if let Some(ws_id) =
-                    chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w)
+                    chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w, csd_reserved)
                 {
                     let bindings = &self.config.keybindings.bindings;
                     let menu = crate::menu::build_tab_menu(ws_id, bindings, (px as f32, py as f32));
@@ -825,8 +830,13 @@ impl App {
                         .as_ref()
                         .map(|g| g.config.width as f32)
                         .unwrap_or(0.0);
+                    let csd_reserved2 = if use_csd {
+                        crate::pane::CSD_BUTTONS_TOTAL_WIDTH
+                    } else {
+                        0.0
+                    };
                     if let Some(ws_id) =
-                        chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w)
+                        chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w, csd_reserved2)
                     {
                         self.switch_workspace(ws_id as u8);
                         if let Some(w) = self.window.as_ref() {
@@ -952,6 +962,11 @@ impl App {
                 }
                 HeaderAction::SplitV(pane_id) => {
                     self.split_pane_by_id(pane_id, SplitDirection::Vertical);
+                }
+                HeaderAction::Zoom(pane_id) => {
+                    // Focus the pane first so zoom acts on the clicked pane.
+                    self.set_focused_pane(Some(pane_id));
+                    self.zoom_toggle_focused_pane();
                 }
             }
             if let Some(w) = self.window.as_ref() {

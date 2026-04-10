@@ -197,6 +197,7 @@ pub(crate) fn draw_split_separator(
 pub(crate) fn draw_pane_header(
     pane: &PaneState,
     is_focused: bool,
+    is_zoomed: bool,
     center_title: Option<&str>,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
@@ -341,17 +342,25 @@ pub(crate) fn draw_pane_header(
         if is_focused { 230 } else { 170 },
     );
 
+    // Button positions right-to-left: [H] [V] [Z] [X]
     let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
-    let btn_x_vsplit = btn_x_close - HEADER_BUTTON_WIDTH;
+    let btn_x_zoom = btn_x_close - HEADER_BUTTON_WIDTH;
+    let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
     let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
 
+    // Zoom glyph: filled square when zoomed (restore), empty square when normal (maximize).
+    let zoom_label = if is_zoomed { " \u{25a3}" } else { " \u{25a1}" };
+
     let focus_tag = if is_focused { "f" } else { "u" };
+    let zoom_tag = if is_zoomed { "z" } else { "n" };
     let idx_slot = format!("hdr_idx_{pane_id}");
     let idx_key = format!("{index_text}|{:.0}|{focus_tag}", vp.width());
     let proc_slot = format!("hdr_proc_{pane_id}");
     let proc_key = format!("{process_text}|{:.0}|{focus_tag}", vp.width());
     let close_slot = format!("hdr_close_{pane_id}");
     let close_key = format!("X|{focus_tag}");
+    let zoom_slot = format!("hdr_zoom_{pane_id}");
+    let zoom_key = format!("{zoom_label}|{focus_tag}|{zoom_tag}");
     let vsplit_slot = format!("hdr_vsplit_{pane_id}");
     let vsplit_key = format!("V|{focus_tag}");
     let hsplit_slot = format!("hdr_hsplit_{pane_id}");
@@ -416,6 +425,19 @@ pub(crate) fn draw_pane_header(
         &mut renderer.overlay_cache,
     );
     ensure_shaped(
+        &zoom_slot,
+        &zoom_key,
+        metrics,
+        HEADER_BUTTON_WIDTH,
+        header_h,
+        zoom_label,
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(button_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    ensure_shaped(
         &vsplit_slot,
         &vsplit_key,
         metrics,
@@ -476,7 +498,7 @@ pub(crate) fn draw_pane_header(
         bottom: surface_height as i32,
     };
 
-    let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(7);
+    let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(8);
     text_areas.push(TextArea {
         buffer: index_buf,
         left: vp.x(),
@@ -524,6 +546,17 @@ pub(crate) fn draw_pane_header(
         text_areas.push(TextArea {
             buffer: buf,
             left: btn_x_vsplit,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: button_color,
+            custom_glyphs: &[],
+        });
+    }
+    if let Some(buf) = cached_buf(&renderer.overlay_cache, &zoom_slot) {
+        text_areas.push(TextArea {
+            buffer: buf,
+            left: btn_x_zoom,
             top: vp.y(),
             scale: 1.0,
             bounds,

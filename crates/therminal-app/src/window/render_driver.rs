@@ -101,12 +101,14 @@ impl App {
 
         let mut pane_counter = 0;
         let show_pane_headers = self.config.general.show_pane_headers;
+        let is_zoomed = self.zoomed_layout.is_some();
         render::render_panes_recursive(
             layout,
             focused,
             show_focus,
             pane_count,
             show_pane_headers,
+            is_zoomed,
             &mut pane_counter,
             renderer,
             &gpu.device,
@@ -242,6 +244,11 @@ impl App {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("tab_bar_encoder"),
                 });
+            let csd_reserved = if use_csd {
+                crate::pane::CSD_BUTTONS_TOTAL_WIDTH
+            } else {
+                0.0
+            };
             chrome::draw_tab_bar(
                 &tab_info,
                 renderer,
@@ -253,6 +260,7 @@ impl App {
                 gpu.config.height,
                 bar_h,
                 self.config.general.show_tab_bar,
+                csd_reserved,
             );
 
             // Submit tab bar before CSD buttons — both use the shared
