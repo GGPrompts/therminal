@@ -59,13 +59,25 @@ Protocol types live in `therminal-protocol/src/daemon.rs`. Server/client in `src
 
 ## Session Manager
 
-Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy managed by `SessionManager` in `src/session.rs`.
+Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy managed by `SessionManager` in `src/session/`.
+
+**Module structure** (split from monolithic `session.rs`):
+
+| File | Responsibility |
+|------|----------------|
+| `session/mod.rs` | Re-exports, top-level `SessionManager` methods |
+| `session/base.rs` | `Session`, `Window`, `Pane` struct definitions |
+| `session/manager.rs` | `SessionManager` CRUD, session lifecycle |
+| `session/pane.rs` | Pane creation, PTY spawn, pane-level operations |
+| `session/window.rs` | Window/workspace management |
+| `session/layout.rs` | Layout tree helpers, split/resize logic |
+| `session/snapshots.rs` | `PaneStateSnapshot`, `PaneSnapshot`, state capture for MCP and reattach |
 
 **Hierarchy**: `SessionManager` owns a `HashMap<SessionId, Session>`. Each `Session` contains `Vec<Window>`, each `Window` contains `Vec<Pane>`. A new session gets one default window with one pane.
 
 **Pane PTY workers**: Both app and daemon use `PtyPaneCore` from `therminal-terminal/src/pty_runtime.rs` for shared PTY lifecycle (Term creation, PTY spawn, reader thread). The daemon implements `PtyReaderHandler` to broadcast `DaemonEvent::PaneOutput`.
 
-**Attach/detach protocol**: tn-zamd landed structured state replay on reattach. On `build_remote_pane_state` the GUI issues `IpcRequest::CapturePaneState { pane_id }`, which returns a versioned `PaneStateSnapshot` (mode flags, cursor, visible grid) produced by `Pane::snapshot_state`. The GUI synthesizes DECSET/DECRST + CUP + grid paint escape sequences via `PaneStateSnapshot::to_replay_bytes` and feeds them directly into the freshly-constructed local `Term` *before* live `DaemonEvent::PaneOutput` forwarding begins. Captured flags: DECTCEM (`?25`), DECCKM (`?1`), LNM (`?7`), focus events (`?1004`), bracketed paste (`?2004`), mouse click/drag/motion (`?1000`/`?1002`/`?1003`), SGR mouse (`?1006`), alt screen (`?1049`), and application keypad (`ESC =` / `ESC >`). Scrollback is intentionally deferred in V1 — the live `PaneOutput` stream rebuilds it organically. The forwarder buffers post-subscribe bytes until snapshot replay completes, then drops the buffer and goes live. The older `PaneSnapshot` type at `session.rs` is still used for MCP capture/grid queries and is unrelated to attach.
+**Attach/detach protocol**: tn-zamd landed structured state replay on reattach. On `build_remote_pane_state` the GUI issues `IpcRequest::CapturePaneState { pane_id }`, which returns a versioned `PaneStateSnapshot` (mode flags, cursor, visible grid) produced by `Pane::snapshot_state`. The GUI synthesizes DECSET/DECRST + CUP + grid paint escape sequences via `PaneStateSnapshot::to_replay_bytes` and feeds them directly into the freshly-constructed local `Term` *before* live `DaemonEvent::PaneOutput` forwarding begins. Captured flags: DECTCEM (`?25`), DECCKM (`?1`), LNM (`?7`), focus events (`?1004`), bracketed paste (`?2004`), mouse click/drag/motion (`?1000`/`?1002`/`?1003`), SGR mouse (`?1006`), alt screen (`?1049`), and application keypad (`ESC =` / `ESC >`). Scrollback is intentionally deferred in V1 — the live `PaneOutput` stream rebuilds it organically. The forwarder buffers post-subscribe bytes until snapshot replay completes, then drops the buffer and goes live. The older `PaneSnapshot` type in `session/snapshots.rs` is still used for MCP capture/grid queries and is unrelated to attach.
 
 **Session CRUD via IPC**: `CreateSession` spawns a real PTY and returns the session ID. `ListSessions`, `GetSession`, `DestroySession` operate on the session map. Session count is synced to the `Lifecycle` for idle-exit tracking.
 
@@ -75,7 +87,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 
 ## MCP Server
 
-`src/mcp.rs` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
+`src/mcp/` implements an MCP server (`rmcp` crate) with cross-platform IPC: Unix sockets on Linux/macOS (`<runtime_dir>/mcp.sock`), named pipes on Windows (`\\.\pipe\therminal-mcp`). Configurable via `[mcp] socket_path` in `therminal.toml`. `therminal-app/src/mcp_stdio.rs` provides a stdio bridge (`therminal mcp` subcommand) that proxies stdin/stdout to the daemon's IPC endpoint, enabling MCP clients like Claude Code to connect as a subprocess.
 
 ### CLI-vs-MCP routing (agents: read this first)
 
@@ -188,7 +200,7 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 1. Pick the correct domain. If none fits, propose a new `terminal.<domain>` in a PR.
 2. Use a standard verb from the table above. Compound verbs use underscores (e.g. `get_content`).
 3. Add the tool name to `tool_category()` in `trust.rs` with the appropriate tier.
-4. Add the `Tool::new()` entry in `tool_definitions()` and the match arm in `call_tool()` in `mcp.rs`.
+4. Add the `Tool::new()` entry in `tool_definitions()` (in `mcp/tools.rs`) and the match arm in `call_tool()` (in `mcp/mod.rs`).
 5. Update the tool table in this file.
 6. **Numeric params must use `deser_compat::*_flexible`** (see below).
 
@@ -196,7 +208,7 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 
 Some MCP clients — at least one version of Claude Code on Windows — serialize numeric tool arguments as JSON strings, sending `{"pane_id":"1"}` instead of `{"pane_id":1}`. A naive `#[derive(Deserialize)]` rejects this with `-32602 invalid type: string "1", expected u64`, which surfaces as a failed tool call even though the JSON Schema we advertise is correct.
 
-As a defensive measure, every numeric field on a tool param struct in `crates/therminal-daemon/src/mcp/mod.rs` uses one of the helpers in `mcp/deser_compat.rs`:
+As a defensive measure, every numeric field on a tool param struct in `crates/therminal-daemon/src/mcp/types.rs` uses one of the helpers in `mcp/deser_compat.rs`:
 
 | Helper | Field type | Notes |
 |--------|------------|-------|
@@ -222,7 +234,19 @@ The `JsonSchema` derive is unaffected — we still advertise `"type":"integer"` 
 
 Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallback. Destructive (Admin) tools are additionally subject to a sliding-window rate limiter (configurable `max_destructive_per_minute`). All allow/deny decisions are audit-logged via `tracing`.
 
-Key files: `src/mcp.rs` (server), `src/trust.rs` (enforcement + rate limiter), `src/persistence.rs` (session state persistence), `src/fd_passing.rs` (FD handoff), `therminal-app/src/mcp_stdio.rs` (stdio bridge), `therminal-core/src/config/mod.rs` (`McpConfig`).
+**MCP module structure** (split from monolithic `mcp.rs`):
+
+| File | Responsibility |
+|------|----------------|
+| `mcp/mod.rs` | `TherminalMcpServer`, `ServerHandler` impl, dispatch, tests |
+| `mcp/types.rs` | All param/result structs, `LayoutNodeJson` |
+| `mcp/helpers.rs` | `json_content`, `parse_args`, `extract_agent_identity`, `build_content_preview`, grid rendering helpers |
+| `mcp/tools.rs` | Tool definitions, `tool_definitions()`, per-tool classification table |
+| `mcp/resources.rs` | MCP resource handlers (pane content, event streams) |
+| `mcp/transport.rs` | IPC transport setup (Unix socket / named pipe) |
+| `mcp/deser_compat.rs` | Stringified-number deserialization helpers |
+
+Key files: `src/mcp/mod.rs` (server), `src/trust.rs` (enforcement + rate limiter), `src/persistence.rs` (session state persistence), `src/fd_passing.rs` (FD handoff), `therminal-app/src/mcp_stdio.rs` (stdio bridge), `therminal-core/src/config/mod.rs` (`McpConfig`).
 
 ## Persistence
 
