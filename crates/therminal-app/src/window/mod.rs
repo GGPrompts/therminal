@@ -145,6 +145,29 @@ pub(crate) enum OverlayMode {
     Settings,
 }
 
+// ── Platform-aware home directory ────────────────────────────────────────
+
+/// Return the user's home directory as a `String`, preferring `$HOME`
+/// (which is always correct on Unix and WSL2) and falling back to
+/// `dirs::home_dir()` on native Windows where `HOME` is often unset.
+///
+/// This replaces raw `std::env::var("HOME")` in app-side path helpers
+/// (status bar `~` abbreviation, tilde expansion for editor/folder-open
+/// hotspots) so that native Windows builds resolve the user profile
+/// directory even when no Unix-style `HOME` variable is present.
+pub(crate) fn platform_home_dir() -> Option<String> {
+    // Fast path: $HOME is set — covers Linux, macOS, and WSL2.
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+    // Fallback: dirs::home_dir() queries the OS profile directory.
+    // On Windows this returns {FOLDERID_Profile} (e.g. C:\Users\<user>)
+    // without requiring $HOME. On Unix it falls back to getpwuid.
+    dirs::home_dir().and_then(|p| p.to_str().map(String::from))
+}
+
 // ── GPU state ────────────────────────────────────────────────────────────
 
 struct GpuState {
@@ -1285,5 +1308,37 @@ mod rename_state_tests {
         s.backspace();
         assert_eq!(s.buffer, "a");
         assert_eq!(s.cursor, 1);
+    }
+}
+
+#[cfg(test)]
+mod platform_home_tests {
+    use super::platform_home_dir;
+
+    #[test]
+    fn platform_home_dir_returns_some_on_unix() {
+        let home = platform_home_dir();
+        assert!(
+            home.is_some(),
+            "platform_home_dir() must return Some on Unix"
+        );
+        let val = home.unwrap();
+        assert!(!val.is_empty(), "home directory must not be empty");
+        assert!(
+            val.starts_with('/'),
+            "home directory must be absolute, got: {val}"
+        );
+    }
+
+    #[test]
+    fn platform_home_dir_prefers_home_env() {
+        if let Ok(expected) = std::env::var("HOME") {
+            let got = platform_home_dir();
+            assert_eq!(
+                got.as_deref(),
+                Some(expected.as_str()),
+                "platform_home_dir should prefer $HOME"
+            );
+        }
     }
 }

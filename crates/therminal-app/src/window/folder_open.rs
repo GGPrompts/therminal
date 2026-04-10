@@ -196,7 +196,7 @@ impl App {
         // Expand `~/…` / `~` before building the `cd` line. The shell
         // we're `exec`-ing into can't expand `~` inside single quotes,
         // so an un-expanded path would land us in `/~/…` (nonexistent).
-        let home = std::env::var("HOME").ok();
+        let home = super::platform_home_dir();
         let expanded = expand_tilde(path, home.as_deref());
         // tn-vm2j: join relative paths against the focused pane's
         // OSC 7 shell cwd before building the `cd` line. Absolute and
@@ -337,7 +337,7 @@ impl App {
         // a literal directory name instead of `$HOME`. On the WSL
         // branch above this is now a no-op (the tilde is already
         // gone); on Linux/macOS it still handles the local HOME.
-        let home = std::env::var("HOME").ok();
+        let home = super::platform_home_dir();
         let expanded = expand_tilde(wsl_pre_expanded.as_ref(), home.as_deref());
         // tn-vm2j: join relative paths against the focused pane's
         // OSC 7 shell cwd before handing off. Most file managers

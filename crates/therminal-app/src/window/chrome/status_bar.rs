@@ -544,7 +544,7 @@ pub(super) fn abbreviate_path(path: &str) -> String {
         path
     };
 
-    if let Ok(home) = std::env::var("HOME")
+    if let Some(home) = super::super::platform_home_dir()
         && let Some(rest) = path.strip_prefix(home.as_str())
     {
         return format!("~{rest}");
@@ -694,5 +694,44 @@ mod tests {
     fn center_text_uses_claude_title_without_cwd() {
         let s = compose_center_text(Some("fix login bug"), None, Some(2));
         assert_eq!(s, "fix login bug  ·  pane 2");
+    }
+}
+
+#[cfg(test)]
+mod abbreviate_path_tests {
+    use super::abbreviate_path;
+
+    #[test]
+    fn abbreviate_path_replaces_home_with_tilde() {
+        if let Some(home) = super::super::super::platform_home_dir() {
+            let path = format!("{home}/projects/therminal/src/main.rs");
+            let abbr = abbreviate_path(&path);
+            assert_eq!(
+                abbr, "~/projects/therminal/src/main.rs",
+                "expected home dir to be abbreviated to ~"
+            );
+        }
+    }
+
+    #[test]
+    fn abbreviate_path_leaves_non_home_paths_alone() {
+        let path = "/tmp/random/path";
+        let abbr = abbreviate_path(path);
+        assert_eq!(abbr, path, "non-home paths should pass through unchanged");
+    }
+
+    #[test]
+    fn abbreviate_path_strips_file_url_prefix() {
+        let path = "file://localhost/tmp/foo";
+        let abbr = abbreviate_path(path);
+        assert_eq!(abbr, "/tmp/foo");
+    }
+
+    #[test]
+    fn abbreviate_path_handles_bare_home() {
+        if let Some(home) = super::super::super::platform_home_dir() {
+            let abbr = abbreviate_path(&home);
+            assert_eq!(abbr, "~", "bare home should abbreviate to ~");
+        }
     }
 }

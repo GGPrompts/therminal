@@ -120,7 +120,7 @@ impl App {
         // Expand `~/…` before the pre-flight stat in `plan_open_in_editor`
         // — otherwise `~/foo.rs:42` stat's as a literal `~/foo.rs` and
         // the hotspot silently fails the "is a regular file" check.
-        let home = std::env::var("HOME").ok();
+        let home = crate::window::platform_home_dir();
         let expanded =
             therminal_terminal::hotspot_detection::expand_tilde(path_with_loc, home.as_deref());
         // tn-vm2j: join relative paths against the focused pane's
