@@ -22,6 +22,14 @@ use therminal_terminal::pty_runtime::TermSize;
 use therminal_terminal::region_index::RegionIndex;
 use tracing::{debug, info, warn};
 
+// tn-l3hk: latency instrumentation — measure IPC round-trip overhead.
+//
+// We record wall-clock timestamps around each blocking IPC call inside
+// `spawn_remote_pane` and `build_remote_pane_state` so we can compare
+// the streamed-bytes model against a hypothetical direct-PTY model.
+// All timings are emitted as tracing `info!` events at the INFO level
+// so they surface in normal runs without needing RUST_LOG=debug.
+
 use super::PaneId;
 use super::PaneListener;
 use super::backend::{PaneBackendKind, REMOTE_PTY_LIVE_TASKS, RemotePtyGuard};
@@ -90,6 +98,9 @@ pub fn spawn_remote_pane(
         "spawn_remote_pane: computed grid size for CreateSession"
     );
 
+    // ── tn-l3hk: overall spawn latency start ─────────────────────────────
+    let t_spawn_start = std::time::Instant::now();
+
     // ── 1. Create the remote session/pane and discover its real pane id ─
     //
     // tn-pgz6: we no longer assume `pane_id == session_id`. After
@@ -105,6 +116,8 @@ pub fn spawn_remote_pane(
         );
         sid
     } else {
+        // tn-l3hk: time the CreateSession round-trip
+        let t_create = std::time::Instant::now();
         let create_resp = tokio_handle.block_on(async {
             tokio::time::timeout(
                 rpc_timeout,
@@ -116,11 +129,16 @@ pub fn spawn_remote_pane(
             )
             .await
         });
+        let t_create_ms = t_create.elapsed().as_millis();
         let create_resp = match create_resp {
             Ok(Ok(resp)) => resp,
             Ok(Err(e)) => return Err(e),
             Err(_) => anyhow::bail!("daemon CreateSession timed out after {rpc_timeout:?}"),
         };
+        info!(
+            rtt_ms = t_create_ms,
+            "tn-l3hk: CreateSession IPC round-trip"
+        );
         match create_resp {
             IpcResponse::SessionCreated { session_id } => session_id,
             IpcResponse::Error { message } => {
@@ -131,6 +149,8 @@ pub fn spawn_remote_pane(
             }
         }
     };
+    // tn-l3hk: time the GetWorkspaces round-trip
+    let t_gw = std::time::Instant::now();
     let workspaces_resp = tokio_handle.block_on(async {
         tokio::time::timeout(
             rpc_timeout,
@@ -138,11 +158,13 @@ pub fn spawn_remote_pane(
         )
         .await
     });
+    let t_gw_ms = t_gw.elapsed().as_millis();
     let workspaces_resp = match workspaces_resp {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => return Err(e),
         Err(_) => anyhow::bail!("daemon GetWorkspaces timed out after {rpc_timeout:?}"),
     };
+    info!(rtt_ms = t_gw_ms, "tn-l3hk: GetWorkspaces IPC round-trip");
     let remote_pane_id = match workspaces_resp {
         IpcResponse::Workspaces { workspaces, .. } => {
             // Look at the first workspace's focused pane (or first pane id).
@@ -190,6 +212,14 @@ pub fn spawn_remote_pane(
         callbacks,
         None,
     )?;
+
+    // tn-l3hk: total spawn wall time (includes CreateSession + GetWorkspaces +
+    // CapturePaneState + worker/forwarder thread creation).
+    info!(
+        total_ms = t_spawn_start.elapsed().as_millis(),
+        local_id, session_id, remote_pane_id, "tn-l3hk: spawn_remote_pane total wall time"
+    );
+
     Ok((state, session_id, remote_pane_id))
 }
 
@@ -512,6 +542,9 @@ pub(crate) fn build_remote_pane_state(
     // to handle the local Term startup.
     {
         let capture_client = Arc::clone(&daemon_client);
+        // tn-l3hk: time the CapturePaneState round-trip (includes snapshot
+        // serialization on the daemon side and deserialization here).
+        let t_capture = std::time::Instant::now();
         let capture_res = tokio_handle.block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
@@ -519,9 +552,16 @@ pub(crate) fn build_remote_pane_state(
             )
             .await
         });
+        let t_capture_ms = t_capture.elapsed().as_millis();
         match capture_res {
             Ok(Ok(snap)) => {
                 let bytes = snap.to_replay_bytes();
+                info!(
+                    remote_pane_id,
+                    rtt_ms = t_capture_ms,
+                    replay_bytes = bytes.len(),
+                    "tn-l3hk: CapturePaneState IPC round-trip (snapshot succeeded)"
+                );
                 debug!(
                     remote_pane_id,
                     modes = ?snap.modes,
@@ -547,9 +587,19 @@ pub(crate) fn build_remote_pane_state(
                 }
             }
             Ok(Err(e)) => {
+                info!(
+                    remote_pane_id,
+                    rtt_ms = t_capture_ms,
+                    "tn-l3hk: CapturePaneState IPC round-trip (failed)"
+                );
                 warn!(remote_pane_id, error = %e, "tn-zamd: CapturePaneState failed; falling back to tn-wlu6 heuristic");
             }
             Err(_) => {
+                info!(
+                    remote_pane_id,
+                    rtt_ms = t_capture_ms,
+                    "tn-l3hk: CapturePaneState IPC round-trip (timed out)"
+                );
                 warn!(
                     remote_pane_id,
                     "tn-zamd: CapturePaneState timed out; falling back to tn-wlu6 heuristic"

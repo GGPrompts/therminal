@@ -442,3 +442,120 @@ async fn test_unsubscribe_stops_events() {
 fn test_max_frame_size_is_one_mib() {
     assert_eq!(MAX_FRAME_SIZE, 1024 * 1024);
 }
+
+/// tn-l3hk: IPC round-trip latency baseline.
+///
+/// Measures the overhead of a single request/response cycle over a local
+/// Unix socket (or named pipe on Windows). This characterises the per-IPC-call
+/// overhead that `spawn_remote_pane` pays three times at startup:
+/// CreateSession + GetWorkspaces + CapturePaneState.
+///
+/// **Decision criteria (from tn-l3hk acceptance):**
+/// - If median RTT < 2 ms and p99 < 10 ms → streamed-bytes model is fine,
+///   FD passing deferred.
+/// - If overhead is >10% of perceived keystroke latency or p99 > 10 ms →
+///   file a follow-up to use fd_passing.rs machinery.
+///
+/// Prints results to stdout; the test always passes (it is an observation,
+/// not a correctness gate). Run with `-- --nocapture` to see the numbers.
+#[tokio::test]
+async fn ipc_rtt_latency_baseline() {
+    let path = temp_socket("latency");
+    let lifecycle = running_lifecycle();
+    let shutdown_notify = lifecycle.shutdown_notify();
+
+    let server = spawn_server(path.clone(), Arc::clone(&lifecycle)).await;
+    tokio::spawn(async move { server.run().await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let client = DaemonClient::connect_with_timeout(&path, Duration::from_secs(5))
+        .await
+        .expect("client connect failed");
+
+    // Warm-up: 5 pings to prime the socket and tokio task scheduling.
+    for _ in 0..5 {
+        client.ping().await.expect("warm-up ping failed");
+    }
+
+    // Measurement: 100 sequential Ping/Pong round-trips.
+    const SAMPLES: usize = 100;
+    let mut samples_us: Vec<u64> = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let t = std::time::Instant::now();
+        client.ping().await.expect("latency ping failed");
+        samples_us.push(t.elapsed().as_micros() as u64);
+    }
+
+    // Compute statistics.
+    samples_us.sort_unstable();
+    let min_us = samples_us[0];
+    let max_us = samples_us[SAMPLES - 1];
+    let median_us = samples_us[SAMPLES / 2];
+    let p95_us = samples_us[(SAMPLES as f64 * 0.95) as usize];
+    let p99_us = samples_us[(SAMPLES as f64 * 0.99) as usize];
+    let mean_us: u64 = samples_us.iter().sum::<u64>() / SAMPLES as u64;
+
+    println!(
+        "\ntn-l3hk IPC round-trip latency (Ping/Pong, {} samples, local Unix socket):",
+        SAMPLES
+    );
+    println!(
+        "  min:    {:>6} µs  ({:.3} ms)",
+        min_us,
+        min_us as f64 / 1000.0
+    );
+    println!(
+        "  mean:   {:>6} µs  ({:.3} ms)",
+        mean_us,
+        mean_us as f64 / 1000.0
+    );
+    println!(
+        "  median: {:>6} µs  ({:.3} ms)",
+        median_us,
+        median_us as f64 / 1000.0
+    );
+    println!(
+        "  p95:    {:>6} µs  ({:.3} ms)",
+        p95_us,
+        p95_us as f64 / 1000.0
+    );
+    println!(
+        "  p99:    {:>6} µs  ({:.3} ms)",
+        p99_us,
+        p99_us as f64 / 1000.0
+    );
+    println!(
+        "  max:    {:>6} µs  ({:.3} ms)",
+        max_us,
+        max_us as f64 / 1000.0
+    );
+    println!();
+
+    // spawn_remote_pane pays 3 round-trips: CreateSession + GetWorkspaces +
+    // CapturePaneState. Estimate total IPC overhead at startup.
+    let estimated_startup_ipc_us = mean_us * 3;
+    println!(
+        "  Estimated IPC overhead at spawn_remote_pane startup (3 RPCs): {} µs  ({:.1} ms)",
+        estimated_startup_ipc_us,
+        estimated_startup_ipc_us as f64 / 1000.0
+    );
+
+    // tn-l3hk decision gate: median < 2ms and p99 < 10ms → acceptable.
+    let median_ok = median_us < 2_000;
+    let p99_ok = p99_us < 10_000;
+    println!(
+        "  Decision: median < 2ms = {}, p99 < 10ms = {}",
+        if median_ok { "PASS" } else { "FAIL" },
+        if p99_ok { "PASS" } else { "FAIL" }
+    );
+    if median_ok && p99_ok {
+        println!("  → streamed-bytes model acceptable; FD passing deferred.");
+    } else {
+        println!(
+            "  → IPC overhead exceeds threshold; file FD-passing follow-up (see crates/therminal-daemon/src/fd_passing.rs)."
+        );
+    }
+
+    client.close().await;
+    shutdown_notify.notify_waiters();
+}
