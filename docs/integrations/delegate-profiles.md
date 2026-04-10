@@ -154,6 +154,64 @@ diff.  See `docs/event-bus-spec.md` for the event envelope schema.
 
 ---
 
+## Result capture
+
+After a delegate finishes, the orchestrator recovers its output via
+`terminal.panes.capture_result`.  The tool uses a two-path strategy:
+
+### Primary path: OSC 633 transcript
+
+When the delegate pane's shell emits OSC 633 marks (Therminal's shell
+integration scripts do this automatically), the `CommandTracker` records
+each command's start/end grid lines.  `capture_result` finds the last
+finished command block and extracts the output lines between its prompt
+line and completion line from the pane's scrollback + visible grid.
+
+The response includes:
+- `source: "transcript"` -- confirms the transcript path was used.
+- `command` -- the command text (from OSC 633 E mark), if the shell
+  provided it.
+- `exit_code` -- from the OSC 633 D mark.
+- `lines` -- the output text, oldest first, with blank lines stripped.
+
+### Fallback path: grid content
+
+When no finished OSC 633 command block exists (the delegate's shell lacks
+shell integration, the delegate wrote output without running a shell
+command, or no commands have completed), `capture_result` falls back to
+returning the last N non-empty lines from the pane's scrollback + visible
+grid.
+
+The response includes:
+- `source: "grid_fallback"` -- signals the fallback was used.
+- `command` and `exit_code` are both `null`.
+- `lines` -- the tail of visible output, oldest first.
+
+### Limits
+
+- `max_lines` (default 200, capped at 500) controls the maximum number of
+  output lines returned.  When output exceeds the limit, the oldest lines
+  are dropped and `truncated_lines` reports how many were cut.
+- The transcript path only captures the *last* finished command.  If the
+  delegate ran multiple commands, only the final one's output is returned.
+  Use `terminal.semantic.query_commands` to enumerate all commands.
+- The grid fallback does not distinguish command output from prompts or
+  other terminal chrome.  It returns raw visible text.
+- Output that has scrolled beyond the scrollback buffer limit (10,000
+  lines) is lost to both paths.
+
+### Usage from `/gg-delegate`
+
+```
+1. Spawn delegate via terminal.panes.create with startup_command
+2. Poll terminal.panes.get_summary until agent_status shows idle/done
+3. Call terminal.panes.capture_result { pane_id }
+4. Read result.lines (check result.source to know which path was used)
+5. Optionally destroy the delegate pane
+```
+
+---
+
 ## Tips
 
 - Profile names may contain hyphens and underscores but must be valid TOML

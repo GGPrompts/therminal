@@ -112,7 +112,7 @@ per-tool classification table. The short version:
 - `terminal.sessions.destroy`, `terminal.panes.destroy` — Admin tier; trust
   enforcement is enforced at the MCP layer, not the CLI layer.
 
-Tools exposed (26 tools):
+Tools exposed (27 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -126,6 +126,7 @@ Tools exposed (26 tools):
 | `terminal.panes.get_content` | Observer | Read the visible grid snapshot with cursor position. **tn-sp3n behavior change:** trailing whitespace is now trimmed from every row by default — empty rows on a sparse pane are returned as `""` instead of `cols`-wide padding (typical 70-90% byte savings). Optional params: `trim_trailing_whitespace=false` restores the historical fixed-width grid, `compact=true` drops fully-blank rows, and `rows=N` returns only the last N visible / non-empty rows. The response now includes a stable `content_hash` (hex-encoded `DefaultHasher` over the full grid + cursor) so subscribers can short-circuit on unchanged screens. |
 | `terminal.panes.get_summary` | Observer | (tn-sp3n) Lightweight (~100 bytes) status snapshot for one pane: `pane_id`, `cursor_col`, `cursor_line`, `content_hash`, `last_command` + `last_exit_code` (from `CommandTracker`), `hotspot_count`, `agent_name` + `agent_status` (from `AgentRegistry`), `timestamp_secs`. Designed for conductor polling — answers "is this pane idle, working, or done?" without pulling any grid content. Compare `content_hash` against the previous tick to decide whether to follow up with `get_content` / `peek`. |
 | `terminal.panes.peek` | Observer | (tn-sp3n) Cheap "what just happened?" snapshot: returns the last N non-empty trimmed lines from a pane (`lines` param defaults to 10, capped server-side at 50) plus the same `content_hash` as `get_content` and a Unix timestamp. ~500 bytes for a typical mostly-empty pane; ideal when `get_summary` says the screen changed and you want a quick look without paying for the full grid. |
+| `terminal.panes.capture_result` | Observer | Capture the final output of the last finished command in a delegate pane. Primary path: extracts output lines from the OSC 633 command transcript (between the last finished command's start and end lines). Fallback: when no transcript data exists, returns the last N non-empty lines from visible grid + scrollback. The `source` field indicates which path was used (`transcript` or `grid_fallback`). Designed for delegate result recovery (tn-ztv3.5). |
 | `terminal.panes.get_geometry` | Observer | Get pane dimensions and split feasibility |
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
 | `terminal.panes.tag` | Writer | Merge opaque key/value tags into a pane's metadata (tn-bbvf). Tags are arbitrary strings — therminal does not interpret them. Existing keys are overwritten; other keys are left untouched. Tags persist across daemon restarts via `sessions.json`. |
