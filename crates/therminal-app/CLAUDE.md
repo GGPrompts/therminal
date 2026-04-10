@@ -25,6 +25,12 @@ src/
 │   ├── spawn.rs         # spawn_pane(), PTY reader loop
 │   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView)
 │   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
+├── widgets/
+│   ├── mod.rs              # WidgetId, re-exports
+│   ├── gpu.rs              # WidgetRenderer + WidgetManager (freshness cache)
+│   ├── rasterizer.rs       # WidgetSpec, WidgetKind, tiny-skia rasterization
+│   ├── badge.rs            # AgentBadgeSource (agent status pill, PoC)
+│   └── agent_timeline.rs   # AgentTimelineSource (tool activity bar, tn-x85k)
 ├── grid_renderer.rs     # wgpu text rendering, glyph cache, rect drawing
 ├── overlay.rs           # OverlayLayer: two-pass alpha-blended overlay compositor
 ├── color_mapping.rs     # ANSI color to thermal palette / glyphon RGBA conversion
@@ -68,7 +74,23 @@ Each frame is composited in two GPU passes, both writing to the same swapchain t
 
 Tiers are sorted before vertex generation so higher tiers always composite on top of lower tiers. Within a tier, submission order is preserved.
 
-Currently the status bar background and visual bell are routed through `OverlayLayer` as the proof of concept. Foundation helpers `push_focus_border_overlay`, `push_header_bg_overlay`, and `push_separator_overlay` exist in `chrome.rs` for future migration of pane chrome backgrounds — they will be wired in once the corresponding text rendering can also be batched. New Phase 6 widgets should push their backgrounds via `OverlayLayer::push_rect` with the `Widget` tier.
+Currently the status bar background and visual bell are routed through `OverlayLayer` as the proof of concept. Foundation helpers `push_focus_border_overlay`, `push_header_bg_overlay`, and `push_separator_overlay` exist in `chrome.rs` for future migration of pane chrome backgrounds -- they will be wired in once the corresponding text rendering can also be batched. New Phase 6 widgets should push their backgrounds via `OverlayLayer::push_rect` with the `Widget` tier.
+
+## Widget Config Pattern (tn-x85k)
+
+Pre-rasterized overlay widgets use the tn-npd substrate: data source produces a `WidgetSpec` with a `data_hash` and a `WidgetKind`, then `WidgetManager::upsert` rasterizes via tiny-skia only when the hash changes. There is **no `Widget` trait** -- widgets are pure data flows.
+
+**Adding a new widget:**
+
+1. Add a new `WidgetKind` variant in `widgets/rasterizer.rs` with a matching `*Spec` struct.
+2. Add a rasterizer function for the new kind (called from `rasterize_to_pixmap`).
+3. Create a source module under `widgets/` that owns the data, computes `data_hash()`, and produces `WidgetSpec` instances.
+4. Add a `[widgets.<name>]` config subsection in `therminal-core/src/config/mod.rs` under `WidgetsConfig`.
+5. Wire into `draw_widget_overlays()` in `render_driver.rs` with position computation and `upsert`.
+6. Add a `KeyAction` toggle if the widget should be user-toggleable.
+7. Every config field must be read by the rendering code (no dead config).
+
+Shipped widgets: `badge.rs` (agent status pill), `agent_timeline.rs` (tool activity bar).
 
 ## Status Bar
 

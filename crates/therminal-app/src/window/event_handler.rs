@@ -205,6 +205,17 @@ impl App {
             KeyAction::JumpErrorNext => {
                 self.jump_to_region(JumpDirection::Next, true);
             }
+            KeyAction::ToggleAgentTimeline => {
+                self.agent_timeline.toggle();
+                if !self.agent_timeline.visible {
+                    // Remove the cached texture so it doesn't linger.
+                    self.widget_manager
+                        .remove(crate::widgets::TIMELINE_WIDGET_ID);
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)

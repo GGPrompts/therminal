@@ -226,6 +226,7 @@ mod tests {
                 assert_eq!(p.height, h);
                 assert!(p.dot.is_some());
             }
+            _ => panic!("expected Pill variant"),
         }
     }
 

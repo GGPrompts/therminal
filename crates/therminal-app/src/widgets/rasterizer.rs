@@ -28,13 +28,17 @@ pub struct WidgetSpec {
 
 /// Supported widget shape kinds.
 ///
-/// v1 only ships `Pill` — a rounded rectangle with a status dot, used by
-/// the agent status badge PoC. Follow-up issues will add more kinds
-/// (context gauge, thinking indicator, tool call card) as they need them.
+/// v1 ships `Pill` (agent status badge) and `TimelineBar` (agent timeline,
+/// tn-x85k). Follow-up issues will add more kinds (context gauge, thinking
+/// indicator, tool call card) as they need them.
 #[derive(Clone, Debug)]
 pub enum WidgetKind {
     /// A rounded-pill background with an optional leading status dot.
     Pill(PillSpec),
+    /// A horizontal bar of colored rectangles representing tool activity
+    /// over time. Each segment is one tool invocation; the second row
+    /// (if present) holds subagent entries.
+    TimelineBar(TimelineBarSpec),
 }
 
 /// A rounded-rectangle "pill" widget with an optional status dot.
@@ -79,6 +83,34 @@ impl PillSpec {
     }
 }
 
+/// A single colored segment within a `TimelineBar`.
+#[derive(Clone, Debug)]
+pub struct TimelineSegment {
+    /// RGBA color for this segment (0..=1).
+    pub color: [f32; 4],
+    /// Whether this segment belongs to a subagent (drawn on the second row).
+    pub is_subagent: bool,
+}
+
+/// A horizontal bar of colored segments representing tool activity (tn-x85k).
+///
+/// The bar is drawn as a rounded rectangle background with colored segments
+/// inside. Top-level entries fill the top half (or full height if no
+/// subagent entries exist); subagent entries fill the bottom half.
+#[derive(Clone, Debug)]
+pub struct TimelineBarSpec {
+    /// Total pixel width of the bar.
+    pub width: u32,
+    /// Total pixel height of the bar.
+    pub height: u32,
+    /// Corner radius for the background pill.
+    pub corner_radius: f32,
+    /// Background RGBA (0..=1).
+    pub background: [f32; 4],
+    /// Ordered segments to draw left-to-right.
+    pub segments: Vec<TimelineSegment>,
+}
+
 /// Rasterizer: builds a tiny-skia `Pixmap` from a `WidgetSpec`.
 ///
 /// Holds no state today; the type exists so we can add (a) a scratch
@@ -101,6 +133,7 @@ impl WidgetRasterizer {
     pub fn rasterize_to_pixmap(&mut self, spec: &WidgetSpec) -> Option<Pixmap> {
         match &spec.kind {
             WidgetKind::Pill(pill) => rasterize_pill(pill),
+            WidgetKind::TimelineBar(bar) => rasterize_timeline_bar(bar),
         }
     }
 }
@@ -204,6 +237,106 @@ fn rasterize_pill(pill: &PillSpec) -> Option<Pixmap> {
             Transform::identity(),
             None,
         );
+    }
+
+    Some(pixmap)
+}
+
+fn rasterize_timeline_bar(bar: &TimelineBarSpec) -> Option<Pixmap> {
+    if bar.width == 0 || bar.height == 0 {
+        tracing::debug!(
+            w = bar.width,
+            h = bar.height,
+            "rasterize_timeline_bar: zero-sized pixmap requested; skipping"
+        );
+        return None;
+    }
+    let mut pixmap = Pixmap::new(bar.width, bar.height)?;
+    pixmap.fill(Color::TRANSPARENT);
+
+    let w = bar.width as f32;
+    let h = bar.height as f32;
+
+    // ── Fill the background pill ─────────────────────────────────────
+    let path = build_pill_path(w, h, bar.corner_radius)?;
+    let bg_paint = Paint {
+        shader: Shader::SolidColor(ts_color(bar.background)),
+        anti_alias: true,
+        ..Paint::default()
+    };
+    pixmap.fill_path(
+        &path,
+        &bg_paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+
+    if bar.segments.is_empty() {
+        return Some(pixmap);
+    }
+
+    // Check whether any subagent segments exist to decide row layout.
+    let has_subagent = bar.segments.iter().any(|s| s.is_subagent);
+    let top_row_h = if has_subagent { h * 0.5 } else { h };
+    let bottom_row_y = if has_subagent { h * 0.5 } else { 0.0 };
+    let bottom_row_h = if has_subagent { h * 0.5 } else { h };
+
+    // Count top-level and subagent segments separately.
+    let top_count = bar.segments.iter().filter(|s| !s.is_subagent).count();
+    let sub_count = bar.segments.iter().filter(|s| s.is_subagent).count();
+
+    // Inset: leave a small margin inside the pill.
+    let inset = bar.corner_radius.min(4.0);
+    let inner_w = (w - 2.0 * inset).max(0.0);
+    let gap = 1.0_f32; // 1px gap between segments.
+
+    // Draw top-level segments.
+    if top_count > 0 {
+        let seg_w =
+            ((inner_w - gap * (top_count as f32 - 1.0).max(0.0)) / top_count as f32).max(1.0);
+        let mut x = inset;
+        for seg in bar.segments.iter().filter(|s| !s.is_subagent) {
+            let rect =
+                SkRect::from_xywh(x, inset.min(2.0), seg_w, top_row_h - inset.min(2.0) * 2.0);
+            if let Some(rect) = rect {
+                let paint = Paint {
+                    shader: Shader::SolidColor(ts_color(seg.color)),
+                    anti_alias: false,
+                    ..Paint::default()
+                };
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
+            x += seg_w + gap;
+        }
+    }
+
+    // Draw subagent segments on the bottom row.
+    if sub_count > 0 {
+        let seg_w =
+            ((inner_w - gap * (sub_count as f32 - 1.0).max(0.0)) / sub_count as f32).max(1.0);
+        let mut x = inset;
+        for seg in bar.segments.iter().filter(|s| s.is_subagent) {
+            let rect = SkRect::from_xywh(
+                x,
+                bottom_row_y + inset.min(2.0),
+                seg_w,
+                bottom_row_h - inset.min(2.0) * 2.0,
+            );
+            if let Some(rect) = rect {
+                // Subagent segments are slightly dimmed (alpha * 0.7) to
+                // visually distinguish them from top-level entries.
+                let mut color = seg.color;
+                color[3] *= 0.7;
+                let paint = Paint {
+                    shader: Shader::SolidColor(ts_color(color)),
+                    anti_alias: false,
+                    ..Paint::default()
+                };
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
+            x += seg_w + gap;
+        }
     }
 
     Some(pixmap)

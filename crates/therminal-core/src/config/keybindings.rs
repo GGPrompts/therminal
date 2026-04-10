@@ -75,6 +75,8 @@ pub enum KeyAction {
     JumpErrorPrev,
     /// Jump scrollback to the next error region.
     JumpErrorNext,
+    /// Toggle the agent timeline overlay widget (tn-x85k).
+    ToggleAgentTimeline,
     // ── Hotspot actions (used by action palette, not keybindable) ────────
     /// Copy a hotspot text to the clipboard.
     HotspotCopy(String),
@@ -128,6 +130,7 @@ impl KeyAction {
             KeyAction::JumpRegionNext => "Jump to next region",
             KeyAction::JumpErrorPrev => "Jump to previous error",
             KeyAction::JumpErrorNext => "Jump to next error",
+            KeyAction::ToggleAgentTimeline => "Toggle agent timeline",
             KeyAction::HotspotCopy(_) => "Copy to clipboard",
             KeyAction::HotspotOpenInEditor(_) => "Open in editor",
             KeyAction::HotspotOpenExternal(_) => "Open externally",
@@ -165,6 +168,7 @@ impl KeyAction {
             | KeyAction::JumpRegionNext
             | KeyAction::JumpErrorPrev
             | KeyAction::JumpErrorNext => "Navigation",
+            KeyAction::ToggleAgentTimeline => "Widgets",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp | KeyAction::ShowSettings => {
                 "General"
@@ -397,6 +401,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "alt+shift+9".to_string(),
                     action: KeyAction::SendToWorkspace(9),
+                },
+                // Agent timeline overlay (tn-x85k)
+                Keybinding {
+                    key: "ctrl+alt+t".to_string(),
+                    action: KeyAction::ToggleAgentTimeline,
                 },
                 // Semantic scrollback navigation
                 Keybinding {

@@ -175,6 +175,19 @@ impl App {
             None
         };
 
+        // Build the agent timeline source from config before `config` is
+        // moved into the struct (tn-x85k).
+        let agent_timeline = {
+            let tc = &config.widgets.agent_timeline;
+            let mut tl = crate::widgets::agent_timeline::AgentTimelineSource::new(
+                tc.max_entries,
+                tc.height_px,
+                tc.position,
+            );
+            tl.visible = tc.enabled;
+            tl
+        };
+
         Self {
             window: None,
             gpu: None,
@@ -227,6 +240,7 @@ impl App {
             pattern_engine,
             widget_renderer: None,
             widget_manager: crate::widgets::WidgetManager::new(),
+            agent_timeline,
             initial_pane_pending: false,
             deferred_remote_spawn: None,
             scrollback_compact_countdown: 0,

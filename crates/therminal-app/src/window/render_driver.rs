@@ -435,26 +435,19 @@ impl App {
     /// Composite pre-rasterized overlay widgets (tn-npd).
     ///
     /// Runs once per frame as the final pass of `App::render`, after the
-    /// grid + chrome overlay pass. Responsibilities:
+    /// grid + chrome overlay pass. Draws:
     ///
-    /// * Look up the focused pane's agent name (from `PaneStatus`) and
-    ///   live `AgentStatus` (from the shared `AgentRegistry`).
-    /// * Build a fresh `AgentBadgeSnapshot`. If no agent is present,
-    ///   fall through and draw nothing — the cached texture, if any,
-    ///   stays allocated for the next time an agent appears.
-    /// * Hand the snapshot to `WidgetManager::upsert`. When the data
-    ///   hash matches the previous frame's the manager returns the
-    ///   cached `CachedWidget` without touching the rasterizer.
-    /// * Position the badge in the top-right of the window (PoC
-    ///   hardcoded placement) and draw it via the textured-quad
-    ///   pipeline in `WidgetRenderer`.
-    /// * Draw the "name · state" label on top of the pill via the
-    ///   existing glyphon overlay text renderer. Text rendering stays
-    ///   out of the pixmap in v1 — see the scope note in
-    ///   `crate::widgets::mod::rs`.
+    /// 1. **Agent status badge** (top-right) — shows the focused pane's
+    ///    detected agent name + inferred status. Only drawn when an agent
+    ///    is present. Also feeds the timeline with tool-change events.
+    /// 2. **Agent timeline bar** (tn-x85k) — horizontal colored bar of
+    ///    recent tool activity. Drawn when visible (keybinding toggle or
+    ///    `widgets.agent_timeline.enabled` config). Position and size
+    ///    controlled by `[widgets.agent_timeline]` config.
     fn draw_widget_overlays(&mut self, view: &wgpu::TextureView) {
-        use crate::widgets::{AgentBadgeSource, BADGE_WIDGET_ID};
+        use crate::widgets::{AgentBadgeSource, BADGE_WIDGET_ID, TIMELINE_WIDGET_ID};
         use glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextArea, TextBounds};
+        use therminal_core::config::TimelinePosition;
 
         let Some(gpu) = self.gpu.as_ref() else {
             return;
@@ -467,191 +460,240 @@ impl App {
         };
 
         // ── Focused pane's agent name (from PaneStatus) ─────────────────
-        let agent_name: Option<String> = {
-            let Some(wm) = self.workspaces.as_ref() else {
-                return;
-            };
+        let agent_name: Option<String> = self.workspaces.as_ref().and_then(|wm| {
             let layout = wm.layout();
-            let Some(fid) = wm.focused_pane() else {
-                return;
-            };
-            let Some(pane) = layout.find_pane(fid) else {
-                return;
-            };
+            let fid = wm.focused_pane()?;
+            let pane = layout.find_pane(fid)?;
             pane.status.lock().ok().and_then(|s| s.agent_name.clone())
-        };
-
-        // If no agent is detected in the focused pane, draw nothing.
-        // The cached texture stays put — next time an agent appears with
-        // the same snapshot it will hit the cache cold, which is fine.
-        let Some(agent_name) = agent_name else {
-            return;
-        };
+        });
 
         // ── Live AgentStatus from the shared registry ───────────────────
-        //
-        // We snapshot into owned values before dropping the lock so we
-        // don't hold the registry mutex across tiny-skia rasterization.
-        let status_owned = {
-            let fid_opt = self.workspaces.as_ref().and_then(|wm| wm.focused_pane());
-            let Some(fid) = fid_opt else {
-                return;
-            };
+        let status_owned = agent_name.as_ref().and_then(|_| {
+            let fid = self.workspaces.as_ref().and_then(|wm| wm.focused_pane())?;
             self.agent_registry
                 .lock()
                 .ok()
                 .and_then(|reg| reg.get(fid).map(|e| e.status.clone()))
-        };
+        });
 
-        let Some(snapshot) = AgentBadgeSource::snapshot(Some(&agent_name), status_owned.as_ref())
-        else {
-            return;
-        };
-        let (spec, width, height) = AgentBadgeSource::spec_for(&snapshot);
-
-        // ── Top-right placement (PoC) ────────────────────────────────────
-        //
-        // Inset from the right edge by 12 px and from the top edge by
-        // (tab bar height + 8). This keeps the badge clear of CSD
-        // controls / tab bar when they're visible.
-        let right_inset = 12.0_f32;
-        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
-            self.config.general.show_tab_bar,
-            self.config.general.use_csd,
-        );
-        let top_inset = tab_bar_h + 8.0;
-        let x = gpu.config.width as f32 - width as f32 - right_inset;
-        let y = top_inset;
-
-        // Bail if the window is too small to fit the badge.
-        if x < 0.0 || y + height as f32 > gpu.config.height as f32 {
-            return;
+        // Feed the timeline with the current tool status, if an agent is
+        // present. This drives the ring buffer from the same per-frame
+        // status snapshot the badge already reads, so no new IPC is needed.
+        if let Some(ref status) = status_owned {
+            use therminal_terminal::agent_registry::AgentStatus;
+            let (tool_name, source) = match status {
+                AgentStatus::ToolUse { tool_name } => (
+                    tool_name.clone(),
+                    crate::widgets::agent_timeline::EventSource::TopLevel,
+                ),
+                AgentStatus::Thinking => (
+                    "Thinking".to_string(),
+                    crate::widgets::agent_timeline::EventSource::TopLevel,
+                ),
+                AgentStatus::Idle => (
+                    "Idle".to_string(),
+                    crate::widgets::agent_timeline::EventSource::TopLevel,
+                ),
+                AgentStatus::Processing | AgentStatus::Streaming => (
+                    "Thinking".to_string(),
+                    crate::widgets::agent_timeline::EventSource::TopLevel,
+                ),
+                AgentStatus::AwaitingInput => (
+                    "Idle".to_string(),
+                    crate::widgets::agent_timeline::EventSource::TopLevel,
+                ),
+                AgentStatus::Active => (
+                    "Thinking".to_string(),
+                    crate::widgets::agent_timeline::EventSource::TopLevel,
+                ),
+            };
+            self.agent_timeline.record_tool_change(&tool_name, source);
         }
 
-        // ── Upsert into the cache (re-rasterizes only on hash change) ───
-        let widget_ref = self.widget_manager.upsert(
-            widget_renderer,
-            &gpu.device,
-            &gpu.queue,
-            BADGE_WIDGET_ID,
-            &spec,
-            x,
-            y,
-        );
-        let Some(widget) = widget_ref else {
-            return;
-        };
-
-        // Clone the fields we need so we can drop the borrow on
-        // `widget_manager` before the glyphon prepare/render cycle
-        // runs — glyphon mutably borrows the grid renderer.
-        let widget_x = widget.x;
-        let widget_y = widget.y;
-        let widget_w = widget.width;
-        let widget_h = widget.height;
-
-        // Draw the pill background texture.
-        widget_renderer.draw(
-            &gpu.device,
-            &gpu.queue,
-            view,
-            gpu.config.width,
-            gpu.config.height,
-            widget,
-        );
-
-        // ── Text label on top of the pill ───────────────────────────────
-        //
-        // Uses the shared `overlay_text_renderer` (not `text_renderer`) so
-        // the badge label doesn't clobber the per-pane cell vertex buffer.
-        //
-        // The label text and colors match the badge snapshot; scale is
-        // derived from the pill height so it reads at a glance without
-        // overlapping the status dot.
-        let label = snapshot.label();
-        let font_size = (widget_h as f32) * 0.52;
-        let line_height = font_size * 1.1;
-        let metrics = Metrics::new(font_size, line_height);
-        let family = renderer.font_config.family.clone();
-        let mut buf = Buffer::new(&mut renderer.font_system, metrics);
-        buf.set_size(
-            &mut renderer.font_system,
-            Some(widget_w as f32),
-            Some(widget_h as f32),
-        );
-        let attrs = Attrs::new().family(Family::Name(&family));
-        buf.set_text(
-            &mut renderer.font_system,
-            &label,
-            &attrs,
-            Shaping::Advanced,
-            None,
-        );
-        buf.shape_until_scroll(&mut renderer.font_system, false);
-
-        // Text origin inside the pill: leave room for the dot.
-        let (tx_local, ty_local) = match spec.kind {
-            crate::widgets::rasterizer::WidgetKind::Pill(ref p) => p.text_origin_px(),
-        };
-        let text_area = TextArea {
-            buffer: &buf,
-            left: widget_x + tx_local,
-            top: widget_y + ty_local,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: widget_x as i32,
-                top: widget_y as i32,
-                right: (widget_x + widget_w as f32) as i32,
-                bottom: (widget_y + widget_h as f32) as i32,
-            },
-            default_color: glyphon::Color::rgba(235, 240, 250, 255),
-            custom_glyphs: &[],
-        };
-
-        // Prepare + render via the dedicated overlay text renderer so
-        // we don't clobber cell glyphs shaped earlier in the frame.
-        if let Err(e) = renderer.overlay_text_renderer.prepare(
-            &gpu.device,
-            &gpu.queue,
-            &mut renderer.font_system,
-            &mut renderer.overlay_atlas,
-            &renderer.viewport,
-            [text_area],
-            &mut renderer.swash_cache,
-        ) {
-            tracing::debug!(error = %e, "widget label prepare failed");
-            return;
-        }
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("widget_label_encoder"),
-            });
+        // ── Agent status badge (PoC) ────────────────────────────────────
+        if let Some(ref agent_name) = agent_name
+            && let Some(snapshot) =
+                AgentBadgeSource::snapshot(Some(agent_name), status_owned.as_ref())
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("widget_label_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let _ = renderer.overlay_text_renderer.render(
-                &renderer.overlay_atlas,
-                &renderer.viewport,
-                &mut pass,
+            let (spec, width, height) = AgentBadgeSource::spec_for(&snapshot);
+
+            let right_inset = 12.0_f32;
+            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+                self.config.general.show_tab_bar,
+                self.config.general.use_csd,
             );
+            let top_inset = tab_bar_h + 8.0;
+            let x = gpu.config.width as f32 - width as f32 - right_inset;
+            let y = top_inset;
+
+            if x >= 0.0 && y + height as f32 <= gpu.config.height as f32 {
+                let widget_ref = self.widget_manager.upsert(
+                    widget_renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    BADGE_WIDGET_ID,
+                    &spec,
+                    x,
+                    y,
+                );
+                if let Some(widget) = widget_ref {
+                    let widget_x = widget.x;
+                    let widget_y = widget.y;
+                    let widget_w = widget.width;
+                    let widget_h = widget.height;
+
+                    widget_renderer.draw(
+                        &gpu.device,
+                        &gpu.queue,
+                        view,
+                        gpu.config.width,
+                        gpu.config.height,
+                        widget,
+                    );
+
+                    // ── Text label on top of the pill ───────────────
+                    let label = snapshot.label();
+                    let font_size = (widget_h as f32) * 0.52;
+                    let line_height = font_size * 1.1;
+                    let metrics = Metrics::new(font_size, line_height);
+                    let family = renderer.font_config.family.clone();
+                    let mut buf = Buffer::new(&mut renderer.font_system, metrics);
+                    buf.set_size(
+                        &mut renderer.font_system,
+                        Some(widget_w as f32),
+                        Some(widget_h as f32),
+                    );
+                    let attrs = Attrs::new().family(Family::Name(&family));
+                    buf.set_text(
+                        &mut renderer.font_system,
+                        &label,
+                        &attrs,
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buf.shape_until_scroll(&mut renderer.font_system, false);
+
+                    let (tx_local, ty_local) = match spec.kind {
+                        crate::widgets::rasterizer::WidgetKind::Pill(ref p) => p.text_origin_px(),
+                        _ => (0.0, 0.0),
+                    };
+                    let text_area = TextArea {
+                        buffer: &buf,
+                        left: widget_x + tx_local,
+                        top: widget_y + ty_local,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: widget_x as i32,
+                            top: widget_y as i32,
+                            right: (widget_x + widget_w as f32) as i32,
+                            bottom: (widget_y + widget_h as f32) as i32,
+                        },
+                        default_color: glyphon::Color::rgba(235, 240, 250, 255),
+                        custom_glyphs: &[],
+                    };
+
+                    if let Err(e) = renderer.overlay_text_renderer.prepare(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut renderer.font_system,
+                        &mut renderer.overlay_atlas,
+                        &renderer.viewport,
+                        [text_area],
+                        &mut renderer.swash_cache,
+                    ) {
+                        tracing::debug!(error = %e, "widget label prepare failed");
+                    } else {
+                        let mut encoder =
+                            gpu.device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("widget_label_encoder"),
+                                });
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("widget_label_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                            let _ = renderer.overlay_text_renderer.render(
+                                &renderer.overlay_atlas,
+                                &renderer.viewport,
+                                &mut pass,
+                            );
+                        }
+                        gpu.queue.submit(std::iter::once(encoder.finish()));
+                    }
+                }
+            }
         }
-        gpu.queue.submit(std::iter::once(encoder.finish()));
+
+        // ── Agent timeline bar (tn-x85k) ────────────────────────────────
+        if self.agent_timeline.visible && !self.agent_timeline.is_empty() {
+            let sw = gpu.config.width as f32;
+            let sh = gpu.config.height as f32;
+            let th = self.agent_timeline.height_px() as f32;
+            let inset = 12.0_f32;
+
+            // Compute bar width: 40% of window width, clamped.
+            let bar_width = ((sw * 0.4).round() as u32).clamp(100, 800);
+
+            // Compute position based on config.
+            let status_bar_h = if self.config.general.show_status_bar {
+                24.0
+            } else {
+                0.0
+            };
+            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+                self.config.general.show_tab_bar,
+                self.config.general.use_csd,
+            );
+
+            let (tl_x, tl_y) = match self.agent_timeline.position() {
+                TimelinePosition::TopRight => (sw - bar_width as f32 - inset, tab_bar_h + inset),
+                TimelinePosition::BottomRight => (
+                    sw - bar_width as f32 - inset,
+                    sh - th - status_bar_h - inset,
+                ),
+                TimelinePosition::BottomCenter => (
+                    (sw - bar_width as f32) / 2.0,
+                    sh - th - status_bar_h - inset,
+                ),
+            };
+
+            // Bail if the window is too small to fit the bar.
+            if tl_x >= 0.0 && tl_y >= 0.0 && tl_y + th <= sh {
+                let spec = self.agent_timeline.spec(bar_width);
+                let widget_ref = self.widget_manager.upsert(
+                    widget_renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    TIMELINE_WIDGET_ID,
+                    &spec,
+                    tl_x,
+                    tl_y,
+                );
+                if let Some(widget) = widget_ref {
+                    widget_renderer.draw(
+                        &gpu.device,
+                        &gpu.queue,
+                        view,
+                        gpu.config.width,
+                        gpu.config.height,
+                        widget,
+                    );
+                }
+            }
+        }
     }
 
     /// Jump the focused pane's scrollback to the previous/next semantic

@@ -311,6 +311,8 @@ pub struct TherminalConfig {
     pub patterns: PatternsConfig,
     /// Sibling delegate profiles for spawning isolated AI agent siblings (tn-ztv3).
     pub delegate: DelegateConfig,
+    /// Overlay widget settings (tn-x85k).
+    pub widgets: WidgetsConfig,
     /// Result of the template-version scan performed by [`Self::load_from`].
     ///
     /// Computed in-process and never round-tripped through TOML
@@ -1208,6 +1210,67 @@ impl Default for DelegateProfileConfig {
             working_dir: WorkingDirMode::default(),
             mcp_enabled: Vec::new(),
             permission_mode: "default".to_string(),
+        }
+    }
+}
+
+// ── Section: Widgets ─────────────────────────────────────────────────────
+
+/// Top-level container for overlay widget configuration (tn-x85k).
+///
+/// Each widget gets its own subsection under `[widgets]`. This sets the
+/// precedent for future widgets (context gauges, tool-call cards, etc.)
+/// to follow the same pattern: `[widgets.<name>]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetsConfig {
+    /// Agent timeline bar: shows recent tool activity color-coded by
+    /// category, with subagent entries visually distinguished.
+    pub agent_timeline: AgentTimelineConfig,
+}
+
+/// Position of the agent timeline bar relative to the window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimelinePosition {
+    /// Top-right corner of the window, below the tab bar.
+    TopRight,
+    /// Bottom-right corner of the window, above the status bar.
+    #[default]
+    BottomRight,
+    /// Bottom-center of the window, above the status bar.
+    BottomCenter,
+}
+
+/// Configuration for the agent timeline overlay widget (tn-x85k).
+///
+/// All fields are wired into the rendering code. `enabled` controls
+/// whether the widget is drawn at all; the keybinding toggle
+/// (`ToggleAgentTimeline`) flips a runtime flag that works independently
+/// of this config value. When `enabled = false` (the default, per
+/// Philosophy B), the timeline is hidden until the user presses the
+/// toggle keybinding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentTimelineConfig {
+    /// Whether the timeline widget is visible on startup.
+    /// Default: false (Philosophy B — ship behind a keybinding).
+    pub enabled: bool,
+    /// Height of the timeline bar in physical pixels.
+    pub height_px: u32,
+    /// Maximum number of tool entries to keep in the ring buffer.
+    pub max_entries: usize,
+    /// Position of the timeline bar relative to the window.
+    pub position: TimelinePosition,
+}
+
+impl Default for AgentTimelineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            height_px: 48,
+            max_entries: 500,
+            position: TimelinePosition::default(),
         }
     }
 }

@@ -47,6 +47,7 @@
 //! thinking indicators, and context gauges are intentionally out of
 //! scope for v1.
 
+pub mod agent_timeline;
 pub mod badge;
 pub mod gpu;
 pub mod rasterizer;
@@ -55,6 +56,8 @@ pub mod rasterizer;
 // The `#[allow(unused_imports)]` is defensive: the types are used by
 // name today only via the submodule paths (see `render_driver.rs`),
 // but future widgets will want to reach them through `crate::widgets::*`.
+#[allow(unused_imports)]
+pub use agent_timeline::{AgentTimelineSource, TIMELINE_WIDGET_ID};
 #[allow(unused_imports)]
 pub use badge::{AgentBadgeSource, BADGE_WIDGET_ID};
 #[allow(unused_imports)]
