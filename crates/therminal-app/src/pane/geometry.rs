@@ -37,6 +37,12 @@ pub const CSD_TAB_BAR_HEIGHT: f32 = 36.0;
 #[allow(dead_code)]
 pub const CSD_BUTTON_WIDTH: f32 = 46.0;
 
+/// Number of CSD window control buttons (settings, minimize, maximize, close).
+pub const CSD_BUTTON_COUNT: u32 = 4;
+
+/// Total width reserved for all CSD window control buttons.
+pub const CSD_BUTTONS_TOTAL_WIDTH: f32 = CSD_BUTTON_WIDTH * CSD_BUTTON_COUNT as f32;
+
 /// Height of a CSD window control button.
 #[allow(dead_code)]
 pub const CSD_BUTTON_HEIGHT: f32 = 36.0;

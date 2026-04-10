@@ -39,6 +39,7 @@ pub(crate) fn draw_tab_bar(
     surface_height: u32,
     bar_h: f32,
     show_tabs: bool,
+    csd_reserved: f32,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
 
@@ -80,7 +81,8 @@ pub(crate) fn draw_tab_bar(
         return;
     }
 
-    let slot_w = slot_width(sw, info.tab_labels.len());
+    let available_w = (sw - csd_reserved).max(0.0);
+    let slot_w = slot_width(available_w, info.tab_labels.len());
     let tab_widths: Vec<f32> = info.tab_labels.iter().map(|_| slot_w).collect();
 
     let tab_offsets: Vec<f32> = tab_widths
@@ -344,12 +346,18 @@ pub(crate) fn tab_bar_hit_test(
     workspace_ids: &[usize],
     tab_labels: &[String],
     bar_width: f32,
+    csd_reserved: f32,
 ) -> Option<usize> {
     if workspace_ids.is_empty() {
         return None;
     }
-    let slot_w = slot_width(bar_width, tab_labels.len());
+    let available_w = (bar_width - csd_reserved).max(0.0);
+    let slot_w = slot_width(available_w, tab_labels.len());
     if slot_w <= 0.0 {
+        return None;
+    }
+    // Clicks inside the CSD reserved zone are not tab clicks.
+    if px >= available_w {
         return None;
     }
     if px < 0.0 {
@@ -397,8 +405,8 @@ mod tests {
 
     #[test]
     fn tab_bar_hit_test_empty_workspaces_returns_none() {
-        assert!(tab_bar_hit_test(0.0, &[], &[], 800.0).is_none());
-        assert!(tab_bar_hit_test(100.0, &[], &labels(&["ws1"]), 800.0).is_none());
+        assert!(tab_bar_hit_test(0.0, &[], &[], 800.0, 0.0).is_none());
+        assert!(tab_bar_hit_test(100.0, &[], &labels(&["ws1"]), 800.0, 0.0).is_none());
     }
 
     #[test]
@@ -406,11 +414,11 @@ mod tests {
         // 4 tabs in 800 px → slot_w = 200.
         let ids = vec![1usize, 2, 3, 4];
         let ls = labels(&["a", "b", "c", "d"]);
-        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls, 800.0), Some(1));
-        assert_eq!(tab_bar_hit_test(199.9, &ids, &ls, 800.0), Some(1));
-        assert_eq!(tab_bar_hit_test(200.0, &ids, &ls, 800.0), Some(2));
-        assert_eq!(tab_bar_hit_test(599.9, &ids, &ls, 800.0), Some(3));
-        assert_eq!(tab_bar_hit_test(700.0, &ids, &ls, 800.0), Some(4));
+        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls, 800.0, 0.0), Some(1));
+        assert_eq!(tab_bar_hit_test(199.9, &ids, &ls, 800.0, 0.0), Some(1));
+        assert_eq!(tab_bar_hit_test(200.0, &ids, &ls, 800.0, 0.0), Some(2));
+        assert_eq!(tab_bar_hit_test(599.9, &ids, &ls, 800.0, 0.0), Some(3));
+        assert_eq!(tab_bar_hit_test(700.0, &ids, &ls, 800.0, 0.0), Some(4));
     }
 
     #[test]
@@ -418,13 +426,37 @@ mod tests {
         let ids = vec![1usize, 2];
         let ls = labels(&["a", "b"]);
         // 2 tabs in 800 px → slot_w capped at TAB_MAX_WIDTH = 200.
-        assert!(tab_bar_hit_test(2.0 * TAB_MAX_WIDTH, &ids, &ls, 800.0).is_none());
+        assert!(tab_bar_hit_test(2.0 * TAB_MAX_WIDTH, &ids, &ls, 800.0, 0.0).is_none());
     }
 
     #[test]
     fn tab_bar_hit_test_negative_x_hits_first_tab() {
         let ids = vec![1usize];
         let ls = labels(&["hello"]);
-        assert_eq!(tab_bar_hit_test(-10.0, &ids, &ls, 800.0), Some(1));
+        assert_eq!(tab_bar_hit_test(-10.0, &ids, &ls, 800.0, 0.0), Some(1));
+    }
+
+    #[test]
+    fn tab_bar_hit_test_respects_csd_reserved() {
+        let csd = crate::pane::CSD_BUTTONS_TOTAL_WIDTH;
+        let ids = vec![1usize, 2, 3, 4];
+        let ls = labels(&["a", "b", "c", "d"]);
+        let available = 800.0 - csd;
+        let slot_w = available / 4.0;
+        assert_eq!(tab_bar_hit_test(0.0, &ids, &ls, 800.0, csd), Some(1));
+        assert_eq!(
+            tab_bar_hit_test(slot_w - 0.1, &ids, &ls, 800.0, csd),
+            Some(1)
+        );
+        assert_eq!(tab_bar_hit_test(slot_w, &ids, &ls, 800.0, csd), Some(2));
+        assert!(tab_bar_hit_test(available + 1.0, &ids, &ls, 800.0, csd).is_none());
+    }
+
+    #[test]
+    fn tab_bar_hit_test_csd_zone_returns_none() {
+        let csd = crate::pane::CSD_BUTTONS_TOTAL_WIDTH;
+        let ids = vec![1usize];
+        let ls = labels(&["hello"]);
+        assert!(tab_bar_hit_test(800.0 - 10.0, &ids, &ls, 800.0, csd).is_none());
     }
 }

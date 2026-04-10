@@ -79,10 +79,11 @@ pub use self::auto_tile::{AutoTileAction, AutoTileDebouncer};
 pub use self::backend::{PaneBackend, PaneBackendKind};
 #[allow(unused_imports)]
 pub use self::geometry::{
-    CSD_BUTTON_HEIGHT, CSD_BUTTON_WIDTH, CSD_TAB_BAR_HEIGHT, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
-    PANE_HEADER_HEIGHT, SEPARATOR_GAP, STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, content_area_rect,
-    content_area_rect_csd, effective_header_height, effective_status_bar_height,
-    effective_tab_bar_height, effective_tab_bar_height_csd,
+    CSD_BUTTON_COUNT, CSD_BUTTON_HEIGHT, CSD_BUTTON_WIDTH, CSD_BUTTONS_TOTAL_WIDTH,
+    CSD_TAB_BAR_HEIGHT, MIN_PANE_HEIGHT, MIN_PANE_WIDTH, PANE_HEADER_HEIGHT, SEPARATOR_GAP,
+    STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, content_area_rect, content_area_rect_csd,
+    effective_header_height, effective_status_bar_height, effective_tab_bar_height,
+    effective_tab_bar_height_csd,
 };
 pub use self::layout::{FocusDirection, LayoutNode, LayoutSnapshot, SpatialDirection};
 #[allow(unused_imports)]

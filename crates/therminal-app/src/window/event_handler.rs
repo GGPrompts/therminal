@@ -751,9 +751,13 @@ impl App {
                 } else {
                     0.0
                 };
-                if let Some(ws_id) =
-                    chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w, csd_reserved)
-                {
+                if let Some(ws_id) = chrome::tab_bar_hit_test(
+                    px as f32,
+                    &workspace_ids,
+                    &tab_labels,
+                    surface_w,
+                    csd_reserved,
+                ) {
                     let bindings = &self.config.keybindings.bindings;
                     let menu = crate::menu::build_tab_menu(ws_id, bindings, (px as f32, py as f32));
                     self.active_menu = Some(menu);
@@ -835,9 +839,13 @@ impl App {
                     } else {
                         0.0
                     };
-                    if let Some(ws_id) =
-                        chrome::tab_bar_hit_test(px as f32, &workspace_ids, &tab_labels, surface_w, csd_reserved2)
-                    {
+                    if let Some(ws_id) = chrome::tab_bar_hit_test(
+                        px as f32,
+                        &workspace_ids,
+                        &tab_labels,
+                        surface_w,
+                        csd_reserved2,
+                    ) {
                         self.switch_workspace(ws_id as u8);
                         if let Some(w) = self.window.as_ref() {
                             w.request_redraw();
