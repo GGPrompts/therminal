@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte::ansi;
@@ -282,6 +283,7 @@ pub(crate) fn build_remote_pane_state(
     let snapshot_applied_for_forwarder = Arc::clone(&snapshot_applied);
     let snapshot_pending_for_forwarder = Arc::clone(&snapshot_pending);
     let shutdown_for_forwarder = Arc::clone(&shutdown);
+    let term_for_forwarder = Arc::clone(&term);
     let forwarder_socket = daemon_socket.clone();
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
     let forwarder_handle = tokio_handle.spawn(async move {
@@ -308,7 +310,11 @@ pub(crate) fn build_remote_pane_state(
         };
         match tokio::time::timeout(
             connect_timeout,
-            sub_client.subscribe_events(vec![EventKind::PaneOutput, EventKind::PaneExited]),
+            sub_client.subscribe_events(vec![
+                EventKind::PaneOutput,
+                EventKind::PaneExited,
+                EventKind::PaneResized,
+            ]),
         )
         .await
         {
@@ -464,6 +470,11 @@ pub(crate) fn build_remote_pane_state(
                 Some(DaemonEvent::PaneExited { pane_id, .. }) if pane_id == remote_pane_id => {
                     info!(remote_pane_id, "remote pane exit event");
                     break;
+                }
+                Some(DaemonEvent::PaneResized {
+                    pane_id, cols, rows, ..
+                }) if pane_id == remote_pane_id => {
+                    apply_remote_resize(&term_for_forwarder, cols as usize, rows as usize);
                 }
                 None => break,
                 _ => {}
@@ -681,6 +692,17 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+fn apply_remote_resize(term: &Arc<FairMutex<Term<PaneListener>>>, cols: usize, rows: usize) {
+    let mut guard = term.lock();
+    if guard.columns() == cols && guard.screen_lines() == rows {
+        return;
+    }
+    guard.resize(TermSize {
+        columns: cols,
+        screen_lines: rows,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,5 +798,25 @@ mod tests {
             mode.contains(TermMode::ALT_SCREEN),
             "ALT_SCREEN should be set"
         );
+    }
+
+    #[test]
+    fn apply_remote_resize_updates_local_term_dimensions() {
+        let term_config = TermConfig {
+            scrolling_history: 100,
+            ..Default::default()
+        };
+        let term_size = TermSize {
+            columns: 80,
+            screen_lines: 24,
+        };
+        let listener = PaneListener::new();
+        let term = Arc::new(FairMutex::new(Term::new(term_config, &term_size, listener)));
+
+        apply_remote_resize(&term, 120, 40);
+
+        let guard = term.lock();
+        assert_eq!(guard.columns(), 120);
+        assert_eq!(guard.screen_lines(), 40);
     }
 }
