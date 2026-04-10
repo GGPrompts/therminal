@@ -1106,14 +1106,23 @@ impl App {
                 return;
             }
             Some(OverlayMode::Settings) => {
+                let is_editing = self.settings_overlay.is_text_editing();
                 match &key_event.logical_key {
-                    Key::Named(NamedKey::Escape) => self.close_overlay(),
-                    Key::Named(NamedKey::Tab) => {
+                    Key::Named(NamedKey::Escape) => {
+                        if !self.settings_overlay.cancel_text_editing() {
+                            self.close_overlay();
+                        }
+                    }
+                    Key::Named(NamedKey::Tab) if !is_editing => {
                         let reverse = self.modifiers.state().shift_key();
                         self.settings_overlay.tab(reverse);
                     }
-                    Key::Named(NamedKey::ArrowUp) => self.settings_overlay.arrow_up(),
-                    Key::Named(NamedKey::ArrowDown) => self.settings_overlay.arrow_down(),
+                    Key::Named(NamedKey::ArrowUp) if !is_editing => {
+                        self.settings_overlay.arrow_up();
+                    }
+                    Key::Named(NamedKey::ArrowDown) if !is_editing => {
+                        self.settings_overlay.arrow_down();
+                    }
                     Key::Named(NamedKey::ArrowLeft) => self.settings_overlay.arrow_left(),
                     Key::Named(NamedKey::ArrowRight) => self.settings_overlay.arrow_right(),
                     Key::Named(NamedKey::Enter) => {
@@ -1121,8 +1130,30 @@ impl App {
                             self.apply_settings_command(cmd);
                         }
                     }
+                    Key::Named(NamedKey::Space) if !is_editing => {
+                        if let Some(cmd) = self.settings_overlay.space() {
+                            self.apply_settings_command(cmd);
+                        }
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        self.settings_overlay.backspace();
+                    }
+                    Key::Named(NamedKey::Delete) => {
+                        self.settings_overlay.delete();
+                    }
+                    Key::Character(s) if is_editing => {
+                        for ch in s.chars() {
+                            self.settings_overlay.char_input(ch);
+                        }
+                    }
                     _ => {}
                 }
+                self.settings_overlay
+                    .sync_toggle_values(&settings_overlay::SettingsRenderValues {
+                        show_pane_headers: self.config.general.show_pane_headers,
+                        show_status_bar: self.config.general.show_status_bar,
+                        show_tab_bar: self.config.general.show_tab_bar,
+                    });
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }

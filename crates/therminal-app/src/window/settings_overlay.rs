@@ -3,8 +3,9 @@
 //! This module provides:
 //! - A reusable section/control registration model (`SettingsOverlayState`).
 //! - Deterministic keyboard navigation state transitions.
+//! - Control type variants (Toggle, Select, TextInput, ListRow) with per-control state.
 //! - Control bindings (`SettingsCommand`) that the app applies to runtime config.
-//! - A simple two-pane overlay renderer (left nav, right controls).
+//! - A simple two-pane overlay renderer (left nav, right controls) with focus ring.
 
 use crate::color_mapping::pixel_rect_to_ndc;
 use crate::grid_renderer::{ColorVertex, GridRenderer};
@@ -76,20 +77,96 @@ impl ControlBinding {
     }
 }
 
+// -- Control type variants --
+
+/// Visual/interactive type for a settings control.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Variants used by downstream settings sections (tn-avjv.5, tn-avjv.6).
+pub(crate) enum ControlType {
+    /// Boolean on/off toggle (renders as a pill).
+    Toggle { value: bool },
+    /// Single-choice selector cycling through a fixed list of options.
+    Select {
+        options: Vec<String>,
+        selected: usize,
+    },
+    /// Single-line editable text field with a visible cursor.
+    TextInput {
+        value: String,
+        cursor: usize,
+        editing: bool,
+    },
+    /// Read-only clickable row displaying a label and a current value string.
+    ListRow { display_value: String },
+    /// Legacy action-only control with no interactive widget state.
+    Action,
+}
+
+#[allow(dead_code)] // Constructors used by downstream settings sections and tests.
+impl ControlType {
+    pub(crate) fn toggle(initial: bool) -> Self {
+        Self::Toggle { value: initial }
+    }
+
+    pub(crate) fn select(options: Vec<String>, initial: usize) -> Self {
+        let selected = if options.is_empty() {
+            0
+        } else {
+            initial.min(options.len() - 1)
+        };
+        Self::Select { options, selected }
+    }
+
+    pub(crate) fn text_input(initial: impl Into<String>) -> Self {
+        let value: String = initial.into();
+        let cursor = value.len();
+        Self::TextInput {
+            value,
+            cursor,
+            editing: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn list_row(display_value: impl Into<String>) -> Self {
+        Self::ListRow {
+            display_value: display_value.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsControl {
     pub label: &'static str,
     pub binding: ControlBinding,
+    pub control_type: ControlType,
 }
 
 impl SettingsControl {
     pub(crate) fn new(label: &'static str, binding: ControlBinding) -> Self {
-        Self { label, binding }
+        Self {
+            label,
+            binding,
+            control_type: ControlType::Action,
+        }
+    }
+
+    pub(crate) fn with_type(
+        label: &'static str,
+        binding: ControlBinding,
+        control_type: ControlType,
+    ) -> Self {
+        Self {
+            label,
+            binding,
+            control_type,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsSection {
+    #[allow(dead_code)] // Used for section lookup by downstream settings sections.
     pub id: &'static str,
     pub title: &'static str,
     pub controls: Vec<SettingsControl>,
@@ -134,6 +211,13 @@ impl SettingsOverlayState {
         self.focus = SettingsFocus::Navigation;
         for idx in &mut self.selected_control_by_section {
             *idx = 0;
+        }
+        for section in &mut self.sections {
+            for control in &mut section.controls {
+                if let ControlType::TextInput { editing, .. } = &mut control.control_type {
+                    *editing = false;
+                }
+            }
         }
     }
 
@@ -195,10 +279,28 @@ impl SettingsOverlayState {
     }
 
     pub(crate) fn arrow_left(&mut self) {
+        if self.focus == SettingsFocus::Controls {
+            if self.text_cursor_left() {
+                return;
+            }
+            if self.active_control_is_select() {
+                self.cycle_select(-1);
+                return;
+            }
+        }
         self.focus = SettingsFocus::Navigation;
     }
 
     pub(crate) fn arrow_right(&mut self) {
+        if self.focus == SettingsFocus::Controls {
+            if self.text_cursor_right() {
+                return;
+            }
+            if self.active_control_is_select() {
+                self.cycle_select(1);
+                return;
+            }
+        }
         self.focus = SettingsFocus::Controls;
     }
 
@@ -208,10 +310,279 @@ impl SettingsOverlayState {
                 self.focus = SettingsFocus::Controls;
                 None
             }
-            SettingsFocus::Controls => self
-                .active_section()
-                .and_then(|s| s.controls.get(self.active_control_index()))
-                .map(|c| c.binding.command()),
+            SettingsFocus::Controls => {
+                let idx = self.active_control_index();
+                let section = self.sections.get_mut(self.selected_section)?;
+                let control = section.controls.get_mut(idx)?;
+                match &mut control.control_type {
+                    ControlType::Toggle { value } => {
+                        *value = !*value;
+                        Some(control.binding.command())
+                    }
+                    ControlType::Select { .. } => {
+                        self.cycle_select(1);
+                        let section = self.sections.get(self.selected_section)?;
+                        let control = section.controls.get(idx)?;
+                        Some(control.binding.command())
+                    }
+                    ControlType::TextInput { editing, .. } => {
+                        if *editing {
+                            *editing = false;
+                            Some(control.binding.command())
+                        } else {
+                            *editing = true;
+                            None
+                        }
+                    }
+                    ControlType::ListRow { .. } | ControlType::Action => {
+                        Some(control.binding.command())
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn space(&mut self) -> Option<SettingsCommand> {
+        if self.focus != SettingsFocus::Controls {
+            return None;
+        }
+        let idx = self.active_control_index();
+        let section = self.sections.get_mut(self.selected_section)?;
+        let control = section.controls.get_mut(idx)?;
+        match &mut control.control_type {
+            ControlType::Toggle { value } => {
+                *value = !*value;
+                Some(control.binding.command())
+            }
+            ControlType::Select { .. } => {
+                self.cycle_select(1);
+                let section = self.sections.get(self.selected_section)?;
+                let control = section.controls.get(idx)?;
+                Some(control.binding.command())
+            }
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } => {
+                if *editing {
+                    value.insert(*cursor, ' ');
+                    *cursor += 1;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn char_input(&mut self, ch: char) -> bool {
+        if self.focus != SettingsFocus::Controls {
+            return false;
+        }
+        let idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(idx) else {
+            return false;
+        };
+        if let ControlType::TextInput {
+            value,
+            cursor,
+            editing,
+        } = &mut control.control_type
+            && *editing
+        {
+            value.insert(*cursor, ch);
+            *cursor += ch.len_utf8();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn backspace(&mut self) -> bool {
+        if self.focus != SettingsFocus::Controls {
+            return false;
+        }
+        let idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(idx) else {
+            return false;
+        };
+        if let ControlType::TextInput {
+            value,
+            cursor,
+            editing,
+        } = &mut control.control_type
+            && *editing
+            && *cursor > 0
+        {
+            let prev = value[..*cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            value.drain(prev..*cursor);
+            *cursor = prev;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn delete(&mut self) -> bool {
+        if self.focus != SettingsFocus::Controls {
+            return false;
+        }
+        let idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(idx) else {
+            return false;
+        };
+        if let ControlType::TextInput {
+            value,
+            cursor,
+            editing,
+        } = &mut control.control_type
+            && *editing
+            && *cursor < value.len()
+        {
+            let next = value[*cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| *cursor + i)
+                .unwrap_or(value.len());
+            value.drain(*cursor..next);
+            return true;
+        }
+        false
+    }
+
+    fn text_cursor_left(&mut self) -> bool {
+        let idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(idx) else {
+            return false;
+        };
+        if let ControlType::TextInput {
+            value,
+            cursor,
+            editing,
+        } = &mut control.control_type
+            && *editing
+            && *cursor > 0
+        {
+            *cursor = value[..*cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            return true;
+        }
+        false
+    }
+
+    fn text_cursor_right(&mut self) -> bool {
+        let idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(idx) else {
+            return false;
+        };
+        if let ControlType::TextInput {
+            value,
+            cursor,
+            editing,
+        } = &mut control.control_type
+            && *editing
+            && *cursor < value.len()
+        {
+            *cursor = value[*cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| *cursor + i)
+                .unwrap_or(value.len());
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn is_text_editing(&self) -> bool {
+        let Some(section) = self.sections.get(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get(self.active_control_index()) else {
+            return false;
+        };
+        matches!(
+            control.control_type,
+            ControlType::TextInput { editing: true, .. }
+        )
+    }
+
+    pub(crate) fn cancel_text_editing(&mut self) -> bool {
+        let ctrl_idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(ctrl_idx) else {
+            return false;
+        };
+        if let ControlType::TextInput { editing, .. } = &mut control.control_type
+            && *editing
+        {
+            *editing = false;
+            return true;
+        }
+        false
+    }
+
+    fn cycle_select(&mut self, delta: i32) {
+        let idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return;
+        };
+        let Some(control) = section.controls.get_mut(idx) else {
+            return;
+        };
+        if let ControlType::Select { options, selected } = &mut control.control_type {
+            if options.is_empty() {
+                return;
+            }
+            let len = options.len() as i32;
+            *selected = ((*selected as i32 + delta).rem_euclid(len)) as usize;
+        }
+    }
+
+    fn active_control_is_select(&self) -> bool {
+        self.sections
+            .get(self.selected_section)
+            .and_then(|s| s.controls.get(self.active_control_index()))
+            .is_some_and(|c| matches!(c.control_type, ControlType::Select { .. }))
+    }
+
+    pub(crate) fn sync_toggle_values(&mut self, values: &SettingsRenderValues) {
+        for section in &mut self.sections {
+            for control in &mut section.controls {
+                match (&control.binding, &mut control.control_type) {
+                    (ControlBinding::TogglePaneHeaders, ControlType::Toggle { value }) => {
+                        *value = values.show_pane_headers;
+                    }
+                    (ControlBinding::ToggleStatusBar, ControlType::Toggle { value }) => {
+                        *value = values.show_status_bar;
+                    }
+                    (ControlBinding::ToggleTabBar, ControlType::Toggle { value }) => {
+                        *value = values.show_tab_bar;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -269,9 +640,21 @@ impl SettingsOverlayState {
             "layout",
             "Layout",
             vec![
-                SettingsControl::new("Show pane headers", ControlBinding::TogglePaneHeaders),
-                SettingsControl::new("Show status bar", ControlBinding::ToggleStatusBar),
-                SettingsControl::new("Show tab bar", ControlBinding::ToggleTabBar),
+                SettingsControl::with_type(
+                    "Show pane headers",
+                    ControlBinding::TogglePaneHeaders,
+                    ControlType::toggle(true),
+                ),
+                SettingsControl::with_type(
+                    "Show status bar",
+                    ControlBinding::ToggleStatusBar,
+                    ControlType::toggle(true),
+                ),
+                SettingsControl::with_type(
+                    "Show tab bar",
+                    ControlBinding::ToggleTabBar,
+                    ControlType::toggle(true),
+                ),
             ],
         ));
 
@@ -317,12 +700,7 @@ pub(crate) struct SettingsRenderValues {
     pub show_tab_bar: bool,
 }
 
-fn bool_text(value: bool) -> &'static str {
-    if value { "ON" } else { "OFF" }
-}
-
 fn truncate_for_width(text: &str, width_px: f32) -> String {
-    // Heuristic tuned for 18px overlay text: keep rows single-line and avoid overlap.
     let max_chars = (width_px / 9.0).floor().max(4.0) as usize;
     let len = text.chars().count();
     if len <= max_chars {
@@ -387,7 +765,6 @@ pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset)
             ],
         ),
     };
-
     colors.background = Some(background.to_string());
     colors.foreground = Some(foreground.to_string());
     colors.cursor = Some(cursor.to_string());
@@ -397,7 +774,7 @@ pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_settings_overlay(
     state: &SettingsOverlayState,
-    values: SettingsRenderValues,
+    _values: SettingsRenderValues,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -412,12 +789,10 @@ pub(crate) fn draw_settings_overlay(
 
     let sw = surface_width as f32;
     let sh = surface_height as f32;
-
     let panel_w = (sw * 0.78).clamp(760.0, 1200.0).min(sw - 24.0);
     let panel_h = (sh * 0.74).clamp(420.0, 760.0).min(sh - 24.0);
     let panel_x = (sw - panel_w) * 0.5;
     let panel_y = (sh - panel_h) * 0.5;
-
     let nav_w = (panel_w * 0.30).clamp(180.0, 320.0);
     let content_x = panel_x + nav_w;
 
@@ -473,19 +848,135 @@ pub(crate) fn draw_settings_overlay(
         }
     }
 
+    let ctrl_row_h = 36.0_f32;
+    let ctrl_start_y = panel_y + 112.0;
+    let focus_ring_border = [0.34, 0.65, 1.0, 0.6];
+
     if state.focus() == SettingsFocus::Controls {
-        let ctrl_row_h = 36.0_f32;
-        let ctrl_start_y = panel_y + 112.0;
         let y = ctrl_start_y + state.active_control_index() as f32 * ctrl_row_h;
+        let row_x = content_x + 22.0;
+        let row_w = panel_w - nav_w - 44.0;
+        let row_h = ctrl_row_h - 3.0;
+        let bw = 2.0_f32;
         verts.extend_from_slice(&pixel_rect_to_ndc(
-            content_x + 22.0,
+            row_x, y, row_w, row_h, sw, sh, item_focus,
+        ));
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            row_x,
             y,
-            panel_w - nav_w - 44.0,
-            ctrl_row_h - 3.0,
+            row_w,
+            bw,
             sw,
             sh,
-            item_focus,
+            focus_ring_border,
         ));
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            row_x,
+            y + row_h - bw,
+            row_w,
+            bw,
+            sw,
+            sh,
+            focus_ring_border,
+        ));
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            row_x,
+            y + bw,
+            bw,
+            row_h - 2.0 * bw,
+            sw,
+            sh,
+            focus_ring_border,
+        ));
+        verts.extend_from_slice(&pixel_rect_to_ndc(
+            row_x + row_w - bw,
+            y + bw,
+            bw,
+            row_h - 2.0 * bw,
+            sw,
+            sh,
+            focus_ring_border,
+        ));
+    }
+
+    if let Some(section) = state.active_section() {
+        let toggle_on_bg = [0.22, 0.78, 0.45, 0.85];
+        let toggle_off_bg = [0.35, 0.38, 0.44, 0.65];
+        let text_field_bg = [0.0, 0.0, 0.0, 0.30];
+        let text_field_editing_bg = [0.0, 0.0, 0.0, 0.50];
+        let text_cursor_color = [0.34, 0.65, 1.0, 0.9];
+        let value_col_x = content_x + 28.0 + (panel_w - nav_w - 56.0) * 0.55;
+
+        for (i, control) in section.controls.iter().enumerate() {
+            let row_y = ctrl_start_y + i as f32 * ctrl_row_h;
+            match &control.control_type {
+                ControlType::Toggle { value } => {
+                    let pill_w = 48.0_f32;
+                    let pill_h = 22.0_f32;
+                    let pill_y = row_y + (ctrl_row_h - pill_h) * 0.5;
+                    let bg = if *value { toggle_on_bg } else { toggle_off_bg };
+                    verts.extend_from_slice(&pixel_rect_to_ndc(
+                        value_col_x,
+                        pill_y,
+                        pill_w,
+                        pill_h,
+                        sw,
+                        sh,
+                        bg,
+                    ));
+                }
+                ControlType::TextInput {
+                    cursor, editing, ..
+                } => {
+                    let field_w = (panel_w - nav_w - 56.0) * 0.42;
+                    let field_h = 24.0_f32;
+                    let field_y = row_y + (ctrl_row_h - field_h) * 0.5;
+                    let bg = if *editing {
+                        text_field_editing_bg
+                    } else {
+                        text_field_bg
+                    };
+                    verts.extend_from_slice(&pixel_rect_to_ndc(
+                        value_col_x,
+                        field_y,
+                        field_w,
+                        field_h,
+                        sw,
+                        sh,
+                        bg,
+                    ));
+                    if *editing {
+                        let char_w = 9.0_f32;
+                        let cursor_x =
+                            value_col_x + 4.0 + (*cursor as f32 * char_w).min(field_w - 8.0);
+                        verts.extend_from_slice(&pixel_rect_to_ndc(
+                            cursor_x,
+                            field_y + 2.0,
+                            2.0,
+                            field_h - 4.0,
+                            sw,
+                            sh,
+                            text_cursor_color,
+                        ));
+                    }
+                }
+                ControlType::Select { .. } => {
+                    let field_w = (panel_w - nav_w - 56.0) * 0.42;
+                    let field_h = 24.0_f32;
+                    let field_y = row_y + (ctrl_row_h - field_h) * 0.5;
+                    verts.extend_from_slice(&pixel_rect_to_ndc(
+                        value_col_x,
+                        field_y,
+                        field_w,
+                        field_h,
+                        sw,
+                        sh,
+                        text_field_bg,
+                    ));
+                }
+                ControlType::ListRow { .. } | ControlType::Action => {}
+            }
+        }
     }
 
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -493,7 +984,6 @@ pub(crate) fn draw_settings_overlay(
         contents: bytemuck::cast_slice(&verts),
         usage: wgpu::BufferUsages::VERTEX,
     });
-
     let mut rect_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("settings_overlay_rect_encoder"),
     });
@@ -543,6 +1033,12 @@ pub(crate) fn draw_settings_overlay(
         220,
     );
     let accent = GlyphColor::rgba(87, 161, 255, 255);
+    let signal = GlyphColor::rgba(
+        PaletteColor::SIGNAL.r,
+        PaletteColor::SIGNAL.g,
+        PaletteColor::SIGNAL.b,
+        255,
+    );
 
     let mut buffers: Vec<Buffer> = Vec::new();
     let mut placements: Vec<(usize, f32, f32, GlyphColor, TextBounds)> = Vec::new();
@@ -598,8 +1094,14 @@ pub(crate) fn draw_settings_overlay(
         ink,
         Weight::SEMIBOLD,
     );
+
+    let hint = if state.is_text_editing() {
+        "Type to edit, Enter to confirm, Esc to cancel"
+    } else {
+        "Tab/Shift+Tab focus, Arrows move, Enter/Space activate, Esc close"
+    };
     add_text(
-        "Tab/Shift+Tab focus, Arrows move, Enter activate, Esc close".to_string(),
+        hint.to_string(),
         content_x + 24.0,
         panel_y + 24.0,
         panel_w - nav_w - 48.0,
@@ -610,11 +1112,10 @@ pub(crate) fn draw_settings_overlay(
     );
 
     for (idx, section) in state.sections().iter().enumerate() {
-        let _section_id = section.id;
         let marker = if idx == state.active_section_index() {
-            "->"
+            ">"
         } else {
-            "  "
+            " "
         };
         let color =
             if idx == state.active_section_index() && state.focus() == SettingsFocus::Navigation {
@@ -645,38 +1146,143 @@ pub(crate) fn draw_settings_overlay(
             ink,
             Weight::SEMIBOLD,
         );
+        let row_width = panel_w - nav_w - 56.0;
+        let label_width = row_width * 0.52;
+        let value_col_x = content_x + 28.0 + row_width * 0.55;
+        let value_width = row_width * 0.42;
 
         for (i, control) in section.controls.iter().enumerate() {
             let selected = i == state.active_control_index();
-            let marker = if selected { "->" } else { "  " };
-            let value_text = match control.binding {
-                ControlBinding::TogglePaneHeaders => bool_text(values.show_pane_headers),
-                ControlBinding::ToggleStatusBar => bool_text(values.show_status_bar),
-                ControlBinding::ToggleTabBar => bool_text(values.show_tab_bar),
-                ControlBinding::ApplyThemePreset(_) => "",
-            };
+            let marker = if selected { ">" } else { " " };
             let row_color = if selected && state.focus() == SettingsFocus::Controls {
                 accent
             } else {
                 ink
             };
-            let row_width = panel_w - nav_w - 56.0;
-            let row_label = if value_text.is_empty() {
-                format!("{marker} {}", control.label)
-            } else {
-                format!("{marker} {}: {value_text}", control.label)
-            };
-            let row_text = truncate_for_width(&row_label, row_width);
-            add_text(
-                row_text,
-                content_x + 28.0,
-                panel_y + 118.0 + i as f32 * 36.0,
-                row_width,
-                32.0,
-                metrics,
-                row_color,
-                Weight::NORMAL,
-            );
+            let row_y = panel_y + 118.0 + i as f32 * 36.0;
+
+            match &control.control_type {
+                ControlType::Toggle { value } => {
+                    add_text(
+                        truncate_for_width(&format!("{marker} {}", control.label), label_width),
+                        content_x + 28.0,
+                        row_y,
+                        label_width,
+                        32.0,
+                        metrics,
+                        row_color,
+                        Weight::NORMAL,
+                    );
+                    let pill_text = if *value { " ON " } else { " OFF" };
+                    let pill_color = if *value { signal } else { muted };
+                    add_text(
+                        pill_text.to_string(),
+                        value_col_x + 4.0,
+                        row_y + 2.0,
+                        48.0,
+                        24.0,
+                        metrics,
+                        pill_color,
+                        Weight::BOLD,
+                    );
+                }
+                ControlType::Select {
+                    options,
+                    selected: sel_idx,
+                } => {
+                    add_text(
+                        truncate_for_width(&format!("{marker} {}", control.label), label_width),
+                        content_x + 28.0,
+                        row_y,
+                        label_width,
+                        32.0,
+                        metrics,
+                        row_color,
+                        Weight::NORMAL,
+                    );
+                    let opt_label = options
+                        .get(*sel_idx)
+                        .map(|s| s.as_str())
+                        .unwrap_or("(none)");
+                    add_text(
+                        truncate_for_width(&format!("< {opt_label} >"), value_width),
+                        value_col_x + 4.0,
+                        row_y + 2.0,
+                        value_width,
+                        24.0,
+                        metrics,
+                        row_color,
+                        Weight::NORMAL,
+                    );
+                }
+                ControlType::TextInput { value, editing, .. } => {
+                    let em = if *editing { "*" } else { "" };
+                    add_text(
+                        truncate_for_width(&format!("{marker} {}{em}", control.label), label_width),
+                        content_x + 28.0,
+                        row_y,
+                        label_width,
+                        32.0,
+                        metrics,
+                        row_color,
+                        Weight::NORMAL,
+                    );
+                    let display = if value.is_empty() && !*editing {
+                        "(empty)".to_string()
+                    } else {
+                        value.clone()
+                    };
+                    let text_color = if value.is_empty() && !*editing {
+                        muted
+                    } else {
+                        ink
+                    };
+                    add_text(
+                        truncate_for_width(&display, value_width - 8.0),
+                        value_col_x + 4.0,
+                        row_y + 2.0,
+                        value_width - 8.0,
+                        24.0,
+                        metrics,
+                        text_color,
+                        Weight::NORMAL,
+                    );
+                }
+                ControlType::ListRow { display_value } => {
+                    add_text(
+                        truncate_for_width(&format!("{marker} {}", control.label), label_width),
+                        content_x + 28.0,
+                        row_y,
+                        label_width,
+                        32.0,
+                        metrics,
+                        row_color,
+                        Weight::NORMAL,
+                    );
+                    add_text(
+                        truncate_for_width(display_value, value_width),
+                        value_col_x + 4.0,
+                        row_y + 2.0,
+                        value_width,
+                        24.0,
+                        metrics,
+                        muted,
+                        Weight::NORMAL,
+                    );
+                }
+                ControlType::Action => {
+                    add_text(
+                        truncate_for_width(&format!("{marker} {}", control.label), row_width),
+                        content_x + 28.0,
+                        row_y,
+                        row_width,
+                        32.0,
+                        metrics,
+                        row_color,
+                        Weight::NORMAL,
+                    );
+                }
+            }
         }
     }
 
@@ -692,7 +1298,6 @@ pub(crate) fn draw_settings_overlay(
             custom_glyphs: &[],
         })
         .collect();
-
     let mut text_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("settings_overlay_text_encoder"),
     });
@@ -708,7 +1313,6 @@ pub(crate) fn draw_settings_overlay(
     ) {
         tracing::warn!("settings overlay text prepare failed: {}", e);
     }
-
     {
         let mut pass = text_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("settings_overlay_text_pass"),
@@ -734,7 +1338,6 @@ pub(crate) fn draw_settings_overlay(
             tracing::warn!("settings overlay text render failed: {}", e);
         }
     }
-
     queue.submit(std::iter::once(text_encoder.finish()));
 }
 
@@ -749,22 +1352,18 @@ mod tests {
             ((v + 0.055) / 1.055).powf(2.4)
         }
     }
-
     fn relative_luminance(hex: &str) -> f64 {
         let color = ColorsConfig::parse_hex(hex).expect("valid hex color");
-        let r = srgb_to_linear(color.r as f64 / 255.0);
-        let g = srgb_to_linear(color.g as f64 / 255.0);
-        let b = srgb_to_linear(color.b as f64 / 255.0);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
+        0.2126 * srgb_to_linear(color.r as f64 / 255.0)
+            + 0.7152 * srgb_to_linear(color.g as f64 / 255.0)
+            + 0.0722 * srgb_to_linear(color.b as f64 / 255.0)
     }
-
     fn contrast_ratio(a: &str, b: &str) -> f64 {
         let l1 = relative_luminance(a);
         let l2 = relative_luminance(b);
         let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
         (hi + 0.05) / (lo + 0.05)
     }
-
     fn assert_min_ansi_contrast(colors: &ColorsConfig, min_contrast: f64, theme_name: &str) {
         let background = colors.background.as_deref().unwrap_or("#000000");
         let ansi = colors.ansi.as_ref().expect("theme should set ANSI palette");
@@ -802,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_from_nav_then_enter_returns_command() {
+    fn enter_from_nav_then_enter_toggles() {
         let mut state = SettingsOverlayState::new();
         assert_eq!(state.enter(), None);
         assert_eq!(state.focus(), SettingsFocus::Controls);
@@ -828,6 +1427,117 @@ mod tests {
     }
 
     #[test]
+    fn toggle_space_flips_value() {
+        let mut state = SettingsOverlayState::new();
+        state.tab(false);
+        assert_eq!(state.space(), Some(SettingsCommand::TogglePaneHeaders));
+    }
+
+    #[test]
+    fn select_arrows_cycle_options() {
+        let mut state = SettingsOverlayState::new();
+        state.register_section(SettingsSection::new(
+            "ts",
+            "TS",
+            vec![SettingsControl::with_type(
+                "C",
+                ControlBinding::ToggleStatusBar,
+                ControlType::select(vec!["A".into(), "B".into(), "C".into()], 0),
+            )],
+        ));
+        state.arrow_down();
+        state.arrow_down();
+        state.tab(false);
+        state.arrow_right();
+        if let ControlType::Select { selected, .. } =
+            &state.sections[state.selected_section].controls[0].control_type
+        {
+            assert_eq!(*selected, 1);
+        }
+        state.arrow_left();
+        if let ControlType::Select { selected, .. } =
+            &state.sections[state.selected_section].controls[0].control_type
+        {
+            assert_eq!(*selected, 0);
+        }
+    }
+
+    #[test]
+    fn text_input_enter_edits_then_confirms() {
+        let mut state = SettingsOverlayState::new();
+        state.register_section(SettingsSection::new(
+            "tt",
+            "TT",
+            vec![SettingsControl::with_type(
+                "N",
+                ControlBinding::ToggleStatusBar,
+                ControlType::text_input("hello"),
+            )],
+        ));
+        state.arrow_down();
+        state.arrow_down();
+        state.tab(false);
+        assert!(!state.is_text_editing());
+        assert_eq!(state.enter(), None);
+        assert!(state.is_text_editing());
+        assert!(state.char_input('!'));
+        assert!(state.enter().is_some());
+        assert!(!state.is_text_editing());
+        if let ControlType::TextInput { value, .. } =
+            &state.sections[state.selected_section].controls[0].control_type
+        {
+            assert_eq!(value, "hello!");
+        }
+    }
+
+    #[test]
+    fn text_input_backspace() {
+        let mut state = SettingsOverlayState::new();
+        state.register_section(SettingsSection::new(
+            "tb",
+            "TB",
+            vec![SettingsControl::with_type(
+                "P",
+                ControlBinding::ToggleStatusBar,
+                ControlType::text_input("abc"),
+            )],
+        ));
+        state.arrow_down();
+        state.arrow_down();
+        state.tab(false);
+        state.enter();
+        assert!(state.backspace());
+        if let ControlType::TextInput { value, cursor, .. } =
+            &state.sections[state.selected_section].controls[0].control_type
+        {
+            assert_eq!(value, "ab");
+            assert_eq!(*cursor, 2);
+        }
+        assert!(!state.delete());
+    }
+
+    #[test]
+    fn escape_cancels_text_editing() {
+        let mut state = SettingsOverlayState::new();
+        state.register_section(SettingsSection::new(
+            "te",
+            "TE",
+            vec![SettingsControl::with_type(
+                "F",
+                ControlBinding::ToggleStatusBar,
+                ControlType::text_input(""),
+            )],
+        ));
+        state.arrow_down();
+        state.arrow_down();
+        state.tab(false);
+        state.enter();
+        assert!(state.is_text_editing());
+        assert!(state.cancel_text_editing());
+        assert!(!state.is_text_editing());
+    }
+
+    #[test]
     fn theme_preset_writes_expected_palette_fields() {
         let mut colors = ColorsConfig::default();
         apply_theme_preset(&mut colors, ThemePreset::OriginalTherminal);
@@ -850,7 +1560,6 @@ mod tests {
                 .map(String::as_str),
             Some("#fef3c7")
         );
-
         apply_theme_preset(&mut colors, ThemePreset::Paper);
         assert_eq!(colors.background.as_deref(), Some("#f2eede"));
         assert_eq!(colors.foreground.as_deref(), Some("#000000"));
@@ -860,57 +1569,29 @@ mod tests {
 
     #[test]
     fn theme_presets_keep_readable_fg_bg_contrast() {
-        // WCAG AA threshold for normal text.
         const MIN_CONTRAST: f64 = 4.5;
         let mut colors = ColorsConfig::default();
-
-        apply_theme_preset(&mut colors, ThemePreset::OriginalTherminal);
-        let ratio = contrast_ratio(
-            colors.background.as_deref().unwrap_or("#000000"),
-            colors.foreground.as_deref().unwrap_or("#ffffff"),
-        );
-        assert!(
-            ratio >= MIN_CONTRAST,
-            "OriginalTherminal contrast too low: {ratio:.2}"
-        );
-
+        for preset in [
+            ThemePreset::OriginalTherminal,
+            ThemePreset::Paper,
+            ThemePreset::TokyoNightLight,
+            ThemePreset::TomorrowNightBright,
+            ThemePreset::HemisuDark,
+        ] {
+            apply_theme_preset(&mut colors, preset);
+            let ratio = contrast_ratio(
+                colors.background.as_deref().unwrap_or("#000000"),
+                colors.foreground.as_deref().unwrap_or("#ffffff"),
+            );
+            assert!(
+                ratio >= MIN_CONTRAST,
+                "{:?} contrast too low: {ratio:.2}",
+                preset
+            );
+        }
         apply_theme_preset(&mut colors, ThemePreset::Paper);
-        let ratio = contrast_ratio(
-            colors.background.as_deref().unwrap_or("#000000"),
-            colors.foreground.as_deref().unwrap_or("#ffffff"),
-        );
-        assert!(ratio >= MIN_CONTRAST, "Paper contrast too low: {ratio:.2}");
         assert_min_ansi_contrast(&colors, MIN_CONTRAST, "Paper");
-
         apply_theme_preset(&mut colors, ThemePreset::TokyoNightLight);
-        let ratio = contrast_ratio(
-            colors.background.as_deref().unwrap_or("#000000"),
-            colors.foreground.as_deref().unwrap_or("#ffffff"),
-        );
-        assert!(
-            ratio >= MIN_CONTRAST,
-            "TokyoNightLight contrast too low: {ratio:.2}"
-        );
         assert_min_ansi_contrast(&colors, MIN_CONTRAST, "TokyoNightLight");
-
-        apply_theme_preset(&mut colors, ThemePreset::TomorrowNightBright);
-        let ratio = contrast_ratio(
-            colors.background.as_deref().unwrap_or("#000000"),
-            colors.foreground.as_deref().unwrap_or("#ffffff"),
-        );
-        assert!(
-            ratio >= MIN_CONTRAST,
-            "TomorrowNightBright contrast too low: {ratio:.2}"
-        );
-
-        apply_theme_preset(&mut colors, ThemePreset::HemisuDark);
-        let ratio = contrast_ratio(
-            colors.background.as_deref().unwrap_or("#000000"),
-            colors.foreground.as_deref().unwrap_or("#ffffff"),
-        );
-        assert!(
-            ratio >= MIN_CONTRAST,
-            "HemisuDark contrast too low: {ratio:.2}"
-        );
     }
 }
