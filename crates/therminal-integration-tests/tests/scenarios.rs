@@ -101,6 +101,7 @@ async fn split_pane_appears_in_list_panes() {
             cwd: None,
             startup_command: None,
             ratio: None,
+            shell: None,
         })
         .await
         .expect("split_pane should succeed");

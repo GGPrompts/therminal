@@ -93,6 +93,7 @@ impl App {
                     cwd: cwd_clone,
                     startup_command: None,
                     ratio: None,
+                    shell: None,
                 }),
             )
             .await
@@ -287,7 +288,7 @@ impl App {
     /// / send_to_workspace replacement / restore_layout rebuild).
     ///
     /// Flow:
-    /// 1. Issue `IpcRequest::SplitPane { pane_id: anchor_daemon_id, horizontal: true, cwd: None }`
+    /// 1. Issue `IpcRequest::SplitPane { pane_id: anchor_daemon_id, horizontal: true, cwd: None, shell: None }`
     /// 2. Allocate a fresh local id via `next_pane_id()`
     /// 3. Build the local `PaneState` via `remote_spawn::build_remote_pane_state`
     /// 4. Insert the (local, daemon) pair into `pane_id_map`
@@ -312,6 +313,7 @@ impl App {
             cwd: None,
             startup_command: None,
             ratio: None,
+            shell: None,
         }) {
             Ok(r) => r,
             Err(e) => {

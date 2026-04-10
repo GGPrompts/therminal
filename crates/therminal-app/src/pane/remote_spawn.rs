@@ -135,6 +135,7 @@ pub fn spawn_remote_pane(
                     name: None,
                     cols: Some(cols as u16),
                     rows: Some(rows as u16),
+                    shell: None,
                 }),
             )
             .await

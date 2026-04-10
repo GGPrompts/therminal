@@ -475,6 +475,13 @@ pub struct GridRenderer {
     /// Value: (cache_key, shaped Buffer). The cache_key encodes text + width + style
     /// so we only re-shape when inputs actually change.
     pub(crate) overlay_cache: HashMap<String, (String, Buffer)>,
+
+    /// Pattern-engine widget matches collected during the current frame's
+    /// render pass (tn-068b). Cleared at the start of each frame via
+    /// `clear_frame_maps()`, populated by `extend_hotspots_from_patterns`
+    /// in `render.rs`, consumed by `draw_widget_overlays` in
+    /// `render_driver.rs`.
+    pub(crate) pattern_widget_sink: Vec<crate::widgets::pattern_widget::PatternWidgetMatch>,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -669,6 +676,7 @@ impl GridRenderer {
             selection_override: None,
             ansi_override: None,
             overlay_cache: HashMap::new(),
+            pattern_widget_sink: Vec::new(),
         }
     }
 
@@ -917,6 +925,7 @@ impl GridRenderer {
     pub fn clear_frame_maps(&mut self) {
         // hotspot_map: damage-aware incremental update (see render_from_cache)
         self.hyperlink_map.clear();
+        self.pattern_widget_sink.clear();
     }
 
     /// Set the pane ID for the pane about to be rendered. Map entries

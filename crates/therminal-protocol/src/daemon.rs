@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -108,6 +108,9 @@ pub enum IpcRequest {
         name: Option<String>,
         cols: Option<u16>,
         rows: Option<u16>,
+        /// Shell binary to spawn instead of the global default. When `None`,
+        /// the daemon falls back to `general.shell` from config.
+        shell: Option<String>,
     },
     /// Destroy a session.
     DestroySession { session_id: SessionId },
@@ -131,6 +134,9 @@ pub enum IpcRequest {
         /// defaults to 0.5 (equal halves). Values are clamped to
         /// `0.1..=0.9` on the daemon side to prevent degenerate layouts.
         ratio: Option<f32>,
+        /// Shell binary to spawn instead of the global default. When `None`,
+        /// the daemon falls back to `general.shell` from config.
+        shell: Option<String>,
     },
     /// Kill (destroy) a specific pane.
     KillPane { pane_id: PaneId },
@@ -470,6 +476,11 @@ pub struct PaneStateSnapshot {
     /// Attributes are not captured in v1 — only the glyphs. Future
     /// versions may add `fg`/`bg`/`flags` per cell.
     pub grid_chars: Vec<String>,
+    /// Opaque key/value tags attached to this pane (tn-bbvf).
+    /// Included in the snapshot so the GUI can display tag badges in
+    /// pane headers immediately on attach without a separate RPC.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tags: HashMap<String, String>,
 }
 
 /// DEC private mode flags captured from the daemon-side alacritty `Term`.
@@ -1193,6 +1204,7 @@ mod tests {
             cursor_col: 10,
             cursor_line: 5,
             grid_chars: vec!["hello".into(); 24],
+            tags: HashMap::new(),
         };
         let msg = IpcMessage::Response {
             request_id: 42,
@@ -1220,6 +1232,7 @@ mod tests {
             cursor_col: 0,
             cursor_line: 0,
             grid_chars: vec!["hello".into(), "world".into()],
+            tags: HashMap::new(),
         };
         let bytes = snap.to_replay_bytes();
         // Hide cursor.

@@ -696,6 +696,57 @@ impl App {
                 }
             }
         }
+
+        // -- Pattern-engine widget placements (tn-068b) -------------------
+        // Drain widget matches collected during the render pass and route
+        // each through the WidgetManager for rasterization + draw.
+        let pattern_matches: Vec<_> = renderer.pattern_widget_sink.drain(..).collect();
+        if !pattern_matches.is_empty() {
+            use crate::widgets::pattern_widget::{
+                compute_placement, spec_from_resolved, widget_id_for,
+            };
+
+            let cell_width = renderer.cell_width;
+            let cell_height = renderer.cell_height;
+            let sw = gpu.config.width;
+            let sh = gpu.config.height;
+
+            for m in &pattern_matches {
+                let (spec, widget_w, widget_h) = spec_from_resolved(&m.widget);
+                let (x, y) = compute_placement(m, cell_width, cell_height, widget_w, sw);
+
+                // Bounds check: skip if the widget would be off-screen.
+                if x < 0.0 || y < 0.0 || y + widget_h as f32 > sh as f32 {
+                    continue;
+                }
+
+                let id = widget_id_for(m.pane_id, m.row, m.start_col);
+                let widget_ref = self.widget_manager.upsert(
+                    widget_renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    id,
+                    &spec,
+                    x,
+                    y,
+                );
+                if let Some(widget) = widget_ref {
+                    widget_renderer.draw(
+                        &gpu.device,
+                        &gpu.queue,
+                        view,
+                        gpu.config.width,
+                        gpu.config.height,
+                        widget,
+                    );
+                }
+            }
+            tracing::trace!(
+                count = pattern_matches.len(),
+                "pattern-widget: placed {} widget(s)",
+                pattern_matches.len(),
+            );
+        }
     }
 
     /// Jump the focused pane's scrollback to the previous/next semantic

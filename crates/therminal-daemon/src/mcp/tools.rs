@@ -125,8 +125,11 @@ impl TherminalMcpServer {
         use therminal_terminal::pty::SpawnOptions;
 
         // Build spawn options from params.
+        // `shell` sets the PTY shell binary; `command` is the legacy alias.
+        // When both are set, `shell` takes precedence.
+        let shell_override = params.shell.or(params.command).unwrap_or_default();
         let spawn_options = SpawnOptions {
-            shell: params.command.unwrap_or_default(),
+            shell: shell_override,
             cwd: params.cwd.unwrap_or_default(),
             ..Default::default()
         };

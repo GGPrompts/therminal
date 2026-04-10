@@ -22,6 +22,7 @@ use therminal_terminal::hotspot_detection::{
 use therminal_terminal::semantic_patterns::PatternEngine;
 
 use crate::claude_cwd::ClaudeCwdTracker;
+use crate::widgets::pattern_widget::PatternWidgetMatch;
 
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 
@@ -137,11 +138,15 @@ fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extend_hotspots_from_patterns(
     engine: &PatternEngine,
     pane_id: u64,
     row_texts: &[String],
     hotspots: &mut Vec<TextHotspot>,
+    widget_sink: &mut Vec<PatternWidgetMatch>,
+    pane_vp_x: f32,
+    pane_vp_y: f32,
 ) {
     for (row_idx, text) in row_texts.iter().enumerate() {
         if text.is_empty() {
@@ -172,6 +177,31 @@ fn extend_hotspots_from_patterns(
             byte_to_col_map.get(byte).copied().unwrap_or(byte)
         });
         hotspots.extend(pattern_hotspots);
+
+        // Collect Widget-action matches for the widget rendering pass (tn-068b).
+        for m in &matches {
+            if let therminal_terminal::semantic_patterns::ResolvedAction::Widget(ref w) =
+                m.action
+            {
+                let start_col = byte_to_col_map
+                    .get(m.byte_start)
+                    .copied()
+                    .unwrap_or(m.byte_start);
+                let end_col = byte_to_col_map
+                    .get(m.byte_end)
+                    .copied()
+                    .unwrap_or(m.byte_end);
+                widget_sink.push(PatternWidgetMatch {
+                    pane_id,
+                    row: row_idx,
+                    start_col,
+                    end_col,
+                    pane_vp_x,
+                    pane_vp_y,
+                    widget: w.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -464,6 +494,11 @@ fn render_single_pane(
     term_guard.reset_damage();
     drop(term_guard);
 
+    // Pre-compute pane viewport pixel origin for widget placement (tn-068b).
+    let header_h_early = crate::pane::effective_header_height(pane_count, show_pane_headers);
+    let pane_vp_x = vp.x() + renderer.padding_x();
+    let pane_vp_y = vp.y() + renderer.padding_y() + header_h_early;
+
     // ── Damage-aware URL/hotspot detection ───────────────────────────────
     // When partial damage is available, only run detection on damaged rows
     // to avoid re-scanning the entire visible area every frame.
@@ -489,7 +524,15 @@ fn render_single_pane(
             hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
         }
         if let Some(engine) = pattern_engine {
-            extend_hotspots_from_patterns(engine, pane.id, &row_texts, &mut hotspots);
+            extend_hotspots_from_patterns(
+                engine,
+                pane.id,
+                &row_texts,
+                &mut hotspots,
+                &mut renderer.pattern_widget_sink,
+                pane_vp_x,
+                pane_vp_y,
+            );
         }
 
         // O(1) copy-back: build a HashMap from detected URLs keyed by (row, col),
@@ -530,7 +573,15 @@ fn render_single_pane(
             hotspots.extend(detect_claude_tool_call_hotspots(&row_texts, cwd));
         }
         if let Some(engine) = pattern_engine {
-            extend_hotspots_from_patterns(engine, pane.id, &row_texts, &mut hotspots);
+            extend_hotspots_from_patterns(
+                engine,
+                pane.id,
+                &row_texts,
+                &mut hotspots,
+                &mut renderer.pattern_widget_sink,
+                pane_vp_x,
+                pane_vp_y,
+            );
         }
 
         // Row-indexed hotspot application: O(C + H) instead of O(H*C).

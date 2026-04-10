@@ -461,7 +461,12 @@ async fn dispatch_ipc(
                 },
             }
         }
-        IpcRequest::CreateSession { name, cols, rows } => {
+        IpcRequest::CreateSession {
+            name,
+            cols,
+            rows,
+            shell,
+        } => {
             let mut mgr = session_mgr.lock().await;
             // Apply caller-supplied PTY dimensions before spawn so the
             // daemon's PTY matches the GUI viewport from the first byte.
@@ -476,9 +481,14 @@ async fn dispatch_ipc(
                 default_rows = mgr.default_rows,
                 req_cols = ?cols,
                 req_rows = ?rows,
+                req_shell = ?shell,
                 "CreateSession: PTY dimensions"
             );
-            match mgr.create_session(name.clone()) {
+            let spawn_options = therminal_terminal::pty::SpawnOptions {
+                shell: shell.clone().unwrap_or_default(),
+                ..Default::default()
+            };
+            match mgr.create_session_with_options(name.clone(), &spawn_options) {
                 Ok(session_id) => {
                     // Update lifecycle session count
                     lifecycle.set_session_count(mgr.session_count());
@@ -536,9 +546,11 @@ async fn dispatch_ipc(
             cwd,
             startup_command,
             ratio,
+            shell,
         } => {
             let mut mgr = session_mgr.lock().await;
             let spawn_options = therminal_terminal::pty::SpawnOptions {
+                shell: shell.clone().unwrap_or_default(),
                 cwd: cwd.clone().unwrap_or_default(),
                 ..Default::default()
             };

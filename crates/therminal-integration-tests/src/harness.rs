@@ -182,6 +182,7 @@ impl DaemonHarness {
                 name: name.map(str::to_string),
                 cols: None,
                 rows: None,
+                shell: None,
             })
             .await?;
         let session_id = match resp {

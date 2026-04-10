@@ -267,6 +267,11 @@ pub(crate) struct SpawnPaneParam {
     /// Split ratio for the source (first) child (0.1..0.9). Default 0.5.
     #[serde(default, deserialize_with = "deser_compat::f32_opt_flexible")]
     pub(crate) ratio: Option<f32>,
+    /// Shell binary to spawn instead of the global default (e.g. "/bin/fish",
+    /// "powershell.exe"). When omitted, the daemon uses `general.shell` from config.
+    /// Distinct from `command` (which is a legacy alias for shell) and `startup_command`
+    /// (which is injected after the prompt is ready).
+    pub(crate) shell: Option<String>,
 }
 
 // ── Tool result types ───────────────────────────────────────────────────

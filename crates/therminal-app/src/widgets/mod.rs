@@ -50,6 +50,7 @@
 pub mod agent_timeline;
 pub mod badge;
 pub mod gpu;
+pub mod pattern_widget;
 pub mod rasterizer;
 
 // Public re-exports for convenient access from the render path.
@@ -62,6 +63,8 @@ pub use agent_timeline::{AgentTimelineSource, TIMELINE_WIDGET_ID};
 pub use badge::{AgentBadgeSource, BADGE_WIDGET_ID};
 #[allow(unused_imports)]
 pub use gpu::{WidgetManager, WidgetRenderer};
+#[allow(unused_imports)]
+pub use pattern_widget::PatternWidgetMatch;
 #[allow(unused_imports)]
 pub use rasterizer::{WidgetRasterizer, WidgetSpec};
 

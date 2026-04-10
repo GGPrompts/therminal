@@ -57,6 +57,7 @@ fn create(ctx: &CliCtx, name: Option<String>, out: OutputFlags) -> Result<()> {
         name,
         cols: None,
         rows: None,
+        shell: None,
     })?;
     let session_id = match resp {
         IpcResponse::SessionCreated { session_id } => session_id,

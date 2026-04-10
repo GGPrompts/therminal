@@ -51,6 +51,9 @@ pub enum PaneCmd {
         /// Split ratio for the source (first) child (0.1..0.9). Default 0.5.
         #[arg(long, value_parser = parse_ratio)]
         ratio: Option<f32>,
+        /// Shell binary to spawn instead of the global default (e.g. /bin/fish, powershell.exe).
+        #[arg(long)]
+        shell: Option<String>,
         #[command(flatten)]
         out: OutputFlags,
     },
@@ -124,8 +127,18 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             session,
             startup_command,
             ratio,
+            shell,
             out,
-        } => create(ctx, from, split, session, startup_command, ratio, out),
+        } => create(
+            ctx,
+            from,
+            split,
+            session,
+            startup_command,
+            ratio,
+            shell,
+            out,
+        ),
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
         PaneCmd::Send { pane_id, keys, raw } => send(ctx, pane_id, &keys, raw),
         PaneCmd::Peek {
@@ -176,6 +189,7 @@ fn list(ctx: &CliCtx, session: Option<u64>, out: OutputFlags) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create(
     ctx: &CliCtx,
     from: Option<u64>,
@@ -183,6 +197,7 @@ fn create(
     session: Option<u64>,
     startup_command: Option<String>,
     ratio: Option<f32>,
+    shell: Option<String>,
     out: OutputFlags,
 ) -> Result<()> {
     // Determine the source pane to split from. If `--from` is set we use it
@@ -191,7 +206,7 @@ fn create(
     // yet we create a session first.
     let source_pane = match from {
         Some(p) => p,
-        None => find_seed_pane(ctx, session)?,
+        None => find_seed_pane(ctx, session, shell.as_deref())?,
     };
 
     let horizontal = matches!(split.as_deref(), Some("horizontal" | "h"));
@@ -202,6 +217,7 @@ fn create(
         cwd: None,
         startup_command,
         ratio,
+        shell,
     })?;
     let new_pane = match resp {
         IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
@@ -224,7 +240,7 @@ fn create(
 /// 2. Otherwise list all panes; if there's at least one, return its id.
 /// 3. If the daemon has no panes at all, create a session (which spawns a
 ///    seed pane) and return that pane's id.
-fn find_seed_pane(ctx: &CliCtx, session: Option<u64>) -> Result<u64> {
+fn find_seed_pane(ctx: &CliCtx, session: Option<u64>, shell: Option<&str>) -> Result<u64> {
     let resp = ctx.send(IpcRequest::ListPanes {
         session_id: session,
     })?;
@@ -243,6 +259,7 @@ fn find_seed_pane(ctx: &CliCtx, session: Option<u64>) -> Result<u64> {
         name: None,
         cols: None,
         rows: None,
+        shell: shell.map(str::to_string),
     })?;
     let session_id = match resp {
         IpcResponse::SessionCreated { session_id } => session_id,

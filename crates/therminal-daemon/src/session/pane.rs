@@ -796,6 +796,7 @@ impl Pane {
             cursor_col: cursor_point.column.0 as u16,
             cursor_line: (cursor_point.line.0.max(0) as usize).min(rows.saturating_sub(1)) as u16,
             grid_chars,
+            tags: self.tags.clone(),
         }
     }
 
