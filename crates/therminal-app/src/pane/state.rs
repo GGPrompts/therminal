@@ -1,5 +1,6 @@
 //! Per-pane terminal state: dimensions adapter, shared status, and pane state.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions;
@@ -41,6 +42,8 @@ pub struct PaneStatus {
     pub last_exit_code: Option<i32>,
     /// Name of a detected AI agent (from ProcessDetector).
     pub agent_name: Option<String>,
+    /// Opaque key/value tags from the daemon (tn-bbvf).
+    pub tags: HashMap<String, String>,
 }
 
 // ── Per-pane state ──────────────────────────────────────────────────────

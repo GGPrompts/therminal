@@ -1,5 +1,7 @@
 //! Pane focus borders, split separators, and per-pane header strips.
 
+use std::collections::HashMap;
+
 use glyphon::{Attrs, Color as GlyphColor, Family, Metrics, Resolution, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
@@ -322,6 +324,10 @@ pub(crate) fn draw_pane_header(
         )
     };
 
+    // tn-166y: tag badges
+    let tags = pane.status.lock().unwrap().tags.clone();
+    let badge_text = format_tag_badges(&tags);
+
     let close_color = GlyphColor::rgba(
         PaletteColor::ALERT.r,
         PaletteColor::ALERT.g,
@@ -350,6 +356,8 @@ pub(crate) fn draw_pane_header(
     let vsplit_key = format!("V|{focus_tag}");
     let hsplit_slot = format!("hdr_hsplit_{pane_id}");
     let hsplit_key = format!("H|{focus_tag}");
+    let badge_slot = format!("hdr_badge_{pane_id}");
+    let badge_key = format!("{badge_text}|{:.0}|{focus_tag}", vp.width());
 
     // Phase 1: shape all buffers.
     let family = renderer.font_config.family.clone();
@@ -379,6 +387,21 @@ pub(crate) fn draw_pane_header(
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
+    if !badge_text.is_empty() {
+        ensure_shaped(
+            &badge_slot,
+            &badge_key,
+            metrics,
+            vp.width(),
+            header_h,
+            &badge_text,
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(index_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
     ensure_shaped(
         &close_slot,
         &close_key,
@@ -453,7 +476,7 @@ pub(crate) fn draw_pane_header(
         bottom: surface_height as i32,
     };
 
-    let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(5);
+    let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(7);
     text_areas.push(TextArea {
         buffer: index_buf,
         left: vp.x(),
@@ -472,6 +495,20 @@ pub(crate) fn draw_pane_header(
         default_color: process_color,
         custom_glyphs: &[],
     });
+    if !badge_text.is_empty()
+        && let Some(badge_buf) = cached_buf(&renderer.overlay_cache, &badge_slot)
+    {
+        let badge_left = vp.x() + center_offset + process_text_width + 8.0;
+        text_areas.push(TextArea {
+            buffer: badge_buf,
+            left: badge_left,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: index_color,
+            custom_glyphs: &[],
+        });
+    }
     if let Some(buf) = cached_buf(&renderer.overlay_cache, &hsplit_slot) {
         text_areas.push(TextArea {
             buffer: buf,
@@ -543,5 +580,80 @@ pub(crate) fn draw_pane_header(
         ) {
             tracing::warn!("header text render failed: {}", e);
         }
+    }
+}
+
+// ── Tag badge formatting (tn-166y) ────────────────────────────────────
+
+const VALUE_ONLY_KEYS: &[&str] = &["issue_id", "branch", "worker"];
+const MAX_VISIBLE_BADGES: usize = 3;
+
+fn format_tag_badges(tags: &HashMap<String, String>) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+    let mut keys: Vec<&String> = tags.keys().collect();
+    keys.sort();
+    let total = keys.len();
+    let mut parts: Vec<String> = Vec::with_capacity(MAX_VISIBLE_BADGES + 1);
+    for key in keys.iter().take(MAX_VISIBLE_BADGES) {
+        let value = &tags[key.as_str()];
+        if VALUE_ONLY_KEYS.contains(&key.as_str()) {
+            parts.push(value.clone());
+        } else {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    if total > MAX_VISIBLE_BADGES {
+        parts.push("\u{2026}".to_string());
+    }
+    parts.join("  ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_tag_badges_empty() {
+        assert_eq!(format_tag_badges(&HashMap::new()), "");
+    }
+
+    #[test]
+    fn format_tag_badges_well_known_value_only() {
+        let mut t = HashMap::new();
+        t.insert("issue_id".into(), "tn-abc".into());
+        t.insert("branch".into(), "feat/foo".into());
+        let r = format_tag_badges(&t);
+        assert!(r.contains("feat/foo") && r.contains("tn-abc"));
+        assert!(!r.contains("issue_id=") && !r.contains("branch="));
+    }
+
+    #[test]
+    fn format_tag_badges_custom_key_value() {
+        let mut t = HashMap::new();
+        t.insert("env".into(), "prod".into());
+        assert_eq!(format_tag_badges(&t), "env=prod");
+    }
+
+    #[test]
+    fn format_tag_badges_overflow() {
+        let mut t = HashMap::new();
+        for c in &["a", "b", "c", "d"] {
+            t.insert(c.to_string(), "x".into());
+        }
+        let r = format_tag_badges(&t);
+        assert!(r.contains('\u{2026}'));
+        assert!(r.contains("a=x") && r.contains("b=x") && r.contains("c=x"));
+        assert!(!r.contains("d=x"));
+    }
+
+    #[test]
+    fn format_tag_badges_deterministic() {
+        let mut t = HashMap::new();
+        t.insert("worker".into(), "alice".into());
+        t.insert("branch".into(), "main".into());
+        t.insert("issue_id".into(), "tn-1".into());
+        assert_eq!(format_tag_badges(&t), "main  tn-1  alice");
     }
 }

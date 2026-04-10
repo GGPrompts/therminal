@@ -664,6 +664,13 @@ pub(crate) fn build_remote_pane_state(
                         "tn-zamd: worker channel closed before snapshot replay"
                     );
                 }
+                // tn-166y: copy tags from the snapshot into PaneStatus so
+                // the GUI can render tag badges in pane headers immediately.
+                if !snap.tags.is_empty()
+                    && let Ok(mut s) = status.lock()
+                {
+                    s.tags = snap.tags;
+                }
             }
             Ok(Err(e)) => {
                 info!(

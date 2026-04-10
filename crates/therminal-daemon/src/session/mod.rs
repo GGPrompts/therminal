@@ -220,6 +220,7 @@ mod tests {
             cursor_col: cursor_point.column.0 as u16,
             cursor_line: (cursor_point.line.0.max(0) as u16).min(rows as u16 - 1),
             grid_chars,
+            tags: std::collections::HashMap::new(),
         };
 
         // Sanity: our captured snapshot shows the relevant flags set.
