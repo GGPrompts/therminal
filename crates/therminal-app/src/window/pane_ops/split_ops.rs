@@ -50,6 +50,10 @@ pub enum DaemonSplitOnComplete {
         bytes: Vec<u8>,
         toast: Option<String>,
     },
+    /// Create a new workspace tab with the spawned pane as its root.
+    /// The pane is NOT inserted into the current layout — it becomes the
+    /// sole leaf in a brand-new workspace.
+    NewWorkspace { workspace_id: u8 },
 }
 
 impl App {
@@ -140,6 +144,12 @@ impl App {
                 return;
             }
         };
+
+        // ── NewWorkspace: build pane state independently, create workspace ──
+        if let DaemonSplitOnComplete::NewWorkspace { workspace_id } = on_complete {
+            self.finish_new_workspace_remote(new_daemon_pane_id, workspace_id);
+            return;
+        }
 
         // Gather immutable deps before mutable-borrowing the layout.
         let scrollback = self.config.general.scrollback_lines;
@@ -273,6 +283,7 @@ impl App {
                         }
                     }
                 }
+                DaemonSplitOnComplete::NewWorkspace { .. } => unreachable!(),
             }
         } else if let Some(e) = build_result.into_inner() {
             warn!(error = %e, "split_pane_remote: build_remote_pane_state failed AFTER daemon split — daemon now has orphan pane");
@@ -303,6 +314,106 @@ impl App {
                     }
                 });
             }
+        }
+    }
+
+    /// Handle the `NewWorkspace` completion: build a pane state for the full
+    /// viewport and insert it as the sole leaf in a new workspace tab.
+    fn finish_new_workspace_remote(
+        &mut self,
+        new_daemon_pane_id: therminal_protocol::PaneId,
+        workspace_id: u8,
+    ) {
+        let full_rect = match self.compute_layout_rect() {
+            Some(r) => r,
+            None => return,
+        };
+        let scrollback = self.config.general.scrollback_lines;
+        let interceptor_cfg = InterceptorConfig {
+            osc_633: self.config.terminal.osc_633,
+            osc_133: self.config.terminal.osc_133,
+            osc_7: self.config.terminal.osc_7,
+            osc_9: self.config.terminal.osc_9,
+            osc_1337: self.config.terminal.osc_1337,
+            osc_7777: self.config.terminal.osc_7777,
+        };
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let (cols, rows) = crate::pane::grid_size_for_rect(full_rect, renderer);
+        let cols = cols.max(2);
+        let rows = rows.max(1);
+        let dc = match self.daemon_client.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return,
+        };
+        let handle = match self.daemon_runtime.as_ref() {
+            Some(h) => h.clone(),
+            None => return,
+        };
+        let socket = dc.socket_path().to_path_buf();
+        let local_id = crate::pane::next_pane_id();
+        let callbacks = make_pane_callbacks(&self.event_proxy, local_id);
+
+        let state = match crate::pane::remote_spawn::build_remote_pane_state(
+            local_id,
+            new_daemon_pane_id,
+            full_rect,
+            cols,
+            rows,
+            scrollback,
+            interceptor_cfg,
+            dc,
+            handle,
+            socket,
+            callbacks,
+            None,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    new_daemon_pane_id,
+                    "finish_new_workspace_remote: build_remote_pane_state failed — best-effort cleanup"
+                );
+                if let (Some(client), Some(handle)) =
+                    (self.daemon_client.as_ref(), self.daemon_runtime.as_ref())
+                {
+                    let client = Arc::clone(client);
+                    handle.spawn(async move {
+                        let _ = client
+                            .send_request(IpcRequest::KillPane {
+                                pane_id: new_daemon_pane_id,
+                            })
+                            .await;
+                    });
+                }
+                self.show_toast("new tab failed");
+                return;
+            }
+        };
+
+        self.pane_id_map.insert(local_id, new_daemon_pane_id);
+        let new_pane_id = state.id;
+        let switched = self
+            .workspaces
+            .as_mut()
+            .map(|wm| {
+                wm.switch_to(workspace_id as usize, || {
+                    Some((LayoutNode::Leaf(state), new_pane_id))
+                })
+            })
+            .unwrap_or(false);
+        if switched {
+            info!(
+                workspace_id,
+                new_local = local_id,
+                new_daemon = new_daemon_pane_id,
+                "finish_new_workspace_remote: created workspace via async split"
+            );
+            self.relayout_and_redraw();
+            self.publish_workspace_state();
         }
     }
 

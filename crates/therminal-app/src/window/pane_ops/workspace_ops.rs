@@ -317,7 +317,10 @@ impl App {
                 }
                 return;
             }
-            // Target workspace does not exist — pre-spawn the pane.
+            // Target workspace does not exist — spawn the pane asynchronously
+            // via `split_pane_remote` so we don't block the event loop. The
+            // completion handler (`NewWorkspace`) creates the workspace when
+            // the RPC resolves.
             let Some(anchor) = self.pane_id_map.any_daemon_id() else {
                 warn!(
                     "switch_workspace: daemon mode but no daemon pane to anchor split — falling back to fresh session"
@@ -340,20 +343,15 @@ impl App {
                 }
                 return;
             };
-            let Some(state) = self.spawn_remote_pane_off_existing(anchor, full_rect) else {
+            let Some(source_local) = self.pane_id_map.local_for_daemon(anchor) else {
+                warn!("switch_workspace: anchor daemon pane {anchor} has no local mapping");
                 return;
             };
-            let new_pane_id = state.id;
-            let switched = self
-                .workspaces
-                .as_mut()
-                .map(|wm| wm.switch_to(n as usize, || Some((LayoutNode::Leaf(state), new_pane_id))))
-                .unwrap_or(false);
-            if switched {
-                info!("Switched to (new) workspace {n} via daemon split");
-                self.relayout_and_redraw();
-                self.publish_workspace_state();
-            }
+            self.split_pane_remote(
+                source_local,
+                SplitDirection::Horizontal,
+                DaemonSplitOnComplete::NewWorkspace { workspace_id: n },
+            );
             return;
         }
 
