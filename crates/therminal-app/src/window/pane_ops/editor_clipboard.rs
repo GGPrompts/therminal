@@ -277,7 +277,7 @@ impl App {
 
         // Capture original focus so we can detect split failure.
         let original_focus = self.focused_pane();
-        self.split_focused_pane(crate::pane::SplitDirection::Vertical);
+        self.split_focused_pane_auto();
         let new_pane = match self.focused_pane() {
             Some(id) if Some(id) != original_focus => id,
             _ => {

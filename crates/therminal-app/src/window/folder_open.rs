@@ -27,7 +27,6 @@ use tracing::{debug, info, warn};
 
 use therminal_terminal::hotspot_detection::{expand_tilde, resolve_relative_to_cwd};
 
-use crate::pane::SplitDirection;
 
 use super::App;
 
@@ -231,7 +230,7 @@ impl App {
         // Capture the originally focused pane id so we can detect that the
         // split actually produced a new one.
         let original_focus = self.focused_pane();
-        self.split_focused_pane(SplitDirection::Vertical);
+        self.split_focused_pane_auto();
         let new_pane = match self.focused_pane() {
             Some(id) if Some(id) != original_focus => id,
             _ => {
@@ -300,7 +299,7 @@ impl App {
         cmd.push('\n');
 
         let original_focus = self.focused_pane();
-        self.split_focused_pane(SplitDirection::Vertical);
+        self.split_focused_pane_auto();
         let new_pane = match self.focused_pane() {
             Some(id) if Some(id) != original_focus => id,
             _ => {
