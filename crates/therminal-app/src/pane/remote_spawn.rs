@@ -15,7 +15,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte::ansi;
 use therminal_core::geometry::Rect;
-use therminal_daemon_client::DaemonClient;
+use therminal_daemon_client::{DaemonClient, GUI_REQUEST_TIMEOUT};
 use therminal_protocol::daemon::{DaemonEvent, EventKind, IpcRequest, IpcResponse};
 use therminal_terminal::interceptor::{InterceptorConfig, TherminalInterceptor};
 use therminal_terminal::pty_runtime::TermSize;
@@ -106,9 +106,14 @@ pub fn spawn_remote_pane(
     // tn-pgz6: we no longer assume `pane_id == session_id`. After
     // CreateSession we issue GetWorkspaces to ask the daemon which pane id
     // it actually allocated for the new session's first pane. Both calls
-    // are wrapped in a 5s timeout so a slow/hung daemon doesn't freeze
+    // use `GUI_REQUEST_TIMEOUT` (10s) so a slow/hung daemon doesn't freeze
     // GUI startup.
-    let rpc_timeout = std::time::Duration::from_secs(5);
+    //
+    // tn-glsq: the previous 5s timeout was too tight for Windows named pipe
+    // IPC where pipe connection retries (up to 1s) stack on top of the
+    // daemon's session creation latency. Aligning with GUI_REQUEST_TIMEOUT
+    // gives enough headroom for the named pipe retry loop + daemon processing.
+    let rpc_timeout = GUI_REQUEST_TIMEOUT;
     let session_id = if let Some(sid) = reuse_session_id {
         info!(
             session_id = sid,
@@ -118,6 +123,11 @@ pub fn spawn_remote_pane(
     } else {
         // tn-l3hk: time the CreateSession round-trip
         let t_create = std::time::Instant::now();
+        info!(
+            timeout_ms = rpc_timeout.as_millis(),
+            platform = std::env::consts::OS,
+            "tn-glsq: CreateSession RPC starting"
+        );
         let create_resp = tokio_handle.block_on(async {
             tokio::time::timeout(
                 rpc_timeout,
@@ -132,8 +142,25 @@ pub fn spawn_remote_pane(
         let t_create_ms = t_create.elapsed().as_millis();
         let create_resp = match create_resp {
             Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => anyhow::bail!("daemon CreateSession timed out after {rpc_timeout:?}"),
+            Ok(Err(e)) => {
+                warn!(
+                    elapsed_ms = t_create_ms,
+                    platform = std::env::consts::OS,
+                    error = %e,
+                    "tn-glsq: CreateSession RPC failed"
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                warn!(
+                    elapsed_ms = t_create_ms,
+                    timeout_ms = rpc_timeout.as_millis(),
+                    platform = std::env::consts::OS,
+                    "tn-glsq: CreateSession RPC timed out -- if on Windows, \
+                     named pipe retries may have consumed part of the budget"
+                );
+                anyhow::bail!("daemon CreateSession timed out after {rpc_timeout:?}");
+            }
         };
         info!(
             rtt_ms = t_create_ms,
@@ -161,8 +188,26 @@ pub fn spawn_remote_pane(
     let t_gw_ms = t_gw.elapsed().as_millis();
     let workspaces_resp = match workspaces_resp {
         Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => anyhow::bail!("daemon GetWorkspaces timed out after {rpc_timeout:?}"),
+        Ok(Err(e)) => {
+            warn!(
+                elapsed_ms = t_gw_ms,
+                platform = std::env::consts::OS,
+                error = %e,
+                session_id,
+                "tn-glsq: GetWorkspaces RPC failed"
+            );
+            return Err(e);
+        }
+        Err(_) => {
+            warn!(
+                elapsed_ms = t_gw_ms,
+                timeout_ms = rpc_timeout.as_millis(),
+                platform = std::env::consts::OS,
+                session_id,
+                "tn-glsq: GetWorkspaces RPC timed out"
+            );
+            anyhow::bail!("daemon GetWorkspaces timed out after {rpc_timeout:?}");
+        }
     };
     info!(rtt_ms = t_gw_ms, "tn-l3hk: GetWorkspaces IPC round-trip");
     let remote_pane_id = match workspaces_resp {
@@ -328,27 +373,50 @@ pub(crate) fn build_remote_pane_state(
     let forwarder_socket = daemon_socket.clone();
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
     let forwarder_handle = tokio_handle.spawn(async move {
-        // F5 (tn-97j6): wrap connect+subscribe in a 5s timeout so a daemon
+        // F5 (tn-97j6): wrap connect+subscribe in a timeout so a daemon
         // that accepts the socket but never responds to Subscribe doesn't
         // leave the forwarder hung forever (pane would appear live but
         // never receive bytes).
-        let connect_timeout = std::time::Duration::from_secs(5);
-        let sub_client = match tokio::time::timeout(
-            connect_timeout,
-            DaemonClient::connect(&forwarder_socket),
-        )
-        .await
-        {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                warn!(error = %e, "remote pane forwarder failed to open subscription connection");
-                return;
-            }
-            Err(_) => {
-                warn!("remote pane forwarder connect timed out after {connect_timeout:?}");
-                return;
-            }
-        };
+        //
+        // tn-glsq: aligned with GUI_REQUEST_TIMEOUT (10s). On Windows, this
+        // second named pipe connection contends with the primary client's
+        // pipe instance -- the daemon must re-arm its listener before this
+        // connect succeeds, and the retry loop in ipc_transport can burn
+        // up to 1s. The previous 5s left only 4s for the actual Subscribe
+        // round-trip after retries.
+        let connect_timeout = GUI_REQUEST_TIMEOUT;
+        let t_fwd_connect = std::time::Instant::now();
+        let sub_client =
+            match tokio::time::timeout(connect_timeout, DaemonClient::connect(&forwarder_socket))
+                .await
+            {
+                Ok(Ok(c)) => {
+                    debug!(
+                        elapsed_ms = t_fwd_connect.elapsed().as_millis(),
+                        platform = std::env::consts::OS,
+                        "tn-glsq: forwarder subscription connection established"
+                    );
+                    c
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        elapsed_ms = t_fwd_connect.elapsed().as_millis(),
+                        platform = std::env::consts::OS,
+                        error = %e,
+                        "tn-glsq: forwarder failed to open subscription connection"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    warn!(
+                        elapsed_ms = t_fwd_connect.elapsed().as_millis(),
+                        timeout_ms = connect_timeout.as_millis(),
+                        platform = std::env::consts::OS,
+                        "tn-glsq: forwarder subscription connect timed out"
+                    );
+                    return;
+                }
+            };
         match tokio::time::timeout(
             connect_timeout,
             sub_client.subscribe_events(vec![
@@ -361,11 +429,21 @@ pub(crate) fn build_remote_pane_state(
         {
             Ok(Ok(_resp)) => {}
             Ok(Err(e)) => {
-                warn!(error = %e, "remote pane forwarder Subscribe failed");
+                warn!(
+                    elapsed_ms = t_fwd_connect.elapsed().as_millis(),
+                    platform = std::env::consts::OS,
+                    error = %e,
+                    "tn-glsq: forwarder Subscribe RPC failed"
+                );
                 return;
             }
             Err(_) => {
-                warn!("remote pane forwarder Subscribe timed out after {connect_timeout:?}");
+                warn!(
+                    elapsed_ms = t_fwd_connect.elapsed().as_millis(),
+                    timeout_ms = connect_timeout.as_millis(),
+                    platform = std::env::consts::OS,
+                    "tn-glsq: forwarder Subscribe RPC timed out"
+                );
                 return;
             }
         }

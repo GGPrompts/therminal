@@ -198,10 +198,27 @@ pub async fn connect_client(socket_path: &Path) -> std::io::Result<IpcClientStre
         const MAX_RETRIES: u32 = 20; // ~1s total at 50ms each
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
+        // tn-glsq: instrument the retry loop so Windows pipe contention is
+        // diagnosable from logs. Each retry burns 50ms, and two concurrent
+        // connections (primary + forwarder subscription) can both land here.
+        let t_pipe_start = std::time::Instant::now();
+        let mut retries = 0u32;
+
         for _ in 0..MAX_RETRIES {
             match ClientOptions::new().open(&*name) {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => {
+                    if retries > 0 {
+                        tracing::debug!(
+                            retries,
+                            elapsed_ms = t_pipe_start.elapsed().as_millis(),
+                            pipe = %name,
+                            "tn-glsq: named pipe connected after retries"
+                        );
+                    }
+                    return Ok(stream);
+                }
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    retries += 1;
                     tokio::time::sleep(RETRY_DELAY).await;
                     continue;
                 }
@@ -209,6 +226,12 @@ pub async fn connect_client(socket_path: &Path) -> std::io::Result<IpcClientStre
             }
         }
         // Final attempt — propagate whatever error we get on the last try.
+        tracing::warn!(
+            retries = MAX_RETRIES,
+            elapsed_ms = t_pipe_start.elapsed().as_millis(),
+            pipe = %name,
+            "tn-glsq: named pipe still busy after all retries, attempting final open"
+        );
         ClientOptions::new().open(&*name)
     }
 }
