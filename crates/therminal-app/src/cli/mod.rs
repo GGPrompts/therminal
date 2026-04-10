@@ -44,6 +44,7 @@ pub mod runtime;
 
 pub mod agents;
 pub mod events;
+pub mod layout;
 pub mod pane;
 pub mod semantic;
 pub mod session;

@@ -79,6 +79,7 @@ pub struct SessionManager {
     /// in `ensure.rs` and drains into a logger / future event bus.
     /// `None` for unit tests that build a bare `SessionManager`.
     harness_event_tx: Option<std::sync::mpsc::Sender<TaggedHarnessEvent>>,
+    suppress_events: bool,
 }
 
 impl SessionManager {
@@ -97,7 +98,25 @@ impl SessionManager {
             pattern_engine: None,
             pattern_bus: None,
             pattern_matches_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            suppress_events: false,
         }
+    }
+
+    /// Set event suppression mode (tn-j3ke batch).
+    pub fn set_events_suppressed(&mut self, suppressed: bool) {
+        self.suppress_events = suppressed;
+    }
+
+    /// Broadcast a daemon event, respecting suppression flag.
+    pub(crate) fn broadcast_event(&self, event: DaemonEvent) {
+        if !self.suppress_events {
+            let _ = self.event_tx.send(event);
+        }
+    }
+
+    /// Get a clone of the event sender for post-batch emission.
+    pub fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
+        self.event_tx.clone()
     }
 
     /// Install the pattern engine + event bus on this session manager.
@@ -348,7 +367,7 @@ impl SessionManager {
         }
         match found_session {
             Some(session_id) => {
-                let _ = self.event_tx.send(DaemonEvent::PaneResized {
+                self.broadcast_event(DaemonEvent::PaneResized {
                     session_id,
                     pane_id,
                     cols,
@@ -605,13 +624,13 @@ impl SessionManager {
         {
             src.resize(first_cols, first_rows);
         }
-        let _ = self.event_tx.send(DaemonEvent::PaneResized {
+        self.broadcast_event(DaemonEvent::PaneResized {
             session_id,
             pane_id,
             cols: first_cols,
             rows: first_rows,
         });
-        let _ = self.event_tx.send(DaemonEvent::PaneResized {
+        self.broadcast_event(DaemonEvent::PaneResized {
             session_id,
             pane_id: new_id,
             cols: second_cols,
@@ -656,7 +675,7 @@ impl SessionManager {
                 });
                 ws.focused_pane = Some(new_id);
                 let active_workspace = session.active_workspace;
-                let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+                self.broadcast_event(DaemonEvent::WorkspaceChanged {
                     session_id,
                     active_workspace,
                 });
@@ -835,7 +854,7 @@ impl SessionManager {
         } else {
             // Broadcast WorkspaceChanged so MCP layout queries re-read.
             let active_workspace = session.active_workspace;
-            let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+            self.broadcast_event(DaemonEvent::WorkspaceChanged {
                 session_id,
                 active_workspace,
             });
@@ -843,7 +862,7 @@ impl SessionManager {
         }
 
         for (pid, cols, rows) in resize_events {
-            let _ = self.event_tx.send(DaemonEvent::PaneResized {
+            self.broadcast_event(DaemonEvent::PaneResized {
                 session_id,
                 pane_id: pid,
                 cols,
@@ -1090,7 +1109,7 @@ impl SessionManager {
             .ok_or_else(|| format!("session not found: {session_id}"))?;
         session.workspace_state = workspaces;
         session.active_workspace = active_workspace;
-        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+        self.broadcast_event(DaemonEvent::WorkspaceChanged {
             session_id,
             active_workspace,
         });
@@ -1121,7 +1140,7 @@ impl SessionManager {
         }
         session.active_workspace = workspace_id;
         // no subscribers is normal — events broadcast to whatever clients are attached
-        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+        self.broadcast_event(DaemonEvent::WorkspaceChanged {
             session_id,
             active_workspace: workspace_id,
         });
@@ -1174,7 +1193,7 @@ impl SessionManager {
         });
         session.active_workspace = new_id;
 
-        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+        self.broadcast_event(DaemonEvent::WorkspaceChanged {
             session_id,
             active_workspace: new_id,
         });
@@ -1200,7 +1219,7 @@ impl SessionManager {
             .ok_or_else(|| format!("workspace {workspace_id} not found in session {session_id}"))?;
         ws.name = name;
         let active_workspace = session.active_workspace;
-        let _ = self.event_tx.send(DaemonEvent::WorkspaceChanged {
+        self.broadcast_event(DaemonEvent::WorkspaceChanged {
             session_id,
             active_workspace,
         });

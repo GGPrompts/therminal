@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -264,6 +264,18 @@ pub enum IpcRequest {
     /// integration tests to assert that a pattern pack actually fired
     /// against real PTY output.
     QueryPatternStats,
+    /// Push a structured agent lifecycle signal from a Claude Code hook script
+    /// into the harness event stream (hook-push path). Used by hook scripts
+    /// running in WSL when the daemon is Windows-native and cannot access the
+    /// WSL filesystem. Routed to HookPushSink::inject on the daemon side.
+    /// Payload is a JSON object matching HookSignal in therminal-harness-claude.
+    PushAgentEvent {
+        /// Serialised HookSignal (JSON object). Malformed payloads return
+        /// IpcResponse::Error.
+        signal: serde_json::Value,
+    },
+    /// Execute multiple layout mutations as a single atomic transaction (tn-j3ke).
+    BatchLayoutOps { ops: Vec<IpcRequest> },
 }
 
 /// Typed IPC responses.
@@ -389,6 +401,11 @@ pub enum IpcResponse {
         total_matches_dispatched: u64,
         total_loaded: u64,
     },
+    /// Per-op results from a `BatchLayoutOps` request (tn-j3ke).
+    BatchResult { results: Vec<IpcResponse> },
+    /// Hook-push agent event accepted and forwarded to the harness broadcast
+    /// channel. Paired with IpcRequest::PushAgentEvent.
+    AgentEventPushed,
     /// Generic error response.
     Error { message: String },
 }

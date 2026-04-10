@@ -22,6 +22,8 @@ use therminal_protocol::daemon::{
     DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE, decode_ipc,
 };
 
+use therminal_harness_claude::HookPushSink;
+
 use crate::control;
 use crate::lifecycle::Lifecycle;
 use crate::session::SessionManager;
@@ -45,6 +47,10 @@ pub struct IpcServer {
     next_conn_id: AtomicU64,
     /// Session manager shared across all connection handlers.
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    /// Optional hook-push sink. None until set_hook_push_sink is called from ensure.rs.
+    hook_push_sink: Option<Arc<HookPushSink>>,
+    /// Shared escalation response map for trust tier prompts (tn-b99).
+    escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
 }
 
 impl IpcServer {
@@ -79,6 +85,10 @@ impl IpcServer {
             event_tx,
             next_conn_id: AtomicU64::new(1),
             session_mgr,
+            hook_push_sink: None,
+            escalation_responses: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -92,6 +102,17 @@ impl IpcServer {
         Arc::clone(&self.session_mgr)
     }
 
+    /// Wire the hook-push sink so IpcRequest::PushAgentEvent signals from WSL
+    /// hook scripts are forwarded to the harness broadcast channel.
+    pub fn set_hook_push_sink(&mut self, sink: HookPushSink) {
+        self.hook_push_sink = Some(Arc::new(sink));
+    }
+
+    /// Get a handle to the shared escalation response map (tn-b99).
+    pub fn escalation_responses(&self) -> Arc<crate::mcp::EscalationResponseMap> {
+        Arc::clone(&self.escalation_responses)
+    }
+
     /// Run the server accept loop until the lifecycle transitions to Stopped.
     pub async fn run(mut self) -> Result<()> {
         let shutdown = self.lifecycle.shutdown_notify();
@@ -100,6 +121,8 @@ impl IpcServer {
         let version = self.version.clone();
         let event_tx = self.event_tx.clone();
         let session_mgr = Arc::clone(&self.session_mgr);
+        let hook_push_sink = self.hook_push_sink.clone();
+        let escalation_responses = Arc::clone(&self.escalation_responses);
 
         loop {
             tokio::select! {
@@ -112,8 +135,10 @@ impl IpcServer {
                             let ver = version.clone();
                             let etx = event_tx.clone();
                             let sm = Arc::clone(&session_mgr);
+                            let hps = hook_push_sink.clone();
+                            let esc = Arc::clone(&escalation_responses);
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, lc, bh, ver, etx, sm, conn_id).await {
+                                if let Err(e) = handle_connection(stream, lc, bh, ver, etx, sm, hps, esc, conn_id).await {
                                     debug!(conn_id, error = %e, "connection handler error");
                                 }
                             });
@@ -181,6 +206,7 @@ async fn handle_connection(
     version: String,
     event_tx: broadcast::Sender<DaemonEvent>,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    hook_push_sink: Option<Arc<HookPushSink>>,
     conn_id: u64,
 ) -> Result<()> {
     // Read the first 4 bytes. For binary protocols this is the length prefix.
@@ -239,6 +265,7 @@ async fn handle_connection(
                 version,
                 event_tx,
                 session_mgr,
+                hook_push_sink,
                 conn_id,
                 ipc_msg,
             )
@@ -260,6 +287,7 @@ async fn handle_ipc_connection(
     version: String,
     event_tx: broadcast::Sender<DaemonEvent>,
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
+    hook_push_sink: Option<Arc<HookPushSink>>,
     conn_id: u64,
     first_msg: IpcMessage,
 ) -> Result<()> {
@@ -275,6 +303,7 @@ async fn handle_ipc_connection(
         &version,
         &event_tx,
         &session_mgr,
+        &hook_push_sink,
         &mut subscribed_kinds,
         &mut event_rx,
         conn_id,
@@ -293,8 +322,8 @@ async fn handle_ipc_connection(
                             let msg = decode_ipc(&data).context("failed to decode IPC message")?;
                             process_ipc_message(
                                 stream, &msg, &lifecycle, &build_hash, &version,
-                                &event_tx, &session_mgr, &mut subscribed_kinds,
-                                &mut event_rx, conn_id,
+                                &event_tx, &session_mgr, &hook_push_sink,
+                                &mut subscribed_kinds, &mut event_rx, conn_id,
                             ).await?;
                         }
                         None => break, // Clean disconnect
@@ -329,6 +358,7 @@ async fn handle_ipc_connection(
                         &version,
                         &event_tx,
                         &session_mgr,
+                        &hook_push_sink,
                         &mut subscribed_kinds,
                         &mut event_rx,
                         conn_id,
@@ -354,6 +384,7 @@ async fn process_ipc_message(
     version: &str,
     event_tx: &broadcast::Sender<DaemonEvent>,
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
+    hook_push_sink: &Option<Arc<HookPushSink>>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -370,6 +401,7 @@ async fn process_ipc_message(
                 version,
                 event_tx,
                 session_mgr,
+                hook_push_sink,
                 subscribed_kinds,
                 event_rx,
                 conn_id,
@@ -401,6 +433,7 @@ async fn dispatch_ipc(
     version: &str,
     event_tx: &broadcast::Sender<DaemonEvent>,
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
+    hook_push_sink: &Option<Arc<HookPushSink>>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -869,7 +902,203 @@ async fn dispatch_ipc(
                 }
             }
         }
+        IpcRequest::PushAgentEvent { signal } => match hook_push_sink {
+            Some(sink) => {
+                match serde_json::from_value::<therminal_harness_claude::HookSignal>(signal.clone())
+                {
+                    Ok(hook_signal) => {
+                        sink.inject(hook_signal);
+                        IpcResponse::AgentEventPushed
+                    }
+                    Err(e) => IpcResponse::Error {
+                        message: format!("PushAgentEvent: invalid HookSignal payload: {e}"),
+                    },
+                }
+            }
+            None => IpcResponse::Error {
+                message: "PushAgentEvent: hook-push sink not wired (harness disabled)".to_string(),
+            },
+        },
+        IpcRequest::BatchLayoutOps { ops } => {
+            batch_layout_ops(ops, lifecycle, event_tx, session_mgr).await
+        }
+        IpcRequest::PushAgentEvent { signal } => match hook_push_sink {
+            Some(sink) => {
+                match serde_json::from_value::<therminal_harness_claude::HookSignal>(signal.clone())
+                {
+                    Ok(hook_signal) => {
+                        sink.inject(hook_signal);
+                        IpcResponse::AgentEventPushed
+                    }
+                    Err(e) => IpcResponse::Error {
+                        message: format!("PushAgentEvent: invalid HookSignal payload: {e}"),
+                    },
+                }
+            }
+            None => IpcResponse::Error {
+                message: "PushAgentEvent: hook-push sink not wired (harness disabled)".to_string(),
+            },
+        },
     }
+}
+
+/// Execute a batch of layout operations atomically (tn-j3ke).
+async fn batch_layout_ops(
+    ops: &[IpcRequest],
+    lifecycle: &Arc<Lifecycle>,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
+) -> IpcResponse {
+    let mut results = Vec::with_capacity(ops.len());
+    let mut mgr = session_mgr.lock().await;
+    mgr.set_events_suppressed(true);
+
+    let mut touched_sessions: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    for op in ops {
+        let resp = match op {
+            IpcRequest::SplitPane {
+                pane_id,
+                horizontal,
+                cwd,
+                startup_command,
+                ratio,
+                shell,
+            } => {
+                let spawn_options = therminal_terminal::pty::SpawnOptions {
+                    shell: shell.clone().unwrap_or_default(),
+                    cwd: cwd.clone().unwrap_or_default(),
+                    ..Default::default()
+                };
+                match mgr.split_pane_with_options(
+                    *pane_id,
+                    *horizontal,
+                    &spawn_options,
+                    startup_command.as_deref(),
+                    *ratio,
+                ) {
+                    Ok(new_pane_id) => {
+                        if let Some(sid) = mgr.session_for_pane(*pane_id) {
+                            touched_sessions.insert(sid);
+                        }
+                        IpcResponse::PaneSplit { new_pane_id }
+                    }
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::KillPane { pane_id } => {
+                if let Some(sid) = mgr.session_for_pane(*pane_id) {
+                    touched_sessions.insert(sid);
+                }
+                match mgr.kill_pane(*pane_id) {
+                    Ok(()) => {
+                        lifecycle.set_session_count(mgr.session_count());
+                        IpcResponse::PaneKilled { pane_id: *pane_id }
+                    }
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::SelectPane { pane_id } => match mgr.select_pane(*pane_id) {
+                Ok(()) => IpcResponse::PaneSelected { pane_id: *pane_id },
+                Err(e) => IpcResponse::Error { message: e },
+            },
+            IpcRequest::SwapPane { a, b } => {
+                if let Some(sid) = mgr.session_for_pane(*a) {
+                    touched_sessions.insert(sid);
+                }
+                match mgr.swap_panes(*a, *b) {
+                    Ok(()) => IpcResponse::PaneSwapped { a: *a, b: *b },
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::MovePane {
+                pane_id,
+                target_workspace_id,
+            } => {
+                if let Some(sid) = mgr.session_for_pane(*pane_id) {
+                    touched_sessions.insert(sid);
+                }
+                match mgr.move_pane(*pane_id, *target_workspace_id) {
+                    Ok((src, dst)) => IpcResponse::PaneMoved {
+                        pane_id: *pane_id,
+                        source_workspace_id: src,
+                        target_workspace_id: dst,
+                    },
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::CreateWorkspace { session_id, name } => {
+                touched_sessions.insert(*session_id);
+                match mgr.create_workspace(*session_id, name.clone()) {
+                    Ok(workspace_id) => IpcResponse::WorkspaceCreated {
+                        session_id: *session_id,
+                        workspace_id,
+                    },
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::SwitchWorkspace {
+                session_id,
+                workspace_id,
+            } => {
+                touched_sessions.insert(*session_id);
+                match mgr.set_active_workspace(*session_id, *workspace_id) {
+                    Ok(()) => IpcResponse::WorkspaceSwitched {
+                        session_id: *session_id,
+                        active_workspace: *workspace_id,
+                    },
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::SetWorkspaceState {
+                session_id,
+                workspaces,
+                active_workspace,
+            } => {
+                touched_sessions.insert(*session_id);
+                match mgr.set_workspace_state(*session_id, workspaces.clone(), *active_workspace) {
+                    Ok(()) => IpcResponse::WorkspaceStateSet {
+                        session_id: *session_id,
+                    },
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            IpcRequest::RenameWorkspace {
+                session_id,
+                workspace_id,
+                name,
+            } => {
+                touched_sessions.insert(*session_id);
+                match mgr.rename_workspace(*session_id, *workspace_id, name.clone()) {
+                    Ok(()) => IpcResponse::WorkspaceRenamed {
+                        session_id: *session_id,
+                        workspace_id: *workspace_id,
+                    },
+                    Err(e) => IpcResponse::Error { message: e },
+                }
+            }
+            _ => IpcResponse::Error {
+                message: format!(
+                    "request type not allowed inside BatchLayoutOps: {:?}",
+                    std::mem::discriminant(op)
+                ),
+            },
+        };
+        results.push(resp);
+    }
+
+    mgr.set_events_suppressed(false);
+    for sid in &touched_sessions {
+        if let Some((_, session)) = mgr.iter_sessions().find(|(id, _)| *id == sid) {
+            let _ = event_tx.send(DaemonEvent::WorkspaceChanged {
+                session_id: *sid,
+                active_workspace: session.active_workspace,
+            });
+        }
+    }
+    drop(mgr);
+
+    IpcResponse::BatchResult { results }
 }
 
 // ── Backward compatibility alias ──────────────────────────────────────────

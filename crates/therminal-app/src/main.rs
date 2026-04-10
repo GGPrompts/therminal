@@ -83,6 +83,9 @@ enum Command {
     Agents(cli::agents::AgentsCmd),
     /// Stream daemon events to stdout (one JSON line per event).
     Events(cli::events::EventsArgs),
+    /// Layout operations (atomic batch execution).
+    #[command(subcommand)]
+    Layout(cli::layout::LayoutCmd),
     /// Semantic queries (commands, hotspots).
     #[command(subcommand)]
     Semantic(cli::semantic::SemanticCmd),
@@ -133,6 +136,7 @@ fn main() -> Result<()> {
             Command::Workspace(c) => cli::runtime::with_runtime(|ctx| cli::workspace::run(ctx, c)),
             Command::Agents(c) => cli::runtime::with_runtime(|ctx| cli::agents::run(ctx, c)),
             Command::Events(c) => cli::runtime::with_runtime(|ctx| cli::events::run(ctx, c)),
+            Command::Layout(c) => cli::runtime::with_runtime(|ctx| cli::layout::run(ctx, c)),
             Command::Semantic(c) => cli::runtime::with_runtime(|ctx| cli::semantic::run(ctx, c)),
         };
     }
