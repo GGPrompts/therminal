@@ -910,6 +910,7 @@ impl App {
                     &workspace_ids,
                     self.workspaces.as_ref(),
                     self.rename_state.as_ref(),
+                    None,
                 );
                 let surface_w = self
                     .gpu
@@ -998,6 +999,7 @@ impl App {
                         &workspace_ids,
                         self.workspaces.as_ref(),
                         self.rename_state.as_ref(),
+                        None,
                     );
                     let surface_w = self
                         .gpu

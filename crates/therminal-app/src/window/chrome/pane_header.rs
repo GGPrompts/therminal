@@ -199,6 +199,7 @@ pub(crate) fn draw_pane_header(
     is_focused: bool,
     is_zoomed: bool,
     center_title: Option<&str>,
+    claude_badge: Option<&str>,
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -362,6 +363,15 @@ pub(crate) fn draw_pane_header(
         index_color
     };
 
+    // tn-5fgz: Claude agent badge color.
+    let claude_badge_text = claude_badge.unwrap_or("");
+    let claude_badge_color = GlyphColor::rgba(
+        PaletteColor::FOCUS.r,
+        PaletteColor::FOCUS.g,
+        PaletteColor::FOCUS.b,
+        if is_focused { 230 } else { 170 },
+    );
+
     let close_color = GlyphColor::rgba(
         PaletteColor::ALERT.r,
         PaletteColor::ALERT.g,
@@ -406,6 +416,8 @@ pub(crate) fn draw_pane_header(
     let badge_key = format!("{badge_text}|{:.0}|{focus_tag}", vp.width());
     let git_slot = format!("hdr_git_{pane_id}");
     let git_key = format!("{git_branch_text}|{:.0}|{focus_tag}", vp.width());
+    let claude_slot = format!("hdr_claude_{pane_id}");
+    let claude_key = format!("{claude_badge_text}|{:.0}|{focus_tag}", vp.width());
 
     // Phase 1: shape all buffers.
     let family = renderer.font_config.family.clone();
@@ -461,6 +473,22 @@ pub(crate) fn draw_pane_header(
             Attrs::new()
                 .family(Family::Name(&family))
                 .color(git_branch_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+    // tn-5fgz: Shape the Claude agent state badge.
+    if !claude_badge_text.is_empty() {
+        ensure_shaped(
+            &claude_slot,
+            &claude_key,
+            metrics,
+            vp.width(),
+            header_h,
+            claude_badge_text,
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(claude_badge_color),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
@@ -574,10 +602,18 @@ pub(crate) fn draw_pane_header(
         default_color: process_color,
         custom_glyphs: &[],
     });
+    // Track right edge of badge cluster for claude badge positioning.
+    let mut badge_right = vp.x() + center_offset + process_text_width;
     if !badge_text.is_empty()
         && let Some(badge_buf) = cached_buf(&renderer.overlay_cache, &badge_slot)
     {
-        let badge_left = vp.x() + center_offset + process_text_width + 8.0;
+        let badge_left = badge_right + 8.0;
+        let badge_w = badge_buf
+            .layout_runs()
+            .next()
+            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            .unwrap_or(0.0);
+        badge_right = badge_left + badge_w;
         text_areas.push(TextArea {
             buffer: badge_buf,
             left: badge_left,
@@ -585,6 +621,21 @@ pub(crate) fn draw_pane_header(
             scale: 1.0,
             bounds,
             default_color: index_color,
+            custom_glyphs: &[],
+        });
+    }
+    // tn-5fgz: Claude agent state badge, positioned after tag badges.
+    if !claude_badge_text.is_empty()
+        && let Some(claude_buf) = cached_buf(&renderer.overlay_cache, &claude_slot)
+    {
+        let claude_left = badge_right + 8.0;
+        text_areas.push(TextArea {
+            buffer: claude_buf,
+            left: claude_left,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: claude_badge_color,
             custom_glyphs: &[],
         });
     }

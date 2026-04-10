@@ -27,13 +27,19 @@ use std::time::Duration;
 
 use tracing::{debug, warn};
 
-use therminal_harness_claude::state::{ClaudeSessionState, ClaudeStatePoller};
+use therminal_harness_claude::state::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
 /// Shared Claude metadata used by chrome surfaces for one pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaudeChromeMeta {
     pub session_title: Option<String>,
     pub cwd: Option<PathBuf>,
+    /// Current Claude session status (idle, processing, streaming, etc.).
+    pub status: ClaudeStatus,
+    /// Name of the currently executing tool, if status is `ToolUse`.
+    pub current_tool: Option<String>,
+    /// Number of active subagents spawned by this session.
+    pub subagent_count: u32,
 }
 
 impl ClaudeChromeMeta {
@@ -49,6 +55,40 @@ impl ClaudeChromeMeta {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
     }
+
+    /// Human-readable status label for pane header and status bar badges.
+    pub(crate) fn status_label(&self) -> &'static str {
+        match self.status {
+            ClaudeStatus::Idle => "idle",
+            ClaudeStatus::Processing => "processing",
+            ClaudeStatus::Streaming => "streaming",
+            ClaudeStatus::Thinking => "thinking",
+            ClaudeStatus::ToolUse => "tool use",
+            ClaudeStatus::AwaitingInput => "waiting",
+        }
+    }
+
+    /// Compose the agent state badge text for the pane header.
+    pub(crate) fn header_badge(&self) -> String {
+        let mut badge = format!("claude \u{00b7} {}", self.status_label());
+        if self.subagent_count > 0 {
+            let noun = if self.subagent_count == 1 {
+                "subagent"
+            } else {
+                "subagents"
+            };
+            badge.push_str(&format!(" \u{00b7} {} {noun}", self.subagent_count));
+        }
+        badge
+    }
+
+    /// Compose the enriched status bar text.
+    pub(crate) fn status_bar_text(&self) -> String {
+        match &self.session_title {
+            Some(title) => format!("claude \u{00b7} {title} \u{00b7} {}", self.status_label()),
+            None => format!("claude \u{00b7} {}", self.status_label()),
+        }
+    }
 }
 
 /// Per-session metadata cached from the Claude state poller.
@@ -58,6 +98,12 @@ struct SessionMeta {
     cwd: Option<PathBuf>,
     /// User-authored session title (from `session_title`).
     session_title: Option<String>,
+    /// Current status (idle, processing, streaming, etc.).
+    status: ClaudeStatus,
+    /// Currently executing tool name.
+    current_tool: Option<String>,
+    /// Number of active subagents.
+    subagent_count: u32,
 }
 
 /// Thread-safe bundle of the two lookups the renderer needs.
@@ -124,11 +170,13 @@ impl ClaudeCwdTracker {
             let meta = SessionMeta {
                 cwd: s.working_dir.as_deref().map(PathBuf::from),
                 session_title: s.session_title.clone(),
+                status: s.status,
+                current_tool: s.current_tool.clone(),
+                subagent_count: s.subagent_count.unwrap_or(0),
             };
-            // Only insert if there is at least one useful field.
-            if meta.cwd.is_some() || meta.session_title.is_some() {
-                by_session.insert(s.session_id.clone(), meta);
-            }
+            // Always insert when we have valid session data so chrome
+            // surfaces can show status even before cwd/title are known.
+            by_session.insert(s.session_id.clone(), meta);
             if let Some(pid) = s.pid
                 && pid > 0
                 && let Ok(pid_u32) = u32::try_from(pid)
@@ -154,6 +202,9 @@ impl ClaudeCwdTracker {
         Some(ClaudeChromeMeta {
             session_title: meta.session_title.clone(),
             cwd: meta.cwd.clone(),
+            status: meta.status,
+            current_tool: meta.current_tool.clone(),
+            subagent_count: meta.subagent_count,
         })
     }
 
@@ -225,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_working_dir_is_ignored() {
+    fn missing_working_dir_returns_none_cwd() {
         let t = ClaudeCwdTracker::new();
         t.replace_from(&[mk_state("sid-a", Some(4242), None)]);
         assert_eq!(t.cwd_for_pid(4242), None);
@@ -310,5 +361,54 @@ mod tests {
         assert_eq!(meta.session_title.as_deref(), Some("fix login bug"));
         assert_eq!(meta.cwd, Some(PathBuf::from("/home/u/repo")));
         assert_eq!(meta.header_title().as_deref(), Some("fix login bug"));
+    }
+
+    #[test]
+    fn header_badge_shows_status() {
+        let meta = ClaudeChromeMeta {
+            session_title: None,
+            cwd: None,
+            status: ClaudeStatus::Streaming,
+            current_tool: None,
+            subagent_count: 0,
+        };
+        assert!(meta.header_badge().contains("streaming"));
+    }
+
+    #[test]
+    fn header_badge_includes_subagent_count() {
+        let meta = ClaudeChromeMeta {
+            session_title: None,
+            cwd: None,
+            status: ClaudeStatus::Thinking,
+            current_tool: None,
+            subagent_count: 3,
+        };
+        assert!(meta.header_badge().contains("3 subagents"));
+    }
+
+    #[test]
+    fn status_bar_text_with_title() {
+        let meta = ClaudeChromeMeta {
+            session_title: Some("fix login bug".into()),
+            cwd: None,
+            status: ClaudeStatus::Streaming,
+            current_tool: None,
+            subagent_count: 0,
+        };
+        let text = meta.status_bar_text();
+        assert!(text.contains("fix login bug") && text.contains("streaming"));
+    }
+
+    #[test]
+    fn chrome_meta_carries_status_and_subagent_count() {
+        let t = ClaudeCwdTracker::new();
+        let mut state = mk_state("sid-a", Some(4242), Some("/home/u/repo"));
+        state.status = ClaudeStatus::Streaming;
+        state.subagent_count = Some(2);
+        t.replace_from(&[state]);
+        let meta = t.chrome_meta_for_pid(4242).expect("expected metadata");
+        assert_eq!(meta.status, ClaudeStatus::Streaming);
+        assert_eq!(meta.subagent_count, 2);
     }
 }

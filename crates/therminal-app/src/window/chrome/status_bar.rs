@@ -18,6 +18,8 @@ pub(crate) struct StatusBarInfo {
     /// Claude state poller. This intentionally comes from the same source as
     /// the pane header, not from shell state.
     pub claude_title: Option<String>,
+    /// Enriched Claude state text for the status bar left section (tn-5fgz).
+    pub claude_status_text: Option<String>,
     /// Current working directory (from OSC 7).
     pub cwd: Option<String>,
     /// Pane grid dimensions (cols, rows).
@@ -146,10 +148,13 @@ pub(crate) fn draw_status_bar(
         if info.is_zoomed {
             parts.push_str(" [ZOOM]");
         }
-        if info.show_agent_indicator
-            && let Some(name) = &info.agent_name
-        {
-            parts.push_str(&format!(" [agent: {name}]"));
+        // tn-5fgz: prefer enriched Claude state text over generic agent name.
+        if info.show_agent_indicator {
+            if let Some(ref text) = info.claude_status_text {
+                parts.push_str(&format!(" [{text}]"));
+            } else if let Some(name) = &info.agent_name {
+                parts.push_str(&format!(" [agent: {name}]"));
+            }
         }
         if parts.is_empty() { None } else { Some(parts) }
     };
@@ -616,6 +621,7 @@ mod tests {
         StatusBarInfo {
             agent_name: None,
             claude_title: claude_title.map(String::from),
+            claude_status_text: None,
             cwd: cwd.map(String::from),
             dimensions: (80, 24),
             last_exit_code: None,

@@ -313,6 +313,18 @@ impl WorkspaceManager {
         Some(status.clone())
     }
 
+    /// Return the focused pane id for a specific workspace, if available.
+    pub fn focused_pane_for(&self, workspace_id: usize) -> Option<PaneId> {
+        let ws = self.workspaces.iter().find(|ws| ws.id == workspace_id)?;
+        ws.focused_pane
+    }
+
+    /// Return a reference to a specific workspace's layout, if it exists.
+    pub fn layout_for(&self, workspace_id: usize) -> Option<&LayoutNode> {
+        let ws = self.workspaces.iter().find(|ws| ws.id == workspace_id)?;
+        Some(&ws.layout)
+    }
+
     /// Return all workspace IDs that currently exist, sorted.
     pub fn workspace_ids(&self) -> Vec<usize> {
         let mut ids: Vec<usize> = self.workspaces.iter().map(|ws| ws.id).collect();

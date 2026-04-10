@@ -355,6 +355,8 @@ fn render_single_pane(
         claude_meta.as_ref().and_then(|meta| meta.cwd.clone());
     let claude_header_title: Option<String> =
         claude_meta.as_ref().and_then(|meta| meta.header_title());
+    // tn-5fgz: Claude agent state badge for the pane header.
+    let claude_badge: Option<String> = claude_meta.as_ref().map(|meta| meta.header_badge());
     let vp = pane.viewport;
     let term = match pane.backend.term() {
         Some(t) => t,
@@ -414,6 +416,7 @@ fn render_single_pane(
                 draw_focus_border,
                 is_zoomed,
                 claude_header_title.as_deref(),
+                claude_badge.as_deref(),
                 renderer,
                 device,
                 queue,
@@ -610,6 +613,7 @@ fn render_single_pane(
             draw_focus_border,
             is_zoomed,
             claude_header_title.as_deref(),
+            claude_badge.as_deref(),
             renderer,
             device,
             queue,

@@ -482,6 +482,7 @@ pub(crate) fn build_tab_labels(
     workspace_ids: &[usize],
     workspaces: Option<&WorkspaceManager>,
     rename_state: Option<&RenameState>,
+    claude_titles: Option<&std::collections::HashMap<usize, String>>,
 ) -> Vec<String> {
     workspace_ids
         .iter()
@@ -495,6 +496,10 @@ pub(crate) fn build_tab_labels(
                 && name != ws_id.to_string()
             {
                 return format!("{ws_id}: {name}");
+            }
+            // tn-5fgz: Use Claude session title when available.
+            if let Some(title) = claude_titles.and_then(|ct| ct.get(&ws_id)) {
+                return format!("{ws_id}: {title}");
             }
             if let Some(status) = workspaces.and_then(|wm| wm.focused_pane_status(ws_id))
                 && let Some(cwd) = status.cwd.as_ref()
@@ -1266,14 +1271,14 @@ mod rename_state_tests {
         use super::{RenameState, build_tab_labels};
         let mut state = RenameState::new(1, "1".to_string());
         // Initial: label is "1: 1_"
-        let labels = build_tab_labels(&[1, 2], None, Some(&state));
+        let labels = build_tab_labels(&[1, 2], None, Some(&state), None);
         assert_eq!(labels[0], "1: 1_");
         assert_eq!(labels[1], "2");
         // After typing 'a','b','c': label is "1: 1abc_"
         for c in ['a', 'b', 'c'] {
             state.insert_char(c);
         }
-        let labels = build_tab_labels(&[1, 2], None, Some(&state));
+        let labels = build_tab_labels(&[1, 2], None, Some(&state), None);
         assert_eq!(labels[0], "1: 1abc_");
     }
 
