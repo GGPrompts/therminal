@@ -10,7 +10,7 @@ use alacritty_terminal::term::TermDamage;
 use alacritty_terminal::term::cell::Flags;
 
 use crate::grid_renderer::{GridRenderer, HyperlinkSource, RenderCell, cell_display_text};
-use crate::pane::{LayoutNode, PaneId, PaneState};
+use crate::pane::{LayoutNode, PaneBackendKind, PaneId, PaneState};
 use crate::url_detection::detect_urls_in_cells;
 use alacritty_terminal::grid::Dimensions;
 use therminal_harness_claude::tool_call_hotspots::detect_claude_tool_call_hotspots;
@@ -63,8 +63,12 @@ fn damaged_rows_any(damaged_rows: Option<&[bool]>) -> bool {
     damaged_rows.is_some_and(|rows| rows.iter().any(|&damaged| damaged))
 }
 
+fn damage_rows_empty(damaged_rows: Option<&[bool]>) -> bool {
+    matches!(damaged_rows, Some(rows) if !rows.iter().any(|&damaged| damaged))
+}
+
 fn should_force_full_rebuild(cache_matches_viewport: bool, damaged_rows: Option<&[bool]>) -> bool {
-    !cache_matches_viewport && matches!(damaged_rows, Some(rows) if !rows.iter().any(|&d| d))
+    !cache_matches_viewport && damage_rows_empty(damaged_rows)
 }
 
 /// Promote `FilePath` hotspots whose target stat'd as a directory using
@@ -340,6 +344,7 @@ fn render_single_pane(
     let display_offset = content.display_offset;
     let cursor = content.cursor;
     let selection_range = content.selection;
+    let is_remote_pane = matches!(pane.backend, PaneBackendKind::RemotePty { .. });
 
     // ── Skip undamaged frames entirely ──────────────────────────────────
     // When partial damage reports an empty set, nothing changed — use
@@ -347,8 +352,8 @@ fn render_single_pane(
     // URL/hotspot detection.
     let cache_matches_viewport =
         renderer.pane_cache_matches_viewport(pane.id, columns, screen_lines, display_offset);
-    let force_full_rebuild =
-        should_force_full_rebuild(cache_matches_viewport, damaged_rows.as_deref());
+    let force_full_rebuild = should_force_full_rebuild(cache_matches_viewport, damaged_rows.as_deref())
+        || (is_remote_pane && damage_rows_empty(damaged_rows.as_deref()));
     let damaged_rows_for_render = if force_full_rebuild {
         None
     } else {
@@ -580,7 +585,7 @@ fn render_single_pane(
 
 #[cfg(test)]
 mod tests {
-    use super::{damaged_rows_any, should_force_full_rebuild};
+    use super::{damage_rows_empty, damaged_rows_any, should_force_full_rebuild};
 
     #[test]
     fn damaged_rows_any_detects_nonempty_damage() {
@@ -588,6 +593,14 @@ mod tests {
         assert!(!damaged_rows_any(Some(&[])));
         assert!(!damaged_rows_any(Some(&[false, false])));
         assert!(damaged_rows_any(Some(&[false, true, false])));
+    }
+
+    #[test]
+    fn damage_rows_empty_detects_all_false_vectors() {
+        assert!(!damage_rows_empty(None));
+        assert!(damage_rows_empty(Some(&[])));
+        assert!(damage_rows_empty(Some(&[false, false])));
+        assert!(!damage_rows_empty(Some(&[false, true, false])));
     }
 
     #[test]
