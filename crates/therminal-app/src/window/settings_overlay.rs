@@ -37,6 +37,16 @@ impl ThemePreset {
             Self::HemisuDark => "Hemisu Dark (dark)",
         }
     }
+
+    pub(crate) fn menu_label(self) -> &'static str {
+        match self {
+            Self::OriginalTherminal => "Original Therminal",
+            Self::Paper => "Paper",
+            Self::TokyoNightLight => "Tokyo Night Light",
+            Self::TomorrowNightBright => "Tomorrow Night Bright",
+            Self::HemisuDark => "Hemisu Dark",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,23 +280,23 @@ impl SettingsOverlayState {
             "Theme Presets",
             vec![
                 SettingsControl::new(
-                    "Apply Original Therminal",
+                    ThemePreset::OriginalTherminal.menu_label(),
                     ControlBinding::ApplyThemePreset(ThemePreset::OriginalTherminal),
                 ),
                 SettingsControl::new(
-                    "Apply Paper",
+                    ThemePreset::Paper.menu_label(),
                     ControlBinding::ApplyThemePreset(ThemePreset::Paper),
                 ),
                 SettingsControl::new(
-                    "Apply Tokyo Night Light",
+                    ThemePreset::TokyoNightLight.menu_label(),
                     ControlBinding::ApplyThemePreset(ThemePreset::TokyoNightLight),
                 ),
                 SettingsControl::new(
-                    "Apply Tomorrow Night Bright",
+                    ThemePreset::TomorrowNightBright.menu_label(),
                     ControlBinding::ApplyThemePreset(ThemePreset::TomorrowNightBright),
                 ),
                 SettingsControl::new(
-                    "Apply Hemisu Dark",
+                    ThemePreset::HemisuDark.menu_label(),
                     ControlBinding::ApplyThemePreset(ThemePreset::HemisuDark),
                 ),
             ],
@@ -341,18 +351,18 @@ pub(crate) fn apply_theme_preset(colors: &mut ColorsConfig, preset: ThemePreset)
             "#000000",
             "#000000",
             [
-                "#000000", "#cc3e28", "#216609", "#b58900", "#1e6fcc", "#5c21a5", "#158c86",
-                "#aaaaaa", "#555555", "#cc3e28", "#216609", "#b58900", "#1e6fcc", "#5c21a5",
-                "#158c86", "#aaaaaa",
+                "#000000", "#b13a24", "#216609", "#7a5f00", "#1659b7", "#5c21a5", "#106c66",
+                "#5f6673", "#555555", "#b13a24", "#216609", "#7a5f00", "#1659b7", "#5c21a5",
+                "#106c66", "#5f6673",
             ],
         ),
         ThemePreset::TokyoNightLight => (
             "#D5D6DB",
-            "#565A6E",
-            "#565A6E",
+            "#4B5563",
+            "#4B5563",
             [
-                "#0F0F14", "#8C4351", "#485E30", "#8F5E15", "#34548A", "#5A4A78", "#0F4B6E",
-                "#343B58", "#9699A3", "#8C4351", "#485E30", "#8F5E15", "#34548A", "#5A4A78",
+                "#0F0F14", "#8C4351", "#485E30", "#7B4F10", "#34548A", "#5A4A78", "#0F4B6E",
+                "#343B58", "#4B5563", "#8C4351", "#485E30", "#7B4F10", "#34548A", "#5A4A78",
                 "#0F4B6E", "#343B58",
             ],
         ),
@@ -643,7 +653,7 @@ pub(crate) fn draw_settings_overlay(
                 ControlBinding::TogglePaneHeaders => bool_text(values.show_pane_headers),
                 ControlBinding::ToggleStatusBar => bool_text(values.show_status_bar),
                 ControlBinding::ToggleTabBar => bool_text(values.show_tab_bar),
-                ControlBinding::ApplyThemePreset(preset) => preset.label(),
+                ControlBinding::ApplyThemePreset(_) => "",
             };
             let row_color = if selected && state.focus() == SettingsFocus::Controls {
                 accent
@@ -651,10 +661,12 @@ pub(crate) fn draw_settings_overlay(
                 ink
             };
             let row_width = panel_w - nav_w - 56.0;
-            let row_text = truncate_for_width(
-                &format!("{marker} {}: {value_text}", control.label),
-                row_width,
-            );
+            let row_label = if value_text.is_empty() {
+                format!("{marker} {}", control.label)
+            } else {
+                format!("{marker} {}: {value_text}", control.label)
+            };
+            let row_text = truncate_for_width(&row_label, row_width);
             add_text(
                 row_text,
                 content_x + 28.0,
@@ -751,6 +763,18 @@ mod tests {
         let l2 = relative_luminance(b);
         let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
         (hi + 0.05) / (lo + 0.05)
+    }
+
+    fn assert_min_ansi_contrast(colors: &ColorsConfig, min_contrast: f64, theme_name: &str) {
+        let background = colors.background.as_deref().unwrap_or("#000000");
+        let ansi = colors.ansi.as_ref().expect("theme should set ANSI palette");
+        for (idx, color) in ansi.iter().enumerate() {
+            let ratio = contrast_ratio(background, color);
+            assert!(
+                ratio >= min_contrast,
+                "{theme_name} ANSI[{idx}] contrast too low: {ratio:.2} ({color} on {background})"
+            );
+        }
     }
 
     #[test]
@@ -856,6 +880,7 @@ mod tests {
             colors.foreground.as_deref().unwrap_or("#ffffff"),
         );
         assert!(ratio >= MIN_CONTRAST, "Paper contrast too low: {ratio:.2}");
+        assert_min_ansi_contrast(&colors, MIN_CONTRAST, "Paper");
 
         apply_theme_preset(&mut colors, ThemePreset::TokyoNightLight);
         let ratio = contrast_ratio(
@@ -866,6 +891,7 @@ mod tests {
             ratio >= MIN_CONTRAST,
             "TokyoNightLight contrast too low: {ratio:.2}"
         );
+        assert_min_ansi_contrast(&colors, MIN_CONTRAST, "TokyoNightLight");
 
         apply_theme_preset(&mut colors, ThemePreset::TomorrowNightBright);
         let ratio = contrast_ratio(
