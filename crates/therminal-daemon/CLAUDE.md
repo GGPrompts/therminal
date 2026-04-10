@@ -67,7 +67,8 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 |------|----------------|
 | `session/mod.rs` | Re-exports, top-level `SessionManager` methods |
 | `session/base.rs` | `Session`, `Window`, `Pane` struct definitions |
-| `session/manager.rs` | `SessionManager` CRUD, session lifecycle |
+| `session/manager.rs` | `SessionManager` struct, CRUD, split/kill pane lifecycle |
+| `session/workspace_ops.rs` | Workspace ops, pane accessors, agent registry, tags, handoff/restore, shutdown |
 | `session/pane.rs` | Pane creation, PTY spawn, pane-level operations |
 | `session/window.rs` | Window/workspace management |
 | `session/layout.rs` | Layout tree helpers, split/resize logic |
@@ -239,13 +240,15 @@ Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallbac
 
 | File | Responsibility |
 |------|----------------|
-| `mcp/mod.rs` | `TherminalMcpServer`, `ServerHandler` impl, dispatch, tests |
+| `mcp/mod.rs` | `TherminalMcpServer` struct, constructors, trust enforcement |
+| `mcp/dispatch.rs` | `ServerHandler` trait impl, tool dispatch routing |
 | `mcp/types.rs` | All param/result structs, `LayoutNodeJson` |
 | `mcp/helpers.rs` | `json_content`, `parse_args`, `extract_agent_identity`, `build_content_preview`, grid rendering helpers |
 | `mcp/tools.rs` | Tool definitions, `tool_definitions()`, per-tool classification table |
 | `mcp/resources.rs` | MCP resource handlers (pane content, event streams) |
 | `mcp/transport.rs` | IPC transport setup (Unix socket / named pipe) |
 | `mcp/deser_compat.rs` | Stringified-number deserialization helpers |
+| `mcp/tests.rs` | Unit and integration tests (trust, params, serialization, end-to-end) |
 
 Key files: `src/mcp/mod.rs` (server), `src/trust.rs` (enforcement + rate limiter), `src/persistence.rs` (session state persistence), `src/fd_passing.rs` (FD handoff), `therminal-app/src/mcp_stdio.rs` (stdio bridge), `therminal-core/src/config/mod.rs` (`McpConfig`).
 
