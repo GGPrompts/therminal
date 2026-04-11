@@ -172,6 +172,7 @@ impl ProcessDetector {
             tracing::debug!(
                 distro,
                 status = ?output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
                 "process_detector: wsl.exe ps non-zero exit"
             );
             return Vec::new();
