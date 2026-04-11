@@ -45,6 +45,12 @@ pub(crate) struct StatusBarInfo {
     /// (tn-3ge3). When non-`UpToDate`, the status bar shows a small muted
     /// hint nudging the user to regenerate via `therminal --print-config`.
     pub template_status: ConfigTemplateStatus,
+    /// Delegate sibling summary text (tn-ztv3.4). When present, a
+    /// `delegates: planner=streaming (87s), …` section is rendered between
+    /// the center text and the template hint. Always `None` unless at least
+    /// one delegate-tagged pane is being tracked by
+    /// [`super::DelegateSummaryState`].
+    pub delegate_summary: Option<String>,
 }
 
 /// Pixel rect (x, y, width, height) returned by chrome hit-test producers.
@@ -286,6 +292,26 @@ pub(crate) fn draw_status_bar(
         );
     }
 
+    // tn-ztv3.4: Delegate sibling summary. Empty string means "no
+    // delegates active" and the section is skipped entirely.
+    let delegate_text = info.delegate_summary.clone().unwrap_or_default();
+    if !delegate_text.is_empty() {
+        let delegate_key = format!("{delegate_text}|{:.0}", sw * 0.5);
+        ensure_shaped(
+            "sb_delegate_summary",
+            &delegate_key,
+            metrics,
+            sw * 0.5,
+            bar_h,
+            &delegate_text,
+            Attrs::new()
+                .family(Family::Name(&family))
+                .color(workspace_active_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+
     let needs_prefix_measure =
         info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
     if needs_prefix_measure {
@@ -414,6 +440,13 @@ pub(crate) fn draw_status_bar(
     // tn-3ge3: render the template-version hint immediately to the left of
     // the right_text. Muted color, no hit-test area, zero impact when the
     // status is UpToDate.
+    // tn-ztv3.4: the delegate summary sits to the left of the template
+    // hint (or the right_text when no hint is active), using the focus
+    // color so it pops against the muted footer. We compute each section's
+    // right edge so neighbouring sections can stack without overlap.
+    let gap = font_size * 0.5;
+    let mut next_right = right_x;
+
     if !template_hint.is_empty() {
         let hint_buf = cached_buf(&renderer.overlay_cache, "sb_template_hint");
         if let Some(buf) = hint_buf {
@@ -424,8 +457,7 @@ pub(crate) fn draw_status_bar(
                 .unwrap_or(0.0);
             // Small gap between the hint and the right_text so they don't
             // visually merge into a single token.
-            let gap = font_size * 0.5;
-            let hint_x = (right_x - hint_w - gap).max(0.0);
+            let hint_x = (next_right - hint_w - gap).max(0.0);
             text_areas.push(TextArea {
                 buffer: buf,
                 left: hint_x,
@@ -435,7 +467,28 @@ pub(crate) fn draw_status_bar(
                 default_color: muted_color,
                 custom_glyphs: &[],
             });
+            next_right = hint_x;
         }
+    }
+
+    if !delegate_text.is_empty()
+        && let Some(buf) = cached_buf(&renderer.overlay_cache, "sb_delegate_summary")
+    {
+        let del_w = buf
+            .layout_runs()
+            .next()
+            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            .unwrap_or(0.0);
+        let del_x = (next_right - del_w - gap).max(0.0);
+        text_areas.push(TextArea {
+            buffer: buf,
+            left: del_x,
+            top: bar_y,
+            scale: 1.0,
+            bounds,
+            default_color: workspace_active_color,
+            custom_glyphs: &[],
+        });
     }
 
     if let Err(e) = renderer.overlay_text_renderer.prepare(
@@ -632,6 +685,7 @@ mod tests {
             focused_pane_id,
             git_branch: None,
             template_status: ConfigTemplateStatus::UpToDate,
+            delegate_summary: None,
         }
     }
 

@@ -340,6 +340,14 @@ pub struct App {
     /// the agent indicator.
     status_bar_hit_areas: chrome::StatusBarHitAreas,
 
+    /// Delegate sibling summary state machine (tn-ztv3.4). Tracks per-pane
+    /// state for `/gg-delegate` siblings so the status bar can render a
+    /// compact `delegates: planner=streaming (87s), reviewer=idle` section
+    /// without forcing the user to open each pane. Always-on: appears
+    /// automatically when delegate-tagged panes exist and fades out ~5 s
+    /// after every sibling reaches a terminal state.
+    pub(crate) delegate_summary: chrome::DelegateSummaryState,
+
     /// Active transient toast notification (lower-right), if any. Set by
     /// `show_toast`, cleared when expired. Used by `open_in_editor` to
     /// surface failures visibly and by the semantic region jump handler.

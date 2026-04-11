@@ -233,6 +233,7 @@ impl App {
             visual_bell_start: None,
             zoomed_layout: None,
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
+            delegate_summary: chrome::DelegateSummaryState::new(),
             toast: None,
             daemon_client: None,
             daemon_runtime: None,

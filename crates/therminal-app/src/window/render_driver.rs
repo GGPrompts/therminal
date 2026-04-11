@@ -2,6 +2,7 @@
 //!
 //! Split out from `mod.rs` to keep the coordinator focused on event dispatch.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,6 +11,8 @@ use tracing::{info, warn};
 use super::settings_overlay;
 use super::trust_escalation_overlay;
 use super::{App, OverlayMode, chrome, help_overlay, render};
+use crate::pane::PaneId;
+use therminal_harness_claude::state::ClaudeStatus;
 
 /// Direction for [`App::jump_to_region`].
 #[derive(Debug, Clone, Copy)]
@@ -18,10 +21,37 @@ pub(super) enum JumpDirection {
     Next,
 }
 
+/// Collapse the richer [`ClaudeStatus`] enum into the coarser
+/// [`chrome::DelegateState`] buckets used by the delegate summary. The
+/// mapping is intentionally narrow — the chrome-level summary only
+/// distinguishes `idle` (waiting / done-ish), `thinking` (reasoning), and
+/// `streaming` (actively producing text). `Done` is reserved for the
+/// explicit `delegate_status=done` tag set by the orchestrator and is
+/// never derived from live Claude state.
+fn delegate_state_from_claude(status: ClaudeStatus) -> chrome::DelegateState {
+    match status {
+        ClaudeStatus::Streaming => chrome::DelegateState::Streaming,
+        ClaudeStatus::Processing | ClaudeStatus::Thinking | ClaudeStatus::ToolUse => {
+            chrome::DelegateState::Thinking
+        }
+        ClaudeStatus::Idle | ClaudeStatus::AwaitingInput => chrome::DelegateState::Idle,
+    }
+}
+
 impl App {
     /// Render a frame: render all panes and separators.
     pub(super) fn render(&mut self) {
         let mut new_status_bar_hit_areas = chrome::StatusBarHitAreas::default();
+
+        // tn-ztv3.4: Compute the delegate sibling summary before borrowing
+        // `grid_renderer` mutably — the scan needs mutable access to
+        // `self.delegate_summary`, the agent registry, and per-pane status
+        // locks, none of which overlap with the renderer but still conflict
+        // with the outer `&mut self` borrow used by the rest of this
+        // method. Running it here keeps the state machine advancing
+        // regardless of whether the status bar is actually shown.
+        let delegate_summary_text = self.scan_and_update_delegate_summary();
+
         let gpu = match self.gpu.as_ref() {
             Some(g) => g,
             None => return,
@@ -218,6 +248,7 @@ impl App {
                 focused_pane_id,
                 git_branch,
                 template_status: self.config.template_status.clone(),
+                delegate_summary: delegate_summary_text.clone(),
             };
 
             let mut encoder = gpu
@@ -501,6 +532,111 @@ impl App {
         if toast_active && let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+
+        // tn-ztv3.4: Keep the event loop ticking while any delegate is
+        // tracked (active or fading). The elapsed-time display updates on
+        // each redraw, and the fade window relies on repeated ticks to
+        // expire cleanly. `is_visible()` returns true for both active and
+        // fade-window entries.
+        if self.delegate_summary.is_visible()
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
+        }
+    }
+
+    /// Walk every workspace's pane tree once per frame, drop observations
+    /// into the delegate summary state machine, and return the rendered
+    /// footer text (or `None` if nothing is tracked).
+    ///
+    /// Detection convention (tn-ztv3.3 `/gg-delegate` skill):
+    ///
+    /// - `delegate_profile=<name>` — pane is a delegate sibling.
+    /// - `delegate_status=done` — the orchestrator marked the sibling as
+    ///   finished (maps to [`chrome::DelegateState::Done`]).
+    ///
+    /// Live state is inferred from the pane's `ClaudeChromeMeta.status`
+    /// (populated by the app-side `ClaudeCwdTracker` poller). When no
+    /// Claude metadata is available for the pane we default to `Idle` so
+    /// the delegate still appears in the summary.
+    fn scan_and_update_delegate_summary(&mut self) -> Option<String> {
+        let now = Instant::now();
+        let mut present: HashSet<PaneId> = HashSet::new();
+
+        // Snapshot workspace ids first to avoid holding a borrow on
+        // `self.workspaces` while we walk panes and update the summary.
+        let workspace_ids: Vec<usize> = match self.workspaces.as_ref() {
+            Some(wm) => wm.workspace_ids(),
+            None => Vec::new(),
+        };
+
+        // Collect (pane_id, profile, state) tuples first so we can release
+        // the pane status / agent registry locks before touching the
+        // mutable summary state.
+        #[derive(Clone)]
+        struct DelegateObservation {
+            pane_id: PaneId,
+            profile: String,
+            state: chrome::DelegateState,
+        }
+        let mut observations: Vec<DelegateObservation> = Vec::new();
+
+        for ws_id in workspace_ids {
+            let layout = match self.workspaces.as_ref().and_then(|wm| wm.layout_for(ws_id)) {
+                Some(l) => l,
+                None => continue,
+            };
+            for pane_id in layout.pane_ids() {
+                let pane = match layout.find_pane(pane_id) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let (profile, tagged_status) = {
+                    let status = pane.status.lock().unwrap_or_else(|e| e.into_inner());
+                    let profile = status.tags.get("delegate_profile").cloned();
+                    let tagged_status = status.tags.get("delegate_status").cloned();
+                    (profile, tagged_status)
+                };
+                let Some(profile) = profile else {
+                    continue;
+                };
+                present.insert(pane_id);
+
+                // An explicit `delegate_status=done` tag wins over the
+                // live Claude state because the orchestrator sets it after
+                // capturing the result, and Claude itself may still report
+                // "idle" during the interval before the process exits.
+                let state = if tagged_status.as_deref() == Some("done") {
+                    chrome::DelegateState::Done
+                } else {
+                    let agent_pid = {
+                        let reg = self
+                            .agent_registry
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        reg.get(pane_id).and_then(|entry| entry.pid)
+                    };
+                    agent_pid
+                        .and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid))
+                        .map(|meta| delegate_state_from_claude(meta.status))
+                        .unwrap_or(chrome::DelegateState::Idle)
+                };
+
+                observations.push(DelegateObservation {
+                    pane_id,
+                    profile,
+                    state,
+                });
+            }
+        }
+
+        for obs in &observations {
+            self.delegate_summary
+                .update(obs.pane_id, &obs.profile, obs.state, now);
+        }
+
+        self.delegate_summary.tick(&present, now);
+        self.delegate_summary.render_text(now)
     }
 
     /// Composite pre-rasterized overlay widgets (tn-npd).
