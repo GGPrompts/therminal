@@ -291,6 +291,89 @@ fn theme_presets_keep_readable_fg_bg_contrast() {
     apply_theme_preset(&mut colors, ThemePreset::TokyoNightLight);
     assert_min_ansi_contrast(&colors, MIN_CONTRAST, "TokyoNightLight");
 }
+
+/// tn-2xwr — every preset must set the full chrome + hotspot role set so
+/// the status bar, pane headers, tab bar, and CSD strip re-skin when the
+/// user picks a preset. Leaving any of these as `None` falls back to the
+/// bundled Codex 2031 defaults regardless of preset.
+#[test]
+fn theme_presets_set_all_chrome_role_fields() {
+    let mut colors = ColorsConfig::default();
+    for preset in [
+        ThemePreset::OriginalTherminal,
+        ThemePreset::Paper,
+        ThemePreset::TokyoNightLight,
+        ThemePreset::TomorrowNightBright,
+        ThemePreset::HemisuDark,
+    ] {
+        apply_theme_preset(&mut colors, preset);
+        let missing = [
+            ("chrome_focus_border", colors.chrome_focus_border.is_some()),
+            ("chrome_separator", colors.chrome_separator.is_some()),
+            ("chrome_header_bg", colors.chrome_header_bg.is_some()),
+            (
+                "chrome_header_bg_dim",
+                colors.chrome_header_bg_dim.is_some(),
+            ),
+            (
+                "chrome_status_bar_bg",
+                colors.chrome_status_bar_bg.is_some(),
+            ),
+            ("chrome_csd_close", colors.chrome_csd_close.is_some()),
+            ("chrome_fg", colors.chrome_fg.is_some()),
+            ("chrome_fg_muted", colors.chrome_fg_muted.is_some()),
+            ("chrome_fg_focus", colors.chrome_fg_focus.is_some()),
+            ("chrome_fg_warn", colors.chrome_fg_warn.is_some()),
+            ("chrome_fg_alert", colors.chrome_fg_alert.is_some()),
+            ("hotspot_filepath", colors.hotspot_filepath.is_some()),
+            ("hotspot_url", colors.hotspot_url.is_some()),
+            ("hotspot_error", colors.hotspot_error.is_some()),
+            ("hotspot_gitref", colors.hotspot_gitref.is_some()),
+            ("hotspot_issueref", colors.hotspot_issueref.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| (!set).then_some(name))
+        .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "{preset:?} missing chrome fields: {missing:?}"
+        );
+    }
+}
+
+/// tn-2xwr — chrome text (`chrome_fg`) must remain readable on the chrome
+/// background it rides (`chrome_header_bg`) for every preset. The pane
+/// header process label and status bar center text both use
+/// `chrome_fg` on `chrome_header_bg`/`chrome_status_bar_bg`, so anything
+/// below WCAG AA (4.5:1) would be a visual regression.
+#[test]
+fn theme_presets_chrome_text_readable_on_chrome_bg() {
+    const MIN_CONTRAST: f64 = 4.5;
+    let mut colors = ColorsConfig::default();
+    for preset in [
+        ThemePreset::OriginalTherminal,
+        ThemePreset::Paper,
+        ThemePreset::TokyoNightLight,
+        ThemePreset::TomorrowNightBright,
+        ThemePreset::HemisuDark,
+    ] {
+        apply_theme_preset(&mut colors, preset);
+        let fg = colors.chrome_fg.as_deref().unwrap();
+        let header_bg = colors.chrome_header_bg.as_deref().unwrap();
+        let status_bg = colors.chrome_status_bar_bg.as_deref().unwrap();
+        let header_ratio = contrast_ratio(fg, header_bg);
+        let status_ratio = contrast_ratio(fg, status_bg);
+        assert!(
+            header_ratio >= MIN_CONTRAST,
+            "{preset:?} chrome_fg/header_bg contrast too low: {header_ratio:.2} ({fg} on {header_bg})"
+        );
+        assert!(
+            status_ratio >= MIN_CONTRAST,
+            "{preset:?} chrome_fg/status_bar_bg contrast too low: {status_ratio:.2} ({fg} on {status_bg})"
+        );
+    }
+}
+
 #[test]
 fn hotspots_section_is_registered() {
     let state = SettingsOverlayState::new();
