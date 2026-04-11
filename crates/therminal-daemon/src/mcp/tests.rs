@@ -23,10 +23,13 @@ pub(crate) fn make_server(trust_config: TrustConfig) -> TherminalMcpServer {
     TherminalMcpServer::new(session_mgr, trust_config, rate_limiter, None, None, None)
 }
 
-/// Build an `AgentIdentity` with the given name.
+/// Build an `AgentIdentity` with the given name. The `connection_id` is
+/// fixed to `0` for tests that don't exercise the per-connection grant key
+/// (tn-yuu4); tests that DO care construct the identity directly.
 fn agent(name: &str) -> AgentIdentity {
     AgentIdentity {
         name: name.to_string(),
+        connection_id: 0,
     }
 }
 
