@@ -788,6 +788,16 @@ impl GridRenderer {
     }
 
     /// Drop all per-pane render caches so the next frame fully rebuilds.
+    ///
+    /// Also drains `hotspot_map` (tn-yxiz): entries are keyed by
+    /// `(PaneId, row, col)` and the damage-aware update in `render_from_cache`
+    /// only rewrites cells that re-render. After a resize (window or font),
+    /// the column count changes and every row is re-rendered from scratch,
+    /// but stale entries at pre-resize columns beyond the new right edge
+    /// would otherwise remain and draw underlines past the content area.
+    /// Dropping the whole map forces a clean rebuild against current grid
+    /// metrics. `hyperlink_map` is rebuilt every frame in `clear_frame_maps`
+    /// so it doesn't need explicit invalidation here.
     pub fn clear_render_caches(&mut self) {
         self.pane_row_cache.clear();
         self.pane_cell_buffers.clear();
@@ -795,6 +805,7 @@ impl GridRenderer {
         self.pane_last_cursor_pos.clear();
         self.pane_last_display_offset.clear();
         self.pane_last_column_count.clear();
+        self.hotspot_map.clear();
     }
 
     /// Returns true when the cached viewport rows for `pane_id` match the
