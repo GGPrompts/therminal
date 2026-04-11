@@ -6,9 +6,7 @@ use glyphon::{
 use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::{ColorVertex, GridRenderer};
-use therminal_core::palette::Color as PaletteColor;
 
-use super::colors::{FOCUS_BORDER_COLOR, HEADER_BG_COLOR, STATUS_BAR_BG_COLOR};
 use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
@@ -23,9 +21,6 @@ const TAB_MIN_WIDTH: f32 = 48.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
 const TAB_PADDING: f32 = 16.0;
 pub(crate) const TAB_ELLIPSIS: char = '…';
-const TAB_BAR_BG_COLOR: [f32; 4] = STATUS_BAR_BG_COLOR;
-const TAB_ACTIVE_BG_COLOR: [f32; 4] = HEADER_BG_COLOR;
-const TAB_ACTIVE_UNDERLINE_COLOR: [f32; 4] = FOCUS_BORDER_COLOR;
 
 /// Draw the workspace tab bar at the top of the window.
 ///
@@ -58,8 +53,14 @@ pub(crate) fn draw_tab_bar(
     let sw = surface_width as f32;
     let sh = surface_height as f32;
 
+    // Snapshot palette colors up front so we can hand the renderer to
+    // mutating helpers later in this function without re-borrowing.
+    let tab_bar_bg = renderer.chrome_palette.tab_bar_bg;
+    let tab_active_bg = renderer.chrome_palette.tab_active_bg;
+    let tab_active_underline = renderer.chrome_palette.tab_active_underline;
+
     // ── Background ──
-    let bg_verts = pixel_rect_to_ndc(0.0, 0.0, sw, bar_h, sw, sh, TAB_BAR_BG_COLOR);
+    let bg_verts = pixel_rect_to_ndc(0.0, 0.0, sw, bar_h, sw, sh, tab_bar_bg);
 
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("tabbar_bg_vbuf"),
@@ -103,7 +104,7 @@ pub(crate) fn draw_tab_bar(
                 bar_h,
                 sw,
                 sh,
-                TAB_ACTIVE_BG_COLOR,
+                tab_active_bg,
             ));
             tab_verts.extend_from_slice(&pixel_rect_to_ndc(
                 tab_x,
@@ -112,7 +113,7 @@ pub(crate) fn draw_tab_bar(
                 2.0,
                 sw,
                 sh,
-                TAB_ACTIVE_UNDERLINE_COLOR,
+                tab_active_underline,
             ));
         }
     }
@@ -137,18 +138,14 @@ pub(crate) fn draw_tab_bar(
     let line_height = bar_h;
     let metrics = Metrics::new(font_size, line_height);
 
-    let active_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
-        255,
-    );
-    let inactive_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
-        200,
-    );
+    // Theme-aware (tn-g7oo): tab text reads from chrome_fg / chrome_fg_muted
+    // so a light theme that re-skins the tab background also re-skins the
+    // labels in step.
+    let chrome_fg = renderer.chrome_palette.chrome_fg;
+    let chrome_fg_muted = renderer.chrome_palette.chrome_fg_muted;
+    let active_color = GlyphColor::rgba(chrome_fg.r, chrome_fg.g, chrome_fg.b, 255);
+    let inactive_color =
+        GlyphColor::rgba(chrome_fg_muted.r, chrome_fg_muted.g, chrome_fg_muted.b, 200);
 
     let family = renderer.font_config.family.clone();
     let mut tab_slots: Vec<(String, f32, f32, GlyphColor)> = Vec::new();

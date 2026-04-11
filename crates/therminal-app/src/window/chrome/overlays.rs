@@ -3,14 +3,11 @@
 
 use wgpu::util::DeviceExt;
 
+use therminal_core::palette::ChromePalette;
+
 use crate::grid_renderer::GridRenderer;
 use crate::overlay::{OverlayLayer, OverlayTier};
 use crate::pane::{LayoutNode, PaneId, PaneState, SplitDirection};
-
-use super::colors::{
-    FOCUS_BORDER_COLOR, HEADER_BG_COLOR, HEADER_BG_DIM_COLOR, SEPARATOR_COLOR,
-    SEPARATOR_FOCUS_COLOR,
-};
 
 /// Draw a full-screen semi-transparent white overlay for the visual bell.
 ///
@@ -78,40 +75,31 @@ pub(crate) fn draw_visual_bell_overlay(
 
 /// Push the focus border quads for a pane into the overlay layer.
 #[allow(dead_code)]
-pub(crate) fn push_focus_border_overlay(pane: &PaneState, overlay: &mut OverlayLayer) {
+pub(crate) fn push_focus_border_overlay(
+    pane: &PaneState,
+    palette: &ChromePalette,
+    overlay: &mut OverlayLayer,
+) {
     let vp = pane.viewport;
     let t = 2.0_f32;
+    let color = palette.focus_border;
 
-    overlay.push_rect(
-        vp.x(),
-        vp.y(),
-        vp.width(),
-        t,
-        FOCUS_BORDER_COLOR,
-        OverlayTier::Chrome,
-    );
+    overlay.push_rect(vp.x(), vp.y(), vp.width(), t, color, OverlayTier::Chrome);
     overlay.push_rect(
         vp.x(),
         vp.bottom() - t,
         vp.width(),
         t,
-        FOCUS_BORDER_COLOR,
+        color,
         OverlayTier::Chrome,
     );
-    overlay.push_rect(
-        vp.x(),
-        vp.y(),
-        t,
-        vp.height(),
-        FOCUS_BORDER_COLOR,
-        OverlayTier::Chrome,
-    );
+    overlay.push_rect(vp.x(), vp.y(), t, vp.height(), color, OverlayTier::Chrome);
     overlay.push_rect(
         vp.right() - t,
         vp.y(),
         t,
         vp.height(),
-        FOCUS_BORDER_COLOR,
+        color,
         OverlayTier::Chrome,
     );
 }
@@ -123,6 +111,7 @@ pub(crate) fn push_separator_overlay(
     first: &LayoutNode,
     second: &LayoutNode,
     focused: Option<PaneId>,
+    palette: &ChromePalette,
     overlay: &mut OverlayLayer,
 ) {
     let first_rects = first.leaf_rects_pub();
@@ -138,9 +127,9 @@ pub(crate) fn push_separator_overlay(
         .map(|fid| first_ids.contains(&fid) || second_ids.contains(&fid))
         .unwrap_or(false);
     let color = if is_focused_adjacent {
-        SEPARATOR_FOCUS_COLOR
+        palette.separator_focus
     } else {
-        SEPARATOR_COLOR
+        palette.separator
     };
 
     let (px, py, pw, ph) = match direction {
@@ -166,15 +155,16 @@ pub(crate) fn push_separator_overlay(
 pub(crate) fn push_header_bg_overlay(
     pane: &PaneState,
     is_focused: bool,
+    palette: &ChromePalette,
     overlay: &mut OverlayLayer,
 ) -> f32 {
     let vp = pane.viewport;
     let header_h = crate::pane::PANE_HEADER_HEIGHT;
 
     let bg_color = if is_focused {
-        HEADER_BG_COLOR
+        palette.header_bg
     } else {
-        HEADER_BG_DIM_COLOR
+        palette.header_bg_dim
     };
 
     overlay.push_rect(

@@ -2,7 +2,7 @@
 
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 use glyphon::Color as GlyphColor;
-use therminal_core::palette::Color as PaletteColor;
+use therminal_core::palette::{ChromePalette, Color as PaletteColor};
 use therminal_terminal::hotspot_detection::HotspotKind;
 
 use crate::grid_renderer::{ColorVertex, RenderCell, TERM_BG};
@@ -245,22 +245,16 @@ pub(crate) fn f32_to_glyph_color(c: [f32; 4]) -> GlyphColor {
 ///
 /// Each hotspot kind gets a visually differentiated color so users can tell at
 /// a glance whether a hotspot is a URL, file path, error, git ref, or issue
-/// reference.  All colors pass WCAG AA text contrast (>= 4.5:1) against
-/// `PaletteColor::BG`.
-pub(crate) fn hotspot_kind_color(kind: &HotspotKind) -> [f32; 4] {
+/// reference. Colors are sourced from the runtime [`ChromePalette`] (tn-g7oo)
+/// so a theme override re-skins underlines automatically. All defaults pass
+/// WCAG AA text contrast (>= 4.5:1) against the dark `PaletteColor::BG`.
+pub(crate) fn hotspot_kind_color(kind: &HotspotKind, palette: &ChromePalette) -> [f32; 4] {
     match kind {
-        // Blue — convention: URLs are blue.
-        HotspotKind::Url => PaletteColor::ACCENT_COOL.to_f32_array(),
-        // Teal — navigable but not alarming.
-        HotspotKind::FilePath => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
-        // Red — errors are red.
-        HotspotKind::ErrorLocation => PaletteColor::STATUS_ERROR.to_f32_array(),
-        // Yellow/amber — consistent with git diff yellow.
-        HotspotKind::GitRef => PaletteColor::HOT.to_f32_array(),
-        // Purple/indigo — distinct, low priority. No existing palette constant
-        // covers purple, so we use a hardcoded value (#b48eff) that meets WCAG
-        // contrast against BG.
-        HotspotKind::IssueRef => [0.706, 0.557, 1.0, 1.0], // #b48eff
+        HotspotKind::Url => palette.hotspot_url,
+        HotspotKind::FilePath => palette.hotspot_filepath,
+        HotspotKind::ErrorLocation => palette.hotspot_error,
+        HotspotKind::GitRef => palette.hotspot_gitref,
+        HotspotKind::IssueRef => palette.hotspot_issueref,
     }
 }
 
@@ -370,30 +364,38 @@ mod tests {
 
     #[test]
     fn hotspot_kind_colors_meet_wcag_text() {
-        assert_wcag_text("Url (ACCENT_COOL)", hotspot_kind_color(&HotspotKind::Url));
+        let palette = ChromePalette::default();
+        assert_wcag_text(
+            "Url (ACCENT_COOL)",
+            hotspot_kind_color(&HotspotKind::Url, &palette),
+        );
         assert_wcag_text(
             "FilePath (ACCENT_NEUTRAL)",
-            hotspot_kind_color(&HotspotKind::FilePath),
+            hotspot_kind_color(&HotspotKind::FilePath, &palette),
         );
         assert_wcag_text(
             "ErrorLocation (STATUS_ERROR)",
-            hotspot_kind_color(&HotspotKind::ErrorLocation),
+            hotspot_kind_color(&HotspotKind::ErrorLocation, &palette),
         );
-        assert_wcag_text("GitRef (HOT)", hotspot_kind_color(&HotspotKind::GitRef));
+        assert_wcag_text(
+            "GitRef (HOT)",
+            hotspot_kind_color(&HotspotKind::GitRef, &palette),
+        );
         assert_wcag_text(
             "IssueRef (purple)",
-            hotspot_kind_color(&HotspotKind::IssueRef),
+            hotspot_kind_color(&HotspotKind::IssueRef, &palette),
         );
     }
 
     #[test]
     fn hotspot_kind_colors_are_distinct() {
+        let palette = ChromePalette::default();
         let colors = [
-            hotspot_kind_color(&HotspotKind::Url),
-            hotspot_kind_color(&HotspotKind::FilePath),
-            hotspot_kind_color(&HotspotKind::ErrorLocation),
-            hotspot_kind_color(&HotspotKind::GitRef),
-            hotspot_kind_color(&HotspotKind::IssueRef),
+            hotspot_kind_color(&HotspotKind::Url, &palette),
+            hotspot_kind_color(&HotspotKind::FilePath, &palette),
+            hotspot_kind_color(&HotspotKind::ErrorLocation, &palette),
+            hotspot_kind_color(&HotspotKind::GitRef, &palette),
+            hotspot_kind_color(&HotspotKind::IssueRef, &palette),
         ];
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {

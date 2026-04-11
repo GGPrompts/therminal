@@ -4,7 +4,6 @@ use glyphon::{Attrs, Color as GlyphColor, Family, Metrics, Resolution, TextArea,
 use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::{ColorVertex, GridRenderer};
-use therminal_core::palette::Color as PaletteColor;
 
 use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
@@ -20,9 +19,6 @@ pub(crate) enum CsdAction {
 
 /// Width of each CSD window control button.
 const CSD_BTN_W: f32 = crate::pane::CSD_BUTTON_WIDTH;
-
-const CSD_CLOSE_COLOR: [f32; 4] = [0.85, 0.25, 0.25, 1.0];
-const CSD_HOVER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.1];
 
 /// Hit-test CSD window control buttons (right-aligned in the tab bar).
 pub(crate) fn csd_button_hit_test(px: f32, bar_h: f32, surface_width: f32) -> Option<CsdAction> {
@@ -145,6 +141,11 @@ fn draw_csd_hover_bg(
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
 
+    // Theme-aware (tn-g7oo): close button gets its own dedicated red, the
+    // other three buttons share the generic translucent hover tint.
+    let close_color = renderer.chrome_palette.csd_close;
+    let hover_color = renderer.chrome_palette.csd_button_hover;
+
     let mut verts: Vec<ColorVertex> = Vec::new();
     match hovered {
         Some(0) => verts.extend_from_slice(&pixel_rect_to_ndc(
@@ -154,7 +155,7 @@ fn draw_csd_hover_bg(
             bar_h,
             sw,
             sh,
-            CSD_CLOSE_COLOR,
+            close_color,
         )),
         Some(1) => verts.extend_from_slice(&pixel_rect_to_ndc(
             layout.max_x,
@@ -163,7 +164,7 @@ fn draw_csd_hover_bg(
             bar_h,
             sw,
             sh,
-            CSD_HOVER_COLOR,
+            hover_color,
         )),
         Some(2) => verts.extend_from_slice(&pixel_rect_to_ndc(
             layout.min_x,
@@ -172,7 +173,7 @@ fn draw_csd_hover_bg(
             bar_h,
             sw,
             sh,
-            CSD_HOVER_COLOR,
+            hover_color,
         )),
         Some(3) => verts.extend_from_slice(&pixel_rect_to_ndc(
             layout.settings_x,
@@ -181,7 +182,7 @@ fn draw_csd_hover_bg(
             bar_h,
             sw,
             sh,
-            CSD_HOVER_COLOR,
+            hover_color,
         )),
         _ => {}
     }
@@ -262,12 +263,10 @@ fn draw_csd_button_icons(
         bottom: surface_height as i32,
     };
 
-    let icon_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
-        200,
-    );
+    // Theme-aware (tn-g7oo): CSD icons use the chrome_fg role so a light
+    // theme can re-skin them.
+    let chrome_fg = renderer.chrome_palette.chrome_fg;
+    let icon_color = GlyphColor::rgba(chrome_fg.r, chrome_fg.g, chrome_fg.b, 200);
     let close_icon_color = if hovered == Some(0) {
         GlyphColor::rgba(255, 255, 255, 255)
     } else {

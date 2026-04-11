@@ -5,9 +5,8 @@ use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::GridRenderer;
 use therminal_core::config::ConfigTemplateStatus;
-use therminal_core::palette::Color as PaletteColor;
+use therminal_core::palette::{ChromePalette, Color as PaletteColor};
 
-use super::colors::STATUS_BAR_BG_COLOR;
 use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
@@ -86,7 +85,7 @@ pub(crate) fn draw_status_bar(
 
     // ── 2. Compose strings + colors ──
     let strings = StatusBarStrings::compute(info);
-    let colors = StatusBarColors::compute(info.last_exit_code);
+    let colors = StatusBarColors::compute(info.last_exit_code, &renderer.chrome_palette);
     let needs_prefix_measure =
         info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
 
@@ -139,7 +138,15 @@ fn draw_status_bar_bg(
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
 
-    let bg_verts = pixel_rect_to_ndc(0.0, bar_y, sw, bar_h, sw, sh, STATUS_BAR_BG_COLOR);
+    let bg_verts = pixel_rect_to_ndc(
+        0.0,
+        bar_y,
+        sw,
+        bar_h,
+        sw,
+        sh,
+        renderer.chrome_palette.status_bar_bg,
+    );
 
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("statusbar_bg_vbuf"),
@@ -235,44 +242,19 @@ struct StatusBarColors {
 }
 
 impl StatusBarColors {
-    fn compute(last_exit_code: Option<i32>) -> Self {
-        let workspace_active = GlyphColor::rgba(
-            PaletteColor::FOCUS.r,
-            PaletteColor::FOCUS.g,
-            PaletteColor::FOCUS.b,
-            255,
-        );
-        let agent = GlyphColor::rgba(
-            PaletteColor::FOCUS.r,
-            PaletteColor::FOCUS.g,
-            PaletteColor::FOCUS.b,
-            230,
-        );
-        let muted = GlyphColor::rgba(
-            PaletteColor::INK_MUTED.r,
-            PaletteColor::INK_MUTED.g,
-            PaletteColor::INK_MUTED.b,
-            230,
-        );
-        let center = GlyphColor::rgba(
-            PaletteColor::INK.r,
-            PaletteColor::INK.g,
-            PaletteColor::INK.b,
-            200,
-        );
+    fn compute(last_exit_code: Option<i32>, palette: &ChromePalette) -> Self {
+        let glyph = |c: PaletteColor, alpha: u8| GlyphColor::rgba(c.r, c.g, c.b, alpha);
+
+        let workspace_active = glyph(palette.chrome_fg_focus, 255);
+        let agent = glyph(palette.chrome_fg_focus, 230);
+        let muted = glyph(palette.chrome_fg_muted, 230);
+        let center = glyph(palette.chrome_fg, 200);
         let exit = match last_exit_code {
-            Some(0) => GlyphColor::rgba(
-                PaletteColor::STATUS_OK.r,
-                PaletteColor::STATUS_OK.g,
-                PaletteColor::STATUS_OK.b,
-                230,
-            ),
-            Some(_) => GlyphColor::rgba(
-                PaletteColor::STATUS_ERROR.r,
-                PaletteColor::STATUS_ERROR.g,
-                PaletteColor::STATUS_ERROR.b,
-                230,
-            ),
+            // Exit code OK / error remain semantic (green/red traffic light) —
+            // they describe a fixed signal, not a chrome role, so they read
+            // from the bundled palette constants regardless of theme.
+            Some(0) => glyph(PaletteColor::STATUS_OK, 230),
+            Some(_) => glyph(PaletteColor::STATUS_ERROR, 230),
             None => muted,
         };
         Self {

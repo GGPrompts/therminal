@@ -1,97 +1,15 @@
-//! Color constants and button dimensions for chrome rendering.
-
-use therminal_core::palette::Color as PaletteColor;
-
-/// Color for focused pane border indicator (FOCUS from Codex 2031 palette).
-pub(crate) const FOCUS_BORDER_COLOR: [f32; 4] = {
-    let c = PaletteColor::FOCUS;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.92,
-    ]
-};
-
-/// Color for unfocused pane separators (LINE from palette).
-pub(super) const SEPARATOR_COLOR: [f32; 4] = {
-    let c = PaletteColor::LINE;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        1.0,
-    ]
-};
-
-/// Color for separators adjacent to the focused pane (FOCUS from palette).
-pub(super) const SEPARATOR_FOCUS_COLOR: [f32; 4] = {
-    let c = PaletteColor::FOCUS;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.82,
-    ]
-};
-
-/// Pane header background color for the focused pane.
-pub(crate) const HEADER_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::VOID_2;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        1.0,
-    ]
-};
-
-/// Dimmed pane header background for unfocused panes.
-pub(crate) const HEADER_BG_DIM_COLOR: [f32; 4] = {
-    let c = PaletteColor::VOID_0;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        1.0,
-    ]
-};
+//! Chrome button dimensions.
+//!
+//! Color constants used to live here as compile-time `[f32; 4]` values
+//! derived from `PaletteColor::*`. Those have been replaced by the runtime
+//! [`therminal_core::palette::ChromePalette`] (tn-g7oo) — chrome modules now
+//! read each color through `&renderer.chrome_palette.<role>` so theme
+//! reloads re-skin the UI immediately. The button dimension constants
+//! below are still compile-time values because they describe layout, not
+//! color, and don't depend on the active theme.
 
 /// Width of each header button in pixels.
 pub(crate) const HEADER_BUTTON_WIDTH: f32 = 24.0;
 
 /// Right-side margin for header buttons.
 pub(crate) const HEADER_BUTTON_MARGIN: f32 = 4.0;
-
-/// Exit-code indicator color: last command exited 0 (success).
-pub(super) const EXIT_OK_COLOR: [f32; 4] = {
-    let c = PaletteColor::STATUS_OK;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.90,
-    ]
-};
-
-/// Exit-code indicator color: last command exited non-zero (failure).
-pub(super) const EXIT_ERROR_COLOR: [f32; 4] = {
-    let c = PaletteColor::STATUS_ERROR;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.90,
-    ]
-};
-
-/// Status bar background color.
-pub(super) const STATUS_BAR_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::VOID_0;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        1.0,
-    ]
-};

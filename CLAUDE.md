@@ -87,6 +87,100 @@ Prefer small, focused modules over large monolithic files. When a file exceeds ~
 - Rust idioms: prefer `?` over `.unwrap()`, use `thiserror` for public error types
 - **Config fields must be wired**: if a config struct has a field, code must read it. Don't declare config options that nothing uses. `TherminalConfig` in `therminal-core` is the single source of truth.
 
+## Theming
+
+Therminal renders both terminal cells **and** chrome (pane headers, separators, focus border, status bar, tab bar, CSD buttons, hotspot underlines, selection, cursor) through a single runtime palette. Hot-reloading `[colors]` re-skins everything in one shot.
+
+### Architecture (tn-g7oo)
+
+`therminal_core::palette::ChromePalette` is the runtime, theme-aware substitute for the compile-time `Color::*` constants chrome modules used to read. Each field is an `[f32; 4]` RGBA value with the alpha already baked in. The struct is owned by `GridRenderer.chrome_palette` and rebuilt on every `apply_color_overrides` call (which is wired into the existing config hot-reload pipeline).
+
+Chrome modules read directly from `&renderer.chrome_palette.<role>`. There is no extra accessor layer — fields are public and addressing is by name.
+
+### Roles
+
+| Field | Default derives from | Used by |
+|---|---|---|
+| `focus_border` | `Color::FOCUS` @ α=0.92 | 3 px outline around the focused pane, separator-focus, tab-active underline |
+| `separator` | `Color::LINE` | Split-pane separator line (unfocused) |
+| `separator_focus` | `Color::FOCUS` @ α=0.82 | Separator adjacent to the focused pane |
+| `header_bg` | `Color::VOID_2` | Pane header — focused (also tab-active background) |
+| `header_bg_dim` | `Color::VOID_0` | Pane header — unfocused |
+| `exit_ok` / `exit_error` | `STATUS_OK` / `STATUS_ERROR` @ α=0.90 | Left-edge exit-code stripe in the pane header |
+| `status_bar_bg` | `Color::VOID_0` | Bottom status bar fill (also tab-bar fill by default) |
+| `tab_bar_bg` | `status_bar_bg` | Workspace tab bar fill — overrides `status_bar_bg` for the tab bar only |
+| `tab_active_bg` | `header_bg` | Active workspace tab background |
+| `tab_active_underline` | `focus_border` | 2 px underline beneath the active workspace tab |
+| `csd_close` | `[0.85, 0.25, 0.25, 1.0]` (red) | CSD close-button hover tint |
+| `csd_button_hover` | `[1.0, 1.0, 1.0, 0.1]` (white α=0.1) | CSD min/max/settings hover tint |
+| `chrome_fg` | `Color::INK` | Primary chrome text — pane header process, status bar center, tab labels (active), CSD icons |
+| `chrome_fg_muted` | `Color::INK_MUTED` | Pane indices, button labels, status bar muted text, inactive tab labels |
+| `chrome_fg_focus` | `Color::FOCUS` | Workspace number, agent indicator, claude badge, topic-branch text |
+| `chrome_fg_warn` | `Color::WARN` | Git detached HEAD label |
+| `chrome_fg_alert` | `Color::ALERT` | Pane header close-button glyph |
+| `selection` | `Color::ACCENT_COOL` @ α=0.35 | Terminal text selection rect |
+| `cursor` | `Color::WHITE_HOT` @ α=0.85 | Cursor block / underline |
+| `hyperlink` | `Color::ACCENT_COOL` | OSC 8 + regex URL underlines (and the linked-cell glyph color) |
+| `hotspot_filepath` | `Color::ACCENT_NEUTRAL` | Dotted underline for `FilePath` hotspots |
+| `hotspot_url` | `Color::ACCENT_COOL` | Dotted underline for `Url` hotspots (also drives `hyperlink`) |
+| `hotspot_error` | `Color::STATUS_ERROR` | Dotted underline for `ErrorLocation` hotspots |
+| `hotspot_gitref` | `Color::HOT` | Dotted underline for `GitRef` hotspots |
+| `hotspot_issueref` | `[0.706, 0.557, 1.0, 1.0]` (purple) | Dotted underline for `IssueRef` hotspots |
+
+### Authoring a theme
+
+Themes live in `[colors]` in `therminal.toml`. Every field is optional — set only the roles you want to recolor; the rest derive from the bundled Codex 2031 palette.
+
+```toml
+[colors]
+# Terminal cells (existing fields, unchanged)
+background = "#fbf6ec"
+foreground = "#2c2823"
+selection  = "#d6c8a6"
+
+# Chrome roles (tn-g7oo)
+chrome_focus_border  = "#2563eb"   # focus outline + active tab underline
+chrome_separator     = "#cbb88a"   # split-pane separator line
+chrome_header_bg     = "#f3ead6"   # focused pane header
+chrome_header_bg_dim = "#ece2c4"   # unfocused pane header
+chrome_status_bar_bg = "#ece2c4"   # bottom status bar (also tab bar)
+chrome_tab_active_bg = "#f3ead6"   # active workspace tab
+chrome_csd_close     = "#cc3333"   # close-button hover tint
+
+# Text colors that ride the new background — set these whenever you re-skin
+# the chrome backgrounds, or pane labels become unreadable.
+chrome_fg            = "#2c2823"   # primary chrome text
+chrome_fg_muted      = "#6b5f53"   # secondary text / button labels
+chrome_fg_focus      = "#2563eb"   # workspace number / agent indicator
+chrome_fg_warn       = "#b8860b"   # git detached HEAD
+chrome_fg_alert      = "#cc3333"   # close button glyph
+
+# Hotspot underline colors
+hotspot_filepath = "#0d9488"
+hotspot_url      = "#2563eb"
+hotspot_error    = "#dc2626"
+hotspot_gitref   = "#b8860b"
+hotspot_issueref = "#7c3aed"
+```
+
+A few derivation rules to know:
+
+- **`chrome_focus_border` propagates** to `separator_focus` and `tab_active_underline` automatically.
+- **`chrome_header_bg` propagates** to `tab_active_bg`.
+- **`chrome_status_bar_bg` propagates** to `tab_bar_bg`. To re-skin only the tab bar, set `chrome_tab_bar_bg` (which does not propagate).
+- **`hotspot_url` propagates** to the OSC 8 `hyperlink` underline so hand-rolled and regex-detected URLs match.
+- **`cursor` and `selection` overrides** keep their default alpha (0.85 / 0.35) — only the RGB channels are replaced.
+
+Invalid hex strings fall back to the default for that single role; the rest of the palette is unaffected.
+
+### Implementation pointers
+
+- `crates/therminal-core/src/palette.rs` — `ChromePalette` struct + `Default` impl + tests.
+- `crates/therminal-core/src/config/mod.rs` — `ColorsConfig` chrome/hotspot fields + `chrome_palette()` resolver + tests.
+- `crates/therminal-app/src/grid_renderer.rs` — `GridRenderer.chrome_palette` field, rebuilt on every `apply_color_overrides` call.
+- `crates/therminal-app/src/window/chrome/{colors,csd,pane_header,status_bar,tab_bar,overlays}.rs` — chrome modules read `renderer.chrome_palette.*` directly.
+- `crates/therminal-app/src/color_mapping.rs` — `hotspot_kind_color(kind, &chrome_palette)` resolves kind-specific underline colors.
+
 ## Building & Testing
 
 Run `./scripts/ci.sh` before committing code changes. This runs the same checks as GitHub Actions CI:

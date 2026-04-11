@@ -22,7 +22,6 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use therminal_core::palette::Color as PaletteColor;
 use therminal_core::text::glyphon_color_mode_for_surface;
 
 use crate::color_mapping::*;
@@ -463,12 +462,16 @@ pub struct GridRenderer {
     bg_override: Option<[f32; 4]>,
     /// Override for default foreground color (from config.colors.foreground).
     fg_override: Option<[f32; 4]>,
-    /// Override for cursor color (from config.colors.cursor).
-    cursor_override: Option<[f32; 4]>,
-    /// Override for selection color (from config.colors.selection).
-    selection_override: Option<[f32; 4]>,
     /// Optional ANSI palette override (16-color table from config.colors.ansi).
     ansi_override: Option<[[f32; 4]; 16]>,
+
+    /// Theme-aware chrome palette (tn-g7oo). Holds resolved RGBA values for
+    /// every chrome / overlay role (focus border, separators, header bg,
+    /// status bar, tab bar, hotspot underlines, selection, cursor, ...).
+    /// Built by `apply_color_overrides` from the active `ColorsConfig` —
+    /// chrome modules read this directly so theme reloads re-skin the UI
+    /// immediately.
+    pub chrome_palette: therminal_core::palette::ChromePalette,
 
     /// Cache for overlay text buffers (status bar, pane headers, tab bar).
     /// Key: slot name (e.g. "header_index_0", "status_center", "tab_1").
@@ -677,9 +680,8 @@ impl GridRenderer {
             current_pane_id: None,
             bg_override: None,
             fg_override: None,
-            cursor_override: None,
-            selection_override: None,
             ansi_override: None,
+            chrome_palette: therminal_core::palette::ChromePalette::default(),
             overlay_cache: HashMap::new(),
             pattern_widget_sink: Vec::new(),
             ui_text_scale: 1.0,
@@ -722,6 +724,12 @@ impl GridRenderer {
     }
 
     /// Apply color overrides from the config's `ColorsConfig`.
+    ///
+    /// Rebuilds both the bg/fg/ansi overrides used by terminal cell color
+    /// resolution and the runtime [`therminal_core::palette::ChromePalette`]
+    /// used by every chrome module (tn-g7oo). Called from `init()`,
+    /// `apply_config()`, and the hot-reload event handler — themes can
+    /// re-skin the entire window without a restart.
     pub fn apply_color_overrides(&mut self, colors: &therminal_core::config::ColorsConfig) {
         self.bg_override = colors
             .background
@@ -730,16 +738,6 @@ impl GridRenderer {
             .map(|c| c.to_f32_array());
         self.fg_override = colors
             .foreground
-            .as_deref()
-            .and_then(therminal_core::config::ColorsConfig::parse_hex)
-            .map(|c| c.to_f32_array());
-        self.cursor_override = colors
-            .cursor
-            .as_deref()
-            .and_then(therminal_core::config::ColorsConfig::parse_hex)
-            .map(|c| c.to_f32_array());
-        self.selection_override = colors
-            .selection
             .as_deref()
             .and_then(therminal_core::config::ColorsConfig::parse_hex)
             .map(|c| c.to_f32_array());
@@ -754,6 +752,12 @@ impl GridRenderer {
             }
             Some(out)
         });
+
+        // Resolve the chrome palette from defaults + per-role overrides.
+        // This is the single point where chrome theming is plumbed through;
+        // every chrome module reads `renderer.chrome_palette` directly so a
+        // hot-reload of `[colors]` re-skins the entire UI immediately.
+        self.chrome_palette = colors.chrome_palette();
 
         self.clear_render_caches();
     }
@@ -771,24 +775,16 @@ impl GridRenderer {
         self.bg_override.unwrap_or(TERM_BG)
     }
 
-    /// Get the resolved cursor color as `[f32; 4]`, respecting config overrides.
+    /// Get the resolved cursor color as `[f32; 4]`, sourced from
+    /// `chrome_palette.cursor` (theme-aware, tn-g7oo).
     pub fn resolved_cursor_color(&self) -> [f32; 4] {
-        if let Some(c) = self.cursor_override {
-            [c[0], c[1], c[2], 0.85]
-        } else {
-            let wh = PaletteColor::WHITE_HOT.to_f32_array();
-            [wh[0], wh[1], wh[2], 0.85]
-        }
+        self.chrome_palette.cursor
     }
 
-    /// Get the resolved selection highlight color as `[f32; 4]`, respecting config overrides.
+    /// Get the resolved selection highlight color as `[f32; 4]`, sourced
+    /// from `chrome_palette.selection` (theme-aware, tn-g7oo).
     pub fn resolved_selection_color(&self) -> [f32; 4] {
-        if let Some(c) = self.selection_override {
-            [c[0], c[1], c[2], 0.35]
-        } else {
-            let accent = PaletteColor::ACCENT_COOL.to_f32_array();
-            [accent[0], accent[1], accent[2], 0.35]
-        }
+        self.chrome_palette.selection
     }
 
     /// Drop all per-pane render caches so the next frame fully rebuilds.
@@ -1199,6 +1195,20 @@ impl GridRenderer {
             },
         );
 
+        // Theme-aware (tn-g7oo): cell-default text color falls back to the
+        // chrome `chrome_fg` role so an override of `[colors] chrome_fg`
+        // re-skins any cell that doesn't carry an explicit fg attr. The
+        // existing `[colors] foreground` override still applies first when
+        // present (it short-circuits the chrome_fg fallback).
+        let default_text_color = self.fg_override.unwrap_or_else(|| {
+            let c = self.chrome_palette.chrome_fg;
+            [
+                c.r as f32 / 255.0,
+                c.g as f32 / 255.0,
+                c.b as f32 / 255.0,
+                1.0,
+            ]
+        });
         let text_areas = build_grid_text_areas(
             &cell_buffers,
             self.padding_x,
@@ -1207,6 +1217,7 @@ impl GridRenderer {
             self.cell_height,
             surface_width,
             surface_height,
+            default_text_color,
         );
         let has_text = !text_areas.is_empty();
         if has_text
@@ -1355,7 +1366,9 @@ impl GridRenderer {
         row_cache: &[Option<CachedRow>],
         bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
     ) {
-        let link_color = PaletteColor::ACCENT_COOL.to_f32_array();
+        // Theme-aware (tn-g7oo) — sourced from chrome_palette.hyperlink so a
+        // light-theme override re-skins regex URL + OSC 8 underlines together.
+        let link_color = self.chrome_palette.hyperlink;
         let underline_h = 1.0_f32;
         let dash_on = 3.0_f32;
         let dash_off = 2.0_f32;
@@ -1443,7 +1456,8 @@ impl GridRenderer {
                 if let Some((ref kind, _, _, _)) = cell.hotspot
                     && cell.hyperlink.is_none()
                 {
-                    let hotspot_color = crate::color_mapping::hotspot_kind_color(kind);
+                    let hotspot_color =
+                        crate::color_mapping::hotspot_kind_color(kind, &self.chrome_palette);
                     let x = self.padding_x + cell.col as f32 * self.cell_width;
                     let y = self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
                         - underline_h;
@@ -1623,7 +1637,9 @@ impl GridRenderer {
             let fg = if is_block_cursor {
                 self.resolved_bg()
             } else if cell.hyperlink.is_some() {
-                PaletteColor::ACCENT_COOL.to_f32_array()
+                // Theme-aware hyperlink text color (tn-g7oo) — matches the
+                // underline color so the cell glyphs read as "linked".
+                self.chrome_palette.hyperlink
             } else if cell.flags.contains(Flags::INVERSE) {
                 self.map_bg_color(&cell.bg).unwrap_or(self.resolved_bg())
             } else {
@@ -1812,6 +1828,7 @@ fn build_grid_text_areas<'a>(
     cell_height: f32,
     surface_width: u32,
     surface_height: u32,
+    default_text_color: [f32; 4],
 ) -> Vec<TextArea<'a>> {
     let bounds = TextBounds {
         left: 0,
@@ -1820,10 +1837,10 @@ fn build_grid_text_areas<'a>(
         bottom: surface_height as i32,
     };
     let default_color = GlyphColor::rgba(
-        PaletteColor::TEXT.r,
-        PaletteColor::TEXT.g,
-        PaletteColor::TEXT.b,
-        255,
+        (default_text_color[0] * 255.0) as u8,
+        (default_text_color[1] * 255.0) as u8,
+        (default_text_color[2] * 255.0) as u8,
+        (default_text_color[3] * 255.0) as u8,
     );
     cell_buffers
         .iter()

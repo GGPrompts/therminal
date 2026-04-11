@@ -8,12 +8,9 @@ use wgpu::util::DeviceExt;
 use crate::grid_renderer::{ColorVertex, GridRenderer};
 use crate::pane::{LayoutNode, PaneId, PaneState, SplitDirection};
 use therminal_core::geometry::Rect;
-use therminal_core::palette::Color as PaletteColor;
+use therminal_core::palette::{ChromePalette, Color as PaletteColor};
 
-use super::colors::{
-    EXIT_ERROR_COLOR, EXIT_OK_COLOR, FOCUS_BORDER_COLOR, HEADER_BG_COLOR, HEADER_BG_DIM_COLOR,
-    HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH, SEPARATOR_COLOR, SEPARATOR_FOCUS_COLOR,
-};
+use super::colors::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
@@ -45,7 +42,7 @@ pub(crate) fn draw_pane_focus_border(
         t,
         sw,
         sh,
-        FOCUS_BORDER_COLOR,
+        renderer.chrome_palette.focus_border,
     ));
     verts.extend_from_slice(&pixel_rect_to_ndc(
         vp.x(),
@@ -54,7 +51,7 @@ pub(crate) fn draw_pane_focus_border(
         t,
         sw,
         sh,
-        FOCUS_BORDER_COLOR,
+        renderer.chrome_palette.focus_border,
     ));
     verts.extend_from_slice(&pixel_rect_to_ndc(
         vp.x(),
@@ -63,7 +60,7 @@ pub(crate) fn draw_pane_focus_border(
         vp.height(),
         sw,
         sh,
-        FOCUS_BORDER_COLOR,
+        renderer.chrome_palette.focus_border,
     ));
     verts.extend_from_slice(&pixel_rect_to_ndc(
         vp.right() - t,
@@ -72,7 +69,7 @@ pub(crate) fn draw_pane_focus_border(
         vp.height(),
         sw,
         sh,
-        FOCUS_BORDER_COLOR,
+        renderer.chrome_palette.focus_border,
     ));
 
     if verts.is_empty() {
@@ -125,9 +122,9 @@ pub(crate) fn draw_split_separator(
         .map(|fid| first_ids.contains(&fid) || second_ids.contains(&fid))
         .unwrap_or(false);
     let color = if is_focused_adjacent {
-        SEPARATOR_FOCUS_COLOR
+        renderer.chrome_palette.separator_focus
     } else {
-        SEPARATOR_COLOR
+        renderer.chrome_palette.separator
     };
 
     let (px, py, pw, ph) = match direction {
@@ -200,7 +197,11 @@ pub(crate) fn draw_pane_header(
     }
 
     // ── 3. Header text ───────────────────────────────────────────────────
-    let style = HeaderTextStyle::compute(is_focused, snapshot.git_state.as_ref());
+    let style = HeaderTextStyle::compute(
+        is_focused,
+        snapshot.git_state.as_ref(),
+        &renderer.chrome_palette,
+    );
     let strings = HeaderTextStrings::compute(
         pane.id,
         center_title,
@@ -276,9 +277,9 @@ fn draw_pane_header_bg(
     use crate::color_mapping::pixel_rect_to_ndc;
 
     let bg_color = if is_focused {
-        HEADER_BG_COLOR
+        renderer.chrome_palette.header_bg
     } else {
-        HEADER_BG_DIM_COLOR
+        renderer.chrome_palette.header_bg_dim
     };
     let mut bg_verts: Vec<ColorVertex> =
         pixel_rect_to_ndc(vp.x(), vp.y(), vp.width(), header_h, sw, sh, bg_color).to_vec();
@@ -376,9 +377,9 @@ fn draw_pane_header_exit_stripe(
 
     let stripe_w = 4.0_f32;
     let stripe_color = if exit_code == 0 {
-        EXIT_OK_COLOR
+        renderer.chrome_palette.exit_ok
     } else {
-        EXIT_ERROR_COLOR
+        renderer.chrome_palette.exit_error
     };
     let stripe_verts = pixel_rect_to_ndc(vp.x(), vp.y(), stripe_w, header_h, sw, sh, stripe_color);
 
@@ -407,67 +408,34 @@ struct HeaderTextStyle {
 }
 
 impl HeaderTextStyle {
-    fn compute(is_focused: bool, git_state: Option<&crate::git_state::GitState>) -> Self {
-        let index_color = GlyphColor::rgba(
-            PaletteColor::INK_MUTED.r,
-            PaletteColor::INK_MUTED.g,
-            PaletteColor::INK_MUTED.b,
-            if is_focused { 255 } else { 200 },
-        );
+    fn compute(
+        is_focused: bool,
+        git_state: Option<&crate::git_state::GitState>,
+        palette: &ChromePalette,
+    ) -> Self {
+        // Build a glyph color from a palette text role with an explicit
+        // alpha so per-state focus modulation stays in one spot.
+        let glyph = |c: PaletteColor, alpha: u8| GlyphColor::rgba(c.r, c.g, c.b, alpha);
+
+        let index_color = glyph(palette.chrome_fg_muted, if is_focused { 255 } else { 200 });
         let process_color = if is_focused {
-            GlyphColor::rgba(
-                PaletteColor::INK.r,
-                PaletteColor::INK.g,
-                PaletteColor::INK.b,
-                255,
-            )
+            glyph(palette.chrome_fg, 255)
         } else {
-            GlyphColor::rgba(
-                PaletteColor::INK_MUTED.r,
-                PaletteColor::INK_MUTED.g,
-                PaletteColor::INK_MUTED.b,
-                220,
-            )
+            glyph(palette.chrome_fg_muted, 220)
         };
         let git_branch_color = match git_state {
-            Some(gs) if gs.detached => GlyphColor::rgba(
-                PaletteColor::WARN.r,
-                PaletteColor::WARN.g,
-                PaletteColor::WARN.b,
-                if is_focused { 230 } else { 170 },
-            ),
-            Some(gs) if crate::git_state::is_default_branch(&gs.branch) => GlyphColor::rgba(
-                PaletteColor::INK_MUTED.r,
-                PaletteColor::INK_MUTED.g,
-                PaletteColor::INK_MUTED.b,
-                if is_focused { 220 } else { 160 },
-            ),
-            Some(_) => GlyphColor::rgba(
-                PaletteColor::FOCUS.r,
-                PaletteColor::FOCUS.g,
-                PaletteColor::FOCUS.b,
-                if is_focused { 230 } else { 170 },
-            ),
+            Some(gs) if gs.detached => {
+                glyph(palette.chrome_fg_warn, if is_focused { 230 } else { 170 })
+            }
+            Some(gs) if crate::git_state::is_default_branch(&gs.branch) => {
+                glyph(palette.chrome_fg_muted, if is_focused { 220 } else { 160 })
+            }
+            Some(_) => glyph(palette.chrome_fg_focus, if is_focused { 230 } else { 170 }),
             None => index_color,
         };
-        let claude_badge_color = GlyphColor::rgba(
-            PaletteColor::FOCUS.r,
-            PaletteColor::FOCUS.g,
-            PaletteColor::FOCUS.b,
-            if is_focused { 230 } else { 170 },
-        );
-        let close_color = GlyphColor::rgba(
-            PaletteColor::ALERT.r,
-            PaletteColor::ALERT.g,
-            PaletteColor::ALERT.b,
-            if is_focused { 230 } else { 160 },
-        );
-        let button_color = GlyphColor::rgba(
-            PaletteColor::INK_MUTED.r,
-            PaletteColor::INK_MUTED.g,
-            PaletteColor::INK_MUTED.b,
-            if is_focused { 230 } else { 170 },
-        );
+        let claude_badge_color = glyph(palette.chrome_fg_focus, if is_focused { 230 } else { 170 });
+        let close_color = glyph(palette.chrome_fg_alert, if is_focused { 230 } else { 160 });
+        let button_color = glyph(palette.chrome_fg_muted, if is_focused { 230 } else { 170 });
         Self {
             index_color,
             process_color,

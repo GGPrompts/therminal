@@ -707,6 +707,15 @@ type HexColor = String;
 ///
 /// All fields are optional hex strings. When `None`, the built-in thermal
 /// palette constant is used.
+///
+/// **Chrome roles (tn-g7oo)**: the `chrome_*` and `hotspot_*` families
+/// override individual roles in the runtime [`crate::palette::ChromePalette`]
+/// (pane headers, separators, focus border, status bar, tab bar, hotspot
+/// underlines, ...). Defaults derive from the bundled Codex 2031 palette
+/// via [`ChromePalette::default`], so themes only need to set the roles
+/// they want to recolor. Hot-reload picks these up automatically because
+/// `apply_color_overrides` rebuilds `GridRenderer.chrome_palette` from this
+/// config on every config change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorsConfig {
@@ -727,6 +736,49 @@ pub struct ColorsConfig {
 
     /// ANSI 16-color overrides (indices 0-15).
     pub ansi: Option<Vec<HexColor>>,
+
+    // ── Chrome role overrides (tn-g7oo) ──────────────────────────────
+    /// Pane focus border color (3 px outline around the focused pane).
+    pub chrome_focus_border: Option<HexColor>,
+    /// Separator color between adjacent panes.
+    pub chrome_separator: Option<HexColor>,
+    /// Pane header background — focused pane.
+    pub chrome_header_bg: Option<HexColor>,
+    /// Pane header background — unfocused pane.
+    pub chrome_header_bg_dim: Option<HexColor>,
+    /// Status bar background fill.
+    pub chrome_status_bar_bg: Option<HexColor>,
+    /// Workspace tab bar background fill.
+    pub chrome_tab_bar_bg: Option<HexColor>,
+    /// Active workspace tab background.
+    pub chrome_tab_active_bg: Option<HexColor>,
+    /// CSD close button hover color.
+    pub chrome_csd_close: Option<HexColor>,
+    /// Primary chrome text color (pane header process labels, status bar
+    /// center text). Themes that re-skin chrome backgrounds should set
+    /// this to something readable against the new background.
+    pub chrome_fg: Option<HexColor>,
+    /// Muted chrome text color (pane indices, button labels).
+    pub chrome_fg_muted: Option<HexColor>,
+    /// Focus-accent chrome text (workspace number, agent indicator,
+    /// active topic branch).
+    pub chrome_fg_focus: Option<HexColor>,
+    /// Warning chrome text (git detached HEAD, ...).
+    pub chrome_fg_warn: Option<HexColor>,
+    /// Alert chrome text (close button, fatal errors).
+    pub chrome_fg_alert: Option<HexColor>,
+
+    // ── Hotspot underline overrides (tn-g7oo) ────────────────────────
+    /// Dotted underline color for `FilePath` hotspots.
+    pub hotspot_filepath: Option<HexColor>,
+    /// Dotted underline color for `Url` hotspots.
+    pub hotspot_url: Option<HexColor>,
+    /// Dotted underline color for `ErrorLocation` hotspots.
+    pub hotspot_error: Option<HexColor>,
+    /// Dotted underline color for `GitRef` hotspots.
+    pub hotspot_gitref: Option<HexColor>,
+    /// Dotted underline color for `IssueRef` hotspots.
+    pub hotspot_issueref: Option<HexColor>,
 }
 
 impl ColorsConfig {
@@ -763,6 +815,134 @@ impl ColorsConfig {
             .as_deref()
             .and_then(Self::parse_hex)
             .unwrap_or(Color::TEXT)
+    }
+
+    /// Build a runtime [`ChromePalette`] by starting from the bundled
+    /// defaults and applying any `chrome_*` / `hotspot_*` overrides set in
+    /// this config.
+    ///
+    /// Each override is treated independently: invalid hex strings fall
+    /// back to the default for that role (and a debug log is emitted by
+    /// the parse helper). Alpha bake-in for the few translucent roles
+    /// (focus border, selection, exit stripes) is preserved — overriding
+    /// `chrome_focus_border` updates only the RGB channels and reuses the
+    /// default 0.92 alpha.
+    pub fn chrome_palette(&self) -> ChromePalette {
+        let mut p = ChromePalette::default();
+
+        // Helper: replace just the RGB channels of an existing [f32; 4],
+        // preserving the alpha that's baked into the default.
+        fn rgb_into(slot: &mut [f32; 4], color: Color) {
+            let [r, g, b, _] = color.to_f32_array();
+            slot[0] = r;
+            slot[1] = g;
+            slot[2] = b;
+        }
+
+        // Chrome roles. Each override is a single role-by-role replacement —
+        // a few derived defaults (separator_focus, tab_bar_bg, tab_active_bg,
+        // tab_active_underline) follow their parents so that overriding the
+        // primary role re-skins the dependents in step.
+        if let Some(c) = self
+            .chrome_focus_border
+            .as_deref()
+            .and_then(Self::parse_hex)
+        {
+            rgb_into(&mut p.focus_border, c);
+            // Separators adjacent to the focused pane track focus_border.
+            rgb_into(&mut p.separator_focus, c);
+            // Active workspace tab underline tracks focus_border.
+            rgb_into(&mut p.tab_active_underline, c);
+        }
+        if let Some(c) = self.chrome_separator.as_deref().and_then(Self::parse_hex) {
+            p.separator = c.to_f32_array();
+        }
+        if let Some(c) = self.chrome_header_bg.as_deref().and_then(Self::parse_hex) {
+            p.header_bg = c.to_f32_array();
+            // Active workspace tab background tracks the header background.
+            p.tab_active_bg = c.to_f32_array();
+        }
+        if let Some(c) = self
+            .chrome_header_bg_dim
+            .as_deref()
+            .and_then(Self::parse_hex)
+        {
+            p.header_bg_dim = c.to_f32_array();
+        }
+        if let Some(c) = self
+            .chrome_status_bar_bg
+            .as_deref()
+            .and_then(Self::parse_hex)
+        {
+            p.status_bar_bg = c.to_f32_array();
+            // Tab bar background defaults to the status bar background, so
+            // an override of `chrome_status_bar_bg` automatically re-skins
+            // the tab bar too.
+            p.tab_bar_bg = c.to_f32_array();
+        }
+        if let Some(c) = self.chrome_tab_bar_bg.as_deref().and_then(Self::parse_hex) {
+            p.tab_bar_bg = c.to_f32_array();
+        }
+        if let Some(c) = self
+            .chrome_tab_active_bg
+            .as_deref()
+            .and_then(Self::parse_hex)
+        {
+            p.tab_active_bg = c.to_f32_array();
+        }
+        if let Some(c) = self.chrome_csd_close.as_deref().and_then(Self::parse_hex) {
+            p.csd_close = c.to_f32_array();
+        }
+
+        // Chrome text-color roles. These are stored as `Color` (u8 channels)
+        // so chrome modules can build per-state alpha-modulated GlyphColors.
+        if let Some(c) = self.chrome_fg.as_deref().and_then(Self::parse_hex) {
+            p.chrome_fg = c;
+        }
+        if let Some(c) = self.chrome_fg_muted.as_deref().and_then(Self::parse_hex) {
+            p.chrome_fg_muted = c;
+        }
+        if let Some(c) = self.chrome_fg_focus.as_deref().and_then(Self::parse_hex) {
+            p.chrome_fg_focus = c;
+        }
+        if let Some(c) = self.chrome_fg_warn.as_deref().and_then(Self::parse_hex) {
+            p.chrome_fg_warn = c;
+        }
+        if let Some(c) = self.chrome_fg_alert.as_deref().and_then(Self::parse_hex) {
+            p.chrome_fg_alert = c;
+        }
+
+        // Cursor + selection: respect existing terminal-color overrides so
+        // those config fields stay backwards-compatible — they used to be
+        // applied in `GridRenderer::resolved_*_color`.
+        if let Some(c) = self.cursor.as_deref().and_then(Self::parse_hex) {
+            rgb_into(&mut p.cursor, c);
+        }
+        if let Some(c) = self.selection.as_deref().and_then(Self::parse_hex) {
+            rgb_into(&mut p.selection, c);
+        }
+
+        // Hotspot underline overrides (full RGBA — these all default to
+        // alpha = 1.0 so a hex override produces the right value).
+        if let Some(c) = self.hotspot_filepath.as_deref().and_then(Self::parse_hex) {
+            p.hotspot_filepath = c.to_f32_array();
+        }
+        if let Some(c) = self.hotspot_url.as_deref().and_then(Self::parse_hex) {
+            p.hotspot_url = c.to_f32_array();
+            // Hyperlink underline (OSC 8) defaults to the URL hotspot color.
+            p.hyperlink = c.to_f32_array();
+        }
+        if let Some(c) = self.hotspot_error.as_deref().and_then(Self::parse_hex) {
+            p.hotspot_error = c.to_f32_array();
+        }
+        if let Some(c) = self.hotspot_gitref.as_deref().and_then(Self::parse_hex) {
+            p.hotspot_gitref = c.to_f32_array();
+        }
+        if let Some(c) = self.hotspot_issueref.as_deref().and_then(Self::parse_hex) {
+            p.hotspot_issueref = c.to_f32_array();
+        }
+
+        p
     }
 }
 
@@ -2857,5 +3037,179 @@ working_dir = "scratch/{random}"
             config.delegate.profiles["isolated"].working_dir,
             WorkingDirMode::ScratchRandom
         );
+    }
+
+    // ── ColorsConfig::chrome_palette (tn-g7oo) ──────────────────────────
+
+    #[test]
+    fn chrome_palette_default_matches_default_chrome_palette() {
+        let colors = ColorsConfig::default();
+        let derived = colors.chrome_palette();
+        let default = ChromePalette::default();
+        // Field-by-field RGBA equality.
+        assert_eq!(derived.focus_border, default.focus_border);
+        assert_eq!(derived.separator, default.separator);
+        assert_eq!(derived.header_bg, default.header_bg);
+        assert_eq!(derived.header_bg_dim, default.header_bg_dim);
+        assert_eq!(derived.status_bar_bg, default.status_bar_bg);
+        assert_eq!(derived.tab_bar_bg, default.tab_bar_bg);
+        assert_eq!(derived.tab_active_bg, default.tab_active_bg);
+        assert_eq!(derived.tab_active_underline, default.tab_active_underline);
+        assert_eq!(derived.exit_ok, default.exit_ok);
+        assert_eq!(derived.exit_error, default.exit_error);
+        assert_eq!(derived.csd_close, default.csd_close);
+        assert_eq!(derived.csd_button_hover, default.csd_button_hover);
+        assert_eq!(derived.selection, default.selection);
+        assert_eq!(derived.cursor, default.cursor);
+        assert_eq!(derived.hyperlink, default.hyperlink);
+        assert_eq!(derived.hotspot_filepath, default.hotspot_filepath);
+        assert_eq!(derived.hotspot_url, default.hotspot_url);
+        assert_eq!(derived.hotspot_error, default.hotspot_error);
+        assert_eq!(derived.hotspot_gitref, default.hotspot_gitref);
+        assert_eq!(derived.hotspot_issueref, default.hotspot_issueref);
+    }
+
+    #[test]
+    fn chrome_palette_focus_border_override_preserves_alpha() {
+        let colors = ColorsConfig {
+            chrome_focus_border: Some("#ffffff".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        assert!((p.focus_border[0] - 1.0).abs() < 1e-6);
+        assert!((p.focus_border[1] - 1.0).abs() < 1e-6);
+        assert!((p.focus_border[2] - 1.0).abs() < 1e-6);
+        // Default 0.92 alpha is preserved through the override.
+        assert!((p.focus_border[3] - 0.92).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_focus_border_override_propagates_to_separator_focus() {
+        let colors = ColorsConfig {
+            chrome_focus_border: Some("#abcdef".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        assert_eq!(p.focus_border[0], p.separator_focus[0]);
+        assert_eq!(p.focus_border[1], p.separator_focus[1]);
+        assert_eq!(p.focus_border[2], p.separator_focus[2]);
+        // Tab active underline also tracks focus border.
+        assert_eq!(p.focus_border[0], p.tab_active_underline[0]);
+        assert_eq!(p.focus_border[1], p.tab_active_underline[1]);
+        assert_eq!(p.focus_border[2], p.tab_active_underline[2]);
+    }
+
+    #[test]
+    fn chrome_palette_status_bar_bg_override_propagates_to_tab_bar_bg() {
+        let colors = ColorsConfig {
+            chrome_status_bar_bg: Some("#ffeedd".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let expected = [
+            0xff as f32 / 255.0,
+            0xee as f32 / 255.0,
+            0xdd as f32 / 255.0,
+            1.0,
+        ];
+        assert_eq!(p.status_bar_bg, expected);
+        assert_eq!(p.tab_bar_bg, expected);
+    }
+
+    #[test]
+    fn chrome_palette_tab_bar_bg_override_does_not_affect_status_bar_bg() {
+        let colors = ColorsConfig {
+            chrome_tab_bar_bg: Some("#112233".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        // tab_bar_bg gets the override; status_bar_bg keeps the default.
+        let expected_tab = [
+            0x11 as f32 / 255.0,
+            0x22 as f32 / 255.0,
+            0x33 as f32 / 255.0,
+            1.0,
+        ];
+        assert_eq!(p.tab_bar_bg, expected_tab);
+        assert_eq!(p.status_bar_bg, ChromePalette::default().status_bar_bg);
+    }
+
+    #[test]
+    fn chrome_palette_header_bg_override_propagates_to_tab_active_bg() {
+        let colors = ColorsConfig {
+            chrome_header_bg: Some("#444444".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let expected = [0x44 as f32 / 255.0; 3];
+        assert!((p.header_bg[0] - expected[0]).abs() < 1e-6);
+        assert_eq!(p.header_bg, p.tab_active_bg);
+    }
+
+    #[test]
+    fn chrome_palette_selection_override_preserves_alpha() {
+        let colors = ColorsConfig {
+            selection: Some("#11ff22".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        assert!((p.selection[0] - 0x11 as f32 / 255.0).abs() < 1e-6);
+        assert!((p.selection[1] - 1.0).abs() < 1e-6);
+        assert!((p.selection[2] - 0x22 as f32 / 255.0).abs() < 1e-6);
+        // Selection highlight alpha (0.35) is preserved through the override.
+        assert!((p.selection[3] - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_cursor_override_preserves_alpha() {
+        let colors = ColorsConfig {
+            cursor: Some("#abcdef".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        assert!((p.cursor[0] - 0xab as f32 / 255.0).abs() < 1e-6);
+        // Cursor alpha (0.85) is preserved.
+        assert!((p.cursor[3] - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_hotspot_url_override_propagates_to_hyperlink() {
+        let colors = ColorsConfig {
+            hotspot_url: Some("#00ff00".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let expected = [0.0, 1.0, 0.0, 1.0];
+        assert_eq!(p.hotspot_url, expected);
+        // Hyperlink underline (OSC 8) tracks the URL hotspot color.
+        assert_eq!(p.hyperlink, expected);
+    }
+
+    #[test]
+    fn chrome_palette_invalid_hex_falls_back_to_default() {
+        let colors = ColorsConfig {
+            chrome_focus_border: Some("not-a-color".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        // Bad hex is silently ignored — default focus_border is used.
+        assert_eq!(p.focus_border, ChromePalette::default().focus_border);
+    }
+
+    #[test]
+    fn chrome_palette_unrelated_overrides_dont_cross_contaminate() {
+        // Setting one role must not perturb the others.
+        let colors = ColorsConfig {
+            chrome_csd_close: Some("#00ff00".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let default = ChromePalette::default();
+        assert_ne!(p.csd_close, default.csd_close);
+        // Everything else is unchanged.
+        assert_eq!(p.focus_border, default.focus_border);
+        assert_eq!(p.header_bg, default.header_bg);
+        assert_eq!(p.status_bar_bg, default.status_bar_bg);
+        assert_eq!(p.csd_button_hover, default.csd_button_hover);
     }
 }

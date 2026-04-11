@@ -10,7 +10,7 @@ use super::{TherminalConfig, TrustTier};
 /// [`super::check_config_template_status`] to detect when a user's
 /// `therminal.toml` predates the current template — without polluting the
 /// parsed config struct.
-pub const CONFIG_TEMPLATE_VERSION: u32 = 4;
+pub const CONFIG_TEMPLATE_VERSION: u32 = 5;
 
 /// Return the fully-commented default config as a TOML string.
 ///
@@ -115,6 +115,36 @@ pub(super) fn default_config_text() -> String {
     out.push_str("#   \"#888888\", \"#ff5555\", \"#55ff55\", \"#ffff55\",\n");
     out.push_str("#   \"#5555ff\", \"#ff55ff\", \"#55ffff\", \"#ffffff\",\n");
     out.push_str("# ]\n");
+    out.push('\n');
+    out.push_str("# Chrome roles (tn-g7oo) — pane headers, separators, focus border,\n");
+    out.push_str("# status bar, tab bar, CSD buttons. Defaults derive from the bundled\n");
+    out.push_str("# palette so you only need to set the roles you want to recolor.\n");
+    out.push_str("# chrome_focus_border = \"#56a7ff\"   # focus outline + active tab underline\n");
+    out.push_str("# chrome_separator     = \"#2f4564\"   # split-pane separator line\n");
+    out.push_str("# chrome_header_bg     = \"#111c2d\"   # focused pane header strip\n");
+    out.push_str("# chrome_header_bg_dim = \"#060a12\"   # unfocused pane header strip\n");
+    out.push_str("# chrome_status_bar_bg = \"#060a12\"   # bottom status bar (also tab bar)\n");
+    out.push_str("# chrome_tab_bar_bg    = \"#060a12\"   # workspace tab bar (overrides above)\n");
+    out.push_str("# chrome_tab_active_bg = \"#111c2d\"   # active workspace tab background\n");
+    out.push_str("# chrome_csd_close     = \"#d94040\"   # CSD close button hover tint\n");
+    out.push('\n');
+    out.push_str("# Chrome text-color roles — used by pane header labels, status bar text,\n");
+    out.push_str("# workspace tab labels, CSD icons. Themes that re-skin chrome backgrounds\n");
+    out.push_str("# should set chrome_fg / chrome_fg_muted to a readable contrast.\n");
+    out.push_str("# chrome_fg        = \"#e7f0ff\"   # primary chrome text\n");
+    out.push_str("# chrome_fg_muted  = \"#a9b8cd\"   # secondary / button labels\n");
+    out.push_str("# chrome_fg_focus  = \"#56a7ff\"   # workspace number, agent indicator\n");
+    out.push_str("# chrome_fg_warn   = \"#ffb24f\"   # git detached HEAD\n");
+    out.push_str("# chrome_fg_alert  = \"#ff5f78\"   # close button glyph\n");
+    out.push('\n');
+    out.push_str(
+        "# Hotspot underline colors (tn-g7oo) — file path / URL / error / git ref / issue ref.\n",
+    );
+    out.push_str("# hotspot_filepath  = \"#39ffb6\"\n");
+    out.push_str("# hotspot_url       = \"#56a7ff\"\n");
+    out.push_str("# hotspot_error     = \"#ff5f78\"\n");
+    out.push_str("# hotspot_gitref    = \"#eab308\"\n");
+    out.push_str("# hotspot_issueref  = \"#b48eff\"\n");
     out.push('\n');
 
     // ── [terminal] ───────────────────────────────────────────────────────

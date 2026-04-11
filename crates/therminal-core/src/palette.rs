@@ -243,6 +243,161 @@ pub fn heat_label(t: f32) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Chrome palette — runtime, theme-aware
+// ---------------------------------------------------------------------------
+
+/// Runtime, theme-aware palette of chrome and overlay roles (tn-g7oo).
+///
+/// Chrome rendering (pane headers, separators, focus borders, status bar,
+/// tab bar, CSD buttons, hotspot underlines) used to read its colors from
+/// compile-time `Color::*` constants. That meant a `[colors]` theme override
+/// re-skinned only the terminal cells; the surrounding chrome stayed pinned
+/// to the dark Codex 2031 palette.
+///
+/// `ChromePalette` is the runtime substitute. Each `[f32; 4]` field holds an
+/// RGBA value with the alpha already baked in (so renderers can pass it
+/// straight to `pixel_rect_to_ndc` / glyphon). The defaults derive from the
+/// existing `Color::*` constants — they reproduce the previous look bit-for-bit
+/// when no overrides are present. Themes can override individual roles via the
+/// `[colors]` section in `therminal.toml` (see `ColorsConfig::chrome_*` and
+/// `ColorsConfig::hotspot_*` fields).
+///
+/// All fields are public so chrome modules can read them directly without
+/// going through accessors. The struct is owned by `GridRenderer` and
+/// rebuilt on `apply_color_overrides`, which is called from
+/// `apply_config()` and `init()` — the existing hot-reload pipeline picks
+/// up theme changes for free.
+#[derive(Debug, Clone, Copy)]
+pub struct ChromePalette {
+    // ── Pane headers / separators / focus border ───────────────────────
+    /// Focused pane border (3 px outline) and the separator color used
+    /// when the focused pane is adjacent to a split.
+    pub focus_border: [f32; 4],
+    /// Separators between adjacent panes (when neither is focused).
+    pub separator: [f32; 4],
+    /// Separators adjacent to the focused pane (slightly stronger than
+    /// `focus_border`'s alpha — read by `draw_split_separator`).
+    pub separator_focus: [f32; 4],
+    /// Pane header background — focused pane.
+    pub header_bg: [f32; 4],
+    /// Pane header background — unfocused pane (dimmed).
+    pub header_bg_dim: [f32; 4],
+    /// Exit-code stripe color when the last command exited 0.
+    pub exit_ok: [f32; 4],
+    /// Exit-code stripe color when the last command exited non-zero.
+    pub exit_error: [f32; 4],
+
+    // ── Bottom status bar / workspace tab bar ──────────────────────────
+    /// Status bar background fill.
+    pub status_bar_bg: [f32; 4],
+    /// Workspace tab bar background fill (defaults to `status_bar_bg`).
+    pub tab_bar_bg: [f32; 4],
+    /// Active workspace tab background fill (defaults to `header_bg`).
+    pub tab_active_bg: [f32; 4],
+    /// 2 px underline drawn beneath the active workspace tab (defaults
+    /// to `focus_border`).
+    pub tab_active_underline: [f32; 4],
+
+    // ── Client-side decorations (CSD) ──────────────────────────────────
+    /// Hover background tint of the close button (the only CSD button
+    /// with a dedicated color — others use `csd_button_hover`).
+    pub csd_close: [f32; 4],
+    /// Hover background tint of all non-close CSD buttons (a near-white
+    /// translucent overlay).
+    pub csd_button_hover: [f32; 4],
+
+    // ── Selection / cursor ─────────────────────────────────────────────
+    /// Selection-highlight rect color (alpha already applied).
+    pub selection: [f32; 4],
+    /// Cursor block / underline color.
+    pub cursor: [f32; 4],
+
+    // ── Chrome text colors ─────────────────────────────────────────────
+    // These are stored as `Color` (u8 channels) so chrome modules can
+    // build glyphon `GlyphColor::rgba` values with their own per-state
+    // alpha modulations (focused vs unfocused, hover vs idle, ...).
+    /// Primary chrome text — pane header process labels, status bar
+    /// center text, etc. Defaults to `Color::INK`.
+    pub chrome_fg: Color,
+    /// Muted chrome text — pane indices, button labels, status-bar muted
+    /// fields. Defaults to `Color::INK_MUTED`.
+    pub chrome_fg_muted: Color,
+    /// Focus-accent chrome text — workspace number highlight, agent
+    /// indicator, claude badge, git branch on a topic branch. Defaults to
+    /// `Color::FOCUS`.
+    pub chrome_fg_focus: Color,
+    /// Warning chrome text — git detached state, etc. Defaults to
+    /// `Color::WARN`.
+    pub chrome_fg_warn: Color,
+    /// Alert chrome text — close-button glyph, fatal errors. Defaults to
+    /// `Color::ALERT`.
+    pub chrome_fg_alert: Color,
+
+    // ── Hyperlink + click-to-open hotspot underlines ───────────────────
+    /// Solid hyperlink underline (OSC 8 + regex URLs in cell text).
+    pub hyperlink: [f32; 4],
+    /// Dotted underline color for `HotspotKind::FilePath` cells.
+    pub hotspot_filepath: [f32; 4],
+    /// Dotted underline color for `HotspotKind::Url` cells.
+    pub hotspot_url: [f32; 4],
+    /// Dotted underline color for `HotspotKind::ErrorLocation` cells.
+    pub hotspot_error: [f32; 4],
+    /// Dotted underline color for `HotspotKind::GitRef` cells.
+    pub hotspot_gitref: [f32; 4],
+    /// Dotted underline color for `HotspotKind::IssueRef` cells.
+    pub hotspot_issueref: [f32; 4],
+}
+
+impl Default for ChromePalette {
+    /// Build the default chrome palette by deriving from the bundled
+    /// Codex 2031 `Color::*` constants. Reproduces the pre-tn-g7oo look
+    /// bit-for-bit so the existing dark theme is unchanged.
+    fn default() -> Self {
+        Self {
+            focus_border: with_alpha(Color::FOCUS, 0.92),
+            separator: Color::LINE.to_f32_array(),
+            separator_focus: with_alpha(Color::FOCUS, 0.82),
+            header_bg: Color::VOID_2.to_f32_array(),
+            header_bg_dim: Color::VOID_0.to_f32_array(),
+            exit_ok: with_alpha(Color::STATUS_OK, 0.90),
+            exit_error: with_alpha(Color::STATUS_ERROR, 0.90),
+
+            status_bar_bg: Color::VOID_0.to_f32_array(),
+            tab_bar_bg: Color::VOID_0.to_f32_array(),
+            tab_active_bg: Color::VOID_2.to_f32_array(),
+            tab_active_underline: with_alpha(Color::FOCUS, 0.92),
+
+            csd_close: [0.85, 0.25, 0.25, 1.0],
+            csd_button_hover: [1.0, 1.0, 1.0, 0.1],
+
+            selection: with_alpha(Color::ACCENT_COOL, 0.35),
+            cursor: with_alpha(Color::WHITE_HOT, 0.85),
+
+            chrome_fg: Color::INK,
+            chrome_fg_muted: Color::INK_MUTED,
+            chrome_fg_focus: Color::FOCUS,
+            chrome_fg_warn: Color::WARN,
+            chrome_fg_alert: Color::ALERT,
+
+            hyperlink: Color::ACCENT_COOL.to_f32_array(),
+            hotspot_filepath: Color::ACCENT_NEUTRAL.to_f32_array(),
+            hotspot_url: Color::ACCENT_COOL.to_f32_array(),
+            hotspot_error: Color::STATUS_ERROR.to_f32_array(),
+            hotspot_gitref: Color::HOT.to_f32_array(),
+            // Distinct purple/indigo — no palette constant covers this hue.
+            hotspot_issueref: [0.706, 0.557, 1.0, 1.0],
+        }
+    }
+}
+
+/// Build a `[f32; 4]` from a `Color` with an explicit alpha (0.0–1.0).
+/// Used by `ChromePalette` defaults so the alpha bake-in stays in one spot.
+fn with_alpha(color: Color, alpha: f32) -> [f32; 4] {
+    let [r, g, b, _] = color.to_f32_array();
+    [r, g, b, alpha]
+}
+
+// ---------------------------------------------------------------------------
 // Legacy [f32; 4] palette (kept for wgpu compatibility)
 // ---------------------------------------------------------------------------
 
@@ -649,6 +804,131 @@ mod tests {
         assert_contrast("STATUS_OK", Color::STATUS_OK, WCAG_AA_TEXT);
         assert_contrast("STATUS_WARN", Color::STATUS_WARN, WCAG_AA_TEXT);
         assert_contrast("STATUS_ERROR", Color::STATUS_ERROR, WCAG_AA_TEXT);
+    }
+
+    // --- ChromePalette (tn-g7oo) ---
+
+    #[test]
+    fn chrome_palette_default_focus_border_matches_focus_constant() {
+        let p = ChromePalette::default();
+        let focus = Color::FOCUS.to_f32_array();
+        // RGB channels match Color::FOCUS; alpha was lowered to 0.92.
+        assert!((p.focus_border[0] - focus[0]).abs() < 1e-6);
+        assert!((p.focus_border[1] - focus[1]).abs() < 1e-6);
+        assert!((p.focus_border[2] - focus[2]).abs() < 1e-6);
+        assert!((p.focus_border[3] - 0.92).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_default_separator_matches_line() {
+        let p = ChromePalette::default();
+        assert_eq!(p.separator, Color::LINE.to_f32_array());
+    }
+
+    #[test]
+    fn chrome_palette_default_header_bg_matches_void_2() {
+        let p = ChromePalette::default();
+        assert_eq!(p.header_bg, Color::VOID_2.to_f32_array());
+    }
+
+    #[test]
+    fn chrome_palette_default_header_bg_dim_matches_void_0() {
+        let p = ChromePalette::default();
+        assert_eq!(p.header_bg_dim, Color::VOID_0.to_f32_array());
+    }
+
+    #[test]
+    fn chrome_palette_default_status_bar_bg_matches_void_0() {
+        let p = ChromePalette::default();
+        assert_eq!(p.status_bar_bg, Color::VOID_0.to_f32_array());
+    }
+
+    #[test]
+    fn chrome_palette_default_tab_bar_bg_tracks_status_bar_bg() {
+        let p = ChromePalette::default();
+        assert_eq!(p.tab_bar_bg, p.status_bar_bg);
+    }
+
+    #[test]
+    fn chrome_palette_default_tab_active_bg_tracks_header_bg() {
+        let p = ChromePalette::default();
+        assert_eq!(p.tab_active_bg, p.header_bg);
+    }
+
+    #[test]
+    fn chrome_palette_default_tab_active_underline_tracks_focus_border() {
+        let p = ChromePalette::default();
+        assert_eq!(p.tab_active_underline, p.focus_border);
+    }
+
+    #[test]
+    fn chrome_palette_default_exit_ok_alpha_is_baked() {
+        let p = ChromePalette::default();
+        assert!((p.exit_ok[3] - 0.90).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_default_exit_error_alpha_is_baked() {
+        let p = ChromePalette::default();
+        assert!((p.exit_error[3] - 0.90).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_default_csd_close_is_red() {
+        let p = ChromePalette::default();
+        // r > g, r > b, fully opaque
+        assert!(p.csd_close[0] > p.csd_close[1]);
+        assert!(p.csd_close[0] > p.csd_close[2]);
+        assert!((p.csd_close[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_default_csd_button_hover_is_translucent_white() {
+        let p = ChromePalette::default();
+        assert!((p.csd_button_hover[0] - 1.0).abs() < 1e-6);
+        assert!((p.csd_button_hover[1] - 1.0).abs() < 1e-6);
+        assert!((p.csd_button_hover[2] - 1.0).abs() < 1e-6);
+        assert!(p.csd_button_hover[3] > 0.0 && p.csd_button_hover[3] < 0.5);
+    }
+
+    #[test]
+    fn chrome_palette_default_selection_alpha_baked() {
+        let p = ChromePalette::default();
+        assert!((p.selection[3] - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_default_cursor_alpha_baked() {
+        let p = ChromePalette::default();
+        assert!((p.cursor[3] - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_default_hotspot_kinds_are_distinct() {
+        let p = ChromePalette::default();
+        let colors = [
+            p.hotspot_filepath,
+            p.hotspot_url,
+            p.hotspot_error,
+            p.hotspot_gitref,
+            p.hotspot_issueref,
+        ];
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(
+                    colors[i], colors[j],
+                    "hotspot kind colors at index {i} and {j} must be distinct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_palette_default_hyperlink_matches_url_hotspot() {
+        // The default hyperlink underline (OSC 8) and the URL-kind hotspot
+        // underline both default to ACCENT_COOL so OSC 8 + regex URLs match.
+        let p = ChromePalette::default();
+        assert_eq!(p.hyperlink, p.hotspot_url);
     }
 }
 
