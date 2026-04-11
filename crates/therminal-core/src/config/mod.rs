@@ -819,18 +819,62 @@ impl ColorsConfig {
             .unwrap_or(Color::TEXT)
     }
 
-    /// Build a runtime [`ChromePalette`] by starting from the bundled
-    /// defaults and applying any `chrome_*` / `hotspot_*` overrides set in
-    /// this config.
+    /// Resolve the 16-entry ANSI palette from config into a
+    /// `[Color; 16]` array, or `None` if the user did not set one (or
+    /// the configured vector is malformed).
     ///
-    /// Each override is treated independently: invalid hex strings fall
-    /// back to the default for that role (and a debug log is emitted by
-    /// the parse helper). Alpha bake-in for the few translucent roles
-    /// (focus border, selection, exit stripes) is preserved — overriding
-    /// `chrome_focus_border` updates only the RGB channels and reuses the
-    /// default 0.92 alpha.
+    /// Used by [`Self::chrome_palette`] so derivation can pull accent
+    /// colors from the theme's own ANSI palette instead of falling back
+    /// to the bundled Codex accents (tn-n3vl).
+    fn resolved_ansi(&self) -> Option<[Color; 16]> {
+        let ansi = self.ansi.as_ref()?;
+        if ansi.len() != 16 {
+            return None;
+        }
+        let mut out = [Color::from_hex(0); 16];
+        for (idx, hex) in ansi.iter().enumerate() {
+            out[idx] = Self::parse_hex(hex)?;
+        }
+        Some(out)
+    }
+
+    /// Build a runtime [`ChromePalette`] by starting from the bundled
+    /// defaults (or a palette derived from the configured cell colors)
+    /// and applying any `chrome_*` / `hotspot_*` overrides set in this
+    /// config.
+    ///
+    /// **Derivation (tn-n3vl)**: when the user has set any of
+    /// `[colors] background`, `foreground`, or `ansi`, the base palette
+    /// is computed by [`ChromePalette::derive_from_cells`] so the
+    /// chrome (status bar, pane headers, tab bar, CSD strip, hotspot
+    /// underlines) tracks the theme automatically. When none of those
+    /// fields are set, the base is the bundled [`ChromePalette::default`]
+    /// so the bundled Codex 2031 look is preserved bit-for-bit.
+    ///
+    /// Each explicit `chrome_*` / `hotspot_*` override is treated
+    /// independently and layered on top of the base: invalid hex
+    /// strings fall back to the base value for that role. Alpha bake-in
+    /// for the few translucent roles (focus border, selection, exit
+    /// stripes) is preserved — overriding `chrome_focus_border` updates
+    /// only the RGB channels and reuses the default 0.92 alpha.
     pub fn chrome_palette(&self) -> ChromePalette {
-        let mut p = ChromePalette::default();
+        // ── Derive-from-cells base (tn-n3vl) ─────────────────────────────
+        // Only derive when the user has actually overridden a cell color.
+        // Otherwise stay bit-for-bit identical to `ChromePalette::default`
+        // — any regression in the default path is a test failure in
+        // `chrome_palette_default_matches_default_chrome_palette`.
+        let ansi = self.resolved_ansi();
+        let cells_overridden =
+            self.background.is_some() || self.foreground.is_some() || ansi.is_some();
+        let mut p = if cells_overridden {
+            ChromePalette::derive_from_cells(
+                self.background_color(),
+                self.foreground_color(),
+                ansi.as_ref(),
+            )
+        } else {
+            ChromePalette::default()
+        };
 
         // Helper: replace just the RGB channels of an existing [f32; 4],
         // preserving the alpha that's baked into the default.
@@ -3194,5 +3238,137 @@ working_dir = "scratch/{random}"
         assert_eq!(p.header_bg, default.header_bg);
         assert_eq!(p.status_bar_bg, default.status_bar_bg);
         assert_eq!(p.csd_button_hover, default.csd_button_hover);
+    }
+
+    // ── Derive-from-cells integration (tn-n3vl) ──────────────────────
+
+    #[test]
+    fn chrome_palette_derives_when_only_background_set() {
+        // Setting only `background` (no chrome_*) should shift every
+        // chrome background away from the Codex defaults, so a user who
+        // hand-picks a single terminal bg gets a matching chrome.
+        let colors = ColorsConfig {
+            background: Some("#101820".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let default = ChromePalette::default();
+        // header_bg / header_bg_dim / status_bar_bg should all have
+        // shifted from the bundled VOID_0/VOID_2 defaults.
+        assert_ne!(p.header_bg, default.header_bg);
+        assert_ne!(p.header_bg_dim, default.header_bg_dim);
+        assert_ne!(p.status_bar_bg, default.status_bar_bg);
+        // And the propagation rules still hold at build time.
+        assert_eq!(p.tab_bar_bg, p.status_bar_bg);
+        assert_eq!(p.tab_active_bg, p.header_bg);
+    }
+
+    #[test]
+    fn chrome_palette_unset_cells_preserves_default_bit_for_bit() {
+        // The no-override case must stay bit-for-bit identical to
+        // `ChromePalette::default` — this is the invariant protected by
+        // `chrome_palette_default_matches_default_chrome_palette`
+        // above. Adding an extra assertion here keeps the intent
+        // visible next to the new derive-from-cells tests.
+        let colors = ColorsConfig::default();
+        let p = colors.chrome_palette();
+        let default = ChromePalette::default();
+        assert_eq!(p.header_bg, default.header_bg);
+        assert_eq!(p.chrome_fg, default.chrome_fg);
+    }
+
+    #[test]
+    fn chrome_palette_explicit_chrome_header_bg_wins_over_derivation() {
+        // Even when derivation is active (because `background` is set),
+        // an explicit `chrome_header_bg` must override the derived value.
+        let colors = ColorsConfig {
+            background: Some("#000000".into()),
+            chrome_header_bg: Some("#ff00ff".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let expected = [1.0, 0.0, 1.0, 1.0];
+        assert_eq!(p.header_bg, expected);
+        // And the propagation from the explicit override still fires.
+        assert_eq!(p.tab_active_bg, expected);
+    }
+
+    #[test]
+    fn chrome_palette_light_theme_derives_darker_chrome_bg() {
+        // On a light theme (bg = near-white, fg = near-black), the
+        // derived header_bg should be *darker* than the window bg — the
+        // sign of the luminance shift inverts automatically because the
+        // derivation mixes bg toward fg.
+        let colors = ColorsConfig {
+            background: Some("#f5f5f5".into()),
+            foreground: Some("#202020".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        // header_bg luminance < background luminance.
+        let header_lum = 0.2126 * p.header_bg[0] as f64
+            + 0.7152 * p.header_bg[1] as f64
+            + 0.0722 * p.header_bg[2] as f64;
+        let bg_lum = 0.2126 * (0xf5 as f64 / 255.0)
+            + 0.7152 * (0xf5 as f64 / 255.0)
+            + 0.0722 * (0xf5 as f64 / 255.0);
+        assert!(
+            header_lum < bg_lum,
+            "derived header_bg ({header_lum:.4}) should be darker than light bg ({bg_lum:.4})"
+        );
+    }
+
+    #[test]
+    fn chrome_palette_ansi_override_drives_accent_picks() {
+        // Setting an ANSI palette (with a valid 16-entry vec) should
+        // route accent picks through those indices.
+        let ansi: Vec<HexColor> = vec![
+            "#000000".into(),
+            "#ff0000".into(),
+            "#00ff00".into(),
+            "#ffff00".into(),
+            "#0000ff".into(),
+            "#ff00ff".into(),
+            "#00ffff".into(),
+            "#ffffff".into(),
+            "#808080".into(),
+            "#ff8080".into(),
+            "#80ff80".into(),
+            "#ffff80".into(),
+            "#8080ff".into(),
+            "#ff80ff".into(),
+            "#80ffff".into(),
+            "#ffffff".into(),
+        ];
+        let colors = ColorsConfig {
+            ansi: Some(ansi),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        // focus from idx 4 = blue
+        assert_eq!(p.chrome_fg_focus, Color::from_hex(0x0000ff));
+        // warn from idx 3 = yellow
+        assert_eq!(p.chrome_fg_warn, Color::from_hex(0xffff00));
+        // alert from idx 1 = red
+        assert_eq!(p.chrome_fg_alert, Color::from_hex(0xff0000));
+    }
+
+    #[test]
+    fn chrome_palette_malformed_ansi_falls_back_to_default_accents() {
+        // A partial/malformed ANSI vector should not crash and should
+        // keep the bundled accents — `resolved_ansi` returns None when
+        // the vector doesn't have exactly 16 entries.
+        let colors = ColorsConfig {
+            background: Some("#060a12".into()),
+            ansi: Some(vec!["#ff0000".into(), "#00ff00".into()]),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        // Derivation still fires because `background` is set, but the
+        // accent picks fall back to Color::FOCUS / WARN / ALERT because
+        // ansi was rejected.
+        assert_eq!(p.chrome_fg_focus, Color::FOCUS);
+        assert_eq!(p.chrome_fg_warn, Color::WARN);
+        assert_eq!(p.chrome_fg_alert, Color::ALERT);
     }
 }

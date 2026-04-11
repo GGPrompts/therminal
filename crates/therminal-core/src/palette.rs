@@ -390,11 +390,148 @@ impl Default for ChromePalette {
     }
 }
 
+impl ChromePalette {
+    /// Derive a chrome palette from resolved terminal cell colors
+    /// (tn-n3vl).
+    ///
+    /// When the user sets only `[colors] background`/`foreground`/`ansi`
+    /// in `therminal.toml`, this builds a visually coherent chrome from
+    /// those cell colors instead of falling back to the bundled Codex
+    /// 2031 defaults — so any theme (hand-rolled, preset, or future
+    /// import) gets a matching status bar, pane headers, tab bar, CSD
+    /// strip, and hotspot underlines without the user having to learn
+    /// the full set of `chrome_*` role keys.
+    ///
+    /// Explicit `chrome_*` / `hotspot_*` overrides still win: they are
+    /// applied on top of this derived palette by
+    /// `ColorsConfig::chrome_palette` after `derive_from_cells` returns.
+    ///
+    /// ## Algorithm
+    ///
+    /// - **Chrome backgrounds** are produced by mixing `bg` toward `fg`
+    ///   by small amounts in sRGB space. Because `fg` is the contrastive
+    ///   complement of `bg`, the mix direction automatically inverts for
+    ///   light vs dark themes — on a dark theme `header_bg` ends up
+    ///   *lighter* than `bg`; on a light theme, *darker*. This matches
+    ///   the intent of the bundled defaults where `VOID_2` is slightly
+    ///   lighter than `VOID_0`.
+    ///
+    /// - **Chrome text** (`chrome_fg`, `chrome_fg_muted`) uses `fg`
+    ///   directly and `fg` blended toward `bg` respectively, so text on
+    ///   the derived header remains readable.
+    ///
+    /// - **Accents** (`focus_border`, `fg_focus`, `warn`, `alert`,
+    ///   hotspot underlines) come from the ANSI palette when the user
+    ///   supplied one. Without an ANSI override, we fall back to the
+    ///   Codex accent constants (`Color::FOCUS`, `Color::WARN`, etc.) —
+    ///   which is exactly what `ChromePalette::default` does, so this
+    ///   method's behavior degrades gracefully when only bg/fg are set.
+    ///
+    /// - **Alpha bake-in** is preserved for the translucent roles
+    ///   (`focus_border`, `separator_focus`, `selection`, `cursor`,
+    ///   `exit_ok`, `exit_error`) — their alpha matches
+    ///   `ChromePalette::default` exactly.
+    pub fn derive_from_cells(bg: Color, fg: Color, ansi: Option<&[Color; 16]>) -> Self {
+        // Mix ratios — chosen to roughly reproduce the Codex defaults on
+        // the bundled dark palette (VOID_0 → VOID_2 is about an 8% shift
+        // toward INK in sRGB space).
+        let header_bg = mix_srgb(bg, fg, 0.08);
+        let header_bg_dim = mix_srgb(bg, fg, 0.04);
+        let status_bar_bg = header_bg_dim;
+        let separator = mix_srgb(bg, fg, 0.20);
+        let chrome_fg_muted = mix_srgb(fg, bg, 0.45);
+
+        // Accent pulls: prefer ANSI palette indices when the user set
+        // them, otherwise use the Codex constants (same as Default).
+        let (accent_focus, accent_warn, accent_alert, ansi_cyan, ansi_magenta) = match ansi {
+            Some(ansi) => (ansi[4], ansi[3], ansi[1], ansi[6], ansi[5]),
+            None => (Color::FOCUS, Color::WARN, Color::ALERT, Color::MILD, {
+                // No palette constant covers the hotspot_issueref purple
+                // — keep the same RGB as `ChromePalette::default`
+                // (0.706, 0.557, 1.0) rounded back to u8 channels.
+                Color::from_rgba(180, 142, 255, 255)
+            }),
+        };
+
+        // The green-ish hotspot_gitref default is yellow/amber; on Codex
+        // that's `Color::HOT` (#eab308). With ANSI overrides we use
+        // index 3 (yellow), which is what the Codex 2031 palette itself
+        // puts at that slot anyway.
+        let accent_gitref = match ansi {
+            Some(ansi) => ansi[3],
+            None => Color::HOT,
+        };
+
+        Self {
+            focus_border: with_alpha(accent_focus, 0.92),
+            separator: separator.to_f32_array(),
+            separator_focus: with_alpha(accent_focus, 0.82),
+            header_bg: header_bg.to_f32_array(),
+            header_bg_dim: header_bg_dim.to_f32_array(),
+            exit_ok: with_alpha(ansi.map(|a| a[2]).unwrap_or(Color::STATUS_OK), 0.90),
+            exit_error: with_alpha(accent_alert, 0.90),
+
+            status_bar_bg: status_bar_bg.to_f32_array(),
+            // Propagation: tab_bar_bg follows status_bar_bg, tab_active_bg
+            // follows header_bg, tab_active_underline follows focus_border.
+            tab_bar_bg: status_bar_bg.to_f32_array(),
+            tab_active_bg: header_bg.to_f32_array(),
+            tab_active_underline: with_alpha(accent_focus, 0.92),
+
+            csd_close: accent_alert.to_f32_array(),
+            // csd_button_hover is a theme-invariant translucent white —
+            // same as the default. It works on both light and dark
+            // because alpha=0.1.
+            csd_button_hover: [1.0, 1.0, 1.0, 0.1],
+
+            selection: with_alpha(accent_focus, 0.35),
+            cursor: with_alpha(fg, 0.85),
+
+            chrome_fg: fg,
+            chrome_fg_muted,
+            chrome_fg_focus: accent_focus,
+            chrome_fg_warn: accent_warn,
+            chrome_fg_alert: accent_alert,
+
+            hyperlink: accent_focus.to_f32_array(),
+            hotspot_filepath: ansi_cyan.to_f32_array(),
+            hotspot_url: accent_focus.to_f32_array(),
+            hotspot_error: accent_alert.to_f32_array(),
+            hotspot_gitref: accent_gitref.to_f32_array(),
+            hotspot_issueref: ansi_magenta.to_f32_array(),
+        }
+    }
+}
+
 /// Build a `[f32; 4]` from a `Color` with an explicit alpha (0.0–1.0).
 /// Used by `ChromePalette` defaults so the alpha bake-in stays in one spot.
 fn with_alpha(color: Color, alpha: f32) -> [f32; 4] {
     let [r, g, b, _] = color.to_f32_array();
     [r, g, b, alpha]
+}
+
+/// Linear interpolation between two sRGB `Color`s in sRGB channel space.
+///
+/// `t` is the weight of `b` (0.0 = pure `a`, 1.0 = pure `b`). Alpha
+/// channels are ignored — the result is opaque.
+///
+/// sRGB channel mixing is not perceptually uniform — a proper derivation
+/// would convert to linear RGB or OKLCH before interpolating. For the
+/// small shifts used by `derive_from_cells` (4–20%) the error is
+/// imperceptible, and sRGB keeps the dependency tree lean.
+fn mix_srgb(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    let mix = |ca: u8, cb: u8| -> u8 {
+        let blended = ca as f32 * inv + cb as f32 * t;
+        blended.round().clamp(0.0, 255.0) as u8
+    };
+    Color {
+        r: mix(a.r, b.r),
+        g: mix(a.g, b.g),
+        b: mix(a.b, b.b),
+        a: 255,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +1066,211 @@ mod tests {
         // underline both default to ACCENT_COOL so OSC 8 + regex URLs match.
         let p = ChromePalette::default();
         assert_eq!(p.hyperlink, p.hotspot_url);
+    }
+
+    // ── ChromePalette::derive_from_cells (tn-n3vl) ──────────────────────
+
+    #[test]
+    fn derive_from_cells_dark_theme_header_bg_lighter_than_bg() {
+        // Dark theme: bg is near-black, fg is near-white. Mixing toward
+        // fg should produce a *lighter* header background.
+        let bg = Color::from_hex(0x000000);
+        let fg = Color::from_hex(0xffffff);
+        let p = ChromePalette::derive_from_cells(bg, fg, None);
+        // header_bg luminance > bg luminance on a dark theme.
+        let header_bg = Color::from_rgba(
+            (p.header_bg[0] * 255.0) as u8,
+            (p.header_bg[1] * 255.0) as u8,
+            (p.header_bg[2] * 255.0) as u8,
+            255,
+        );
+        assert!(
+            header_bg.relative_luminance() > bg.relative_luminance(),
+            "derived header_bg should be lighter than a dark bg"
+        );
+        // And it should not have inverted past the foreground.
+        assert!(header_bg.relative_luminance() < fg.relative_luminance());
+    }
+
+    #[test]
+    fn derive_from_cells_light_theme_header_bg_darker_than_bg() {
+        // Light theme: bg is near-white, fg is near-black. Mixing bg
+        // toward fg should now produce a *darker* header background —
+        // the sign flips automatically because fg flipped.
+        let bg = Color::from_hex(0xf0f0f0);
+        let fg = Color::from_hex(0x000000);
+        let p = ChromePalette::derive_from_cells(bg, fg, None);
+        let header_bg = Color::from_rgba(
+            (p.header_bg[0] * 255.0) as u8,
+            (p.header_bg[1] * 255.0) as u8,
+            (p.header_bg[2] * 255.0) as u8,
+            255,
+        );
+        assert!(
+            header_bg.relative_luminance() < bg.relative_luminance(),
+            "derived header_bg should be darker than a light bg"
+        );
+        assert!(header_bg.relative_luminance() > fg.relative_luminance());
+    }
+
+    #[test]
+    fn derive_from_cells_header_bg_dim_closer_to_bg_than_header_bg() {
+        // `header_bg_dim` should sit between `bg` and `header_bg` — it
+        // is a smaller shift toward fg than `header_bg`.
+        let bg = Color::from_hex(0x060a12);
+        let fg = Color::from_hex(0xe7f0ff);
+        let p = ChromePalette::derive_from_cells(bg, fg, None);
+        let header = Color::from_rgba(
+            (p.header_bg[0] * 255.0) as u8,
+            (p.header_bg[1] * 255.0) as u8,
+            (p.header_bg[2] * 255.0) as u8,
+            255,
+        );
+        let dim = Color::from_rgba(
+            (p.header_bg_dim[0] * 255.0) as u8,
+            (p.header_bg_dim[1] * 255.0) as u8,
+            (p.header_bg_dim[2] * 255.0) as u8,
+            255,
+        );
+        let bg_to_dim = (dim.relative_luminance() - bg.relative_luminance()).abs();
+        let bg_to_header = (header.relative_luminance() - bg.relative_luminance()).abs();
+        assert!(
+            bg_to_dim < bg_to_header,
+            "header_bg_dim ({:.4}) should be closer to bg than header_bg ({:.4})",
+            bg_to_dim,
+            bg_to_header
+        );
+    }
+
+    #[test]
+    fn derive_from_cells_no_ansi_falls_back_to_codex_accents() {
+        // Without an ANSI override, accents should match the bundled
+        // Codex constants — so themes that set only bg/fg get the same
+        // focus/warn/alert colors as today.
+        let bg = Color::from_hex(0x060a12);
+        let fg = Color::from_hex(0xe7f0ff);
+        let p = ChromePalette::derive_from_cells(bg, fg, None);
+        assert_eq!(p.chrome_fg_focus, Color::FOCUS);
+        assert_eq!(p.chrome_fg_warn, Color::WARN);
+        assert_eq!(p.chrome_fg_alert, Color::ALERT);
+    }
+
+    #[test]
+    fn derive_from_cells_with_ansi_picks_accents_from_indices() {
+        // With an ANSI palette, accents should come from the expected
+        // indices: focus=4 (blue), warn=3 (yellow), alert=1 (red),
+        // filepath=6 (cyan), issueref=5 (magenta).
+        let bg = Color::from_hex(0x000000);
+        let fg = Color::from_hex(0xffffff);
+        let mut ansi = [Color::from_hex(0); 16];
+        ansi[1] = Color::from_hex(0xabcdef); // red slot
+        ansi[3] = Color::from_hex(0x123456); // yellow slot
+        ansi[4] = Color::from_hex(0xfedcba); // blue slot
+        ansi[5] = Color::from_hex(0xdeadbe); // magenta slot
+        ansi[6] = Color::from_hex(0xbadc0f); // cyan slot
+        let p = ChromePalette::derive_from_cells(bg, fg, Some(&ansi));
+        assert_eq!(p.chrome_fg_focus, ansi[4]);
+        assert_eq!(p.chrome_fg_warn, ansi[3]);
+        assert_eq!(p.chrome_fg_alert, ansi[1]);
+        // Hotspot underlines
+        assert_eq!(p.hotspot_filepath, ansi[6].to_f32_array());
+        assert_eq!(p.hotspot_url, ansi[4].to_f32_array());
+        assert_eq!(p.hotspot_error, ansi[1].to_f32_array());
+        assert_eq!(p.hotspot_gitref, ansi[3].to_f32_array());
+        assert_eq!(p.hotspot_issueref, ansi[5].to_f32_array());
+        // CSD close tracks alert
+        assert_eq!(p.csd_close, ansi[1].to_f32_array());
+    }
+
+    #[test]
+    fn derive_from_cells_preserves_alpha_bake_in() {
+        // The translucent roles must keep the same alphas as
+        // `ChromePalette::default` so chrome that assumes those alphas
+        // (split separator, exit-code stripe, selection rect, cursor)
+        // keeps working.
+        let p = ChromePalette::derive_from_cells(
+            Color::from_hex(0x000000),
+            Color::from_hex(0xffffff),
+            None,
+        );
+        assert!((p.focus_border[3] - 0.92).abs() < 1e-6);
+        assert!((p.separator_focus[3] - 0.82).abs() < 1e-6);
+        assert!((p.tab_active_underline[3] - 0.92).abs() < 1e-6);
+        assert!((p.exit_ok[3] - 0.90).abs() < 1e-6);
+        assert!((p.exit_error[3] - 0.90).abs() < 1e-6);
+        assert!((p.selection[3] - 0.35).abs() < 1e-6);
+        assert!((p.cursor[3] - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn derive_from_cells_chrome_fg_muted_between_fg_and_bg() {
+        // Muted chrome text should sit between fg and bg in luminance
+        // space so it reads as "secondary" relative to primary text.
+        let bg = Color::from_hex(0x060a12);
+        let fg = Color::from_hex(0xe7f0ff);
+        let p = ChromePalette::derive_from_cells(bg, fg, None);
+        let muted_lum = p.chrome_fg_muted.relative_luminance();
+        assert!(muted_lum > bg.relative_luminance());
+        assert!(muted_lum < fg.relative_luminance());
+    }
+
+    #[test]
+    fn derive_from_cells_tab_propagations_track_base_roles() {
+        // tab_bar_bg follows status_bar_bg, tab_active_bg follows
+        // header_bg. Derivation must establish these at build time — the
+        // config-layer override propagations only fire when explicit
+        // chrome_* keys are present.
+        let p = ChromePalette::derive_from_cells(
+            Color::from_hex(0x060a12),
+            Color::from_hex(0xe7f0ff),
+            None,
+        );
+        assert_eq!(p.tab_bar_bg, p.status_bar_bg);
+        assert_eq!(p.tab_active_bg, p.header_bg);
+    }
+
+    #[test]
+    fn derive_from_cells_chrome_text_readable_on_chrome_header_bg() {
+        // WCAG AA (4.5:1) for chrome_fg on derived chrome_header_bg.
+        // Verifies both a dark and a light case — the whole point of
+        // deriving from cells is that `chrome_fg = fg` stays readable
+        // because `header_bg` is a tiny shift from the theme's own bg.
+        for (bg, fg, name) in [
+            (
+                Color::from_hex(0x060a12),
+                Color::from_hex(0xe7f0ff),
+                "dark codex",
+            ),
+            (
+                Color::from_hex(0xf5f5f5),
+                Color::from_hex(0x1a1a1a),
+                "light",
+            ),
+            (
+                Color::from_hex(0x000000),
+                Color::from_hex(0xffffff),
+                "pure bw",
+            ),
+            (
+                Color::from_hex(0xf2eede),
+                Color::from_hex(0x000000),
+                "paper",
+            ),
+        ] {
+            let p = ChromePalette::derive_from_cells(bg, fg, None);
+            let header_bg = Color::from_rgba(
+                (p.header_bg[0] * 255.0) as u8,
+                (p.header_bg[1] * 255.0) as u8,
+                (p.header_bg[2] * 255.0) as u8,
+                255,
+            );
+            let ratio = p.chrome_fg.contrast_ratio(header_bg);
+            assert!(
+                ratio >= 4.5,
+                "{name}: chrome_fg on derived header_bg contrast {ratio:.2} < 4.5 \
+                 (fg={fg:?}, header_bg={header_bg:?})"
+            );
+        }
     }
 }
 
