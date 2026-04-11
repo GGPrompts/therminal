@@ -129,11 +129,14 @@ impl ClaudeCwdTracker {
     /// tracker that the renderer holds. If inotify initialisation fails
     /// (stripped-down container, no `/tmp/claude-code-state`, etc.) the
     /// tracker is still returned; it simply stays empty and every
-    /// lookup falls through to `None`.
+    /// lookup falls through to `None`. Likewise, if the OS refuses to
+    /// create the background thread (resource exhaustion, ulimit hit),
+    /// we log a warning and return the empty tracker — the GUI must
+    /// not panic just because best-effort cwd tracking is unavailable.
     pub fn spawn() -> Arc<Self> {
         let tracker = Self::new();
         let tracker_bg = Arc::clone(&tracker);
-        thread::Builder::new()
+        let spawn_result = thread::Builder::new()
             .name("claude-cwd-tracker".into())
             .spawn(move || {
                 let mut poller = match ClaudeStatePoller::new() {
@@ -150,8 +153,13 @@ impl ClaudeCwdTracker {
                     let snapshot = poller.poll();
                     tracker_bg.replace_from(&snapshot);
                 }
-            })
-            .expect("failed to spawn claude-cwd-tracker thread");
+            });
+        if let Err(e) = spawn_result {
+            warn!(
+                error = %e,
+                "claude cwd tracker disabled (failed to spawn background thread)"
+            );
+        }
         tracker
     }
 
