@@ -145,10 +145,8 @@ impl App {
         let callbacks = make_pane_callbacks(&proxy, local_id);
         // tn-ou30: compute post-split header height so the local Term starts
         // at the correct size, avoiding a shrink→scrollback row on relayout.
-        let post_split_header_h = crate::pane::effective_header_height(
-            layout.pane_count() + 1,
-            self.config.general.show_pane_headers,
-        );
+        let post_split_header_h =
+            crate::pane::effective_header_height(layout.pane_count() + 1, !self.focus_mode);
         let build_result: std::cell::RefCell<Option<anyhow::Error>> = std::cell::RefCell::new(None);
         let new_id = layout.split_pane(source_local, direction, |viewport| {
             let (cols, rows) = crate::pane::grid_size_for_rect_with_header(

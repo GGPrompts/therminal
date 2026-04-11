@@ -117,8 +117,6 @@ impl App {
     pub(super) fn build_settings_render_values(&self) -> settings_overlay::SettingsRenderValues {
         use therminal_core::config::NewPaneCwd;
         settings_overlay::SettingsRenderValues {
-            show_pane_headers: self.config.general.show_pane_headers,
-            show_status_bar: self.config.general.show_status_bar,
             editor_chain: self.config.hotspots.editor_chain.clone(),
             folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
             folder_opener: self.config.hotspots.folder_opener.clone(),
@@ -149,14 +147,6 @@ impl App {
 
     fn apply_settings_command(&mut self, command: SettingsCommand) {
         match command {
-            SettingsCommand::TogglePaneHeaders => {
-                self.config.general.show_pane_headers = !self.config.general.show_pane_headers;
-                self.relayout_and_redraw();
-            }
-            SettingsCommand::ToggleStatusBar => {
-                self.config.general.show_status_bar = !self.config.general.show_status_bar;
-                self.relayout_and_redraw();
-            }
             SettingsCommand::ApplyThemePreset(preset) => {
                 settings_overlay::apply_theme_preset(&mut self.config.colors, preset);
                 if let Some(renderer) = self.grid_renderer.as_mut() {
@@ -376,6 +366,12 @@ impl App {
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
+            }
+            KeyAction::FocusMode => {
+                // tn-t2yd.2: toggle runtime focus mode (hide/show all chrome).
+                self.focus_mode = !self.focus_mode;
+                info!(focus_mode = self.focus_mode, "focus mode toggled");
+                self.relayout_and_redraw();
             }
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)

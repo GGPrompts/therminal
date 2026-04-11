@@ -131,7 +131,7 @@ impl App {
         renderer.clear_frame_maps();
 
         let mut pane_counter = 0;
-        let show_pane_headers = self.config.general.show_pane_headers;
+        let show_pane_headers = !self.focus_mode;
         let is_zoomed = self.zoomed_layout.is_some();
         render::render_panes_recursive(
             layout,
@@ -158,7 +158,7 @@ impl App {
         let mut chrome_overlay = crate::overlay::OverlayLayer::new();
 
         // ── Status bar ──────────────────────────────────────────────────
-        if self.config.general.show_status_bar {
+        if !self.focus_mode {
             // Gather status info from the focused pane.
             let focused_pane = self
                 .workspaces
@@ -271,9 +271,13 @@ impl App {
         }
 
         // ── Tab bar / CSD title bar ────────────────────────────────────
+        // tn-t2yd.2: focus mode hides the tab bar entirely unless CSD is
+        // active, in which case the CSD title strip must still render so
+        // the user retains access to the window close/min/max buttons.
         let use_csd = self.config.general.use_csd;
+        let chrome_visible = !self.focus_mode;
         let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
-        let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
+        let tab_bar_visible = chrome_visible && crate::pane::should_show_tab_bar(workspace_count);
         if tab_bar_visible || use_csd {
             let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
                 (wm.workspace_ids(), wm.active_id())
@@ -335,11 +339,14 @@ impl App {
                 0.0
             };
             // tn-t2yd.4: when the CSD strip is reserved (use_csd = true) we
-            // always render the tab labels even with a single workspace so
+            // normally render the tab labels even with a single workspace so
             // the tab is clickable and has a right-click menu. Without CSD
             // we keep the tn-t2yd.3 behavior of auto-hiding tabs for a lone
             // workspace.
-            let draw_tabs = tab_bar_visible || use_csd;
+            // tn-t2yd.2: focus mode strips the tab labels even under CSD
+            // — the CSD window control buttons still render on top so the
+            // user keeps the ability to close/move the window.
+            let draw_tabs = chrome_visible && (tab_bar_visible || use_csd);
             chrome::draw_tab_bar(
                 &tab_info,
                 renderer,
@@ -864,11 +871,7 @@ impl App {
             let bar_width = ((sw * 0.4).round() as u32).clamp(100, 800);
 
             // Compute position based on config.
-            let status_bar_h = if self.config.general.show_status_bar {
-                24.0
-            } else {
-                0.0
-            };
+            let status_bar_h = if !self.focus_mode { 24.0 } else { 0.0 };
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
                 workspace_count,
                 self.config.general.use_csd,

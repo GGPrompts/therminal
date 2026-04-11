@@ -153,8 +153,7 @@ impl App {
         let pane = layout.find_pane(pane_id)?;
 
         let vp = pane.viewport;
-        let header_h =
-            crate::pane::effective_header_height(pane_count, self.config.general.show_pane_headers);
+        let header_h = crate::pane::effective_header_height(pane_count, !self.focus_mode);
         let col = ((px as f32 - vp.x() - renderer.padding_x()) / renderer.cell_width).floor();
         let row =
             ((py as f32 - vp.y() - renderer.padding_y() - header_h) / renderer.cell_height).floor();
@@ -231,10 +230,10 @@ impl App {
         if pane_count <= 1 && !is_zoomed {
             return None;
         }
-        // When the user has disabled pane headers globally, there is no
-        // header strip to hit-test — fall through so the right-click context
+        // Focus mode (tn-t2yd.2) hides the pane header strip, so there is
+        // nothing to hit-test — fall through so the right-click context
         // menu (and other pane-body handlers) own the click area.
-        if !self.config.general.show_pane_headers {
+        if self.focus_mode {
             return None;
         }
 
@@ -868,7 +867,7 @@ impl App {
             tab_bar_h,
             gpu.config.width as f32,
             gpu.config.height as f32
-                - crate::pane::effective_status_bar_height(self.config.general.show_status_bar)
+                - crate::pane::effective_status_bar_height(!self.focus_mode)
                 - tab_bar_h,
         ))
     }

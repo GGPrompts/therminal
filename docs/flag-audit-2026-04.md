@@ -16,14 +16,14 @@ Implementer references: changes to DELETE flags belong in tn-t2yd; PANEL additio
 | Flag | Section | Default | Verdict |
 |---|---|---|---|
 | `trust.show_agent_indicator` | `[trust]` | `true` | DELETE |
-| `general.show_pane_headers` | `[general]` | `true` | PANEL |
-| `general.show_status_bar` | `[general]` | `true` | REDESIGN |
+| `general.show_pane_headers` | `[general]` | `true` | DELETE (resolved tn-t2yd.2) |
+| `general.show_status_bar` | `[general]` | `true` | DELETE (resolved tn-t2yd.2) |
 | `general.show_tab_bar` | `[general]` | `true` | REDESIGN (resolved tn-t2yd.3) |
 | `font.nerd_font` | `[font]` | `true` | PANEL |
 | `general.use_csd` | `[general]` | platform | PANEL |
 | `general.auto_tile` | `[general]` | `true` | PANEL |
 
-Verdict counts: **1 DELETE, 4 PANEL, 2 REDESIGN**
+Verdict counts: **3 DELETE, 3 PANEL, 1 REDESIGN**
 
 ---
 
@@ -52,23 +52,9 @@ Verdict counts: **1 DELETE, 4 PANEL, 2 REDESIGN**
 | | |
 |---|---|
 | **Default** | `true` |
-| **Verdict** | PANEL |
+| **Verdict** | DELETE (resolved tn-t2yd.2) |
 
-**Justification.** The per-pane header strip is genuinely space-constrained for users running large agent swarms in tiled layouts — every pixel counts when you have 8 panes. Disabling headers is a legitimate display-density preference. The existing fallback (footer surfaces focused-pane info when headers are hidden) makes this safe to turn off. Belongs in the settings panel under a "Display" group.
-
-**Code references:**
-- `crates/therminal-core/src/config/mod.rs` — struct field `GeneralConfig::show_pane_headers` (line ~249) and default (line ~295)
-- `crates/therminal-core/src/config/config_text.rs` — template comment (line ~36)
-- `crates/therminal-app/src/pane/geometry.rs` — `effective_header_height(pane_count, show_pane_headers)` (lines ~18–19); doc comment (line ~14)
-- `crates/therminal-app/src/pane/layout/tree.rs` — `resize_all_panes(renderer, show_pane_headers)` (lines ~62–63)
-- `crates/therminal-app/src/window/render_driver.rs` — reads `config.general.show_pane_headers` (line ~102, ~108)
-- `crates/therminal-app/src/window/render.rs` — passed through `render_panes_recursive` and `render_leaf_pane` (lines ~114, ~135, ~157, ~171, ~211, ~261–262, ~412–413)
-- `crates/therminal-app/src/window/mouse.rs` — hit-test uses `effective_header_height` (line ~140); early-return guard (line ~216)
-- `crates/therminal-app/src/window/init.rs` — `resize_all_panes` calls with config value (lines ~411, ~497, ~632, ~880)
-- `crates/therminal-app/src/window/mod.rs` — hot-reload path and layout update (lines ~563, ~668)
-- `crates/therminal-app/src/window/pane_ops.rs` — post-split layout reflow (lines ~1225, ~1235, ~1250, ~1259)
-- `crates/therminal-app/src/window/chrome/status_bar.rs` — doc comment references fallback behavior (line ~32)
-- `crates/therminal-app/src/window/chrome/pane_header.rs` — doc comment (line ~30)
+**Resolution (tn-t2yd.2).** Config field removed. Pane headers are now on unconditionally whenever multiple panes exist and `App.focus_mode = false`. The original "PANEL" verdict assumed display density was a real preference — in practice the setting sat in the overlay unused, and the actual use case (maximum terminal real estate during focused work) is better served by a single F11 `KeyAction::FocusMode` runtime toggle that also hides the status bar and tab bar in one gesture. Parameters like `show_pane_headers: bool` are still threaded through `effective_header_height`, `resize_all_panes`, and `render_panes_recursive`, but every call site computes them as `!self.focus_mode` from the new runtime flag.
 
 ---
 
@@ -77,19 +63,9 @@ Verdict counts: **1 DELETE, 4 PANEL, 2 REDESIGN**
 | | |
 |---|---|
 | **Default** | `true` |
-| **Verdict** | REDESIGN |
+| **Verdict** | DELETE (resolved tn-t2yd.2) |
 
-**Justification.** The status bar carries agent indicator, CWD, exit code, and workspace navigation — all of which are needed most urgently in small, constrained windows. Turning it off entirely via a boolean is too coarse: on a 40-row terminal the bar is precious; on a 200-row external monitor it is trivially present. The right design is auto-hide based on window height (hide below a threshold, e.g. 15 rows), not a user-facing on/off toggle. Once the auto-hide heuristic exists the flag becomes redundant and should be deleted. This flag is analogous to the pattern called out in tn-t2yd: a design decision encoded as a preference.
-
-**Code references:**
-- `crates/therminal-core/src/config/mod.rs` — struct field `GeneralConfig::show_status_bar` (line ~244) and default (line ~294)
-- `crates/therminal-core/src/config/config_text.rs` — template comment (line ~32)
-- `crates/therminal-app/src/pane/geometry.rs` — `effective_status_bar_height(show_status_bar)` (lines ~72, ~75, ~85, ~89)
-- `crates/therminal-app/src/window/render_driver.rs` — gate `if self.config.general.show_status_bar` (line ~124)
-- `crates/therminal-app/src/window/mouse.rs` — subtracts status bar height from hit region (line ~824)
-- `crates/therminal-app/src/window/mod.rs` — hot-reload change detection (lines ~504–505); layout reflow passes (lines ~556, ~647)
-- `crates/therminal-app/src/window/init.rs` — init layout call (line ~317)
-- `crates/therminal-app/CLAUDE.md` — config note (line ~79)
+**Resolution (tn-t2yd.2).** Config field removed. The original verdict called for an auto-hide-by-row-count heuristic; the actual landing was simpler: the bar is on by default and can be hidden alongside the other chrome via the F11 focus mode toggle (`KeyAction::FocusMode`). Call sites (`content_area_rect_csd`, `effective_status_bar_height`) still take a `bool` parameter but every site computes it from `App.focus_mode` at the moment of the call.
 
 ---
 

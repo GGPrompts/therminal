@@ -277,7 +277,7 @@ impl App {
             None => return,
         };
 
-        let show_pane_headers = self.config.general.show_pane_headers;
+        let show_pane_headers = !self.focus_mode;
         // Direct field access needed: layout_mut + grid_renderer must coexist.
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
@@ -302,7 +302,7 @@ impl App {
             None => return,
         };
 
-        let show_pane_headers = self.config.general.show_pane_headers;
+        let show_pane_headers = !self.focus_mode;
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
             None => return,

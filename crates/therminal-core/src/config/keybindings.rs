@@ -77,6 +77,9 @@ pub enum KeyAction {
     JumpErrorNext,
     /// Toggle the agent timeline overlay widget (tn-x85k).
     ToggleAgentTimeline,
+    /// Toggle "focus mode" — hide/show all chrome (pane headers, status
+    /// bar, tab bar) for maximum terminal space (tn-t2yd.2).
+    FocusMode,
     // ── Hotspot actions (used by action palette, not keybindable) ────────
     /// Copy a hotspot text to the clipboard.
     HotspotCopy(String),
@@ -142,6 +145,7 @@ impl KeyAction {
             KeyAction::JumpErrorPrev => "Jump to previous error",
             KeyAction::JumpErrorNext => "Jump to next error",
             KeyAction::ToggleAgentTimeline => "Toggle agent timeline",
+            KeyAction::FocusMode => "Toggle focus mode (hide all chrome)",
             KeyAction::HotspotCopy(_) => "Copy to clipboard",
             KeyAction::HotspotOpenInEditor(_) => "Open in editor",
             KeyAction::HotspotOpenExternal(_) => "Open externally",
@@ -182,9 +186,11 @@ impl KeyAction {
             | KeyAction::JumpErrorNext => "Navigation",
             KeyAction::ToggleAgentTimeline => "Widgets",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
-            KeyAction::Copy | KeyAction::Paste | KeyAction::ShowHelp | KeyAction::ShowSettings => {
-                "General"
-            }
+            KeyAction::Copy
+            | KeyAction::Paste
+            | KeyAction::ShowHelp
+            | KeyAction::ShowSettings
+            | KeyAction::FocusMode => "General",
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
@@ -419,6 +425,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+alt+t".to_string(),
                     action: KeyAction::ToggleAgentTimeline,
+                },
+                // Focus mode: hide all chrome (tn-t2yd.2)
+                Keybinding {
+                    key: "f11".to_string(),
+                    action: KeyAction::FocusMode,
                 },
                 // Semantic scrollback navigation
                 Keybinding {

@@ -36,7 +36,7 @@ pub(crate) struct StatusBarInfo {
     pub is_zoomed: bool,
     /// Real daemon PaneId of the focused pane, surfaced in the footer center
     /// section so users can identify the active pane even when per-pane
-    /// headers are hidden via `show_pane_headers = false`. Matches the value
+    /// headers are hidden (e.g. single-pane layouts). Matches the value
     /// copied by "Copy pane ID" in the context menu (tn-5wrx).
     pub focused_pane_id: Option<u64>,
     /// Git branch display text for the focused pane (tn-e97n).

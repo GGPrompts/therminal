@@ -112,10 +112,8 @@ impl App {
 
         // tn-ou30: compute the header height that resize_all_panes will apply
         // AFTER the split so the PTY starts at the correct size.
-        let post_split_header_h = crate::pane::effective_header_height(
-            layout.pane_count() + 1,
-            self.config.general.show_pane_headers,
-        );
+        let post_split_header_h =
+            crate::pane::effective_header_height(layout.pane_count() + 1, !self.focus_mode);
 
         let new_id = layout.split_pane(
             focused,
@@ -258,10 +256,8 @@ impl App {
             self.config.general.new_pane_cwd,
         );
 
-        let post_split_header_h = crate::pane::effective_header_height(
-            layout.pane_count() + 1,
-            self.config.general.show_pane_headers,
-        );
+        let post_split_header_h =
+            crate::pane::effective_header_height(layout.pane_count() + 1, !self.focus_mode);
 
         let new_id =
             layout.split_pane(

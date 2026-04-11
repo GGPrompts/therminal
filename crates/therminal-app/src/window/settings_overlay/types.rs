@@ -40,8 +40,6 @@ impl ThemePreset {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlBinding {
-    TogglePaneHeaders,
-    ToggleStatusBar,
     ApplyThemePreset(ThemePreset),
     // Hotspot controls (tn-avjv.5)
     EditorChainEntry(usize),
@@ -60,8 +58,6 @@ pub(crate) enum ControlBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // MoveUp/MoveDown wired in future keyboard shortcut pass.
 pub(crate) enum SettingsCommand {
-    TogglePaneHeaders,
-    ToggleStatusBar,
     ApplyThemePreset(ThemePreset),
     // Hotspot mutations (tn-avjv.5)
     EditorChainRemove(usize),
@@ -84,8 +80,6 @@ pub(crate) enum SettingsCommand {
 impl ControlBinding {
     pub(super) fn command(&self) -> SettingsCommand {
         match self {
-            Self::TogglePaneHeaders => SettingsCommand::TogglePaneHeaders,
-            Self::ToggleStatusBar => SettingsCommand::ToggleStatusBar,
             Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(*preset),
             Self::EditorChainEntry(idx) => SettingsCommand::EditorChainRemove(*idx),
             Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerRemove(*idx),

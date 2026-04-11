@@ -157,7 +157,7 @@ A full-width status bar at the bottom of the window (24px tall) with three secti
 
 **Data flow**: The PTY reader thread in `pane/spawn.rs` drains `InterceptedEvent`s from the `TherminalInterceptor` and `ProcessDetector` results into a shared `Arc<Mutex<PaneStatus>>` on `PaneState`. The render loop reads this to populate `StatusBarInfo` passed to `draw_status_bar()` in `chrome/status_bar.rs`.
 
-**Config**: `general.show_status_bar` (default `true`) controls visibility. `trust.show_agent_indicator` controls the agent name in the left section.
+**Config**: the status bar is on by default. To hide it along with the rest of the chrome (pane headers, tab bar) press F11 to toggle `KeyAction::FocusMode` (tn-t2yd.2). `trust.show_agent_indicator` controls the agent name in the left section.
 
 ## Workspace Tabs
 

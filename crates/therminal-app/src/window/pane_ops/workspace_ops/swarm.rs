@@ -140,10 +140,8 @@ impl App {
             self.config.general.new_pane_cwd,
         );
 
-        let post_split_header_h = crate::pane::effective_header_height(
-            layout.pane_count() + 1,
-            self.config.general.show_pane_headers,
-        );
+        let post_split_header_h =
+            crate::pane::effective_header_height(layout.pane_count() + 1, !self.focus_mode);
 
         let new_id =
             layout.split_pane(

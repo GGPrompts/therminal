@@ -28,7 +28,7 @@ pub(crate) fn draw_pane_focus_border(
 
     let vp = pane.viewport;
     // Slightly stronger border (3px) so focus is unambiguous when per-pane
-    // headers are hidden via `general.show_pane_headers = false`.
+    // headers are hidden (single-pane layouts, or F11 focus mode).
     let t = 3.0_f32;
     let sw = surface_width as f32;
     let sh = surface_height as f32;

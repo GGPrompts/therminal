@@ -425,6 +425,13 @@ pub struct App {
     /// clears the flag.
     pub(crate) initial_pane_pending: bool,
 
+    /// Runtime-only "focus mode" toggle (tn-t2yd.2). When true, all chrome
+    /// (pane headers, status bar, tab bar) is hidden so the terminal grid
+    /// owns the whole window. Bound to `KeyAction::FocusMode` (F11 by
+    /// default). Not persisted — this is a transient user choice, not a
+    /// preference.
+    pub(crate) focus_mode: bool,
+
     /// Stashed state for a deferred remote fresh-spawn. `None` when the
     /// deferred spawn is local-mode or when no spawn is pending.
     pub(crate) deferred_remote_spawn: Option<DeferredRemoteSpawn>,
@@ -688,10 +695,7 @@ impl App {
             renderer.set_ui_text_scale(self.config.accessibility.ui_text_scale);
         }
 
-        let status_bar_changed =
-            self.config.general.show_status_bar != old_config.general.show_status_bar;
-
-        let needs_relayout = font_changed || padding_changed || status_bar_changed;
+        let needs_relayout = font_changed || padding_changed;
 
         if needs_relayout
             && let (Some(renderer), Some(gpu), Some(window)) = (
@@ -735,18 +739,20 @@ impl App {
             }
 
             // Resize all panes after font or padding change.
+            let chrome_visible = !self.focus_mode;
             let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+            let effective_workspace_count = if chrome_visible { workspace_count } else { 1 };
             let full_rect = crate::pane::content_area_rect_csd(
                 gpu.config.width as f32,
                 gpu.config.height as f32,
-                self.config.general.show_status_bar,
-                workspace_count,
+                chrome_visible,
+                effective_workspace_count,
                 self.config.general.use_csd,
             );
             if let Some(wm) = self.workspaces.as_mut() {
                 let layout = wm.layout_mut();
                 layout.layout(full_rect);
-                layout.resize_all_panes(renderer, self.config.general.show_pane_headers);
+                layout.resize_all_panes(renderer, chrome_visible);
             }
         }
 
@@ -876,16 +882,41 @@ impl App {
         status.cwd.clone()
     }
 
-    /// Compute the content area rect from GPU dimensions and config flags.
+    /// Whether chrome (pane headers, status bar, tab bar) should be drawn.
+    ///
+    /// tn-t2yd.2: returns `false` when focus mode is active, baking the
+    /// default choice (chrome on) into the source. Individual chrome pieces
+    /// used to be flag-gated via `[general] show_status_bar` /
+    /// `show_pane_headers` but those config fields were removed — the
+    /// tripwire now is a single F11 runtime toggle.
+    pub(crate) fn chrome_visible(&self) -> bool {
+        !self.focus_mode
+    }
+
+    /// Compute the content area rect from GPU dimensions.
     /// Returns `None` if the GPU state is not yet initialized.
+    ///
+    /// Respects `focus_mode` (tn-t2yd.2): when active, the status bar is
+    /// collapsed and the tab bar is collapsed unless CSD is in use (since
+    /// CSD owns the top strip for window controls, which must remain
+    /// reachable so the user can still close/move the window).
     pub(crate) fn compute_layout_rect(&self) -> Option<Rect> {
         let gpu = self.gpu.as_ref()?;
         let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+        // In focus mode we tell the layout helper "no workspaces to render
+        // a tab bar for" so the top strip collapses — but if CSD is active
+        // we still pass use_csd=true because CSD reserves the title bar
+        // strip regardless of chrome.
+        let effective_workspace_count = if self.chrome_visible() {
+            workspace_count
+        } else {
+            1
+        };
         Some(crate::pane::content_area_rect_csd(
             gpu.config.width as f32,
             gpu.config.height as f32,
-            self.config.general.show_status_bar,
-            workspace_count,
+            self.chrome_visible(),
+            effective_workspace_count,
             self.config.general.use_csd,
         ))
     }
@@ -898,14 +929,14 @@ impl App {
             Some(r) => r,
             None => return,
         };
+        let show_headers = self.chrome_visible();
         if let Some(layout) = self.get_layout_mut() {
             layout.layout(full_rect);
         }
         // Separate borrow scope: layout_mut + renderer.
         if let (Some(wm), Some(renderer)) = (self.workspaces.as_mut(), self.grid_renderer.as_ref())
         {
-            wm.layout_mut()
-                .resize_all_panes(renderer, self.config.general.show_pane_headers);
+            wm.layout_mut().resize_all_panes(renderer, show_headers);
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();

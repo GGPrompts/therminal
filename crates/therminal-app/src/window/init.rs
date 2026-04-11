@@ -257,6 +257,7 @@ impl App {
             widget_manager: crate::widgets::WidgetManager::new(),
             agent_timeline,
             initial_pane_pending: false,
+            focus_mode: false,
             deferred_remote_spawn: None,
             scrollback_compact_countdown: 0,
         }
@@ -378,8 +379,7 @@ impl App {
         self.widget_renderer = Some(crate::widgets::WidgetRenderer::new(&device, format));
 
         // ── First pane (fills window minus status bar and tab bar) ─────
-        let status_bar_h =
-            crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
+        let status_bar_h = crate::pane::effective_status_bar_height(!self.focus_mode);
         // At init there is always exactly one workspace, so the tab bar is
         // collapsed unless CSD is on (which reserves the title-bar strip for
         // window controls).
@@ -472,8 +472,7 @@ impl App {
                     if let Some(wm) = self.workspaces.as_mut()
                         && let Some(renderer) = self.grid_renderer.as_ref()
                     {
-                        wm.layout_mut()
-                            .resize_all_panes(renderer, self.config.general.show_pane_headers);
+                        wm.layout_mut().resize_all_panes(renderer, !self.focus_mode);
                     }
                     info!("attached to existing daemon session");
                     return;
@@ -654,18 +653,15 @@ impl App {
                         && let Some(renderer) = self.grid_renderer.as_ref()
                     {
                         let pane_count = wm.layout().pane_count();
-                        let header_h = crate::pane::effective_header_height(
-                            pane_count,
-                            self.config.general.show_pane_headers,
-                        );
+                        let header_h =
+                            crate::pane::effective_header_height(pane_count, !self.focus_mode);
                         info!(
                             pane_count,
                             header_h,
-                            show_pane_headers = self.config.general.show_pane_headers,
+                            show_pane_headers = !self.focus_mode,
                             "resize_all_panes: effective header"
                         );
-                        wm.layout_mut()
-                            .resize_all_panes(renderer, self.config.general.show_pane_headers);
+                        wm.layout_mut().resize_all_panes(renderer, !self.focus_mode);
                     }
 
                     // Log actual pane viewport after resize
@@ -771,8 +767,7 @@ impl App {
         if let Some(wm) = self.workspaces.as_mut()
             && let Some(renderer) = self.grid_renderer.as_ref()
         {
-            wm.layout_mut()
-                .resize_all_panes(renderer, self.config.general.show_pane_headers);
+            wm.layout_mut().resize_all_panes(renderer, !self.focus_mode);
         }
 
         if let (Some(renderer), Some(gpu)) = (self.grid_renderer.as_ref(), self.gpu.as_ref()) {
@@ -984,7 +979,7 @@ impl App {
         if let Some(wm) = self.workspaces.as_mut() {
             let layout = wm.layout_mut();
             layout.layout(full_rect);
-            layout.resize_all_panes(renderer, self.config.general.show_pane_headers);
+            layout.resize_all_panes(renderer, !self.focus_mode);
         }
         self.daemon_session_id = Some(session_id);
         Ok(true)
@@ -1032,7 +1027,7 @@ impl App {
         {
             let layout = wm.layout_mut();
             layout.layout(full_rect);
-            layout.resize_all_panes(renderer, self.config.general.show_pane_headers);
+            layout.resize_all_panes(renderer, !self.focus_mode);
         }
 
         tracing::debug!(

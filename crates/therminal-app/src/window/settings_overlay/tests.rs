@@ -42,8 +42,6 @@ fn assert_min_ansi_contrast(colors: &ColorsConfig, min_contrast: f64, theme_name
 
 fn test_render_values() -> SettingsRenderValues {
     SettingsRenderValues {
-        show_pane_headers: true,
-        show_status_bar: true,
         editor_chain: vec!["$VISUAL".into(), "$EDITOR".into(), "code".into()],
         folder_pane_command: vec!["tfe".into(), "{path}".into()],
         folder_opener: vec!["$FILE_MANAGER".into(), "xdg-open".into()],
@@ -80,13 +78,6 @@ fn arrows_navigate_sections_and_controls() {
     assert_eq!(state.active_control_index(), 0);
 }
 #[test]
-fn enter_from_nav_then_enter_toggles() {
-    let mut state = SettingsOverlayState::new();
-    assert_eq!(state.enter(), None);
-    assert_eq!(state.focus(), SettingsFocus::Controls);
-    assert_eq!(state.enter(), Some(SettingsCommand::TogglePaneHeaders));
-}
-#[test]
 fn register_section_extends_navigation_model() {
     let mut state = SettingsOverlayState::new();
     let base = state.sections().len();
@@ -95,7 +86,7 @@ fn register_section_extends_navigation_model() {
         "Test",
         vec![SettingsControl::new(
             "Toggle",
-            ControlBinding::ToggleStatusBar,
+            ControlBinding::ToggleHighContrast,
         )],
     ));
     assert_eq!(state.sections().len(), base + 1);
@@ -105,12 +96,6 @@ fn register_section_extends_navigation_model() {
     assert_eq!(state.active_section().map(|s| s.id), Some("test"));
 }
 #[test]
-fn toggle_space_flips_value() {
-    let mut state = SettingsOverlayState::new();
-    state.tab(false);
-    assert_eq!(state.space(), Some(SettingsCommand::TogglePaneHeaders));
-}
-#[test]
 fn select_arrows_cycle_options() {
     let mut state = SettingsOverlayState::new();
     state.register_section(SettingsSection::new(
@@ -118,7 +103,7 @@ fn select_arrows_cycle_options() {
         "TS",
         vec![SettingsControl::with_type(
             "C",
-            ControlBinding::ToggleStatusBar,
+            ControlBinding::ToggleHighContrast,
             ControlType::select(vec!["A".into(), "B".into(), "C".into()], 0),
         )],
     ));
@@ -148,7 +133,7 @@ fn select_up_down_arrows_cycle_options() {
         "TS2",
         vec![SettingsControl::with_type(
             "D",
-            ControlBinding::ToggleStatusBar,
+            ControlBinding::ToggleHighContrast,
             ControlType::select(vec!["X".into(), "Y".into(), "Z".into()], 0),
         )],
     ));
@@ -180,7 +165,7 @@ fn text_input_enter_edits_then_confirms() {
         "TT",
         vec![SettingsControl::with_type(
             "N",
-            ControlBinding::ToggleStatusBar,
+            ControlBinding::ToggleHighContrast,
             ControlType::text_input("hello"),
         )],
     ));
@@ -209,7 +194,7 @@ fn text_input_backspace() {
         "TB",
         vec![SettingsControl::with_type(
             "P",
-            ControlBinding::ToggleStatusBar,
+            ControlBinding::ToggleHighContrast,
             ControlType::text_input("abc"),
         )],
     ));
@@ -236,7 +221,7 @@ fn escape_cancels_text_editing() {
         "TE",
         vec![SettingsControl::with_type(
             "F",
-            ControlBinding::ToggleStatusBar,
+            ControlBinding::ToggleHighContrast,
             ControlType::text_input(""),
         )],
     ));
@@ -341,8 +326,7 @@ fn hotspots_section_rebuilds_from_config() {
 fn editor_chain_remove_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 2: layout=0, shell=1, hotspots=2).
-    state.arrow_down();
+    // Navigate to "hotspots" section (index 1: shell=0, hotspots=1).
     state.arrow_down();
     state.tab(false);
     let cmd = state.enter();
@@ -352,8 +336,7 @@ fn editor_chain_remove_produces_command() {
 fn folder_pane_command_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 2: layout=0, shell=1, hotspots=2).
-    state.arrow_down();
+    // Navigate to "hotspots" section (index 1: shell=0, hotspots=1).
     state.arrow_down();
     state.tab(false);
     state.arrow_down();
@@ -398,8 +381,7 @@ fn shell_section_rebuilds_from_config() {
 fn shell_default_shell_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 1: layout=0, shell=1).
-    state.arrow_down();
+    // "shell" section is now at index 0 (tn-t2yd.2 removed the layout section).
     state.tab(false);
     // Enter to start editing the "Default shell" text input.
     assert_eq!(state.enter(), None);
@@ -412,8 +394,7 @@ fn shell_default_shell_text_edit_produces_command() {
 fn shell_new_pane_cwd_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 1), then to "New pane cwd" control (index 2).
-    state.arrow_down();
+    // "shell" section is at index 0, "New pane cwd" is control index 2.
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
@@ -456,9 +437,9 @@ fn accessibility_section_rebuilds_from_config() {
 fn accessibility_high_contrast_toggle_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 4: layout=0, shell=1,
-    // hotspots=2, themes=3, accessibility=4).
-    for _ in 0..4 {
+    // Navigate to "accessibility" section (index 3: shell=0, hotspots=1,
+    // themes=2, accessibility=3).
+    for _ in 0..3 {
         state.arrow_down();
     }
     state.tab(false);
@@ -470,7 +451,7 @@ fn accessibility_ui_text_scale_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
     // Navigate to "accessibility" section, control index 2 (UI text scale).
-    for _ in 0..4 {
+    for _ in 0..3 {
         state.arrow_down();
     }
     state.tab(false);

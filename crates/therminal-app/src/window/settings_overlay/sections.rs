@@ -24,8 +24,6 @@ pub(crate) fn ui_text_scale_index(scale: f32) -> usize {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsRenderValues {
-    pub show_pane_headers: bool,
-    pub show_status_bar: bool,
     pub editor_chain: Vec<String>,
     pub folder_pane_command: Vec<String>,
     pub folder_opener: Vec<String>,
@@ -88,12 +86,6 @@ impl SettingsOverlayState {
         for section in &mut self.sections {
             for control in &mut section.controls {
                 match (&control.binding, &mut control.control_type) {
-                    (ControlBinding::TogglePaneHeaders, ControlType::Toggle { value }) => {
-                        *value = values.show_pane_headers;
-                    }
-                    (ControlBinding::ToggleStatusBar, ControlType::Toggle { value }) => {
-                        *value = values.show_status_bar;
-                    }
                     (ControlBinding::ToggleHighContrast, ControlType::Toggle { value }) => {
                         *value = values.high_contrast;
                     }
@@ -226,22 +218,9 @@ impl SettingsOverlayState {
     }
 
     pub(super) fn seed_defaults(&mut self) {
-        self.register_section(SettingsSection::new(
-            "layout",
-            "Layout",
-            vec![
-                SettingsControl::with_type(
-                    "Show pane headers",
-                    ControlBinding::TogglePaneHeaders,
-                    ControlType::toggle(true),
-                ),
-                SettingsControl::with_type(
-                    "Show status bar",
-                    ControlBinding::ToggleStatusBar,
-                    ControlType::toggle(true),
-                ),
-            ],
-        ));
+        // tn-t2yd.2: Layout section (show pane headers / show status bar)
+        // was removed — those toggles are replaced by the runtime F11
+        // focus mode keybinding (`KeyAction::FocusMode`).
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
         self.register_section(SettingsSection::new(

@@ -45,14 +45,11 @@ pub(super) fn default_config_text() -> String {
         "# new_pane_cwd = \"inherit\"  # \"inherit\" (focused pane cwd) or \"home\" (home dir)\n",
     );
     out.push_str(&format!("# padding = {}\n", d.general.padding));
-    out.push_str(&format!(
-        "# show_status_bar = {}\n",
-        d.general.show_status_bar
-    ));
-    out.push_str(&format!(
-        "# show_pane_headers = {}  # per-pane header strip in multi-pane layouts\n",
-        d.general.show_pane_headers
-    ));
+    out.push_str(
+        "# Focus mode (hides pane headers, status bar, and tab bar for maximum\n\
+         # terminal space) is a runtime toggle bound to F11 by default — see\n\
+         # [keybindings] and KeyAction::FocusMode (tn-t2yd.2).\n",
+    );
     out.push_str(&format!(
         "# use_csd = {}  # client-side decorations (default: true on Linux/Windows)\n",
         d.general.use_csd
