@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -137,6 +137,16 @@ pub enum IpcRequest {
         /// Shell binary to spawn instead of the global default. When `None`,
         /// the daemon falls back to `general.shell` from config.
         shell: Option<String>,
+        /// Optional git branch to spawn the new pane inside. The daemon
+        /// resolves the source pane's git repo, finds (or creates via
+        /// `git worktree add`) a worktree for `<branch>`, sets the new
+        /// pane's cwd to that worktree path, and auto-tags the pane with
+        /// `branch=`, `worktree=`, `repo=`. Mutually compatible with
+        /// `cwd` and `startup_command` — `worktree` overrides `cwd` for
+        /// the spawn target, and `startup_command` is injected after the
+        /// pane lands in the worktree directory. See tn-h7tq.
+        #[serde(default)]
+        worktree: Option<String>,
     },
     /// Kill (destroy) a specific pane.
     KillPane { pane_id: PaneId },

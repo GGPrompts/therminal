@@ -58,11 +58,33 @@ impl DaemonHarness {
         Self::spawn_with_setup(|_config_dir| Ok(())).await
     }
 
+    /// Same as [`Self::spawn_with_setup`], but additionally launches the
+    /// daemon child with `current_dir(working_dir)` and `HOME=working_dir`
+    /// so the initial PTY shell inherits both that cwd and a hermetic
+    /// `$HOME` (which suppresses any user `~/.bashrc` side-effects that
+    /// would otherwise `cd` the shell out from under us). Useful for
+    /// tests that need the source pane to live inside a specific
+    /// directory — e.g. a temp git repo for tn-h7tq's worktree creation
+    /// path.
+    pub async fn spawn_with_setup_in_dir<F>(working_dir: &Path, setup: F) -> Result<Self>
+    where
+        F: FnOnce(&Path) -> Result<()>,
+    {
+        Self::spawn_inner(setup, Some(working_dir)).await
+    }
+
     /// Same as [`Self::spawn`], but runs `setup` against the hermetic
     /// config directory (`$XDG_CONFIG_HOME`) before launching the daemon.
     /// Used by scenarios that need to stage files the daemon reads at
     /// startup (pattern packs, therminal.toml, trust config, ...).
     pub async fn spawn_with_setup<F>(setup: F) -> Result<Self>
+    where
+        F: FnOnce(&Path) -> Result<()>,
+    {
+        Self::spawn_inner(setup, None).await
+    }
+
+    async fn spawn_inner<F>(setup: F, working_dir: Option<&Path>) -> Result<Self>
     where
         F: FnOnce(&Path) -> Result<()>,
     {
@@ -101,8 +123,8 @@ impl DaemonHarness {
         // Spawn with `--foreground` so we can manage the subprocess
         // directly (no double-fork), and a minimal `keep_alive` so an
         // orphaned daemon (test panic before Drop) self-terminates quickly.
-        let child = Command::new(&daemon_bin)
-            .arg("--foreground")
+        let mut cmd = Command::new(&daemon_bin);
+        cmd.arg("--foreground")
             .arg("--keep-alive")
             .arg("0")
             // Hermetic environment — clear everything the host user has
@@ -125,7 +147,16 @@ impl DaemonHarness {
             .env("RUST_LOG", "error")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+            // Override HOME so the user's real ~/.bashrc / ~/.zshrc don't
+            // run side-effects (cd, etc.) inside the spawned shell. This
+            // is the partner to current_dir(dir) for tests that need a
+            // hermetic source pane cwd.
+            cmd.env("HOME", dir);
+        }
+        let child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn {}", daemon_bin.display()))?;
 

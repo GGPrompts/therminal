@@ -38,7 +38,7 @@ Defined in `lib.rs` as `u64` type aliases -- `Copy`, `Eq`, `Hash`, cheap to pass
 ### Daemon IPC (`daemon.rs`)
 
 - **`IpcMessage`** -- Tagged envelope with three variants: `Request { request_id, payload }`, `Response { request_id, payload }`, `Event { payload }`. The `request_id: u64` enables multiplexing over a single connection.
-- **`IpcRequest`** -- All client-to-daemon commands: `Ping`, `GracefulShutdown`, `Subscribe`, session CRUD, pane operations (`SendKeys`, `CapturePane`, `SplitPane`, `KillPane`, `SelectPane`), workspace state (`SetWorkspaceState`, `GetWorkspaces`, `CreateWorkspace`, `RenameWorkspace`), and `RequestHandoffFds`. `SplitPane` carries `startup_command: Option<String>` for command injection after prompt readiness, and `ratio: Option<f32>` (clamped 0.1..0.9, default 0.5) for controlling the split proportion.
+- **`IpcRequest`** -- All client-to-daemon commands: `Ping`, `GracefulShutdown`, `Subscribe`, session CRUD, pane operations (`SendKeys`, `CapturePane`, `SplitPane`, `KillPane`, `SelectPane`), workspace state (`SetWorkspaceState`, `GetWorkspaces`, `CreateWorkspace`, `RenameWorkspace`), and `RequestHandoffFds`. `SplitPane` carries `startup_command: Option<String>` for command injection after prompt readiness, `ratio: Option<f32>` (clamped 0.1..0.9, default 0.5) for controlling the split proportion, and `worktree: Option<String>` (tn-h7tq) which routes the new pane through a git worktree resolved from the source pane's repo.
 - **`IpcResponse`** -- Corresponding responses including `Pong` (with health data), `PaneCaptured` (grid snapshot), `HandoffReady`, `Workspaces`, and `Error`.
 - **`DaemonEvent`** -- Server-pushed events: `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`, `WorkspaceChanged`. Clients filter via `EventKind`.
 - **`DaemonState`** -- Daemon lifecycle state machine: `Starting -> Binding -> Ready -> Running -> Draining -> Stopped`.
@@ -50,7 +50,7 @@ Defined in `lib.rs` as `u64` type aliases -- `Copy`, `Eq`, `Hash`, cheap to pass
 
 - **Framing**: 4-byte big-endian length prefix + MessagePack payload. Max frame: 1 MiB (`MAX_FRAME_SIZE`).
 - **`encode_ipc()` / `decode_ipc()`** -- Serialize/deserialize `IpcMessage` with length-prefixed framing.
-- **`PROTOCOL_VERSION`** -- Bumped when IPC wire format changes in a way that requires daemon restart. Normal rebuilds reuse the running daemon. Current value: 4 (bumped for `SplitPane.ratio` and `CreateWorkspace`/`RenameWorkspace` additions).
+- **`PROTOCOL_VERSION`** -- Bumped when IPC wire format changes in a way that requires daemon restart. Normal rebuilds reuse the running daemon. Current value: 7 (bumped for `SplitPane.worktree` from tn-h7tq).
 
 ### Message Bus (`message.rs`)
 

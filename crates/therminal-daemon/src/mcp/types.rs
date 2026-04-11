@@ -272,6 +272,15 @@ pub(crate) struct SpawnPaneParam {
     /// Distinct from `command` (which is a legacy alias for shell) and `startup_command`
     /// (which is injected after the prompt is ready).
     pub(crate) shell: Option<String>,
+    /// Optional git branch. When set, the daemon resolves the source
+    /// pane's git repo, finds (or creates) a worktree for the branch
+    /// (`git worktree add <repo>/../<repo>-<branch> <branch>`), spawns
+    /// the new pane cd'd to that worktree, and auto-tags the pane with
+    /// `branch=`, `worktree=`, `repo=`. The branch must already exist
+    /// in the repo. Composes with `startup_command` (which is still
+    /// injected after the prompt is ready, inside the worktree). When
+    /// `worktree` and `cwd` are both set, `worktree` wins. tn-h7tq.
+    pub(crate) worktree: Option<String>,
 }
 
 // ── Tool result types ───────────────────────────────────────────────────

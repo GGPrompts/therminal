@@ -588,11 +588,43 @@ async fn dispatch_ipc(
             startup_command,
             ratio,
             shell,
+            worktree,
         } => {
             let mut mgr = session_mgr.lock().await;
+            // tn-h7tq: when --worktree is set, resolve it against the
+            // source pane's cwd before spawning. The resolution shells
+            // out to git and may take a few hundred ms on first use; we
+            // hold the manager lock across that call so concurrent
+            // splits on the same source pane serialise. Worst-case
+            // latency is bounded by the git invocations.
+            let (effective_cwd, worktree_resolved) = match worktree.as_deref() {
+                Some(branch) => {
+                    let source_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
+                    match crate::session::worktree::resolve_repo_root(&source_cwd) {
+                        Ok(repo_root) => match crate::session::worktree::find_or_create_worktree(
+                            &repo_root, branch,
+                        ) {
+                            Ok(resolved) => {
+                                (resolved.path.to_string_lossy().into_owned(), Some(resolved))
+                            }
+                            Err(e) => {
+                                return IpcResponse::Error {
+                                    message: format!("worktree resolve failed: {e}"),
+                                };
+                            }
+                        },
+                        Err(e) => {
+                            return IpcResponse::Error {
+                                message: format!("worktree resolve failed: {e}"),
+                            };
+                        }
+                    }
+                }
+                None => (cwd.clone().unwrap_or_default(), None),
+            };
             let spawn_options = therminal_terminal::pty::SpawnOptions {
                 shell: shell.clone().unwrap_or_default(),
-                cwd: cwd.clone().unwrap_or_default(),
+                cwd: effective_cwd,
                 ..Default::default()
             };
             match mgr.split_pane_with_options(
@@ -602,7 +634,23 @@ async fn dispatch_ipc(
                 startup_command.as_deref(),
                 *ratio,
             ) {
-                Ok(new_pane_id) => IpcResponse::PaneSplit { new_pane_id },
+                Ok(new_pane_id) => {
+                    // tn-h7tq: auto-tag the new pane with the worktree
+                    // metadata so downstream tools (delegate result
+                    // capture, conductor polling, MCP queries) can find
+                    // siblings by branch / repo without re-shelling git.
+                    if let Some(resolved) = worktree_resolved {
+                        let mut tags = std::collections::HashMap::new();
+                        tags.insert("branch".to_string(), resolved.branch);
+                        tags.insert(
+                            "worktree".to_string(),
+                            resolved.path.to_string_lossy().into_owned(),
+                        );
+                        tags.insert("repo".to_string(), resolved.repo_name);
+                        let _ = mgr.tag_pane(new_pane_id, tags);
+                    }
+                    IpcResponse::PaneSplit { new_pane_id }
+                }
                 Err(e) => IpcResponse::Error { message: e },
             }
         }
@@ -976,10 +1024,43 @@ async fn batch_layout_ops(
                 startup_command,
                 ratio,
                 shell,
+                worktree,
             } => {
+                // tn-h7tq: same worktree resolution as the non-batch
+                // path; see the dispatch_ipc handler for details.
+                let (effective_cwd, worktree_resolved) = match worktree.as_deref() {
+                    Some(branch) => {
+                        let source_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
+                        match crate::session::worktree::resolve_repo_root(&source_cwd) {
+                            Ok(repo_root) => {
+                                match crate::session::worktree::find_or_create_worktree(
+                                    &repo_root, branch,
+                                ) {
+                                    Ok(resolved) => (
+                                        resolved.path.to_string_lossy().into_owned(),
+                                        Some(resolved),
+                                    ),
+                                    Err(e) => {
+                                        results.push(IpcResponse::Error {
+                                            message: format!("worktree resolve failed: {e}"),
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                results.push(IpcResponse::Error {
+                                    message: format!("worktree resolve failed: {e}"),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    None => (cwd.clone().unwrap_or_default(), None),
+                };
                 let spawn_options = therminal_terminal::pty::SpawnOptions {
                     shell: shell.clone().unwrap_or_default(),
-                    cwd: cwd.clone().unwrap_or_default(),
+                    cwd: effective_cwd,
                     ..Default::default()
                 };
                 match mgr.split_pane_with_options(
@@ -992,6 +1073,16 @@ async fn batch_layout_ops(
                     Ok(new_pane_id) => {
                         if let Some(sid) = mgr.session_for_pane(*pane_id) {
                             touched_sessions.insert(sid);
+                        }
+                        if let Some(resolved) = worktree_resolved {
+                            let mut tags = std::collections::HashMap::new();
+                            tags.insert("branch".to_string(), resolved.branch);
+                            tags.insert(
+                                "worktree".to_string(),
+                                resolved.path.to_string_lossy().into_owned(),
+                            );
+                            tags.insert("repo".to_string(), resolved.repo_name);
+                            let _ = mgr.tag_pane(new_pane_id, tags);
                         }
                         IpcResponse::PaneSplit { new_pane_id }
                     }

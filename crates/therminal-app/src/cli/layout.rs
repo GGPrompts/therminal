@@ -86,6 +86,7 @@ fn parse_split(args: &[String]) -> Result<IpcRequest> {
     let mut spawn: Option<String> = None;
     let mut shell: Option<String> = None;
     let mut cwd: Option<String> = None;
+    let mut worktree: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -125,6 +126,14 @@ fn parse_split(args: &[String]) -> Result<IpcRequest> {
                         .clone(),
                 );
             }
+            "--worktree" => {
+                i += 1;
+                worktree = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--worktree requires a value"))?
+                        .clone(),
+                );
+            }
             other => bail!("unknown split flag: {other}"),
         }
         i += 1;
@@ -137,6 +146,7 @@ fn parse_split(args: &[String]) -> Result<IpcRequest> {
         startup_command: spawn,
         ratio,
         shell,
+        worktree,
     })
 }
 

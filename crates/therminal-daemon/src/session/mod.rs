@@ -15,6 +15,7 @@ mod pane;
 mod snapshots;
 mod window;
 mod workspace_ops;
+pub mod worktree;
 
 // ── Re-exports ──────────────────────────────────────────────────────────
 // Every pub item is re-exported so external callers keep their existing

@@ -336,6 +336,21 @@ impl SessionManager {
         None
     }
 
+    /// Snapshot a pane's current working directory (from OSC 7 / spawn).
+    /// Returns `None` if the pane does not exist; returns `Some("")` if it
+    /// exists but never published a cwd. Used by tn-h7tq's worktree
+    /// resolution path to find the source pane's git repo.
+    pub fn pane_cwd(&self, pane_id: PaneId) -> Option<String> {
+        for session in self.sessions.values() {
+            for window in &session.windows {
+                if let Some(pane) = window.pane(pane_id) {
+                    return Some(pane.cwd());
+                }
+            }
+        }
+        None
+    }
+
     /// Find the session ID that contains a given pane.
     pub fn session_for_pane(&self, pane_id: PaneId) -> Option<SessionId> {
         self.sessions

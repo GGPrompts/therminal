@@ -102,6 +102,7 @@ async fn split_pane_appears_in_list_panes() {
             startup_command: None,
             ratio: None,
             shell: None,
+            worktree: None,
         })
         .await
         .expect("split_pane should succeed");
@@ -460,4 +461,167 @@ kind = "file"
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Scenario — `SplitPane { worktree }` creates a git worktree, spawns
+/// the new pane in it, and auto-tags the pane with `branch`, `worktree`,
+/// `repo` (tn-h7tq).
+///
+/// Sets up a temp git repo with a `feature-x` branch, spawns the daemon
+/// with its initial cwd inside that repo (so the source pane lands in
+/// the repo), then issues `IpcRequest::SplitPane { worktree:
+/// Some("feature-x"), .. }` and asserts:
+///
+///   1. The split returns a fresh pane id.
+///   2. The new pane shows up in `ListPanes` with `branch=`, `worktree=`,
+///      `repo=` tags.
+///   3. The worktree directory `<repo>/../<repo>-feature-x` exists on
+///      disk after the call.
+///
+/// A second split with the same branch must reuse the existing worktree
+/// (no error, same path tagged on the second pane).
+#[tokio::test]
+async fn split_pane_worktree_creates_and_tags() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("git not on PATH; skipping");
+        return;
+    }
+
+    // Build a temp git repo with a feature branch.
+    let repo_root_tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_root_tmp.path().join("toy");
+    std::fs::create_dir_all(&repo).unwrap();
+    run_git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test"]);
+    std::fs::write(repo.join("README"), "hi\n").unwrap();
+    run_git(&repo, &["add", "README"]);
+    run_git(&repo, &["commit", "--quiet", "-m", "init"]);
+    run_git(&repo, &["branch", "feature-x"]);
+
+    // Daemon's initial PTY shell will land in `repo` so the source pane's
+    // OSC 7 / spawn cwd resolves git correctly. Worktree resolution
+    // shells out to git -C <cwd> rev-parse, which only needs the cwd to
+    // be a path inside the repo — we don't need OSC 7 from the shell.
+    let harness = DaemonHarness::spawn_with_setup_in_dir(&repo, |_config| Ok(()))
+        .await
+        .expect("daemon harness should spawn");
+
+    let (session_id, source_pane_id) = harness
+        .create_session_with_pane(Some("worktree-test"))
+        .await
+        .expect("create session");
+    // Wait for the source pane's OSC 7 / shell-integration prompt cycle
+    // to publish the cwd back to the daemon. The harness was launched
+    // with `current_dir(repo)` and `HOME=repo`, so the shell prints its
+    // first prompt inside the temp git repo and the OSC 7 sequence
+    // updates `pane.cwd()` to that path. Give the shell ~1s to source
+    // its rcfile and emit the prompt.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // First split: should create the worktree.
+    let resp = harness
+        .client()
+        .send_request(IpcRequest::SplitPane {
+            pane_id: source_pane_id,
+            horizontal: true,
+            cwd: None,
+            startup_command: None,
+            ratio: None,
+            shell: None,
+            worktree: Some("feature-x".into()),
+        })
+        .await
+        .expect("split with worktree should succeed");
+    let new_pane_id = match resp {
+        IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
+        IpcResponse::Error { message } => panic!("worktree split returned error: {message}"),
+        other => panic!("expected PaneSplit, got {other:?}"),
+    };
+    assert_ne!(new_pane_id, source_pane_id);
+
+    let expected_path = repo_root_tmp.path().join("toy-feature-x");
+    assert!(
+        expected_path.exists(),
+        "worktree directory should exist on disk: {}",
+        expected_path.display()
+    );
+
+    let panes = harness.list_panes().await.expect("list_panes");
+    let new_pane = panes
+        .iter()
+        .find(|p| p.pane_id == new_pane_id && p.session_id == session_id)
+        .expect("new pane should appear in ListPanes");
+    assert_eq!(
+        new_pane.tags.get("branch").map(String::as_str),
+        Some("feature-x"),
+        "branch tag missing or wrong: {:?}",
+        new_pane.tags
+    );
+    assert_eq!(
+        new_pane.tags.get("repo").map(String::as_str),
+        Some("toy"),
+        "repo tag missing or wrong: {:?}",
+        new_pane.tags
+    );
+    assert_eq!(
+        new_pane.tags.get("worktree").map(String::as_str),
+        Some(expected_path.to_string_lossy().as_ref()),
+        "worktree tag missing or wrong: {:?}",
+        new_pane.tags
+    );
+    assert_eq!(
+        new_pane.cwd.as_deref(),
+        Some(expected_path.to_string_lossy().as_ref()),
+        "new pane cwd should be the worktree path, got {:?}",
+        new_pane.cwd
+    );
+
+    // Second split with the same branch must reuse the existing worktree.
+    let resp = harness
+        .client()
+        .send_request(IpcRequest::SplitPane {
+            pane_id: source_pane_id,
+            horizontal: false,
+            cwd: None,
+            startup_command: None,
+            ratio: None,
+            shell: None,
+            worktree: Some("feature-x".into()),
+        })
+        .await
+        .expect("second split with same worktree branch should succeed");
+    let second_pane_id = match resp {
+        IpcResponse::PaneSplit { new_pane_id } => new_pane_id,
+        IpcResponse::Error { message } => {
+            panic!("second split returned error (expected reuse): {message}")
+        }
+        other => panic!("expected PaneSplit, got {other:?}"),
+    };
+    assert_ne!(second_pane_id, new_pane_id);
+
+    let panes = harness.list_panes().await.expect("list_panes");
+    let second_pane = panes
+        .iter()
+        .find(|p| p.pane_id == second_pane_id)
+        .expect("second pane in ListPanes");
+    assert_eq!(
+        second_pane.tags.get("worktree").map(String::as_str),
+        Some(expected_path.to_string_lossy().as_ref()),
+        "reused worktree tag should match the original"
+    );
+}
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .status()
+        .expect("git invocation");
+    assert!(status.success(), "git {args:?} failed in {}", cwd.display());
 }

@@ -136,7 +136,7 @@ and `crates/therminal-daemon/CLAUDE.md`.
 
 ```text
 therminal pane list [--session N] [--json]
-therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--ratio 0.1..0.9] [--json]
+therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--ratio 0.1..0.9] [--worktree <branch>] [--json]
 therminal pane destroy <pane_id>
 therminal pane send <pane_id> <keys> [--raw]
 therminal pane peek <pane_id> [--last N] [--trim] [--json]
@@ -167,6 +167,22 @@ rows. `--trim` (on by default) strips trailing whitespace per row.
 `pane create` without `--from` walks the daemon for an existing pane to
 split. If no panes exist anywhere, it spawns a fresh session first.
 `--ratio` controls the split proportion (clamped 0.1..0.9, default 0.5).
+
+`pane create --worktree <branch>` (tn-h7tq) resolves the source pane's
+git repo, finds an existing worktree for `<branch>` (`git worktree list
+--porcelain`) or creates one at `<repo>/../<repo>-<branch>` via `git
+worktree add`, spawns the new pane cd'd to that path, and auto-tags
+the pane with `branch=<branch>`, `worktree=<absolute path>`, and
+`repo=<basename>`. The branch must already exist — `pane create` does
+not create new branches. Compose with `--spawn` to launch a delegate
+agent inside the worktree:
+
+```sh
+tn pane create --worktree feature-x --spawn 'claude -p "fix the bug"'
+```
+
+When both `--worktree` and `--cwd`-style options are provided, the
+worktree path wins.
 
 `pane focus` selects the given pane as the focused pane in its workspace.
 

@@ -128,12 +128,13 @@ impl TherminalMcpServer {
         // `shell` sets the PTY shell binary; `command` is the legacy alias.
         // When both are set, `shell` takes precedence.
         let shell_override = params.shell.or(params.command).unwrap_or_default();
-        let spawn_options = SpawnOptions {
+        let mut spawn_options = SpawnOptions {
             shell: shell_override,
             cwd: params.cwd.unwrap_or_default(),
             ..Default::default()
         };
         let startup_command = params.startup_command.as_deref();
+        let worktree_branch = params.worktree.as_deref();
 
         // Determine horizontal flag from split_direction (default: vertical).
         let horizontal = match params.split_direction.as_deref() {
@@ -154,6 +155,36 @@ impl TherminalMcpServer {
             .and_then(|r| if r.is_finite() { Some(r) } else { None });
 
         if let Some(split_from_id) = params.split_from {
+            // tn-h7tq: resolve worktree against the source pane's cwd
+            // before spawning, and remember the resolution so we can
+            // auto-tag the new pane.
+            let worktree_resolved = match worktree_branch {
+                Some(branch) => {
+                    let source_cwd = mgr.pane_cwd(split_from_id).unwrap_or_default();
+                    match crate::session::worktree::resolve_repo_root(&source_cwd) {
+                        Ok(repo_root) => match crate::session::worktree::find_or_create_worktree(
+                            &repo_root, branch,
+                        ) {
+                            Ok(resolved) => {
+                                spawn_options.cwd = resolved.path.to_string_lossy().into_owned();
+                                Some(resolved)
+                            }
+                            Err(e) => {
+                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                    "worktree resolve failed: {e}"
+                                ))]));
+                            }
+                        },
+                        Err(e) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "worktree resolve failed: {e}"
+                            ))]));
+                        }
+                    }
+                }
+                None => None,
+            };
+
             // Split from an existing pane.
             match mgr.split_pane_with_options(
                 split_from_id,
@@ -163,6 +194,17 @@ impl TherminalMcpServer {
                 ratio,
             ) {
                 Ok(new_pane_id) => {
+                    // Tag the new pane with worktree metadata when applicable.
+                    if let Some(resolved) = worktree_resolved {
+                        let mut tags = std::collections::HashMap::new();
+                        tags.insert("branch".to_string(), resolved.branch);
+                        tags.insert(
+                            "worktree".to_string(),
+                            resolved.path.to_string_lossy().into_owned(),
+                        );
+                        tags.insert("repo".to_string(), resolved.repo_name);
+                        let _ = mgr.tag_pane(new_pane_id, tags);
+                    }
                     // Find the session and pane to get dimensions.
                     let (session_id, cols, rows) =
                         find_pane_info(&mgr, new_pane_id).unwrap_or((0, 80, 24));
@@ -220,6 +262,37 @@ impl TherminalMcpServer {
 
             // Session exists -- split from its first pane.
             if let Some((first_pane_id, _, _)) = find_first_pane_in_session(&mgr, session_id) {
+                // tn-h7tq: resolve worktree against the first pane's cwd.
+                let worktree_resolved = match worktree_branch {
+                    Some(branch) => {
+                        let source_cwd = mgr.pane_cwd(first_pane_id).unwrap_or_default();
+                        match crate::session::worktree::resolve_repo_root(&source_cwd) {
+                            Ok(repo_root) => {
+                                match crate::session::worktree::find_or_create_worktree(
+                                    &repo_root, branch,
+                                ) {
+                                    Ok(resolved) => {
+                                        spawn_options.cwd =
+                                            resolved.path.to_string_lossy().into_owned();
+                                        Some(resolved)
+                                    }
+                                    Err(e) => {
+                                        return Ok(CallToolResult::error(vec![Content::text(
+                                            format!("worktree resolve failed: {e}"),
+                                        )]));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                    "worktree resolve failed: {e}"
+                                ))]));
+                            }
+                        }
+                    }
+                    None => None,
+                };
+
                 match mgr.split_pane_with_options(
                     first_pane_id,
                     horizontal,
@@ -228,6 +301,16 @@ impl TherminalMcpServer {
                     None,
                 ) {
                     Ok(new_pane_id) => {
+                        if let Some(resolved) = worktree_resolved {
+                            let mut tags = std::collections::HashMap::new();
+                            tags.insert("branch".to_string(), resolved.branch);
+                            tags.insert(
+                                "worktree".to_string(),
+                                resolved.path.to_string_lossy().into_owned(),
+                            );
+                            tags.insert("repo".to_string(), resolved.repo_name);
+                            let _ = mgr.tag_pane(new_pane_id, tags);
+                        }
                         let (_, cols, rows) =
                             find_pane_info(&mgr, new_pane_id).unwrap_or((session_id, 80, 24));
                         let result = SpawnPaneResult {
@@ -1515,7 +1598,7 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "terminal.panes.create",
-            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command, working directory, and an optional startup command injected after the first prompt.",
+            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command, working directory, and an optional startup command injected after the first prompt. Optional `worktree = \"<branch>\"` resolves the source pane's git repo, finds or creates a worktree for the branch (`git worktree add <repo>/../<repo>-<branch> <branch>`), spawns the new pane there, and auto-tags it with `branch=`, `worktree=`, `repo=`.",
             schema_for_type::<SpawnPaneParam>(),
         ),
         Tool::new(

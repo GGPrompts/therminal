@@ -54,6 +54,15 @@ pub enum PaneCmd {
         /// Shell binary to spawn instead of the global default (e.g. /bin/fish, powershell.exe).
         #[arg(long)]
         shell: Option<String>,
+        /// Spawn the new pane inside a git worktree for `<branch>`. The
+        /// daemon resolves the source pane's git repo, creates the
+        /// worktree if needed (`git worktree add <repo>/../<repo>-<branch>
+        /// <branch>`), and auto-tags the new pane with `branch=`,
+        /// `worktree=`, `repo=`. Composes with `--spawn`: the startup
+        /// command runs after the pane lands in the worktree directory
+        /// (tn-h7tq).
+        #[arg(long)]
+        worktree: Option<String>,
         #[command(flatten)]
         out: OutputFlags,
     },
@@ -128,6 +137,7 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             startup_command,
             ratio,
             shell,
+            worktree,
             out,
         } => create(
             ctx,
@@ -137,6 +147,7 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             startup_command,
             ratio,
             shell,
+            worktree,
             out,
         ),
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
@@ -198,6 +209,7 @@ fn create(
     startup_command: Option<String>,
     ratio: Option<f32>,
     shell: Option<String>,
+    worktree: Option<String>,
     out: OutputFlags,
 ) -> Result<()> {
     // Determine the source pane to split from. If `--from` is set we use it
@@ -218,6 +230,7 @@ fn create(
         startup_command,
         ratio,
         shell,
+        worktree,
     })?;
     let new_pane = match resp {
         IpcResponse::PaneSplit { new_pane_id } => new_pane_id,

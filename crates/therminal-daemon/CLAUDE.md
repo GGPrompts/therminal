@@ -43,7 +43,7 @@ The daemon exposes a multiplexed IPC protocol over Unix domain sockets with leng
 
 **Envelope** (`IpcMessage`): Three variants -- `Request { request_id, payload }`, `Response { request_id, payload }`, `Event { payload }`. The `request_id: u64` enables multiplexing multiple in-flight requests over one connection.
 
-**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`. `SplitPane` accepts `pane_id`, `horizontal`, `cwd`, `startup_command`, and `ratio: Option<f32>` (0.1..0.9, default 0.5). `CreateWorkspace` and `RenameWorkspace` provide CLI-driven workspace lifecycle without requiring the full `SetWorkspaceState` topology push.
+**Requests** (`IpcRequest`): `Ping`, `GracefulShutdown`, `Subscribe { filter }`, `Unsubscribe`, `ListSessions`, `GetSession`, `CreateSession`, `DestroySession`, `GetState`. `SplitPane` accepts `pane_id`, `horizontal`, `cwd`, `startup_command`, `ratio: Option<f32>` (0.1..0.9, default 0.5), and `worktree: Option<String>` (tn-h7tq — when set, the daemon resolves the source pane's git repo, finds/creates a worktree for the branch, and uses that path as the new pane's cwd; auto-tags the new pane with `branch`/`worktree`/`repo`). `CreateWorkspace` and `RenameWorkspace` provide CLI-driven workspace lifecycle without requiring the full `SetWorkspaceState` topology push.
 
 **Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
 
@@ -73,6 +73,7 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 | `session/window.rs` | Window/workspace management |
 | `session/layout.rs` | Layout tree helpers, split/resize logic |
 | `session/snapshots.rs` | `PaneStateSnapshot`, `PaneSnapshot`, state capture for MCP and reattach |
+| `session/worktree.rs` | tn-h7tq git worktree resolution + creation for `SplitPane { worktree }` |
 
 **Hierarchy**: `SessionManager` owns a `HashMap<SessionId, Session>`. Each `Session` contains `Vec<Window>`, each `Window` contains `Vec<Pane>`. A new session gets one default window with one pane.
 
@@ -85,6 +86,51 @@ Persistent multiplexed sessions via a `Session -> Window -> Pane` hierarchy mana
 **Keystroke forwarding**: Client sends input bytes via IPC, dispatched through `SessionManager::write_to_pane()` to the pane's PTY writer.
 
 **Graceful shutdown**: `IpcServer::run()` calls `SessionManager::shutdown()` on exit, which destroys all sessions (dropping PTY masters, causing reader threads to get EOF and exit).
+
+## Worktree-aware pane creation (tn-h7tq)
+
+`IpcRequest::SplitPane` and `terminal.panes.create` (MCP) accept an optional
+`worktree: Option<String>` field. When set, the daemon:
+
+1. Reads the source pane's current `cwd` (from OSC 7 / `SpawnOptions.cwd`).
+2. Shells out to `git -C <cwd> rev-parse --show-toplevel` to find the
+   repo root. Errors if the source pane is not inside a git repo.
+3. Runs `git -C <repo_root> worktree list --porcelain` and looks for an
+   existing worktree on `refs/heads/<branch>`. If one is registered,
+   reuses its path — two delegates pointed at the same branch land in
+   the same on-disk tree.
+4. Otherwise verifies the branch exists (`git show-ref --verify --quiet
+   refs/heads/<branch>`) and creates a new worktree at
+   `<repo_root parent>/<repo_name>-<sanitised-branch>` via `git worktree
+   add <target> <branch>`. Slashes / colons / backslashes in the branch
+   name become dashes so the directory is portable.
+5. Sets `SpawnOptions.cwd = <worktree_path>` (overriding any caller-supplied
+   `cwd`) and proceeds through the normal `split_pane_with_options` path.
+6. **Auto-tags** the new pane with three keys via `tag_pane`:
+
+   | Key        | Value                                       |
+   | ---------- | ------------------------------------------- |
+   | `branch`   | the branch name as passed in                |
+   | `worktree` | absolute path the new pane was cd'd into    |
+   | `repo`     | basename of the repo root (e.g. `therminal`)|
+
+   Downstream tools (delegate result capture, conductor polling, MCP
+   queries, the GUI's pane header) can rely on these tags to look up
+   sibling worktrees by branch / repo without re-shelling git.
+
+**Composition with `--spawn`**: `worktree` and `startup_command` are
+orthogonal. The startup command is injected after the new pane lands in
+the worktree directory and the first prompt is ready, so
+`tn pane create --worktree feature-x --spawn 'claude -p "fix it"'` runs
+the agent inside the worktree.
+
+**Composition with `cwd`**: when both are set, `worktree` wins —
+`SpawnOptions.cwd` is overwritten with the resolved worktree path.
+
+The implementation lives in `src/session/worktree.rs` (parser unit
+tests cover the porcelain format and the round-trip is exercised
+end-to-end by `split_pane_worktree_creates_and_tags` in
+`crates/therminal-integration-tests/tests/scenarios.rs`).
 
 ## MCP Server
 
@@ -122,7 +168,7 @@ Tools exposed (30 tools):
 | `terminal.sessions.create` | Writer | Spawn a new PTY session |
 | `terminal.sessions.destroy` | Admin | Destroy a session and all its panes |
 | `terminal.panes.list` | Observer | List all panes with dimensions, session membership, title, plus optional `cwd` (from OSC 7 / spawn), `last_exit_code` (from OSC 633 D), and `agent_name` (from `AgentRegistry`). Optional fields are omitted when unknown to preserve wire compatibility. |
-| `terminal.panes.create` | Writer | Create a pane (split from existing or add to session). Optional `startup_command` is injected after the first OSC 133/633 prompt-start mark; if no shell integration arrives, the daemon falls back to a 300ms delay before writing. |
+| `terminal.panes.create` | Writer | Create a pane (split from existing or add to session). Optional `startup_command` is injected after the first OSC 133/633 prompt-start mark; if no shell integration arrives, the daemon falls back to a 300ms delay before writing. Optional `worktree = "<branch>"` resolves the source pane's git repo, finds or creates a worktree for the branch, spawns the new pane there, and auto-tags the pane with `branch=`, `worktree=`, `repo=` (tn-h7tq). |
 | `terminal.panes.destroy` | Admin | Destroy a pane and its PTY |
 | `terminal.panes.get_content` | Observer | Read the visible grid snapshot with cursor position. **tn-sp3n behavior change:** trailing whitespace is now trimmed from every row by default — empty rows on a sparse pane are returned as `""` instead of `cols`-wide padding (typical 70-90% byte savings). Optional params: `trim_trailing_whitespace=false` restores the historical fixed-width grid, `compact=true` drops fully-blank rows, and `rows=N` returns only the last N visible / non-empty rows. The response now includes a stable `content_hash` (hex-encoded `DefaultHasher` over the full grid + cursor) so subscribers can short-circuit on unchanged screens. |
 | `terminal.panes.get_summary` | Observer | (tn-sp3n) Lightweight (~100 bytes) status snapshot for one pane: `pane_id`, `cursor_col`, `cursor_line`, `content_hash`, `last_command` + `last_exit_code` (from `CommandTracker`), `hotspot_count`, `agent_name` + `agent_status` (from `AgentRegistry`), `timestamp_secs`. Designed for conductor polling — answers "is this pane idle, working, or done?" without pulling any grid content. Compare `content_hash` against the previous tick to decide whether to follow up with `get_content` / `peek`. |
