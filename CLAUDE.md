@@ -120,9 +120,9 @@ Chrome modules read directly from `&renderer.chrome_palette.<role>`. There is no
 | `chrome_fg_alert` | `Color::ALERT` | Pane header close-button glyph |
 | `selection` | `Color::ACCENT_COOL` @ α=0.35 | Terminal text selection rect |
 | `cursor` | `Color::WHITE_HOT` @ α=0.85 | Cursor block / underline |
-| `hyperlink` | `Color::ACCENT_COOL` | OSC 8 + regex URL underlines (and the linked-cell glyph color) |
+| `hyperlink` | `Color::ACCENT_COOL` | OSC 8 + regex URL underlines (and the linked-cell glyph color); override independently via `chrome_hyperlink` |
 | `hotspot_filepath` | `Color::ACCENT_NEUTRAL` | Dotted underline for `FilePath` hotspots |
-| `hotspot_url` | `Color::ACCENT_COOL` | Dotted underline for `Url` hotspots (also drives `hyperlink`) |
+| `hotspot_url` | `Color::ACCENT_COOL` | Dotted underline for `Url` hotspots (also drives `hyperlink` unless `chrome_hyperlink` is set) |
 | `hotspot_error` | `Color::STATUS_ERROR` | Dotted underline for `ErrorLocation` hotspots |
 | `hotspot_gitref` | `Color::HOT` | Dotted underline for `GitRef` hotspots |
 | `hotspot_issueref` | `[0.706, 0.557, 1.0, 1.0]` (purple) | Dotted underline for `IssueRef` hotspots |
@@ -168,7 +168,7 @@ A few derivation rules to know:
 - **`chrome_focus_border` propagates** to `separator_focus` and `tab_active_underline` automatically.
 - **`chrome_header_bg` propagates** to `tab_active_bg`.
 - **`chrome_status_bar_bg` propagates** to `tab_bar_bg`. To re-skin only the tab bar, set `chrome_tab_bar_bg` (which does not propagate).
-- **`hotspot_url` propagates** to the OSC 8 `hyperlink` underline so hand-rolled and regex-detected URLs match.
+- **`hotspot_url` propagates** to the OSC 8 `hyperlink` underline so hand-rolled and regex-detected URLs match. Set `chrome_hyperlink` to override only the OSC 8 underline without affecting the click-to-open URL hotspot color.
 - **`cursor` and `selection` overrides** keep their default alpha (0.85 / 0.35) — only the RGB channels are replaced.
 
 Invalid hex strings fall back to the default for that single role; the rest of the palette is unaffected.

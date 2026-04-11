@@ -771,8 +771,19 @@ pub struct ColorsConfig {
     // ── Hotspot underline overrides (tn-g7oo) ────────────────────────
     /// Dotted underline color for `FilePath` hotspots.
     pub hotspot_filepath: Option<HexColor>,
-    /// Dotted underline color for `Url` hotspots.
+    /// Dotted underline color for `Url` hotspots (click-to-open URLs).
+    ///
+    /// Setting this field also overrides the OSC 8 hyperlink underline color
+    /// unless `chrome_hyperlink` is separately set.  Set `chrome_hyperlink`
+    /// to decouple the two.
     pub hotspot_url: Option<HexColor>,
+    /// OSC 8 hyperlink underline color, independent of `hotspot_url`.
+    ///
+    /// When unset, the hyperlink underline inherits the `hotspot_url`
+    /// override (or the palette default when neither is set).  Set this to
+    /// override OSC 8 underlines without affecting click-to-open URL hotspot
+    /// styling.
+    pub chrome_hyperlink: Option<HexColor>,
     /// Dotted underline color for `ErrorLocation` hotspots.
     pub hotspot_error: Option<HexColor>,
     /// Dotted underline color for `GitRef` hotspots.
@@ -930,6 +941,13 @@ impl ColorsConfig {
         if let Some(c) = self.hotspot_url.as_deref().and_then(Self::parse_hex) {
             p.hotspot_url = c.to_f32_array();
             // Hyperlink underline (OSC 8) defaults to the URL hotspot color.
+            // Overridden below by `chrome_hyperlink` when that field is set.
+            p.hyperlink = c.to_f32_array();
+        }
+        // Allow OSC 8 hyperlink underlines to be overridden independently of
+        // the click-to-open URL hotspot color.  Runs after the `hotspot_url`
+        // block so it always wins when both fields are present.
+        if let Some(c) = self.chrome_hyperlink.as_deref().and_then(Self::parse_hex) {
             p.hyperlink = c.to_f32_array();
         }
         if let Some(c) = self.hotspot_error.as_deref().and_then(Self::parse_hex) {
@@ -3183,6 +3201,28 @@ working_dir = "scratch/{random}"
         assert_eq!(p.hotspot_url, expected);
         // Hyperlink underline (OSC 8) tracks the URL hotspot color.
         assert_eq!(p.hyperlink, expected);
+    }
+
+    #[test]
+    fn chrome_hyperlink_override_decouples_from_hotspot_url() {
+        // hotspot_url = green, chrome_hyperlink = red — they must be
+        // independent: p.hotspot_url == green, p.hyperlink == red.
+        let colors = ColorsConfig {
+            hotspot_url: Some("#00ff00".into()),
+            chrome_hyperlink: Some("#ff0000".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        assert_eq!(
+            p.hotspot_url,
+            [0.0, 1.0, 0.0, 1.0],
+            "hotspot_url should be green"
+        );
+        assert_eq!(
+            p.hyperlink,
+            [1.0, 0.0, 0.0, 1.0],
+            "hyperlink should be red (chrome_hyperlink wins)"
+        );
     }
 
     #[test]
