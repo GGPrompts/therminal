@@ -57,7 +57,7 @@
 //!    — the click must still resolve against the *new* worktree cwd.
 //! 5. A printed `Bash(echo hi)` line must NOT become a hotspot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -76,6 +76,15 @@ use crate::state::{ClaudeSessionState, ClaudeStateUpdate};
 /// The index tracks only *live* sessions: [`ClaudeStateUpdate::Removed`]
 /// drops the entry. Subagents are included — they carry their own
 /// `working_dir`, which may differ from the parent's during a worktree hop.
+///
+/// Because [`ClaudeStateUpdate::Removed`] carries only the deleted file
+/// path (not the `session_id` we key on), some eviction paths cannot match
+/// an entry back to its key. To bound the index in the long-running daemon,
+/// callers wired into the pipeline tick should call
+/// [`ClaudeSessionCwdIndex::retain_live`] every poll cycle with the set of
+/// session ids the [`ClaudeStatePoller`](crate::state::ClaudeStatePoller)
+/// just observed; any entry whose id is missing from that set is dropped.
+/// See tn-ossc.
 ///
 /// **Why the harness, not core**: core's generic resolver would join
 /// `Update(src/foo.rs)` against the pane's OSC 7 cwd. When the agent hops
@@ -99,7 +108,7 @@ impl ClaudeSessionCwdIndex {
     /// than "clear" — some hook writers omit the field. On `Removed`, all
     /// sessions whose state file matches the removed path are dropped; for
     /// simplicity we drop by session_id when the caller has one, otherwise
-    /// the observer can let the next poll sweep cleanse stale entries.
+    /// the next [`Self::retain_live`] sweep cleanses stale entries.
     pub fn apply(&self, update: &ClaudeStateUpdate) {
         match update {
             ClaudeStateUpdate::Upserted(state) => self.upsert(state),
@@ -109,18 +118,10 @@ impl ClaudeSessionCwdIndex {
                 // we cannot evict the entry here without re-deriving the id
                 // from the filename, which would couple the index to hook
                 // path layout. The pipeline calls `forget(session_id)`
-                // explicitly when it knows the id; otherwise stale entries
-                // remain until overwritten by the next `Upserted` for the
-                // same id.
-                //
-                // Memory note: this index is bounded by the number of live
-                // Claude sessions a user runs in parallel (typically << 100),
-                // and entries are at most a `String` + `PathBuf`. Unbounded
-                // growth in pathological cases (sessions that disappear
-                // without ever being re-upserted) is acceptable for a
-                // pure-UI-hint structure; if it ever becomes a concern,
-                // a periodic sweep against `ClaudeStatePoller`'s live set
-                // can evict orphans.
+                // explicitly when it knows the id, and the per-tick
+                // [`Self::retain_live`] sweep evicts anything still left
+                // behind by comparing against the poller's live snapshot.
+                // See tn-ossc.
             }
         }
     }
@@ -140,6 +141,35 @@ impl ClaudeSessionCwdIndex {
     pub fn forget(&self, session_id: &str) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.remove(session_id);
+    }
+
+    /// Drop every entry whose `session_id` is not in `live_session_ids`.
+    ///
+    /// Called from the pipeline tick with the set of session ids the
+    /// [`ClaudeStatePoller`](crate::state::ClaudeStatePoller) just observed.
+    /// This is the long-running daemon's defence against the
+    /// [`ClaudeStateUpdate::Removed`] arm being unable to evict by id (it
+    /// only carries a file path) — anything still in the index but missing
+    /// from the live snapshot is an orphan and gets dropped here. See tn-ossc.
+    ///
+    /// Returns the number of evicted entries (purely informational; callers
+    /// may surface it as a debug log).
+    pub fn retain_live<'a, I>(&self, live_session_ids: I) -> usize
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let live: HashSet<&str> = live_session_ids.into_iter().collect();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let before = g.len();
+        g.retain(|sid, _| live.contains(sid.as_str()));
+        before - g.len()
+    }
+
+    /// Convenience wrapper around [`Self::retain_live`] that takes a poller
+    /// snapshot directly. Mirrors the shape of `ClaudeStatePoller::poll()`'s
+    /// return value so the pipeline call site is a one-liner.
+    pub fn retain_live_from_snapshot(&self, snapshot: &[ClaudeSessionState]) -> usize {
+        self.retain_live(snapshot.iter().map(|s| s.session_id.as_str()))
     }
 
     /// Look up the agent cwd for a Claude session id. Returns `None` when
@@ -408,6 +438,63 @@ mod tests {
         assert!(idx.cwd_for("sid-1").is_some());
         idx.forget("sid-1");
         assert!(idx.cwd_for("sid-1").is_none());
+    }
+
+    #[test]
+    fn cwd_index_retain_live_evicts_missing_entries() {
+        // Regression test for tn-ossc: an entry whose session id is missing
+        // from the poller's live snapshot must be dropped on the next sweep.
+        // Otherwise sessions that exit *without* a re-upsert (e.g. the
+        // `Removed` notify event arrives but the file path can't be matched
+        // back to a session_id) leak forever in a long-running daemon.
+        use crate::state::{ClaudeSessionState, ClaudeStatus};
+
+        let idx = ClaudeSessionCwdIndex::new();
+
+        // Insert three live sessions.
+        for sid in ["sid-a", "sid-b", "sid-c"] {
+            let state = ClaudeSessionState {
+                session_id: sid.into(),
+                status: ClaudeStatus::Idle,
+                working_dir: Some(format!("/w/{sid}")),
+                ..Default::default()
+            };
+            idx.apply(&ClaudeStateUpdate::Upserted(Box::new(state)));
+        }
+        assert_eq!(idx.len(), 3);
+
+        // Simulate a poll snapshot where `sid-b` has gone away — its hook
+        // file was removed but the `Removed` arm of `apply` couldn't evict
+        // by id. The sweep must drop it.
+        let snapshot = vec![
+            ClaudeSessionState {
+                session_id: "sid-a".into(),
+                status: ClaudeStatus::Idle,
+                ..Default::default()
+            },
+            ClaudeSessionState {
+                session_id: "sid-c".into(),
+                status: ClaudeStatus::Idle,
+                ..Default::default()
+            },
+        ];
+        let evicted = idx.retain_live_from_snapshot(&snapshot);
+        assert_eq!(evicted, 1, "exactly one orphan should be evicted");
+        assert_eq!(idx.len(), 2);
+        assert!(idx.cwd_for("sid-a").is_some(), "sid-a must survive");
+        assert!(idx.cwd_for("sid-b").is_none(), "sid-b must be evicted");
+        assert!(idx.cwd_for("sid-c").is_some(), "sid-c must survive");
+
+        // A second sweep with the same snapshot is a no-op.
+        let evicted = idx.retain_live_from_snapshot(&snapshot);
+        assert_eq!(evicted, 0);
+        assert_eq!(idx.len(), 2);
+
+        // An empty snapshot evicts everything (e.g. the user closed all
+        // Claude sessions).
+        let evicted = idx.retain_live_from_snapshot(&[]);
+        assert_eq!(evicted, 2);
+        assert!(idx.is_empty());
     }
 
     #[test]
