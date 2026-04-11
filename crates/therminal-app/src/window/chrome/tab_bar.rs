@@ -21,7 +21,7 @@ pub(crate) struct TabBarInfo {
 const TAB_MIN_WIDTH: f32 = 48.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
 const TAB_PADDING: f32 = 16.0;
-const TAB_ELLIPSIS: char = '…';
+pub(crate) const TAB_ELLIPSIS: char = '…';
 const TAB_BAR_BG_COLOR: [f32; 4] = STATUS_BAR_BG_COLOR;
 const TAB_ACTIVE_BG_COLOR: [f32; 4] = HEADER_BG_COLOR;
 const TAB_ACTIVE_UNDERLINE_COLOR: [f32; 4] = FOCUS_BORDER_COLOR;

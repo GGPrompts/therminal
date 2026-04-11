@@ -484,8 +484,11 @@ impl App {
 /// Precedence per workspace:
 /// 1. Inline rename in progress: show buffer + trailing cursor.
 /// 2. Custom name set via rename: show `"<id>: <name>"`.
-/// 3. Focused pane has a known cwd: show `"<id>: <basename>"`.
-/// 4. Otherwise: just `"<id>"`.
+/// 3. Focused pane has a Claude session title (tn-5fgz / tn-lxq9): show
+///    `"<id>: <title>"`, truncated to [`MAX_TAB_LABEL_CHARS`] with
+///    [`chrome::TAB_ELLIPSIS`]. The `"<id>: "` prefix is always preserved.
+/// 4. Focused pane has a known cwd: show `"<id>: <basename>"`.
+/// 5. Otherwise: just `"<id>"`.
 pub(crate) fn build_tab_labels(
     workspace_ids: &[usize],
     workspaces: Option<&WorkspaceManager>,
@@ -505,9 +508,14 @@ pub(crate) fn build_tab_labels(
             {
                 return format!("{ws_id}: {name}");
             }
-            // tn-5fgz: Use Claude session title when available.
-            if let Some(title) = claude_titles.and_then(|ct| ct.get(&ws_id)) {
-                return format!("{ws_id}: {title}");
+            // tn-5fgz / tn-lxq9: Use Claude session title when available.
+            // Truncate to MAX_TAB_LABEL_CHARS so long prompts don't blow up
+            // the tab slot; char-count (not byte-slice) to stay unicode-safe.
+            if let Some(title) = claude_titles
+                .and_then(|ct| ct.get(&ws_id))
+                .filter(|t| !t.is_empty())
+            {
+                return truncate_tab_label(ws_id, title);
             }
             if let Some(status) = workspaces.and_then(|wm| wm.focused_pane_status(ws_id))
                 && let Some(cwd) = status.cwd.as_ref()
@@ -521,6 +529,45 @@ pub(crate) fn build_tab_labels(
             format!("{ws_id}")
         })
         .collect()
+}
+
+/// Maximum char count for a rendered tab label when composed from a
+/// Claude session title. The chrome tab-bar renderer (`tab_bar.rs`)
+/// applies its own shape-and-measure fit pass for rendering, but we also
+/// cap at the logical level here so the label that feeds hit-tests and
+/// tests doesn't grow unbounded.
+pub(crate) const MAX_TAB_LABEL_CHARS: usize = 24;
+
+/// Compose `"<id>: <title>"` and truncate the title portion with the
+/// chrome ellipsis glyph so the total stays ≤ [`MAX_TAB_LABEL_CHARS`].
+///
+/// The `"<id>: "` prefix is always preserved. If the prefix alone is
+/// already longer than the budget (unreachable in practice — workspace
+/// IDs are small integers), we return the full untruncated label
+/// unchanged rather than producing something meaningless.
+fn truncate_tab_label(ws_id: usize, title: &str) -> String {
+    let prefix = format!("{ws_id}: ");
+    let prefix_chars = prefix.chars().count();
+    let full = format!("{prefix}{title}");
+    let full_chars = full.chars().count();
+
+    if full_chars <= MAX_TAB_LABEL_CHARS {
+        return full;
+    }
+
+    // Leave room for at least the prefix + one ellipsis. If the prefix
+    // alone already meets or exceeds the budget, skip truncation — this
+    // isn't this function's job to fix (see doc comment above).
+    if prefix_chars + 1 >= MAX_TAB_LABEL_CHARS {
+        return full;
+    }
+
+    let title_budget = MAX_TAB_LABEL_CHARS - prefix_chars - 1; // -1 for ellipsis
+    let truncated_title: String = title.chars().take(title_budget).collect();
+    let mut out = prefix;
+    out.push_str(&truncated_title);
+    out.push(chrome::TAB_ELLIPSIS);
+    out
 }
 
 /// State for an in-progress inline workspace tab rename.
@@ -1335,6 +1382,127 @@ mod rename_state_tests {
         s.backspace();
         assert_eq!(s.buffer, "a");
         assert_eq!(s.cursor, 1);
+    }
+
+    // ── Claude session title → tab label (tn-lxq9) ─────────────────────
+
+    #[test]
+    fn build_tab_labels_uses_claude_title_when_present() {
+        use super::build_tab_labels;
+        use std::collections::HashMap;
+        let mut titles = HashMap::new();
+        titles.insert(1usize, "fix login bug".to_string());
+        let labels = build_tab_labels(&[1, 2], None, None, Some(&titles));
+        assert_eq!(labels[0], "1: fix login bug");
+        // Workspace 2 has no title and no cwd → bare id.
+        assert_eq!(labels[1], "2");
+    }
+
+    #[test]
+    fn build_tab_labels_ignores_empty_claude_title() {
+        use super::build_tab_labels;
+        use std::collections::HashMap;
+        let mut titles = HashMap::new();
+        titles.insert(1usize, String::new());
+        let labels = build_tab_labels(&[1], None, None, Some(&titles));
+        // Empty title should fall through to the bare-id branch (no cwd,
+        // no rename, no workspace manager) rather than emit "1: ".
+        assert_eq!(labels[0], "1");
+    }
+
+    #[test]
+    fn build_tab_labels_truncates_long_claude_title_with_ellipsis() {
+        use super::{MAX_TAB_LABEL_CHARS, build_tab_labels};
+        use crate::window::chrome::TAB_ELLIPSIS;
+        use std::collections::HashMap;
+        let mut titles = HashMap::new();
+        // "1: " = 3 chars → title budget = 24 - 3 - 1 = 20 chars of title
+        // before the ellipsis.
+        let long = "this title is definitely much longer than the budget";
+        titles.insert(1usize, long.to_string());
+        let labels = build_tab_labels(&[1], None, None, Some(&titles));
+        let label = &labels[0];
+        assert_eq!(label.chars().count(), MAX_TAB_LABEL_CHARS);
+        assert!(label.starts_with("1: "));
+        assert!(
+            label.ends_with(TAB_ELLIPSIS),
+            "expected ellipsis suffix, got {label:?}",
+        );
+        // Sanity: the first 3 chars of the visible title survived.
+        assert!(label.contains("this"));
+    }
+
+    #[test]
+    fn build_tab_labels_does_not_truncate_short_title() {
+        use super::{MAX_TAB_LABEL_CHARS, build_tab_labels};
+        use std::collections::HashMap;
+        let mut titles = HashMap::new();
+        titles.insert(1usize, "short".to_string());
+        let labels = build_tab_labels(&[1], None, None, Some(&titles));
+        assert_eq!(labels[0], "1: short");
+        assert!(labels[0].chars().count() <= MAX_TAB_LABEL_CHARS);
+    }
+
+    #[test]
+    fn build_tab_labels_unicode_title_is_truncated_by_char_not_bytes() {
+        use super::{MAX_TAB_LABEL_CHARS, build_tab_labels};
+        use crate::window::chrome::TAB_ELLIPSIS;
+        use std::collections::HashMap;
+        // Each emoji is 4 UTF-8 bytes but one char. A byte-slice truncator
+        // would panic or produce a non-char-boundary; char-count-based
+        // truncation must stay safe.
+        let title = "🎉".repeat(40);
+        let mut titles = HashMap::new();
+        titles.insert(1usize, title);
+        let labels = build_tab_labels(&[1], None, None, Some(&titles));
+        let label = &labels[0];
+        assert_eq!(label.chars().count(), MAX_TAB_LABEL_CHARS);
+        assert!(label.starts_with("1: "));
+        assert!(label.ends_with(TAB_ELLIPSIS));
+    }
+
+    #[test]
+    fn build_tab_labels_exactly_at_budget_is_not_truncated() {
+        use super::{MAX_TAB_LABEL_CHARS, build_tab_labels};
+        use crate::window::chrome::TAB_ELLIPSIS;
+        use std::collections::HashMap;
+        // "1: " (3) + title → exactly MAX_TAB_LABEL_CHARS total.
+        let title: String = "x".repeat(MAX_TAB_LABEL_CHARS - 3);
+        let mut titles = HashMap::new();
+        titles.insert(1usize, title.clone());
+        let labels = build_tab_labels(&[1], None, None, Some(&titles));
+        assert_eq!(labels[0], format!("1: {title}"));
+        assert!(!labels[0].contains(TAB_ELLIPSIS));
+        assert_eq!(labels[0].chars().count(), MAX_TAB_LABEL_CHARS);
+    }
+
+    #[test]
+    fn build_tab_labels_title_takes_precedence_over_other_sources() {
+        // Title beats cwd when both would be available. We can't easily
+        // exercise the cwd branch without a WorkspaceManager, but we can
+        // confirm that when a title exists and the workspace manager is
+        // absent, the title still wins over the bare-id fallback.
+        use super::build_tab_labels;
+        use std::collections::HashMap;
+        let mut titles = HashMap::new();
+        titles.insert(3usize, "audit OSC parser".to_string());
+        let labels = build_tab_labels(&[1, 3, 5], None, None, Some(&titles));
+        assert_eq!(labels[0], "1");
+        assert_eq!(labels[1], "3: audit OSC parser");
+        assert_eq!(labels[2], "5");
+    }
+
+    #[test]
+    fn build_tab_labels_rename_beats_claude_title() {
+        // An in-progress inline rename must still win over a cached
+        // Claude title — the user is actively editing the label.
+        use super::{RenameState, build_tab_labels};
+        use std::collections::HashMap;
+        let state = RenameState::new(1, "manual".to_string());
+        let mut titles = HashMap::new();
+        titles.insert(1usize, "from claude".to_string());
+        let labels = build_tab_labels(&[1], None, Some(&state), Some(&titles));
+        assert_eq!(labels[0], "1: manual_");
     }
 }
 

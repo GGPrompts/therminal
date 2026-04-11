@@ -36,6 +36,8 @@ Current high-value CLI surfaces include:
 - `crates/therminal-daemon/CLAUDE.md` — daemon MCP tool and resource reference.
 - [Cheap Polling](cheap-polling.md) — Use `terminal.panes.get_summary`, `terminal.panes.peek`,
   and `content_hash` to poll many panes without burning conductor cache (tn-sp3n).
+- [Claude Code Session Titles](claude-code-session-titles.md) — Use `UserPromptSubmit`
+  hooks to set workspace tab labels from Claude Code session titles (tn-lxq9).
 - [Streaming Pane Output](streaming-pane-output.md) — Subscribe to live PTY output via
   `terminal://pane/{id}/output`; comparison with conductor-mcp `watch_pane`.
 - [WSL2](wsl2.md) — Running therminal under WSL2: quirks, GPU, clipboard.

@@ -26,7 +26,7 @@ pub(crate) use pane_header::{draw_pane_focus_border, draw_pane_header, draw_spli
 pub(crate) use status_bar::{
     StatusBarHit, StatusBarHitAreas, StatusBarInfo, draw_status_bar, status_bar_hit_test,
 };
-pub(crate) use tab_bar::{TabBarInfo, draw_tab_bar, tab_bar_hit_test};
+pub(crate) use tab_bar::{TAB_ELLIPSIS, TabBarInfo, draw_tab_bar, tab_bar_hit_test};
 
 #[cfg(test)]
 mod tests {
