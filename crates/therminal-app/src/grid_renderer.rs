@@ -820,6 +820,33 @@ impl GridRenderer {
         )
     }
 
+    /// Reconstruct row text from the cached `RenderCell`s for a pane.
+    ///
+    /// Used by the early-exit (undamaged) render path so the pattern engine
+    /// can re-emit widget matches without paying for a fresh cell collection
+    /// pass (tn-qyyp). Returns one `String` per cached row, with cells laid
+    /// out by column. Returns an empty `Vec` if the pane has no cached rows.
+    pub fn cached_row_texts(&self, pane_id: PaneId) -> Vec<String> {
+        let Some(rows) = self.pane_row_cache.get(&pane_id) else {
+            return Vec::new();
+        };
+        rows.iter()
+            .map(|row| match row {
+                Some(cached) => {
+                    let mut chars: Vec<char> = Vec::new();
+                    for cell in &cached.cells {
+                        if cell.col >= chars.len() {
+                            chars.resize(cell.col + 1, ' ');
+                        }
+                        chars[cell.col] = cell.c;
+                    }
+                    chars.into_iter().collect()
+                }
+                None => String::new(),
+            })
+            .collect()
+    }
+
     /// Update the viewport resolution (call on resize).
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         self.viewport.update(queue, Resolution { width, height });

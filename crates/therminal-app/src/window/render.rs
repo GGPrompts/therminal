@@ -408,6 +408,31 @@ fn render_single_pane(
         term_guard.reset_damage();
         drop(term_guard);
 
+        // Re-emit pattern-engine widget matches from the cached row text so
+        // overlay widgets persist across undamaged frames (tn-qyyp). The
+        // sink is drained every frame by `draw_widget_overlays`, so without
+        // this re-emit pass any pane that wasn't repainted this frame would
+        // lose its widgets entirely.
+        if let Some(engine) = pattern_engine {
+            let header_h_early =
+                crate::pane::effective_header_height(pane_count, show_pane_headers);
+            let pane_vp_x = vp.x() + renderer.padding_x();
+            let pane_vp_y = vp.y() + renderer.padding_y() + header_h_early;
+            let row_texts = renderer.cached_row_texts(pane.id);
+            if !row_texts.is_empty() {
+                let mut hotspots_unused: Vec<TextHotspot> = Vec::new();
+                extend_hotspots_from_patterns(
+                    engine,
+                    pane.id,
+                    &row_texts,
+                    &mut hotspots_unused,
+                    &mut renderer.pattern_widget_sink,
+                    pane_vp_x,
+                    pane_vp_y,
+                );
+            }
+        }
+
         // Draw pane header even when content is unchanged.
         let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
         if show_pane_headers {
