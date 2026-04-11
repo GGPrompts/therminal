@@ -23,7 +23,7 @@ use toml_edit::{DocumentMut, Item, Table};
 use tracing::{info, warn};
 
 use crate::font::FontConfig as CoreFontConfig;
-use crate::palette::Color;
+use crate::palette::{ChromePalette, Color};
 
 // ── Config file path ─────────────────────────────────────────────────────
 
@@ -358,6 +358,7 @@ impl TherminalConfig {
                         check_config_template_status(&contents, CONFIG_TEMPLATE_VERSION);
                     log_template_status(path, &config.template_status);
                     config.validate_paths();
+                    config.clamp_trust_settings();
                     config
                 }
                 Err(e) => {
@@ -497,6 +498,46 @@ impl TherminalConfig {
                     "delegate profile has an empty command; it will be unusable"
                 );
             }
+        }
+    }
+
+    /// Clamp security-sensitive trust settings to safe values.
+    ///
+    /// `[trust] auto_approve_tier` is a footgun: setting it to `Trusted`
+    /// silently auto-approves every MCP tool call, including destructive
+    /// `Admin`-tier ones (`sessions.destroy`, `panes.destroy`, etc.),
+    /// bypassing the GUI confirmation flow entirely. tn-t5il enforces an
+    /// invariant at config-load time:
+    ///
+    /// > `auto_approve_tier` may never exceed `Supervised`.
+    ///
+    /// If a user sets `auto_approve_tier = "Trusted"` (or any future
+    /// value above `Supervised`), this method clamps it down to
+    /// `Supervised` and emits a prominent `tracing::warn!` so the
+    /// override is loud and visible on every startup. The user's TOML
+    /// is **not** rewritten — clamp-and-warn is friendlier than
+    /// refuse-to-load and avoids destroying user intent, but the warn
+    /// hits the log loudly enough that nobody can claim ignorance.
+    ///
+    /// Users who really want "trust everything" should set the agent's
+    /// `tier = "trusted"` explicitly under `[trust.agents.<name>]`,
+    /// which is per-agent and audit-logged on every call.
+    pub fn clamp_trust_settings(&mut self) {
+        if let Some(requested) = self.trust.auto_approve_tier
+            && requested > TrustTier::Supervised
+        {
+            warn!(
+                requested = %requested,
+                clamped_to = %TrustTier::Supervised,
+                "[trust] auto_approve_tier = \"{requested}\" would silently \
+                 auto-approve destructive Admin-tier MCP tool calls \
+                 (sessions.destroy, panes.destroy, etc.) and bypass the \
+                 GUI confirmation flow. Clamping to \"Supervised\" — see \
+                 tn-t5il and the doc comment on TrustConfig::auto_approve_tier \
+                 for details. To grant full trust to a specific agent, \
+                 set [trust.agents.<name>] tier = \"trusted\" instead."
+            );
+            self.trust.auto_approve_tier = Some(TrustTier::Supervised);
         }
     }
 
@@ -868,7 +909,29 @@ pub struct TrustConfig {
     /// allowed per agent per minute. Set to `0` to disable rate limiting.
     /// Default is `5`.
     pub destructive_rate_limit: u32,
-    /// Auto-approve trust escalations up to this tier without prompting.
+    /// Auto-approve trust escalations up to this tier without prompting the
+    /// user via the GUI confirmation flow.
+    ///
+    /// Tier semantics (security-sensitive):
+    /// - `None` (default): every escalation prompts. Safe; the GUI is
+    ///   always in the loop.
+    /// - `Some(Sandboxed)`: only Observer-tier reads auto-approve. The
+    ///   incoming agent must already be at Sandboxed or above; this is
+    ///   effectively a no-op for read-only tools that wouldn't prompt
+    ///   anyway.
+    /// - `Some(Supervised)`: Observer + Writer tools auto-approve. This is
+    ///   the maximum allowed value — see the clamp note below. Useful for
+    ///   trusted local agents that you don't want to babysit, while still
+    ///   prompting for destructive Admin-tier operations
+    ///   (`sessions.destroy`, `panes.destroy`, etc.).
+    /// - `Some(Trusted)`: would silently auto-approve **all** tools
+    ///   including destructive Admin-tier ones. **This is unsafe and is
+    ///   clamped to `Supervised` at config load time** (tn-t5il) — a
+    ///   `tracing::warn!` is emitted on every startup that loads such a
+    ///   config so the override is loud and visible. To get effective
+    ///   "trust everything" behavior, set the relevant agent's `tier =
+    ///   "trusted"` explicitly under `[trust.agents.<name>]` instead;
+    ///   that path is per-agent and audit-logged.
     pub auto_approve_tier: Option<TrustTier>,
 }
 
@@ -1668,6 +1731,89 @@ allowed_tools = ["read_file", "write_file"]
         assert_eq!(config.trust.default_tier, TrustTier::Sandboxed);
         assert!(!config.trust.show_agent_indicator);
         assert_eq!(config.trust.agents["claude"].tier, TrustTier::Trusted);
+    }
+
+    /// tn-t5il: `auto_approve_tier` greater than `Supervised` is unsafe
+    /// because it would silently auto-approve destructive Admin-tier MCP
+    /// tool calls (`sessions.destroy`, `panes.destroy`, etc.) and bypass
+    /// the GUI confirmation flow. The clamp at config-load time forces
+    /// the effective value down to `Supervised`.
+    #[test]
+    fn clamp_trust_settings_clamps_trusted_to_supervised() {
+        let mut config = TherminalConfig::default();
+        config.trust.auto_approve_tier = Some(TrustTier::Trusted);
+        config.clamp_trust_settings();
+        assert_eq!(
+            config.trust.auto_approve_tier,
+            Some(TrustTier::Supervised),
+            "auto_approve_tier = Trusted must be clamped to Supervised"
+        );
+    }
+
+    /// `clamp_trust_settings` must NOT touch values that are already at or
+    /// below the safe ceiling — they're explicit user intent.
+    #[test]
+    fn clamp_trust_settings_preserves_safe_values() {
+        for safe in [
+            None,
+            Some(TrustTier::Sandboxed),
+            Some(TrustTier::Supervised),
+        ] {
+            let mut config = TherminalConfig::default();
+            config.trust.auto_approve_tier = safe;
+            config.clamp_trust_settings();
+            assert_eq!(
+                config.trust.auto_approve_tier, safe,
+                "safe value {safe:?} must be preserved"
+            );
+        }
+    }
+
+    /// End-to-end: a TOML file with `auto_approve_tier = "trusted"` must
+    /// land at `Supervised` after `load_from` runs the post-parse clamp.
+    /// This is the tn-t5il invariant the daemon's trust gate relies on.
+    #[test]
+    fn load_from_clamps_unsafe_auto_approve_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust-clamp.toml");
+        std::fs::write(
+            &path,
+            r#"
+[trust]
+auto_approve_tier = "trusted"
+"#,
+        )
+        .unwrap();
+
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(
+            loaded.trust.auto_approve_tier,
+            Some(TrustTier::Supervised),
+            "load_from must clamp `auto_approve_tier = trusted` down to Supervised"
+        );
+    }
+
+    /// Same end-to-end load path but for the safe value — `Supervised`
+    /// in the user's TOML must round-trip unchanged.
+    #[test]
+    fn load_from_preserves_supervised_auto_approve_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust-supervised.toml");
+        std::fs::write(
+            &path,
+            r#"
+[trust]
+auto_approve_tier = "supervised"
+"#,
+        )
+        .unwrap();
+
+        let loaded = TherminalConfig::load_from(&path);
+        assert_eq!(
+            loaded.trust.auto_approve_tier,
+            Some(TrustTier::Supervised),
+            "load_from must preserve `auto_approve_tier = supervised`"
+        );
     }
 
     #[test]

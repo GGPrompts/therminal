@@ -287,6 +287,8 @@ The `JsonSchema` derive is unaffected — we still advertise `"type":"integer"` 
 
 Agent tiers are set per-agent in `[trust]` config, with a `default_tier` fallback. Destructive (Admin) tools are additionally subject to a sliding-window rate limiter (configurable `max_destructive_per_minute`). All allow/deny decisions are audit-logged via `tracing`.
 
+**Security invariant — `auto_approve_tier` is clamped at config load (tn-t5il)**: `[trust] auto_approve_tier` controls how high an escalation prompt can auto-approve without showing the GUI confirmation dialog. The maximum allowed value is `Supervised`. If a user sets `auto_approve_tier = "trusted"`, `TherminalConfig::load_from` calls `clamp_trust_settings` which silently clamps the effective value down to `Supervised` and emits a prominent `tracing::warn!` on every startup. This is a defense against a footgun where a user could otherwise lock themselves into a state where any MCP client (including malicious ones) can run destructive Admin-tier tools (`sessions.destroy`, `panes.destroy`, etc.) with zero prompts. To genuinely grant full trust to a specific agent, set `[trust.agents.<name>] tier = "trusted"` instead — that path is per-agent, audit-logged, and intentional. Lives in `crates/therminal-core/src/config/mod.rs::TherminalConfig::clamp_trust_settings`.
+
 **MCP module structure** (split from monolithic `mcp.rs`):
 
 | File | Responsibility |
