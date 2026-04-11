@@ -163,6 +163,7 @@ pub fn detect_default_distro() -> Option<String> {
                 if !output.status.success() {
                     tracing::debug!(
                         status = ?output.status,
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
                         "wsl_paths: `wsl.exe -l -q` failed, no distro detected"
                     );
                     return None;
@@ -230,6 +231,7 @@ pub fn detect_wsl_home() -> Option<String> {
                 if !output.status.success() {
                     tracing::debug!(
                         status = ?output.status,
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
                         "wsl_paths: `wsl.exe -e sh -c printf $HOME` failed"
                     );
                     return None;
