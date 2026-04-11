@@ -61,11 +61,34 @@ async fn main() -> Result<()> {
     {
         use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
         use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+        // SAFETY: AllocConsole, GetConsoleWindow, and ShowWindow are pure
+        // Win32 entry points with no Rust-side aliasing or lifetime
+        // requirements. This runs single-threaded at process startup before
+        // any worker threads are spawned, so there is no concurrent caller
+        // racing on the process console. AllocConsole's only precondition
+        // is that the process not already own a console — when the GUI
+        // launches us with DETACHED_PROCESS that holds; if it doesn't (e.g.
+        // a future caller starts the daemon from an existing terminal),
+        // AllocConsole returns 0 (FALSE) and we log + skip the hide step
+        // rather than panicking. ShowWindow's HWND is null-checked before
+        // use, and SW_HIDE is a documented constant.
         unsafe {
-            AllocConsole();
-            let hwnd = GetConsoleWindow();
-            if !hwnd.is_null() {
-                ShowWindow(hwnd, SW_HIDE);
+            // AllocConsole returns BOOL (i32): non-zero on success, zero on
+            // failure (e.g. the process already has a console). Don't panic
+            // on failure — alloc-failure during console bootstrap is a soft
+            // condition; ConPTY just won't get the hidden-conhost reuse
+            // optimisation. Log a warning and continue.
+            if AllocConsole() == 0 {
+                let err = std::io::Error::last_os_error();
+                tracing::warn!(
+                    error = %err,
+                    "AllocConsole failed; ConPTY conhost windows may flash for each pane"
+                );
+            } else {
+                let hwnd = GetConsoleWindow();
+                if !hwnd.is_null() {
+                    ShowWindow(hwnd, SW_HIDE);
+                }
             }
         }
     }

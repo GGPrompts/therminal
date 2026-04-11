@@ -70,6 +70,19 @@ fn get_default_shell() -> String {
             return shell;
         }
         // Fallback: passwd database.
+        // SAFETY: `getuid` is a pure read of the calling process's real
+        // user id and has no preconditions. `getpwuid` returns either a
+        // pointer to a static `passwd` struct owned by libc or NULL on
+        // error / "not found"; we null-check `ent` before any deref.
+        // Reading `(*ent).pw_shell` is sound while we still hold the
+        // pointer — we don't call any other passwd-database function on
+        // this thread (which would be the only way to invalidate the
+        // static buffer) before extracting the C string. `CStr::from_ptr`
+        // requires the pointer to point to a NUL-terminated C string;
+        // POSIX guarantees `pw_shell` is one. The lifetime of the
+        // resulting `&CStr` is bounded by the surrounding `unsafe` block,
+        // and `to_str().to_owned()` copies it before we return so the
+        // caller never sees the libc-owned memory.
         unsafe {
             let ent = libc::getpwuid(libc::getuid());
             if !ent.is_null() {
