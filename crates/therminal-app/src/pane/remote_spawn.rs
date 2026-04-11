@@ -934,7 +934,7 @@ fn apply_remote_resize(term: &Arc<FairMutex<Term<PaneListener>>>, cols: usize, r
 /// For local PTY panes (`PaneBackendKind::Terminal`) this helper is
 /// not used — those panes are the authoritative Term and their
 /// scrollback growth on resize is spec-compliant xterm behavior.
-fn resize_remote_term_without_scrollback_pollution(
+pub(crate) fn resize_remote_term_without_scrollback_pollution(
     guard: &mut Term<PaneListener>,
     cols: usize,
     rows: usize,
@@ -1183,10 +1183,18 @@ mod tests {
         let final_history = term.lock().grid().history_size();
 
         // Invariant: repaints that don't produce genuinely new content
-        // must not grow scrollback. Tolerance is generous — a handful
-        // of rows per resize covers reflow artifacts and cursor-at-end
-        // rounding.
-        let max_allowed = baseline_history + RESIZE_COUNT * 4;
+        // must not grow scrollback. With the tn-ebdu fix the viewport
+        // is blanked before each `Term::resize`, so `shrink_lines`
+        // scrolls empty rows into history and the TUI's subsequent
+        // `ESC[2J` scrolls zero non-empty rows. Net growth should be
+        // 0; we permit 1 row of slack per resize to absorb
+        // cursor-at-end rounding in alacritty's reflow path, which
+        // can prepend a single extra history row when the cursor
+        // lands on the final column before a shrink. Any bound
+        // beyond that would let a partial regression (e.g. only
+        // suppressing the ESC[2J path but not `shrink_lines`) slip
+        // through undetected.
+        let max_allowed = baseline_history + RESIZE_COUNT;
         assert!(
             final_history <= max_allowed,
             "tn-ebdu regression: {RESIZE_COUNT} resize+repaint cycles grew \

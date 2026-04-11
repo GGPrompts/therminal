@@ -141,7 +141,11 @@ impl Pane {
         // stored `""` here — silently defeating every downstream Claude
         // observability consumer on Windows + WSL panes.
         let resolved_shell = therminal_terminal::pty::resolve_shell(spawn_options);
-        tracing::info!(
+        // Debug-level: the process-detector-task emits an info-level
+        // once-per-pane line when the WSL probe actually activates, which
+        // is the signal operators care about in production. This line is
+        // only useful when actively debugging the shell-resolution path.
+        tracing::debug!(
             pane_id = id,
             shell = %resolved_shell,
             requested_shell = %spawn_options.shell,

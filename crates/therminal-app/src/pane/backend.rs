@@ -194,23 +194,22 @@ impl PaneBackend for PaneBackendKind {
                     // is. Letting `Term::resize` run its normal
                     // shrink_lines + post-repaint clear_viewport path
                     // on a streaming-TUI pane duplicates the pre-resize
-                    // viewport into scrollback on every resize (and the
-                    // bug scales linearly with resize count). Blank the
-                    // visible viewport first so the scroll-to-history
-                    // pipeline has nothing to scroll. Legitimate
-                    // scrollback above the viewport is untouched.
-                    // See `resize_remote_term_without_scrollback_pollution`
-                    // in remote_spawn.rs for the full rationale.
-                    use alacritty_terminal::term::TermMode;
+                    // viewport into scrollback on every resize. The
+                    // shared helper in `remote_spawn.rs` blanks the
+                    // visible viewport first (primary screen only) so
+                    // the scroll-to-history pipeline has nothing to
+                    // scroll, then invokes `Term::resize`. Both the
+                    // `apply_remote_resize` path and this main-thread
+                    // `resize_all_panes` path must go through the same
+                    // helper so the regression test coverage in
+                    // `resize_does_not_duplicate_streaming_tui_into_scrollback`
+                    // protects both call sites.
                     let mut term_guard = term.lock();
-                    if !term_guard.mode().contains(TermMode::ALT_SCREEN) {
-                        term_guard.grid_mut().reset_region(..);
-                    }
-                    let size = PaneTermSize {
-                        columns: cols,
-                        screen_lines: rows,
-                    };
-                    term_guard.resize(size);
+                    crate::pane::remote_spawn::resize_remote_term_without_scrollback_pollution(
+                        &mut term_guard,
+                        cols,
+                        rows,
+                    );
                 }
                 let client = Arc::clone(daemon_client);
                 let pid = *pane_id;

@@ -871,7 +871,7 @@ impl App {
             let bar_width = ((sw * 0.4).round() as u32).clamp(100, 800);
 
             // Compute position based on config.
-            let status_bar_h = if !self.focus_mode { 24.0 } else { 0.0 };
+            let status_bar_h = crate::pane::effective_status_bar_height(!self.focus_mode);
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
                 workspace_count,
                 self.config.general.use_csd,
