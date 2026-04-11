@@ -253,7 +253,59 @@ fn is_plausible_file_path_match(joined: &str, start: usize, end: usize) -> bool 
     if !right_ok {
         return false;
     }
+    if is_bare_root_slash_word(&joined[start..end]) {
+        return false;
+    }
     true
+}
+
+/// Reject `/`-rooted single-segment matches with no extension and no
+/// `:line[:col]` suffix.
+///
+/// This filters out slash commands typed in agent harnesses (`/commit`,
+/// `/help`, `/gg-execute`, …) which are syntactically indistinguishable
+/// from bare top-level Unix paths (`/tmp`, `/etc`, `/usr`). The trade-off:
+/// we lose click-to-open on bare top-level path references in shell
+/// output, but we kill a high-frequency false positive that fires on
+/// every Claude Code / Codex / Copilot CLI session.
+///
+/// Multi-segment paths (`/tmp/foo`, `/etc/hosts`), tilde paths
+/// (`~/notes`), explicit-relative paths (`./run`, `../bar`), paths with
+/// known extensions (`/help.md`), and paths with a `:line[:col]` suffix
+/// (`/tmp:42`) are all left alone — none of them collide with the slash
+/// command grammar.
+///
+/// The check operates on the candidate slice produced by `FILE_PATH_RE`
+/// (which already includes any optional `:line[:col]` suffix as part of
+/// the match), so we look at the literal match text rather than peeking
+/// past `end`. See tn-6svc.
+fn is_bare_root_slash_word(candidate: &str) -> bool {
+    let bytes = candidate.as_bytes();
+    // Must start with `/`. Anchors `./`, `../`, `~/`, `~user/` are
+    // syntactically distinct from slash commands and stay allowed.
+    if bytes.first() != Some(&b'/') {
+        return false;
+    }
+    let rest = &candidate[1..];
+    // A second `/` anywhere means multi-segment — definitely a path.
+    if rest.contains('/') {
+        return false;
+    }
+    // Any `.` means there's an extension or dotfile fragment.
+    if rest.contains('.') {
+        return false;
+    }
+    // A `:` means a `:line[:col]` suffix is present (the regex captured
+    // it). Slash commands never carry that suffix.
+    if rest.contains(':') {
+        return false;
+    }
+    // The remaining shape is `/<word>` where `<word>` is a single
+    // segment of `[A-Za-z0-9_-]+`. That's the slash-command shape we
+    // want to suppress. Empty `<word>` (a bare `/`) can't be matched
+    // by the regex anyway, so this branch is reached only with at
+    // least one trailing char.
+    !rest.is_empty()
 }
 
 /// Characters allowed immediately before a file-path match.
@@ -1165,6 +1217,62 @@ mod tests {
             .collect();
         assert_eq!(fp.len(), 1);
         assert_eq!(fp[0].text, "Cargo.toml");
+    }
+
+    #[test]
+    fn slash_commands_are_not_file_path_hotspots() {
+        // tn-6svc: bare `/word` and `/word-word` strings (slash commands
+        // typed in agent harnesses like Claude Code / Codex / Copilot
+        // CLI) must NOT be detected as FilePath hotspots. Without the
+        // `is_bare_root_slash_word` filter, these match Branch A of
+        // `FILE_PATH_RE` (anchored, no extension) because the leading
+        // `/` satisfies the anchor and `is_left_boundary` accepts
+        // start-of-string.
+        for line in &[
+            "/commit",
+            "/help",
+            "/clear",
+            "/gg-execute",
+            "/gg-delegate",
+            "  /commit",
+            "Type /commit to run",
+            "Run /gg-execute now",
+            "> /commit",
+            "see /tmp", // bare top-level paths fall in the same trap;
+            "see /etc", // we accept the loss to kill the slash-command
+            "see /usr", // false positive.
+        ] {
+            let hs = detect(&[line]);
+            let fp: Vec<_> = hs
+                .iter()
+                .filter(|h| h.kind == HotspotKind::FilePath)
+                .collect();
+            assert!(
+                fp.is_empty(),
+                "expected no file-path match in {line:?}, got {:?}",
+                fp.iter().map(|h| &h.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn slash_commands_filter_does_not_break_real_paths() {
+        // The `is_bare_root_slash_word` filter must only suppress the
+        // single-segment, no-extension, no-line-col shape. Multi-segment
+        // paths, paths with extensions, tilde anchors, and explicit
+        // relative anchors must all still match.
+        assert_file_path_match("see /etc/hosts", "/etc/hosts");
+        assert_file_path_match("look in /tmp/foo", "/tmp/foo");
+        assert_file_path_match("read /usr/local/bin/cargo", "/usr/local/bin/cargo");
+        assert_file_path_match("edit /home/marci/notes.md", "/home/marci/notes.md");
+        assert_file_path_match("dump ~/notes", "~/notes");
+        assert_file_path_match("run ./script", "./script");
+        assert_file_path_match("see ../parent", "../parent");
+        // `:line[:col]` suffixes disambiguate enough that even a
+        // single-segment root path is allowed through.
+        assert_file_path_match("see /tmp:42", "/tmp:42");
+        // Known extensions also rescue single-segment root paths.
+        assert_file_path_match("see /help.md", "/help.md");
     }
 
     #[test]
