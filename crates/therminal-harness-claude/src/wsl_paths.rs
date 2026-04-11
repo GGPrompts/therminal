@@ -172,6 +172,18 @@ pub fn detect_default_distro() -> Option<String> {
                 let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
                 if first.is_empty() {
                     None
+                } else if !is_safe_distro_name(first) {
+                    // Defense-in-depth: reject anything outside the
+                    // installer-enforced distro name charset before
+                    // splicing it into a UNC path string. A tampered
+                    // `wsl.exe` or malformed output could otherwise
+                    // return something like `..\..\Windows\System32`
+                    // which would escape the UNC root.
+                    tracing::warn!(
+                        distro = %first,
+                        "wsl_paths: rejecting unsafe distro name from `wsl.exe -l -q`"
+                    );
+                    None
                 } else {
                     tracing::info!(distro = %first, "wsl_paths: detected default WSL distro");
                     Some(first.to_string())
@@ -183,6 +195,21 @@ pub fn detect_default_distro() -> Option<String> {
     {
         None
     }
+}
+
+/// Return `true` when `name` only contains characters allowed in a
+/// WSL distribution name. Real-world WSL distro names are constrained
+/// by the installer to alphanumeric + hyphen + dot + underscore; this
+/// allowlist is a defense-in-depth check against a tampered `wsl.exe`
+/// returning a path-traversal payload that would escape the
+/// `\\wsl.localhost\<distro>\...` UNC root when spliced into
+/// [`linux_to_unc`].
+#[cfg(any(windows, test))]
+fn is_safe_distro_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
 }
 
 /// Return the Linux `$HOME` of the default WSL distribution, or `None`
@@ -384,6 +411,26 @@ mod tests {
     fn is_wsl_unc_path_rejects_other_unc() {
         assert!(!is_wsl_unc_path(Path::new(r"\\server\share\file")));
         assert!(!is_wsl_unc_path(Path::new("/tmp/foo")));
+    }
+
+    #[test]
+    fn is_safe_distro_name_accepts_real_world_names() {
+        assert!(is_safe_distro_name("Ubuntu"));
+        assert!(is_safe_distro_name("Ubuntu-24.04"));
+        assert!(is_safe_distro_name("Debian_12"));
+        assert!(is_safe_distro_name("kali-linux"));
+        assert!(is_safe_distro_name("openSUSE-Tumbleweed"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_rejects_path_traversal_and_garbage() {
+        assert!(!is_safe_distro_name(r"..\Windows"));
+        assert!(!is_safe_distro_name("../etc"));
+        assert!(!is_safe_distro_name("foo;bar"));
+        assert!(!is_safe_distro_name("foo bar"));
+        assert!(!is_safe_distro_name(""));
+        assert!(!is_safe_distro_name(r"foo\bar"));
+        assert!(!is_safe_distro_name("foo/bar"));
     }
 
     // On non-Windows builds the detection helpers must short-circuit so
