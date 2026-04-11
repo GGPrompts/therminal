@@ -8,6 +8,7 @@ use therminal_core::config::ConfigTemplateStatus;
 use therminal_core::palette::Color as PaletteColor;
 
 use super::colors::STATUS_BAR_BG_COLOR;
+use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
 /// Data collected for the status bar from the focused pane.
@@ -75,15 +76,69 @@ pub(crate) fn draw_status_bar(
     surface_width: u32,
     surface_height: u32,
 ) -> StatusBarHitAreas {
-    let mut hit_areas = StatusBarHitAreas::default();
-    use crate::color_mapping::pixel_rect_to_ndc;
-
     let bar_h = crate::pane::STATUS_BAR_HEIGHT;
     let sw = surface_width as f32;
     let sh = surface_height as f32;
     let bar_y = sh - bar_h;
 
-    // ── Background rect ──
+    // ── 1. Background rect ──
+    draw_status_bar_bg(renderer, device, encoder, view, sw, sh, bar_y, bar_h);
+
+    // ── 2. Compose strings + colors ──
+    let strings = StatusBarStrings::compute(info);
+    let colors = StatusBarColors::compute(info.last_exit_code);
+    let needs_prefix_measure =
+        info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
+
+    let font_size = renderer.chrome_font_size((bar_h * 0.55).max(10.0));
+    let metrics = Metrics::new(font_size, bar_h);
+
+    // ── 3. Phase 1: shape every text slot ──
+    shape_status_bar_text(
+        &strings,
+        &colors,
+        info.last_exit_code,
+        needs_prefix_measure,
+        metrics,
+        sw,
+        bar_h,
+        renderer,
+    );
+
+    // ── 4. Phase 2: position TextAreas, prepare + draw ──
+    position_and_draw_status_bar_text(
+        info,
+        &strings,
+        &colors,
+        font_size,
+        sw,
+        bar_y,
+        bar_h,
+        needs_prefix_measure,
+        renderer,
+        device,
+        queue,
+        encoder,
+        view,
+        surface_width,
+        surface_height,
+    )
+}
+
+/// Draw the status bar background fill in a single render pass.
+#[allow(clippy::too_many_arguments)]
+fn draw_status_bar_bg(
+    renderer: &GridRenderer,
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    sw: f32,
+    sh: f32,
+    bar_y: f32,
+    bar_h: f32,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+
     let bg_verts = pixel_rect_to_ndc(0.0, bar_y, sw, bar_h, sw, sh, STATUS_BAR_BG_COLOR);
 
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -92,201 +147,223 @@ pub(crate) fn draw_status_bar(
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("statusbar_bg_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+    with_chrome_render_pass(encoder, view, "statusbar_bg_pass", |pass| {
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.draw(0..6, 0..1);
+    });
+}
+
+/// Pre-formatted strings shown in the status bar. Empty strings denote
+/// sections that should be skipped entirely.
+struct StatusBarStrings {
+    workspace_text: String,
+    left_text: String,
+    center_text: String,
+    right_text: String,
+    template_hint: String,
+    delegate_text: String,
+}
+
+impl StatusBarStrings {
+    fn compute(info: &StatusBarInfo) -> Self {
+        let workspace_text = if info.workspace_ids.len() > 1 {
+            let mut s = String::from(" ");
+            for &ws_id in &info.workspace_ids {
+                if ws_id == info.active_workspace {
+                    s.push_str(&format!("[{ws_id}] "));
+                } else {
+                    s.push_str(&format!(" {ws_id}  "));
+                }
+            }
+            s
+        } else {
+            String::new()
+        };
+
+        let left_text = {
+            let mut parts = String::new();
+            if info.is_zoomed {
+                parts.push_str(" [ZOOM]");
+            }
+            // tn-5fgz: prefer enriched Claude state text over generic agent name.
+            if info.show_agent_indicator {
+                if let Some(ref text) = info.claude_status_text {
+                    parts.push_str(&format!(" [{text}]"));
+                } else if let Some(name) = &info.agent_name {
+                    parts.push_str(&format!(" [agent: {name}]"));
+                }
+            }
+            parts
+        };
+
+        let center_text = compose_center_text(
+            info.claude_title.as_deref(),
+            info.cwd.as_deref(),
+            info.git_branch.as_deref(),
+            info.focused_pane_id,
+        );
+
+        let (cols, rows) = info.dimensions;
+        let right_text = match info.last_exit_code {
+            Some(code) => format!("{cols}x{rows}  [{code}] "),
+            None => format!("{cols}x{rows} "),
+        };
+
+        let template_hint = compose_template_hint(&info.template_status);
+        let delegate_text = info.delegate_summary.clone().unwrap_or_default();
+
+        Self {
+            workspace_text,
+            left_text,
+            center_text,
+            right_text,
+            template_hint,
+            delegate_text,
+        }
     }
+}
 
-    // ── Status bar text ──
-    let font_size = renderer.chrome_font_size((bar_h * 0.55).max(10.0));
-    let line_height = bar_h;
-    let metrics = Metrics::new(font_size, line_height);
+/// Glyph colors used by the status bar. Computed once from the exit code
+/// and reused for shaping + TextArea defaults.
+struct StatusBarColors {
+    workspace_active: GlyphColor,
+    agent: GlyphColor,
+    muted: GlyphColor,
+    center: GlyphColor,
+    exit: GlyphColor,
+}
 
-    let bounds = TextBounds {
-        left: 0,
-        top: 0,
-        right: surface_width as i32,
-        bottom: surface_height as i32,
-    };
-
-    let mut text_areas: Vec<TextArea<'_>> = Vec::new();
-
-    let workspace_text = if info.workspace_ids.len() > 1 {
-        let mut s = String::from(" ");
-        for &ws_id in &info.workspace_ids {
-            if ws_id == info.active_workspace {
-                s.push_str(&format!("[{ws_id}] "));
-            } else {
-                s.push_str(&format!(" {ws_id}  "));
-            }
-        }
-        s
-    } else {
-        String::new()
-    };
-
-    let workspace_active_color = GlyphColor::rgba(
-        PaletteColor::FOCUS.r,
-        PaletteColor::FOCUS.g,
-        PaletteColor::FOCUS.b,
-        255,
-    );
-
-    let left_text = {
-        let mut parts = String::new();
-        if info.is_zoomed {
-            parts.push_str(" [ZOOM]");
-        }
-        // tn-5fgz: prefer enriched Claude state text over generic agent name.
-        if info.show_agent_indicator {
-            if let Some(ref text) = info.claude_status_text {
-                parts.push_str(&format!(" [{text}]"));
-            } else if let Some(name) = &info.agent_name {
-                parts.push_str(&format!(" [agent: {name}]"));
-            }
-        }
-        if parts.is_empty() { None } else { Some(parts) }
-    };
-    let left_text_ref = left_text.as_deref().unwrap_or("");
-
-    let agent_color = GlyphColor::rgba(
-        PaletteColor::FOCUS.r,
-        PaletteColor::FOCUS.g,
-        PaletteColor::FOCUS.b,
-        230,
-    );
-    let muted_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
-        230,
-    );
-
-    let center_text = compose_center_text(
-        info.claude_title.as_deref(),
-        info.cwd.as_deref(),
-        info.git_branch.as_deref(),
-        info.focused_pane_id,
-    );
-    let center_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
-        200,
-    );
-
-    let (cols, rows) = info.dimensions;
-    let right_text = match info.last_exit_code {
-        Some(code) => format!("{cols}x{rows}  [{code}] "),
-        None => format!("{cols}x{rows} "),
-    };
-
-    // tn-3ge3: optional template-version hint, rendered between the center
-    // and right sections in muted color. Empty string means "no hint".
-    let template_hint = compose_template_hint(&info.template_status);
-
-    let exit_color = match info.last_exit_code {
-        Some(0) => GlyphColor::rgba(
-            PaletteColor::STATUS_OK.r,
-            PaletteColor::STATUS_OK.g,
-            PaletteColor::STATUS_OK.b,
+impl StatusBarColors {
+    fn compute(last_exit_code: Option<i32>) -> Self {
+        let workspace_active = GlyphColor::rgba(
+            PaletteColor::FOCUS.r,
+            PaletteColor::FOCUS.g,
+            PaletteColor::FOCUS.b,
+            255,
+        );
+        let agent = GlyphColor::rgba(
+            PaletteColor::FOCUS.r,
+            PaletteColor::FOCUS.g,
+            PaletteColor::FOCUS.b,
             230,
-        ),
-        Some(_) => GlyphColor::rgba(
-            PaletteColor::STATUS_ERROR.r,
-            PaletteColor::STATUS_ERROR.g,
-            PaletteColor::STATUS_ERROR.b,
+        );
+        let muted = GlyphColor::rgba(
+            PaletteColor::INK_MUTED.r,
+            PaletteColor::INK_MUTED.g,
+            PaletteColor::INK_MUTED.b,
             230,
-        ),
-        None => muted_color,
-    };
+        );
+        let center = GlyphColor::rgba(
+            PaletteColor::INK.r,
+            PaletteColor::INK.g,
+            PaletteColor::INK.b,
+            200,
+        );
+        let exit = match last_exit_code {
+            Some(0) => GlyphColor::rgba(
+                PaletteColor::STATUS_OK.r,
+                PaletteColor::STATUS_OK.g,
+                PaletteColor::STATUS_OK.b,
+                230,
+            ),
+            Some(_) => GlyphColor::rgba(
+                PaletteColor::STATUS_ERROR.r,
+                PaletteColor::STATUS_ERROR.g,
+                PaletteColor::STATUS_ERROR.b,
+                230,
+            ),
+            None => muted,
+        };
+        Self {
+            workspace_active,
+            agent,
+            muted,
+            center,
+            exit,
+        }
+    }
+}
 
-    let ws_key = format!("{workspace_text}|{:.0}", sw * 0.25);
-    let left_key = format!("{left_text_ref}|{:.0}", sw * 0.35);
-    let center_key = format!("{center_text}|{sw:.0}");
-    let right_key = format!("{right_text}|{:.0}|{:?}", sw * 0.35, info.last_exit_code);
-
+/// Phase 1: shape every status bar text slot. Mutates the chrome text
+/// cache so the immutable Phase 2 can pull buffers by slot name.
+#[allow(clippy::too_many_arguments)]
+fn shape_status_bar_text(
+    strings: &StatusBarStrings,
+    colors: &StatusBarColors,
+    last_exit_code: Option<i32>,
+    needs_prefix_measure: bool,
+    metrics: Metrics,
+    sw: f32,
+    bar_h: f32,
+    renderer: &mut GridRenderer,
+) {
     let family = renderer.font_config.family.clone();
+    let attrs =
+        |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Name(&family)).color(c) };
+
+    let ws_key = format!("{}|{:.0}", strings.workspace_text, sw * 0.25);
     ensure_shaped(
         "sb_workspace",
         &ws_key,
         metrics,
         sw * 0.25,
         bar_h,
-        &workspace_text,
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(workspace_active_color),
+        &strings.workspace_text,
+        attrs(colors.workspace_active),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
+
+    let left_key = format!("{}|{:.0}", strings.left_text, sw * 0.35);
     ensure_shaped(
         "sb_left",
         &left_key,
         metrics,
         sw * 0.35,
         bar_h,
-        left_text_ref,
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(agent_color),
+        &strings.left_text,
+        attrs(colors.agent),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
+
+    let center_key = format!("{}|{sw:.0}", strings.center_text);
     ensure_shaped(
         "sb_center",
         &center_key,
         metrics,
         sw,
         bar_h,
-        &center_text,
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(center_color),
+        &strings.center_text,
+        attrs(colors.center),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
+
+    let right_key = format!("{}|{:.0}|{last_exit_code:?}", strings.right_text, sw * 0.35);
     ensure_shaped(
         "sb_right",
         &right_key,
         metrics,
         sw * 0.35,
         bar_h,
-        &right_text,
-        Attrs::new().family(Family::Name(&family)).color(exit_color),
+        &strings.right_text,
+        attrs(colors.exit),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
 
-    if !template_hint.is_empty() {
-        let hint_key = format!("{template_hint}|{:.0}", sw * 0.5);
+    if !strings.template_hint.is_empty() {
+        let hint_key = format!("{}|{:.0}", strings.template_hint, sw * 0.5);
         ensure_shaped(
             "sb_template_hint",
             &hint_key,
             metrics,
             sw * 0.5,
             bar_h,
-            &template_hint,
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(muted_color),
+            &strings.template_hint,
+            attrs(colors.muted),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
@@ -294,26 +371,23 @@ pub(crate) fn draw_status_bar(
 
     // tn-ztv3.4: Delegate sibling summary. Empty string means "no
     // delegates active" and the section is skipped entirely.
-    let delegate_text = info.delegate_summary.clone().unwrap_or_default();
-    if !delegate_text.is_empty() {
-        let delegate_key = format!("{delegate_text}|{:.0}", sw * 0.5);
+    if !strings.delegate_text.is_empty() {
+        let delegate_key = format!("{}|{:.0}", strings.delegate_text, sw * 0.5);
         ensure_shaped(
             "sb_delegate_summary",
             &delegate_key,
             metrics,
             sw * 0.5,
             bar_h,
-            &delegate_text,
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(workspace_active_color),
+            &strings.delegate_text,
+            attrs(colors.workspace_active),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
     }
 
-    let needs_prefix_measure =
-        info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
+    // Pre-shape a " [ZOOM]" prefix so Phase 2 can subtract its width when
+    // computing the agent-indicator hit area while zoomed.
     if needs_prefix_measure {
         let prefix = " [ZOOM]";
         let prefix_key = format!("{prefix}|{:.0}", sw * 0.35);
@@ -324,35 +398,40 @@ pub(crate) fn draw_status_bar(
             sw * 0.35,
             bar_h,
             prefix,
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(agent_color),
+            attrs(colors.agent),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
     }
+}
 
-    // Phase 2: immutable borrow. Missing slots indicate a shaping failure;
-    // skip the affected element instead of panicking.
-    let workspace_buf = cached_buf(&renderer.overlay_cache, "sb_workspace");
-    let workspace_text_width = workspace_buf
-        .and_then(|b| b.layout_runs().next())
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
-
-    let center_buf = cached_buf(&renderer.overlay_cache, "sb_center");
-    let center_text_width = center_buf
-        .and_then(|b| b.layout_runs().next())
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
-    let center_offset = ((sw - center_text_width) / 2.0).max(0.0);
-
-    let right_buf = cached_buf(&renderer.overlay_cache, "sb_right");
-    let right_text_width = right_buf
-        .and_then(|b| b.layout_runs().next())
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
-    let right_x = (sw - right_text_width).max(0.0);
+/// Phase 2: read shaped buffers, build TextArea positions, register hit
+/// areas, then prepare + render. Returns the hit areas so callers can
+/// mouse-test the agent indicator.
+#[allow(clippy::too_many_arguments)]
+fn position_and_draw_status_bar_text(
+    info: &StatusBarInfo,
+    strings: &StatusBarStrings,
+    colors: &StatusBarColors,
+    font_size: f32,
+    sw: f32,
+    bar_y: f32,
+    bar_h: f32,
+    needs_prefix_measure: bool,
+    renderer: &mut GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) -> StatusBarHitAreas {
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_width as i32,
+        bottom: surface_height as i32,
+    };
 
     renderer.viewport.update(
         queue,
@@ -362,7 +441,76 @@ pub(crate) fn draw_status_bar(
         },
     );
 
-    if !workspace_text.is_empty()
+    let (text_areas, hit_areas) = build_status_bar_text_areas(
+        info,
+        strings,
+        colors,
+        font_size,
+        sw,
+        bar_y,
+        bar_h,
+        needs_prefix_measure,
+        bounds,
+        &renderer.overlay_cache,
+    );
+
+    if let Err(e) = renderer.overlay_text_renderer.prepare(
+        device,
+        queue,
+        &mut renderer.font_system,
+        &mut renderer.overlay_atlas,
+        &renderer.viewport,
+        text_areas,
+        &mut renderer.swash_cache,
+    ) {
+        tracing::warn!("status bar text prepare failed: {}", e);
+    }
+
+    with_chrome_render_pass(encoder, view, "statusbar_text_pass", |pass| {
+        if let Err(e) =
+            renderer
+                .overlay_text_renderer
+                .render(&renderer.overlay_atlas, &renderer.viewport, pass)
+        {
+            tracing::warn!("status bar text render failed: {}", e);
+        }
+    });
+
+    hit_areas
+}
+
+/// Build the TextArea list and hit areas for the status bar. Pulled out
+/// of `position_and_draw_status_bar_text` so the borrow on
+/// `renderer.overlay_cache` (immutable) is scoped tightly and the
+/// subsequent prepare/render calls can take `&mut renderer`.
+#[allow(clippy::too_many_arguments)]
+fn build_status_bar_text_areas<'cache>(
+    info: &StatusBarInfo,
+    strings: &StatusBarStrings,
+    colors: &StatusBarColors,
+    font_size: f32,
+    sw: f32,
+    bar_y: f32,
+    bar_h: f32,
+    needs_prefix_measure: bool,
+    bounds: TextBounds,
+    cache: &'cache super::text_cache::ChromeTextCache,
+) -> (Vec<TextArea<'cache>>, StatusBarHitAreas) {
+    let mut text_areas: Vec<TextArea<'cache>> = Vec::new();
+    let mut hit_areas = StatusBarHitAreas::default();
+
+    let workspace_buf = cached_buf(cache, "sb_workspace");
+    let workspace_text_width = workspace_buf.map(buffer_run_width).unwrap_or(0.0);
+
+    let center_buf = cached_buf(cache, "sb_center");
+    let center_text_width = center_buf.map(buffer_run_width).unwrap_or(0.0);
+    let center_offset = ((sw - center_text_width) / 2.0).max(0.0);
+
+    let right_buf = cached_buf(cache, "sb_right");
+    let right_text_width = right_buf.map(buffer_run_width).unwrap_or(0.0);
+    let right_x = (sw - right_text_width).max(0.0);
+
+    if !strings.workspace_text.is_empty()
         && let Some(buf) = workspace_buf
     {
         text_areas.push(TextArea {
@@ -371,24 +519,18 @@ pub(crate) fn draw_status_bar(
             top: bar_y,
             scale: 1.0,
             bounds,
-            default_color: workspace_active_color,
+            default_color: colors.workspace_active,
             custom_glyphs: &[],
         });
     }
 
-    if !left_text_ref.is_empty()
-        && let Some(left_buf) = cached_buf(&renderer.overlay_cache, "sb_left")
+    if !strings.left_text.is_empty()
+        && let Some(left_buf) = cached_buf(cache, "sb_left")
     {
-        let left_total_w = left_buf
-            .layout_runs()
-            .next()
-            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-            .unwrap_or(0.0);
-
+        let left_total_w = buffer_run_width(left_buf);
         let agent_prefix_width = if needs_prefix_measure {
-            cached_buf(&renderer.overlay_cache, "sb_left_zoom_prefix")
-                .and_then(|b| b.layout_runs().next())
-                .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+            cached_buf(cache, "sb_left_zoom_prefix")
+                .map(buffer_run_width)
                 .unwrap_or(0.0)
         } else {
             0.0
@@ -406,12 +548,12 @@ pub(crate) fn draw_status_bar(
             top: bar_y,
             scale: 1.0,
             bounds,
-            default_color: agent_color,
+            default_color: colors.agent,
             custom_glyphs: &[],
         });
     }
 
-    if !center_text.is_empty()
+    if !strings.center_text.is_empty()
         && let Some(buf) = center_buf
     {
         text_areas.push(TextArea {
@@ -420,7 +562,7 @@ pub(crate) fn draw_status_bar(
             top: bar_y,
             scale: 1.0,
             bounds,
-            default_color: center_color,
+            default_color: colors.center,
             custom_glyphs: &[],
         });
     }
@@ -432,53 +574,38 @@ pub(crate) fn draw_status_bar(
             top: bar_y,
             scale: 1.0,
             bounds,
-            default_color: exit_color,
+            default_color: colors.exit,
             custom_glyphs: &[],
         });
     }
 
-    // tn-3ge3: render the template-version hint immediately to the left of
-    // the right_text. Muted color, no hit-test area, zero impact when the
-    // status is UpToDate.
-    // tn-ztv3.4: the delegate summary sits to the left of the template
-    // hint (or the right_text when no hint is active), using the focus
-    // color so it pops against the muted footer. We compute each section's
-    // right edge so neighbouring sections can stack without overlap.
+    // tn-3ge3 + tn-ztv3.4: stack the template hint and delegate summary
+    // to the left of the right_text. Each section advances `next_right`
+    // so they don't overlap.
     let gap = font_size * 0.5;
     let mut next_right = right_x;
 
-    if !template_hint.is_empty() {
-        let hint_buf = cached_buf(&renderer.overlay_cache, "sb_template_hint");
-        if let Some(buf) = hint_buf {
-            let hint_w = buf
-                .layout_runs()
-                .next()
-                .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-                .unwrap_or(0.0);
-            // Small gap between the hint and the right_text so they don't
-            // visually merge into a single token.
-            let hint_x = (next_right - hint_w - gap).max(0.0);
-            text_areas.push(TextArea {
-                buffer: buf,
-                left: hint_x,
-                top: bar_y,
-                scale: 1.0,
-                bounds,
-                default_color: muted_color,
-                custom_glyphs: &[],
-            });
-            next_right = hint_x;
-        }
+    if !strings.template_hint.is_empty()
+        && let Some(buf) = cached_buf(cache, "sb_template_hint")
+    {
+        let hint_w = buffer_run_width(buf);
+        let hint_x = (next_right - hint_w - gap).max(0.0);
+        text_areas.push(TextArea {
+            buffer: buf,
+            left: hint_x,
+            top: bar_y,
+            scale: 1.0,
+            bounds,
+            default_color: colors.muted,
+            custom_glyphs: &[],
+        });
+        next_right = hint_x;
     }
 
-    if !delegate_text.is_empty()
-        && let Some(buf) = cached_buf(&renderer.overlay_cache, "sb_delegate_summary")
+    if !strings.delegate_text.is_empty()
+        && let Some(buf) = cached_buf(cache, "sb_delegate_summary")
     {
-        let del_w = buf
-            .layout_runs()
-            .next()
-            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-            .unwrap_or(0.0);
+        let del_w = buffer_run_width(buf);
         let del_x = (next_right - del_w - gap).max(0.0);
         text_areas.push(TextArea {
             buffer: buf,
@@ -486,51 +613,20 @@ pub(crate) fn draw_status_bar(
             top: bar_y,
             scale: 1.0,
             bounds,
-            default_color: workspace_active_color,
+            default_color: colors.workspace_active,
             custom_glyphs: &[],
         });
     }
 
-    if let Err(e) = renderer.overlay_text_renderer.prepare(
-        device,
-        queue,
-        &mut renderer.font_system,
-        &mut renderer.overlay_atlas,
-        &renderer.viewport,
-        text_areas,
-        &mut renderer.swash_cache,
-    ) {
-        tracing::warn!("status bar text prepare failed: {}", e);
-    }
+    (text_areas, hit_areas)
+}
 
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("statusbar_text_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        if let Err(e) = renderer.overlay_text_renderer.render(
-            &renderer.overlay_atlas,
-            &renderer.viewport,
-            &mut pass,
-        ) {
-            tracing::warn!("status bar text render failed: {}", e);
-        }
-    }
-
-    hit_areas
+/// Sum the glyph advance widths of the first layout run in `buf`.
+fn buffer_run_width(buf: &glyphon::Buffer) -> f32 {
+    buf.layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0)
 }
 
 /// Hit-test the status bar at the given physical pixel coordinates.

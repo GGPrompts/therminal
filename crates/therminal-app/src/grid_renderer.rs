@@ -1149,13 +1149,106 @@ impl GridRenderer {
             .unwrap_or_default();
         let prev_cursor = self.pane_last_cursor_pos.get(&pane_id).copied();
 
-        // ── Collect background rects from all cached rows ───────────────
+        // ── 1. Collect background, cursor, selection rects ──────────────
         let mut bg_rects: Vec<([f32; 4], [f32; 4])> = Vec::new();
+        self.collect_cell_bg_rects(&row_cache, &mut bg_rects);
+        self.add_cursor_rects(cursor, screen_lines, &mut bg_rects);
+        self.add_selection_rects(selection, display_offset, &row_cache, &mut bg_rects);
 
+        // ── 2. Hyperlink + hotspot underlines (and map updates) ─────────
+        let map_pane_id = self.current_pane_id.unwrap_or(0);
+        self.process_hyperlinks(map_pane_id, &row_cache, &mut bg_rects);
+        self.process_hotspots(map_pane_id, &row_cache, damaged_rows, &mut bg_rects);
+
+        // ── 3. Upload rect vertices into the persistent GPU buffer ──────
+        let rect_vertex_count = self.upload_rect_buffer(&bg_rects, sw, sh, device, queue);
+
+        // ── 4. Rebuild damaged per-cell glyphon buffers ─────────────────
+        let cursor_line = cursor.point.line.0;
+        let cursor_row = if cursor_line >= 0 {
+            cursor_line as usize
+        } else {
+            usize::MAX
+        };
+        let cursor_col = cursor.point.column.0;
+        self.rebuild_cell_buffers(
+            cursor,
+            cursor_row,
+            cursor_col,
+            screen_lines,
+            damaged_rows,
+            prev_cursor,
+            &row_cache,
+            &mut cell_buffers,
+            &mut cell_shape_keys,
+        );
+
+        // ── 5. Persist per-pane bookkeeping fields ──────────────────────
+        self.pane_last_cursor_pos
+            .insert(pane_id, (cursor_row, cursor_col));
+        self.pane_last_display_offset
+            .insert(pane_id, display_offset);
+        self.pane_last_column_count.insert(pane_id, columns);
+
+        // ── 6. Update viewport, prepare text, emit render passes ────────
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: surface_width,
+                height: surface_height,
+            },
+        );
+
+        let text_areas = build_grid_text_areas(
+            &cell_buffers,
+            self.padding_x,
+            self.padding_y,
+            self.cell_width,
+            self.cell_height,
+            surface_width,
+            surface_height,
+        );
+        let has_text = !text_areas.is_empty();
+        if has_text
+            && let Err(e) = self.text_renderer.prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            )
+        {
+            tracing::warn!("glyphon prepare failed: {}", e);
+        }
+        self.flush_grid_render_passes(rect_vertex_count, has_text, encoder, target_view);
+
+        // ── 7. Atlas trim + frame timing housekeeping ───────────────────
+        self.frame_count += 1;
+        if self.frame_count.is_multiple_of(ATLAS_TRIM_INTERVAL) {
+            self.atlas.trim();
+            self.overlay_atlas.trim();
+        }
+        self.update_frame_timing(frame_start);
+
+        // ── 8. Restore per-pane caches back into the HashMaps ───────────
+        self.pane_row_cache.insert(pane_id, row_cache);
+        self.pane_cell_buffers.insert(pane_id, cell_buffers);
+        self.pane_cell_shape_keys.insert(pane_id, cell_shape_keys);
+    }
+
+    /// Collect cell-background rects from every cached row. Cells with no
+    /// `bg` (transparent / default) are skipped so the persistent rect
+    /// buffer only carries the geometry that actually paints.
+    fn collect_cell_bg_rects(
+        &self,
+        row_cache: &[Option<CachedRow>],
+        bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
+    ) {
         for row in row_cache.iter().flatten() {
             for cell in &row.cells {
-                let bg_color = cell_bg_color(cell);
-                if let Some(bg) = bg_color {
+                if let Some(bg) = cell_bg_color(cell) {
                     let x = self.padding_x + cell.col as f32 * self.cell_width;
                     let y = self.padding_y + cell.row as f32 * self.cell_height;
                     let w = if cell.flags.contains(Flags::WIDE_CHAR) {
@@ -1167,229 +1260,270 @@ impl GridRenderer {
                 }
             }
         }
+    }
 
-        // ── Cursor rect ──────────────────────────────────────────────────
-        if cursor.shape != CursorShape::Hidden {
-            let cursor_line = cursor.point.line.0;
-            if cursor_line >= 0 && (cursor_line as usize) < screen_lines {
-                let cursor_row = cursor_line as usize;
-                let col_idx = cursor.point.column.0;
-                let cx = self.padding_x + col_idx as f32 * self.cell_width;
-                let cy = self.padding_y + cursor_row as f32 * self.cell_height;
-                let cursor_color = self.resolved_cursor_color();
+    /// Append the cursor rect(s) to `bg_rects`. Block / underline / beam /
+    /// hollow-block all share the same anchor formula but emit different
+    /// geometry. Hidden cursors emit nothing.
+    fn add_cursor_rects(
+        &self,
+        cursor: &RenderableCursor,
+        screen_lines: usize,
+        bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
+    ) {
+        if cursor.shape == CursorShape::Hidden {
+            return;
+        }
+        let cursor_line = cursor.point.line.0;
+        if cursor_line < 0 || (cursor_line as usize) >= screen_lines {
+            return;
+        }
+        let cursor_row = cursor_line as usize;
+        let col_idx = cursor.point.column.0;
+        let cx = self.padding_x + col_idx as f32 * self.cell_width;
+        let cy = self.padding_y + cursor_row as f32 * self.cell_height;
+        let cursor_color = self.resolved_cursor_color();
 
-                match cursor.shape {
-                    CursorShape::Block => {
-                        bg_rects.push(([cx, cy, self.cell_width, self.cell_height], cursor_color));
-                    }
-                    CursorShape::Underline => {
-                        let h = 2.0;
-                        bg_rects.push((
-                            [cx, cy + self.cell_height - h, self.cell_width, h],
-                            cursor_color,
-                        ));
-                    }
-                    CursorShape::Beam => {
-                        bg_rects.push(([cx, cy, 2.0, self.cell_height], cursor_color));
-                    }
-                    CursorShape::HollowBlock => {
-                        let t = 1.0;
-                        bg_rects.push(([cx, cy, self.cell_width, t], cursor_color));
-                        bg_rects.push((
-                            [cx, cy + self.cell_height - t, self.cell_width, t],
-                            cursor_color,
-                        ));
-                        bg_rects.push(([cx, cy, t, self.cell_height], cursor_color));
-                        bg_rects.push((
-                            [cx + self.cell_width - t, cy, t, self.cell_height],
-                            cursor_color,
-                        ));
-                    }
-                    CursorShape::Hidden => {}
+        match cursor.shape {
+            CursorShape::Block => {
+                bg_rects.push(([cx, cy, self.cell_width, self.cell_height], cursor_color));
+            }
+            CursorShape::Underline => {
+                let h = 2.0;
+                bg_rects.push((
+                    [cx, cy + self.cell_height - h, self.cell_width, h],
+                    cursor_color,
+                ));
+            }
+            CursorShape::Beam => {
+                bg_rects.push(([cx, cy, 2.0, self.cell_height], cursor_color));
+            }
+            CursorShape::HollowBlock => {
+                let t = 1.0;
+                bg_rects.push(([cx, cy, self.cell_width, t], cursor_color));
+                bg_rects.push((
+                    [cx, cy + self.cell_height - t, self.cell_width, t],
+                    cursor_color,
+                ));
+                bg_rects.push(([cx, cy, t, self.cell_height], cursor_color));
+                bg_rects.push((
+                    [cx + self.cell_width - t, cy, t, self.cell_height],
+                    cursor_color,
+                ));
+            }
+            CursorShape::Hidden => {}
+        }
+    }
+
+    /// Append selection-highlight rects for any cell that lies inside the
+    /// active `SelectionRange`. No-op when `selection` is `None`.
+    fn add_selection_rects(
+        &self,
+        selection: Option<&SelectionRange>,
+        display_offset: usize,
+        row_cache: &[Option<CachedRow>],
+        bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
+    ) {
+        let Some(sel) = selection else { return };
+        let sel_highlight = self.resolved_selection_color();
+
+        for row in row_cache.iter().flatten() {
+            for cell in &row.cells {
+                let grid_line = Line(cell.row as i32 - display_offset as i32);
+                let point = Point::new(grid_line, Column(cell.col));
+                if sel.contains(point) {
+                    let x = self.padding_x + cell.col as f32 * self.cell_width;
+                    let y = self.padding_y + cell.row as f32 * self.cell_height;
+                    let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                        self.cell_width * 2.0
+                    } else {
+                        self.cell_width
+                    };
+                    bg_rects.push(([x, y, w, self.cell_height], sel_highlight));
                 }
             }
         }
+    }
 
-        // ── Selection highlight rects ────────────────────────────────────
-        if let Some(sel) = selection {
-            let sel_highlight = self.resolved_selection_color();
-
-            for row in row_cache.iter().flatten() {
-                for cell in &row.cells {
-                    let grid_line = Line(cell.row as i32 - display_offset as i32);
-                    let point = Point::new(grid_line, Column(cell.col));
-                    if sel.contains(point) {
-                        let x = self.padding_x + cell.col as f32 * self.cell_width;
-                        let y = self.padding_y + cell.row as f32 * self.cell_height;
-                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                            self.cell_width * 2.0
-                        } else {
-                            self.cell_width
-                        };
-                        bg_rects.push(([x, y, w, self.cell_height], sel_highlight));
-                    }
-                }
-            }
-        }
-
-        // ── Hyperlink underline rects + map rebuild ────────────────────
-        // OSC 8 hyperlinks get a solid underline; regex-detected URLs get a
-        // dashed underline (alternating 3px on / 2px off segments).
-        let pane_id = self.current_pane_id.unwrap_or(0);
-        {
-            let link_color = PaletteColor::ACCENT_COOL.to_f32_array();
-            let underline_h = 1.0_f32;
-            let dash_on = 3.0_f32;
-            let dash_off = 2.0_f32;
-            for row in row_cache.iter().flatten() {
-                for cell in &row.cells {
-                    if let Some(ref url) = cell.hyperlink {
-                        self.hyperlink_map
-                            .insert((pane_id, cell.row, cell.col), Arc::clone(url));
-                        let x = self.padding_x + cell.col as f32 * self.cell_width;
-                        let y =
-                            self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
-                                - underline_h;
-                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                            self.cell_width * 2.0
-                        } else {
-                            self.cell_width
-                        };
-                        let is_regex = cell.hyperlink_source == Some(HyperlinkSource::Regex);
-                        if is_regex {
-                            // Dashed underline: emit short segments across the cell width.
-                            let mut offset = 0.0;
-                            while offset < w {
-                                let seg_w = (w - offset).min(dash_on);
-                                bg_rects.push(([x + offset, y, seg_w, underline_h], link_color));
-                                offset += dash_on + dash_off;
-                            }
-                        } else {
-                            // Solid underline for OSC 8 hyperlinks.
-                            bg_rects.push(([x, y, w, underline_h], link_color));
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Hotspot dotted underline rects + damage-aware map update ──────
-        // Hotspots (file paths, errors, git refs, issue refs) get a dotted
-        // underline (2px dot / 2px gap) to distinguish from hyperlink styles.
-        //
-        // Only rebuild hotspot_map entries for damaged rows, then draw
-        // underlines for ALL cached rows. Complexity: O(D) for map update
-        // where D = cells in damaged rows, plus O(C) for underline drawing
-        // where C = total cached cells. Previously was O(C) for both every
-        // frame even when only a few rows changed.
-        {
-            // Remove stale hotspot_map entries for damaged rows, then re-insert.
-            // Undamaged rows keep their existing map entries.
-            for (row_idx, cached_row) in row_cache.iter().enumerate() {
-                let is_damaged = match damaged_rows {
-                    None => true,
-                    Some(d) => d.get(row_idx).copied().unwrap_or(false),
+    /// Update `hyperlink_map` and emit underline rects for every cell that
+    /// carries an OSC 8 or regex-detected URL. OSC 8 hyperlinks get a solid
+    /// underline; regex URLs get a 3px-on / 2px-off dashed underline so the
+    /// two sources are visually distinguishable.
+    fn process_hyperlinks(
+        &mut self,
+        pane_id: PaneId,
+        row_cache: &[Option<CachedRow>],
+        bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
+    ) {
+        let link_color = PaletteColor::ACCENT_COOL.to_f32_array();
+        let underline_h = 1.0_f32;
+        let dash_on = 3.0_f32;
+        let dash_off = 2.0_f32;
+        for row in row_cache.iter().flatten() {
+            for cell in &row.cells {
+                let Some(ref url) = cell.hyperlink else {
+                    continue;
                 };
-                if is_damaged {
-                    // Remove all hotspot entries for this damaged row.
-                    // We collect cols first to avoid borrowing issues.
-                    if let Some(row) = cached_row {
-                        for cell in &row.cells {
-                            self.hotspot_map.remove(&(pane_id, cell.row, cell.col));
-                        }
+                self.hyperlink_map
+                    .insert((pane_id, cell.row, cell.col), Arc::clone(url));
+                let x = self.padding_x + cell.col as f32 * self.cell_width;
+                let y = self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
+                    - underline_h;
+                let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                    self.cell_width * 2.0
+                } else {
+                    self.cell_width
+                };
+                let is_regex = cell.hyperlink_source == Some(HyperlinkSource::Regex);
+                if is_regex {
+                    let mut offset = 0.0;
+                    while offset < w {
+                        let seg_w = (w - offset).min(dash_on);
+                        bg_rects.push(([x + offset, y, seg_w, underline_h], link_color));
+                        offset += dash_on + dash_off;
                     }
-                    // Re-insert from fresh cell data.
-                    if let Some(row) = cached_row {
-                        for cell in &row.cells {
-                            if let Some((ref kind, ref full_text, is_dir, ref resolved)) =
-                                cell.hotspot
-                                && cell.hyperlink.is_none()
-                            {
-                                self.hotspot_map.insert(
-                                    (pane_id, cell.row, cell.col),
-                                    (
-                                        kind.clone(),
-                                        Arc::clone(full_text),
-                                        is_dir,
-                                        resolved.clone(),
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                } else {
+                    bg_rects.push(([x, y, w, underline_h], link_color));
                 }
             }
+        }
+    }
 
-            // Draw dotted underlines for all rows (damaged and undamaged).
-            // Each hotspot kind gets a distinct underline color.
-            let underline_h = 1.0_f32;
-            let dot_on = 2.0_f32;
-            let dot_off = 2.0_f32;
-            for row in row_cache.iter().flatten() {
+    /// Damage-aware update of `hotspot_map` plus dotted-underline rect
+    /// emission. Each damaged row's stale entries are evicted and
+    /// re-inserted from fresh cell data, while undamaged rows keep their
+    /// existing map entries — the underline pass then runs over every
+    /// cached row regardless of damage so visible decorations stay stable.
+    fn process_hotspots(
+        &mut self,
+        pane_id: PaneId,
+        row_cache: &[Option<CachedRow>],
+        damaged_rows: Option<&[bool]>,
+        bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
+    ) {
+        // Map update: evict + re-insert for damaged rows only.
+        for (row_idx, cached_row) in row_cache.iter().enumerate() {
+            let is_damaged = match damaged_rows {
+                None => true,
+                Some(d) => d.get(row_idx).copied().unwrap_or(false),
+            };
+            if !is_damaged {
+                continue;
+            }
+            if let Some(row) = cached_row {
                 for cell in &row.cells {
-                    if let Some((ref kind, _, _, _)) = cell.hotspot
+                    self.hotspot_map.remove(&(pane_id, cell.row, cell.col));
+                }
+                for cell in &row.cells {
+                    if let Some((ref kind, ref full_text, is_dir, ref resolved)) = cell.hotspot
                         && cell.hyperlink.is_none()
                     {
-                        let hotspot_color = crate::color_mapping::hotspot_kind_color(kind);
-                        let x = self.padding_x + cell.col as f32 * self.cell_width;
-                        let y =
-                            self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
-                                - underline_h;
-                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                            self.cell_width * 2.0
-                        } else {
-                            self.cell_width
-                        };
-                        // Dotted underline: 2px on / 2px off pattern.
-                        let mut offset = 0.0;
-                        while offset < w {
-                            let seg_w = (w - offset).min(dot_on);
-                            bg_rects.push(([x + offset, y, seg_w, underline_h], hotspot_color));
-                            offset += dot_on + dot_off;
-                        }
+                        self.hotspot_map.insert(
+                            (pane_id, cell.row, cell.col),
+                            (
+                                kind.clone(),
+                                Arc::clone(full_text),
+                                is_dir,
+                                resolved.clone(),
+                            ),
+                        );
                     }
                 }
             }
         }
 
-        // ── Write rect vertices into persistent buffer ──────────────────
+        // Underline emission: dotted (2px on / 2px off) for every cell
+        // that carries a hotspot but no hyperlink (hyperlinks already
+        // drew a different underline above).
+        let underline_h = 1.0_f32;
+        let dot_on = 2.0_f32;
+        let dot_off = 2.0_f32;
+        for row in row_cache.iter().flatten() {
+            for cell in &row.cells {
+                if let Some((ref kind, _, _, _)) = cell.hotspot
+                    && cell.hyperlink.is_none()
+                {
+                    let hotspot_color = crate::color_mapping::hotspot_kind_color(kind);
+                    let x = self.padding_x + cell.col as f32 * self.cell_width;
+                    let y = self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
+                        - underline_h;
+                    let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                        self.cell_width * 2.0
+                    } else {
+                        self.cell_width
+                    };
+                    let mut offset = 0.0;
+                    while offset < w {
+                        let seg_w = (w - offset).min(dot_on);
+                        bg_rects.push(([x + offset, y, seg_w, underline_h], hotspot_color));
+                        offset += dot_on + dot_off;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flatten the collected `bg_rects` into the CPU vertex buffer, grow
+    /// the persistent GPU buffer if needed, and queue a `write_buffer` to
+    /// upload the new data. Returns the vertex count for the subsequent
+    /// draw call.
+    fn upload_rect_buffer(
+        &mut self,
+        bg_rects: &[([f32; 4], [f32; 4])],
+        sw: f32,
+        sh: f32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> u32 {
         self.rect_verts_cpu.clear();
-        for (xywh, color) in &bg_rects {
+        for (xywh, color) in bg_rects {
             let verts = pixel_rect_to_ndc(xywh[0], xywh[1], xywh[2], xywh[3], sw, sh, *color);
             self.rect_verts_cpu.extend_from_slice(&verts);
         }
 
         let rect_vertex_count = self.rect_verts_cpu.len() as u32;
-
-        if !self.rect_verts_cpu.is_empty() {
-            let needed = self.rect_verts_cpu.len() as u64;
-
-            if needed > self.rect_buf_capacity {
-                let new_capacity = needed * 2;
-                let buf_size = new_capacity * std::mem::size_of::<ColorVertex>() as u64;
-                self.rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("grid_rect_vbuf_persistent"),
-                    size: buf_size,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                self.rect_buf_capacity = new_capacity;
-            }
-
-            let data = bytemuck::cast_slice::<ColorVertex, u8>(&self.rect_verts_cpu);
-            queue.write_buffer(&self.rect_buf, 0, data);
+        if self.rect_verts_cpu.is_empty() {
+            return rect_vertex_count;
         }
 
-        // ── Rebuild only damaged per-cell glyphon Buffers ────────────────
-        let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
+        let needed = self.rect_verts_cpu.len() as u64;
+        if needed > self.rect_buf_capacity {
+            let new_capacity = needed * 2;
+            let buf_size = new_capacity * std::mem::size_of::<ColorVertex>() as u64;
+            self.rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("grid_rect_vbuf_persistent"),
+                size: buf_size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.rect_buf_capacity = new_capacity;
+        }
 
-        let cursor_line = cursor.point.line.0;
-        let cursor_row = if cursor_line >= 0 {
-            cursor_line as usize
-        } else {
-            usize::MAX
-        };
-        let cursor_col = cursor.point.column.0;
+        let data = bytemuck::cast_slice::<ColorVertex, u8>(&self.rect_verts_cpu);
+        queue.write_buffer(&self.rect_buf, 0, data);
+
+        rect_vertex_count
+    }
+
+    /// Rebuild the persistent per-cell `Buffer`s for any row marked as
+    /// damaged (or the whole viewport when `damaged_rows` is `None`). The
+    /// shape-key cache lets us skip rows whose text/flags/color match the
+    /// previous frame, so a typical typing edit only re-shapes the row the
+    /// cursor is on.
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild_cell_buffers(
+        &mut self,
+        cursor: &RenderableCursor,
+        cursor_row: usize,
+        cursor_col: usize,
+        screen_lines: usize,
+        damaged_rows: Option<&[bool]>,
+        prev_cursor: Option<(usize, usize)>,
+        row_cache: &[Option<CachedRow>],
+        cell_buffers: &mut Vec<Vec<Option<Buffer>>>,
+        cell_shape_keys: &mut Vec<Vec<Option<CellShapeKey>>>,
+    ) {
+        let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
 
         while cell_buffers.len() < screen_lines {
             cell_buffers.push(Vec::new());
@@ -1431,183 +1565,155 @@ impl GridRenderer {
                 }
             };
 
-            let row_cells = &row.cells;
-            if row_cells.is_empty() {
-                cell_buffers[row_idx].clear();
-                cell_shape_keys[row_idx].clear();
+            self.rebuild_row(
+                row,
+                row_idx,
+                cursor,
+                cursor_row,
+                cursor_col,
+                metrics,
+                cell_buffers,
+                cell_shape_keys,
+            );
+        }
+    }
+
+    /// Rebuild a single damaged row's per-cell glyphon buffers, sharing
+    /// `font_system` with the existing slot when the shape key matches.
+    /// Pulled out of `rebuild_cell_buffers` so the per-row body stays
+    /// readable on its own.
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild_row(
+        &mut self,
+        row: &CachedRow,
+        row_idx: usize,
+        cursor: &RenderableCursor,
+        cursor_row: usize,
+        cursor_col: usize,
+        metrics: Metrics,
+        cell_buffers: &mut [Vec<Option<Buffer>>],
+        cell_shape_keys: &mut [Vec<Option<CellShapeKey>>],
+    ) {
+        let row_cells = &row.cells;
+        if row_cells.is_empty() {
+            cell_buffers[row_idx].clear();
+            cell_shape_keys[row_idx].clear();
+            return;
+        }
+
+        let max_col = row_cells.iter().map(|c| c.col).max().unwrap_or(0) + 1;
+        while cell_buffers[row_idx].len() < max_col {
+            cell_buffers[row_idx].push(None);
+        }
+        while cell_shape_keys[row_idx].len() < max_col {
+            cell_shape_keys[row_idx].push(None);
+        }
+
+        // Track which columns have visible content so we can clear stale buffers.
+        let mut occupied_cols = vec![false; max_col];
+
+        for cell in row_cells {
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
 
-            let max_col = row_cells.iter().map(|c| c.col).max().unwrap_or(0) + 1;
-            while cell_buffers[row_idx].len() < max_col {
-                cell_buffers[row_idx].push(None);
-            }
-            while cell_shape_keys[row_idx].len() < max_col {
-                cell_shape_keys[row_idx].push(None);
-            }
+            let is_block_cursor = cursor.shape == CursorShape::Block
+                && cursor_col == cell.col
+                && cursor_row == cell.row;
+            let fg = if is_block_cursor {
+                self.resolved_bg()
+            } else if cell.hyperlink.is_some() {
+                PaletteColor::ACCENT_COOL.to_f32_array()
+            } else if cell.flags.contains(Flags::INVERSE) {
+                self.map_bg_color(&cell.bg).unwrap_or(self.resolved_bg())
+            } else {
+                self.map_fg_color(&cell.fg)
+            };
 
-            // Track which columns have visible content so we can clear stale buffers.
-            let mut occupied_cols = vec![false; max_col];
-
-            for cell in row_cells {
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    continue;
+            if cell.c == ' ' && !is_block_cursor {
+                if cell.col < cell_buffers[row_idx].len() {
+                    cell_buffers[row_idx][cell.col] = None;
+                    cell_shape_keys[row_idx][cell.col] = None;
                 }
-
-                let is_block_cursor = cursor.shape == CursorShape::Block
-                    && cursor_col == cell.col
-                    && cursor_row == cell.row;
-                let fg = if is_block_cursor {
-                    self.resolved_bg()
-                } else if cell.hyperlink.is_some() {
-                    PaletteColor::ACCENT_COOL.to_f32_array()
-                } else if cell.flags.contains(Flags::INVERSE) {
-                    self.map_bg_color(&cell.bg).unwrap_or(self.resolved_bg())
-                } else {
-                    self.map_fg_color(&cell.fg)
-                };
-
-                if cell.c == ' ' && !is_block_cursor {
-                    if cell.col < cell_buffers[row_idx].len() {
-                        cell_buffers[row_idx][cell.col] = None;
-                        cell_shape_keys[row_idx][cell.col] = None;
-                    }
-                    if cell.col < occupied_cols.len() {
-                        occupied_cols[cell.col] = true;
-                    }
-                    continue;
-                }
-
                 if cell.col < occupied_cols.len() {
                     occupied_cols[cell.col] = true;
                 }
-
-                let new_key = CellShapeKey {
-                    text: cell.text.clone(),
-                    bold: cell.flags.contains(Flags::BOLD),
-                    italic: cell.flags.contains(Flags::ITALIC),
-                    wide: cell.flags.contains(Flags::WIDE_CHAR),
-                    fg,
-                };
-
-                // If the existing buffer was shaped with identical parameters, keep it.
-                if let Some(old_key) = cell_shape_keys[row_idx]
-                    .get(cell.col)
-                    .and_then(|k| k.as_ref())
-                    && *old_key == new_key
-                {
-                    continue;
-                }
-
-                let buf_width = if new_key.wide {
-                    self.cell_width * 2.0
-                } else {
-                    self.cell_width
-                };
-
-                let buf = cell_buffers[row_idx][cell.col]
-                    .get_or_insert_with(|| Buffer::new(&mut self.font_system, metrics));
-                buf.set_metrics(&mut self.font_system, metrics);
-                buf.set_size(
-                    &mut self.font_system,
-                    Some(buf_width + 4.0),
-                    Some(self.cell_height + 4.0),
-                );
-
-                let attrs = Attrs::new()
-                    .family(Family::Name(self.font_config.effective_family()))
-                    .color(f32_to_glyph_color(fg));
-                let shaping = if cell.text.is_ascii() {
-                    Shaping::Basic
-                } else {
-                    Shaping::Advanced
-                };
-                buf.set_text(&mut self.font_system, &cell.text, &attrs, shaping, None);
-                buf.shape_until_scroll(&mut self.font_system, false);
-
-                cell_shape_keys[row_idx][cell.col] = Some(new_key);
+                continue;
             }
 
-            // Clear buffers for columns no longer occupied.
-            for col in 0..cell_buffers[row_idx].len() {
-                if col < occupied_cols.len() && !occupied_cols[col] {
-                    cell_buffers[row_idx][col] = None;
-                    cell_shape_keys[row_idx][col] = None;
-                }
+            if cell.col < occupied_cols.len() {
+                occupied_cols[cell.col] = true;
             }
 
-            // Truncate trailing slots if the row shrank.
-            cell_buffers[row_idx].truncate(max_col);
-            cell_shape_keys[row_idx].truncate(max_col);
-        }
+            let new_key = CellShapeKey {
+                text: cell.text.clone(),
+                bold: cell.flags.contains(Flags::BOLD),
+                italic: cell.flags.contains(Flags::ITALIC),
+                wide: cell.flags.contains(Flags::WIDE_CHAR),
+                fg,
+            };
 
-        self.pane_last_cursor_pos
-            .insert(pane_id, (cursor_row, cursor_col));
-        self.pane_last_display_offset
-            .insert(pane_id, display_offset);
-        self.pane_last_column_count.insert(pane_id, columns);
+            if let Some(old_key) = cell_shape_keys[row_idx]
+                .get(cell.col)
+                .and_then(|k| k.as_ref())
+                && *old_key == new_key
+            {
+                continue;
+            }
 
-        // ── Update viewport ──────────────────────────────────────────────
-        self.viewport.update(
-            queue,
-            Resolution {
-                width: surface_width,
-                height: surface_height,
-            },
-        );
+            let buf_width = if new_key.wide {
+                self.cell_width * 2.0
+            } else {
+                self.cell_width
+            };
 
-        // ── Prepare glyphon text from persistent cell_buffers ────────────
-        let pad_x = self.padding_x;
-        let pad_y = self.padding_y;
-        let cw = self.cell_width;
-        let ch = self.cell_height;
-        let text_areas: Vec<TextArea<'_>> = cell_buffers
-            .iter()
-            .enumerate()
-            .flat_map(|(row_idx, row)| {
-                row.iter()
-                    .enumerate()
-                    .filter_map(move |(col_idx, opt_buf)| {
-                        let buf = opt_buf.as_ref()?;
-                        Some(TextArea {
-                            buffer: buf,
-                            left: pad_x + col_idx as f32 * cw,
-                            top: pad_y + row_idx as f32 * ch,
-                            scale: 1.0,
-                            bounds: TextBounds {
-                                left: 0,
-                                top: 0,
-                                right: surface_width as i32,
-                                bottom: surface_height as i32,
-                            },
-                            default_color: GlyphColor::rgba(
-                                PaletteColor::TEXT.r,
-                                PaletteColor::TEXT.g,
-                                PaletteColor::TEXT.b,
-                                255,
-                            ),
-                            custom_glyphs: &[],
-                        })
-                    })
-            })
-            .collect();
-
-        let has_text = !text_areas.is_empty();
-        if has_text
-            && let Err(e) = self.text_renderer.prepare(
-                device,
-                queue,
+            let buf = cell_buffers[row_idx][cell.col]
+                .get_or_insert_with(|| Buffer::new(&mut self.font_system, metrics));
+            buf.set_metrics(&mut self.font_system, metrics);
+            buf.set_size(
                 &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )
-        {
-            tracing::warn!("glyphon prepare failed: {}", e);
+                Some(buf_width + 4.0),
+                Some(self.cell_height + 4.0),
+            );
+
+            let attrs = Attrs::new()
+                .family(Family::Name(self.font_config.effective_family()))
+                .color(f32_to_glyph_color(fg));
+            let shaping = if cell.text.is_ascii() {
+                Shaping::Basic
+            } else {
+                Shaping::Advanced
+            };
+            buf.set_text(&mut self.font_system, &cell.text, &attrs, shaping, None);
+            buf.shape_until_scroll(&mut self.font_system, false);
+
+            cell_shape_keys[row_idx][cell.col] = Some(new_key);
         }
 
-        // ── Render pass: backgrounds + cursor rects ──────────────────────
+        // Clear buffers for columns no longer occupied.
+        for col in 0..cell_buffers[row_idx].len() {
+            if col < occupied_cols.len() && !occupied_cols[col] {
+                cell_buffers[row_idx][col] = None;
+                cell_shape_keys[row_idx][col] = None;
+            }
+        }
+
+        // Truncate trailing slots if the row shrank.
+        cell_buffers[row_idx].truncate(max_col);
+        cell_shape_keys[row_idx].truncate(max_col);
+    }
+
+    /// Emit the two render passes that paint the grid: a rect pass for
+    /// backgrounds / cursor / underlines, then (optionally) a glyphon text
+    /// pass for the cell glyphs on top. Both load the existing swapchain
+    /// contents so prior pane render passes are preserved.
+    fn flush_grid_render_passes(
+        &self,
+        rect_vertex_count: u32,
+        has_text: bool,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("grid_rect_pass"),
@@ -1633,7 +1739,6 @@ impl GridRenderer {
             }
         }
 
-        // ── Render pass: text on top ─────────────────────────────────────
         if has_text {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("grid_text_pass"),
@@ -1659,15 +1764,12 @@ impl GridRenderer {
                 tracing::warn!("glyphon render failed: {}", e);
             }
         }
+    }
 
-        // Trim atlas periodically to free unused glyphs.
-        self.frame_count += 1;
-        if self.frame_count.is_multiple_of(ATLAS_TRIM_INTERVAL) {
-            self.atlas.trim();
-            self.overlay_atlas.trim();
-        }
-
-        // ── Frame timing ────────────────────────────────────────────────
+    /// Update the rolling 100-frame timing window and emit a debug log
+    /// when the just-finished frame exceeded the 2 ms target or every 100
+    /// frames as a checkpoint.
+    fn update_frame_timing(&mut self, frame_start: Instant) {
         let elapsed_us = frame_start.elapsed().as_micros() as u64;
 
         let idx = self.frame_time_idx % self.frame_times_us.len();
@@ -1695,12 +1797,54 @@ impl GridRenderer {
                 "grid render 100-frame avg"
             );
         }
-
-        // ── Restore per-pane caches back into the HashMaps ──────────────
-        self.pane_row_cache.insert(pane_id, row_cache);
-        self.pane_cell_buffers.insert(pane_id, cell_buffers);
-        self.pane_cell_shape_keys.insert(pane_id, cell_shape_keys);
     }
+}
+
+/// Build the per-frame TextArea list from the persistent per-cell
+/// glyphon `Buffer`s. Pure function so it can be unit-tested without
+/// constructing a `GridRenderer`, and so the borrow on `cell_buffers`
+/// stays scoped tightly inside `render_from_cache`.
+fn build_grid_text_areas<'a>(
+    cell_buffers: &'a [Vec<Option<Buffer>>],
+    pad_x: f32,
+    pad_y: f32,
+    cell_width: f32,
+    cell_height: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> Vec<TextArea<'a>> {
+    let bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_width as i32,
+        bottom: surface_height as i32,
+    };
+    let default_color = GlyphColor::rgba(
+        PaletteColor::TEXT.r,
+        PaletteColor::TEXT.g,
+        PaletteColor::TEXT.b,
+        255,
+    );
+    cell_buffers
+        .iter()
+        .enumerate()
+        .flat_map(move |(row_idx, row)| {
+            row.iter()
+                .enumerate()
+                .filter_map(move |(col_idx, opt_buf)| {
+                    let buf = opt_buf.as_ref()?;
+                    Some(TextArea {
+                        buffer: buf,
+                        left: pad_x + col_idx as f32 * cell_width,
+                        top: pad_y + row_idx as f32 * cell_height,
+                        scale: 1.0,
+                        bounds,
+                        default_color,
+                        custom_glyphs: &[],
+                    })
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]

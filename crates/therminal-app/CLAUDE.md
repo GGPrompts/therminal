@@ -18,7 +18,8 @@ src/
 │   │   ├── tab_bar.rs       # Workspace tab bar rendering
 │   │   ├── csd.rs           # Client-side decorations
 │   │   ├── colors.rs        # Chrome color helpers
-│   │   ├── text_cache.rs    # Chrome text caching
+│   │   ├── text_cache.rs    # Chrome text caching (ChromeTextCache type alias)
+│   │   ├── render_pass.rs   # Shared `with_chrome_render_pass` helper (tn-ppub)
 │   │   └── overlays.rs      # Chrome overlay helpers
 │   ├── help_overlay.rs  # Keybinding help overlay
 │   ├── settings_overlay.rs  # Settings panel overlay

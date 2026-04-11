@@ -11,6 +11,7 @@ mod csd;
 mod delegate_summary;
 mod overlays;
 mod pane_header;
+mod render_pass;
 mod status_bar;
 mod tab_bar;
 mod text_cache;

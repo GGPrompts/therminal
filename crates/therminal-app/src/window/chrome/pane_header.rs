@@ -7,12 +7,14 @@ use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::{ColorVertex, GridRenderer};
 use crate::pane::{LayoutNode, PaneId, PaneState, SplitDirection};
+use therminal_core::geometry::Rect;
 use therminal_core::palette::Color as PaletteColor;
 
 use super::colors::{
     EXIT_ERROR_COLOR, EXIT_OK_COLOR, FOCUS_BORDER_COLOR, HEADER_BG_COLOR, HEADER_BG_DIM_COLOR,
     HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH, SEPARATOR_COLOR, SEPARATOR_FOCUS_COLOR,
 };
+use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
 /// Draw a subtle border around the focused pane.
@@ -83,26 +85,12 @@ pub(crate) fn draw_pane_focus_border(
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("focus_border_pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-            depth_slice: None,
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
+    let vertex_count = verts.len() as u32;
+    with_chrome_render_pass(encoder, view, "focus_border_pass", |pass| {
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, vertex_buf.slice(..));
+        pass.draw(0..vertex_count, 0..1);
     });
-
-    pass.set_pipeline(&renderer.rect_pipeline);
-    pass.set_vertex_buffer(0, vertex_buf.slice(..));
-    pass.draw(0..verts.len() as u32, 0..1);
 }
 
 /// Draw a 1px separator line in the gap between two split children.
@@ -165,26 +153,11 @@ pub(crate) fn draw_split_separator(
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("separator_pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-            depth_slice: None,
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
+    with_chrome_render_pass(encoder, view, "separator_pass", |pass| {
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, vertex_buf.slice(..));
+        pass.draw(0..6, 0..1);
     });
-
-    pass.set_pipeline(&renderer.rect_pipeline);
-    pass.set_vertex_buffer(0, vertex_buf.slice(..));
-    pass.draw(0..6, 0..1);
 }
 
 /// Draw the pane header strip (background + text).
@@ -208,18 +181,100 @@ pub(crate) fn draw_pane_header(
     surface_width: u32,
     surface_height: u32,
 ) {
-    use crate::color_mapping::pixel_rect_to_ndc;
-
     let vp = pane.viewport;
     let header_h = crate::pane::PANE_HEADER_HEIGHT;
     let sw = surface_width as f32;
     let sh = surface_height as f32;
 
-    // ── Header background rect + tn-nhbv context gauge ──
-    //
-    // Both the header background and the 2px context-window fill gauge
-    // are appended to the same vertex buffer and rendered in a single
-    // pass, so the gauge adds zero additional render passes per pane.
+    // ── Snapshot all pane status fields under one lock ───────────────────
+    let snapshot = HeaderStatusSnapshot::from_pane(pane);
+
+    // ── 1. Header background + context gauge (single render pass) ───────
+    draw_pane_header_bg(
+        vp, header_h, is_focused, &snapshot, renderer, device, encoder, view, sw, sh,
+    );
+
+    // ── 2. Exit-code stripe on the left edge ─────────────────────────────
+    if let Some(code) = snapshot.last_exit_code {
+        draw_pane_header_exit_stripe(vp, header_h, code, renderer, device, encoder, view, sw, sh);
+    }
+
+    // ── 3. Header text ───────────────────────────────────────────────────
+    let style = HeaderTextStyle::compute(is_focused, snapshot.git_state.as_ref());
+    let strings = HeaderTextStrings::compute(
+        pane.id,
+        center_title,
+        claude_badge,
+        &snapshot.tags,
+        snapshot.git_state.as_ref(),
+    );
+    let layout = HeaderButtonLayout::compute(vp, is_zoomed);
+    let slots = HeaderTextSlots::new(pane.id, &strings, vp, is_focused, is_zoomed);
+
+    let font_size = renderer.chrome_font_size((header_h * 0.6).max(9.0));
+    let metrics = Metrics::new(font_size, header_h);
+
+    shape_pane_header_text(&strings, &slots, &style, metrics, vp, header_h, renderer);
+    draw_pane_header_text(
+        vp,
+        is_zoomed,
+        &strings,
+        &slots,
+        &style,
+        &layout,
+        renderer,
+        device,
+        queue,
+        encoder,
+        view,
+        surface_width,
+        surface_height,
+    );
+}
+
+/// Snapshot of `PaneState::status` fields needed by header rendering.
+///
+/// Acquires the pane status lock once, copies out everything we need, and
+/// releases the lock so the rest of the draw can run without holding it.
+struct HeaderStatusSnapshot {
+    agent_tokens: Option<u64>,
+    agent_model: Option<String>,
+    last_exit_code: Option<i32>,
+    tags: HashMap<String, String>,
+    git_state: Option<crate::git_state::GitState>,
+}
+
+impl HeaderStatusSnapshot {
+    fn from_pane(pane: &PaneState) -> Self {
+        let s = pane.status.lock().unwrap_or_else(|e| e.into_inner());
+        Self {
+            agent_tokens: s.agent_tokens,
+            agent_model: s.agent_model.clone(),
+            last_exit_code: s.last_exit_code,
+            tags: s.tags.clone(),
+            git_state: s.git_state.clone(),
+        }
+    }
+}
+
+/// Draw the header background rect plus the optional tn-nhbv context-window
+/// gauge in a single render pass — both fill geometry shares one vertex
+/// buffer so the gauge adds zero render passes per pane.
+#[allow(clippy::too_many_arguments)]
+fn draw_pane_header_bg(
+    vp: Rect,
+    header_h: f32,
+    is_focused: bool,
+    snapshot: &HeaderStatusSnapshot,
+    renderer: &GridRenderer,
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    sw: f32,
+    sh: f32,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+
     let bg_color = if is_focused {
         HEADER_BG_COLOR
     } else {
@@ -228,64 +283,16 @@ pub(crate) fn draw_pane_header(
     let mut bg_verts: Vec<ColorVertex> =
         pixel_rect_to_ndc(vp.x(), vp.y(), vp.width(), header_h, sw, sh, bg_color).to_vec();
 
-    // tn-nhbv: pane-header context gauge. Snapshot tokens + model under
-    // the pane-status lock, then release before rasterising. Graceful
-    // no-op when either input is missing or the model isn't known.
-    let (agent_tokens, agent_model) = {
-        let s = pane.status.lock().unwrap_or_else(|e| e.into_inner());
-        (s.agent_tokens, s.agent_model.clone())
-    };
-    if let (Some(tokens), Some(model)) = (agent_tokens, agent_model)
-        && let Some(window) = crate::model_context::context_window_for_model(&model)
-        && let Some(ratio) = crate::model_context::fill_ratio(tokens, window)
-    {
-        let tier = crate::model_context::gauge_tier(ratio);
-        let color = match tier {
-            crate::model_context::GaugeTier::Green => {
-                let c = PaletteColor::STATUS_OK;
-                [
-                    c.r as f32 / 255.0,
-                    c.g as f32 / 255.0,
-                    c.b as f32 / 255.0,
-                    if is_focused { 0.95 } else { 0.70 },
-                ]
-            }
-            crate::model_context::GaugeTier::Yellow => {
-                let c = PaletteColor::STATUS_WARN;
-                [
-                    c.r as f32 / 255.0,
-                    c.g as f32 / 255.0,
-                    c.b as f32 / 255.0,
-                    if is_focused { 0.95 } else { 0.70 },
-                ]
-            }
-            crate::model_context::GaugeTier::Red => {
-                let c = PaletteColor::STATUS_ERROR;
-                [
-                    c.r as f32 / 255.0,
-                    c.g as f32 / 255.0,
-                    c.b as f32 / 255.0,
-                    if is_focused { 0.95 } else { 0.70 },
-                ]
-            }
-        };
-        let gauge_h = 2.0_f32;
-        // Clamp so overflow (>100%) still renders a full bar rather than
-        // painting past the pane right edge.
-        let clamped = ratio.clamp(0.0, 1.0);
-        let gauge_w = (vp.width() * clamped).max(0.0);
-        if gauge_w > 0.0 {
-            let gauge_y = vp.y() + header_h - gauge_h;
-            bg_verts.extend_from_slice(&pixel_rect_to_ndc(
-                vp.x(),
-                gauge_y,
-                gauge_w,
-                gauge_h,
-                sw,
-                sh,
-                color,
-            ));
-        }
+    if let Some(gauge) = compute_context_gauge(snapshot, vp, header_h, is_focused) {
+        bg_verts.extend_from_slice(&pixel_rect_to_ndc(
+            gauge.x,
+            gauge.y,
+            gauge.w,
+            gauge.h,
+            sw,
+            sh,
+            gauge.color,
+        ));
     }
 
     let bg_vert_count = bg_verts.len() as u32;
@@ -295,349 +302,459 @@ pub(crate) fn draw_pane_header(
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("header_bg_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+    with_chrome_render_pass(encoder, view, "header_bg_pass", |pass| {
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.draw(0..bg_vert_count, 0..1);
-    }
+    });
+}
 
-    // ── Exit-code indicator stripe (left edge) ──
-    {
-        let exit_code = pane
-            .status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_exit_code;
-        if let Some(code) = exit_code {
-            let stripe_w = 4.0_f32;
-            let stripe_color = if code == 0 {
-                EXIT_OK_COLOR
-            } else {
-                EXIT_ERROR_COLOR
-            };
-            let stripe_verts =
-                pixel_rect_to_ndc(vp.x(), vp.y(), stripe_w, header_h, sw, sh, stripe_color);
+/// Computed geometry + color for the tn-nhbv context-window fill gauge.
+struct ContextGauge {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+}
 
-            let stripe_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("header_exit_stripe_vbuf"),
-                contents: bytemuck::cast_slice(&stripe_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("header_exit_stripe_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&renderer.rect_pipeline);
-            pass.set_vertex_buffer(0, stripe_buf.slice(..));
-            pass.draw(0..6, 0..1);
-        }
-    }
-
-    // ── Header text ──
-    let font_size = renderer.chrome_font_size((header_h * 0.6).max(9.0));
-    let line_height = header_h;
-    let metrics = Metrics::new(font_size, line_height);
-
-    let pane_id = pane.id;
-    let index_text = format!(" {pane_id}");
-    let index_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
-        if is_focused { 255 } else { 200 },
-    );
-
-    let process_text = match center_title {
-        Some(title) => title.to_string(),
-        None => format!("pane {pane_id}"),
+/// Compute the context gauge rect for the header. Returns `None` when
+/// tokens or model are unknown, the model isn't in the registry, or the
+/// computed width is zero.
+fn compute_context_gauge(
+    snapshot: &HeaderStatusSnapshot,
+    vp: Rect,
+    header_h: f32,
+    is_focused: bool,
+) -> Option<ContextGauge> {
+    let tokens = snapshot.agent_tokens?;
+    let model = snapshot.agent_model.as_ref()?;
+    let window = crate::model_context::context_window_for_model(model)?;
+    let ratio = crate::model_context::fill_ratio(tokens, window)?;
+    let alpha = if is_focused { 0.95 } else { 0.70 };
+    let palette_color = match crate::model_context::gauge_tier(ratio) {
+        crate::model_context::GaugeTier::Green => PaletteColor::STATUS_OK,
+        crate::model_context::GaugeTier::Yellow => PaletteColor::STATUS_WARN,
+        crate::model_context::GaugeTier::Red => PaletteColor::STATUS_ERROR,
     };
-    let process_color = if is_focused {
-        GlyphColor::rgba(
-            PaletteColor::INK.r,
-            PaletteColor::INK.g,
-            PaletteColor::INK.b,
-            255,
-        )
+    let color = [
+        palette_color.r as f32 / 255.0,
+        palette_color.g as f32 / 255.0,
+        palette_color.b as f32 / 255.0,
+        alpha,
+    ];
+
+    let gauge_h = 2.0_f32;
+    let clamped = ratio.clamp(0.0, 1.0);
+    let gauge_w = (vp.width() * clamped).max(0.0);
+    if gauge_w <= 0.0 {
+        return None;
+    }
+    Some(ContextGauge {
+        x: vp.x(),
+        y: vp.y() + header_h - gauge_h,
+        w: gauge_w,
+        h: gauge_h,
+        color,
+    })
+}
+
+/// Draw the 4px exit-code stripe on the left edge of the header.
+#[allow(clippy::too_many_arguments)]
+fn draw_pane_header_exit_stripe(
+    vp: Rect,
+    header_h: f32,
+    exit_code: i32,
+    renderer: &GridRenderer,
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    sw: f32,
+    sh: f32,
+) {
+    use crate::color_mapping::pixel_rect_to_ndc;
+
+    let stripe_w = 4.0_f32;
+    let stripe_color = if exit_code == 0 {
+        EXIT_OK_COLOR
     } else {
-        GlyphColor::rgba(
+        EXIT_ERROR_COLOR
+    };
+    let stripe_verts = pixel_rect_to_ndc(vp.x(), vp.y(), stripe_w, header_h, sw, sh, stripe_color);
+
+    let stripe_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("header_exit_stripe_vbuf"),
+        contents: bytemuck::cast_slice(&stripe_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    with_chrome_render_pass(encoder, view, "header_exit_stripe_pass", |pass| {
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, stripe_buf.slice(..));
+        pass.draw(0..6, 0..1);
+    });
+}
+
+/// Glyph colors used by header text. Computed once from `is_focused` and
+/// the optional git state and reused for shaping + TextArea defaults.
+struct HeaderTextStyle {
+    index_color: GlyphColor,
+    process_color: GlyphColor,
+    git_branch_color: GlyphColor,
+    claude_badge_color: GlyphColor,
+    close_color: GlyphColor,
+    button_color: GlyphColor,
+}
+
+impl HeaderTextStyle {
+    fn compute(is_focused: bool, git_state: Option<&crate::git_state::GitState>) -> Self {
+        let index_color = GlyphColor::rgba(
             PaletteColor::INK_MUTED.r,
             PaletteColor::INK_MUTED.g,
             PaletteColor::INK_MUTED.b,
-            220,
-        )
-    };
-
-    // tn-166y: tag badges + tn-e97n: git branch
-    let (tags, git_state) = {
-        let s = pane.status.lock().unwrap_or_else(|e| e.into_inner());
-        (s.tags.clone(), s.git_state.clone())
-    };
-    let badge_text = format_tag_badges(&tags);
-    let git_branch_text = git_state
-        .as_ref()
-        .map(crate::git_state::format_for_header)
-        .unwrap_or_default();
-    let git_branch_color = if let Some(ref gs) = git_state {
-        if gs.detached {
+            if is_focused { 255 } else { 200 },
+        );
+        let process_color = if is_focused {
             GlyphColor::rgba(
-                PaletteColor::WARN.r,
-                PaletteColor::WARN.g,
-                PaletteColor::WARN.b,
-                if is_focused { 230 } else { 170 },
+                PaletteColor::INK.r,
+                PaletteColor::INK.g,
+                PaletteColor::INK.b,
+                255,
             )
-        } else if crate::git_state::is_default_branch(&gs.branch) {
+        } else {
             GlyphColor::rgba(
                 PaletteColor::INK_MUTED.r,
                 PaletteColor::INK_MUTED.g,
                 PaletteColor::INK_MUTED.b,
-                if is_focused { 220 } else { 160 },
+                220,
             )
-        } else {
-            GlyphColor::rgba(
+        };
+        let git_branch_color = match git_state {
+            Some(gs) if gs.detached => GlyphColor::rgba(
+                PaletteColor::WARN.r,
+                PaletteColor::WARN.g,
+                PaletteColor::WARN.b,
+                if is_focused { 230 } else { 170 },
+            ),
+            Some(gs) if crate::git_state::is_default_branch(&gs.branch) => GlyphColor::rgba(
+                PaletteColor::INK_MUTED.r,
+                PaletteColor::INK_MUTED.g,
+                PaletteColor::INK_MUTED.b,
+                if is_focused { 220 } else { 160 },
+            ),
+            Some(_) => GlyphColor::rgba(
                 PaletteColor::FOCUS.r,
                 PaletteColor::FOCUS.g,
                 PaletteColor::FOCUS.b,
                 if is_focused { 230 } else { 170 },
-            )
+            ),
+            None => index_color,
+        };
+        let claude_badge_color = GlyphColor::rgba(
+            PaletteColor::FOCUS.r,
+            PaletteColor::FOCUS.g,
+            PaletteColor::FOCUS.b,
+            if is_focused { 230 } else { 170 },
+        );
+        let close_color = GlyphColor::rgba(
+            PaletteColor::ALERT.r,
+            PaletteColor::ALERT.g,
+            PaletteColor::ALERT.b,
+            if is_focused { 230 } else { 160 },
+        );
+        let button_color = GlyphColor::rgba(
+            PaletteColor::INK_MUTED.r,
+            PaletteColor::INK_MUTED.g,
+            PaletteColor::INK_MUTED.b,
+            if is_focused { 230 } else { 170 },
+        );
+        Self {
+            index_color,
+            process_color,
+            git_branch_color,
+            claude_badge_color,
+            close_color,
+            button_color,
         }
-    } else {
-        index_color
-    };
-
-    // tn-5fgz: Claude agent badge color.
-    let claude_badge_text = claude_badge.unwrap_or("");
-    let claude_badge_color = GlyphColor::rgba(
-        PaletteColor::FOCUS.r,
-        PaletteColor::FOCUS.g,
-        PaletteColor::FOCUS.b,
-        if is_focused { 230 } else { 170 },
-    );
-
-    let close_color = GlyphColor::rgba(
-        PaletteColor::ALERT.r,
-        PaletteColor::ALERT.g,
-        PaletteColor::ALERT.b,
-        if is_focused { 230 } else { 160 },
-    );
-    let button_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
-        if is_focused { 230 } else { 170 },
-    );
-
-    // Button positions right-to-left.
-    // When zoomed, split buttons are hidden: [Z] [X]
-    // When not zoomed: [H] [V] [Z] [X]
-    let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
-    let btn_x_zoom = btn_x_close - HEADER_BUTTON_WIDTH;
-    let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
-    let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
-    // The leftmost button edge determines where git branch text is anchored.
-    let leftmost_btn_x = if is_zoomed { btn_x_zoom } else { btn_x_hsplit };
-
-    // Zoom glyph: filled square when zoomed (restore), empty square when normal (maximize).
-    let zoom_label = if is_zoomed { " \u{25a3}" } else { " \u{25a1}" };
-
-    let focus_tag = if is_focused { "f" } else { "u" };
-    let zoom_tag = if is_zoomed { "z" } else { "n" };
-    let idx_slot = format!("hdr_idx_{pane_id}");
-    let idx_key = format!("{index_text}|{:.0}|{focus_tag}", vp.width());
-    let proc_slot = format!("hdr_proc_{pane_id}");
-    let proc_key = format!("{process_text}|{:.0}|{focus_tag}", vp.width());
-    let close_slot = format!("hdr_close_{pane_id}");
-    let close_key = format!("X|{focus_tag}");
-    let zoom_slot = format!("hdr_zoom_{pane_id}");
-    let zoom_key = format!("{zoom_label}|{focus_tag}|{zoom_tag}");
-    let vsplit_slot = format!("hdr_vsplit_{pane_id}");
-    let vsplit_key = format!("V|{focus_tag}");
-    let hsplit_slot = format!("hdr_hsplit_{pane_id}");
-    let hsplit_key = format!("H|{focus_tag}");
-    let badge_slot = format!("hdr_badge_{pane_id}");
-    let badge_key = format!("{badge_text}|{:.0}|{focus_tag}", vp.width());
-    let git_slot = format!("hdr_git_{pane_id}");
-    let git_key = format!("{git_branch_text}|{:.0}|{focus_tag}", vp.width());
-    let claude_slot = format!("hdr_claude_{pane_id}");
-    let claude_key = format!("{claude_badge_text}|{:.0}|{focus_tag}", vp.width());
-
-    // Phase 1: shape all buffers.
-    let family = renderer.font_config.family.clone();
-    ensure_shaped(
-        &idx_slot,
-        &idx_key,
-        metrics,
-        vp.width(),
-        header_h,
-        &index_text,
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(index_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    ensure_shaped(
-        &proc_slot,
-        &proc_key,
-        metrics,
-        vp.width(),
-        header_h,
-        &process_text,
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(process_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    if !badge_text.is_empty() {
-        ensure_shaped(
-            &badge_slot,
-            &badge_key,
-            metrics,
-            vp.width(),
-            header_h,
-            &badge_text,
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(index_color),
-            &mut renderer.font_system,
-            &mut renderer.overlay_cache,
-        );
     }
-    if !git_branch_text.is_empty() {
-        ensure_shaped(
-            &git_slot,
-            &git_key,
-            metrics,
-            vp.width(),
-            header_h,
-            &git_branch_text,
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(git_branch_color),
-            &mut renderer.font_system,
-            &mut renderer.overlay_cache,
-        );
-    }
-    // tn-5fgz: Shape the Claude agent state badge.
-    if !claude_badge_text.is_empty() {
-        ensure_shaped(
-            &claude_slot,
-            &claude_key,
-            metrics,
-            vp.width(),
-            header_h,
+}
+
+/// Pre-formatted strings shown in the header. Empty strings mean the
+/// section is skipped entirely.
+struct HeaderTextStrings {
+    index_text: String,
+    process_text: String,
+    badge_text: String,
+    git_branch_text: String,
+    claude_badge_text: String,
+}
+
+impl HeaderTextStrings {
+    fn compute(
+        pane_id: PaneId,
+        center_title: Option<&str>,
+        claude_badge: Option<&str>,
+        tags: &HashMap<String, String>,
+        git_state: Option<&crate::git_state::GitState>,
+    ) -> Self {
+        let index_text = format!(" {pane_id}");
+        let process_text = match center_title {
+            Some(title) => title.to_string(),
+            None => format!("pane {pane_id}"),
+        };
+        let badge_text = format_tag_badges(tags);
+        let git_branch_text = git_state
+            .map(crate::git_state::format_for_header)
+            .unwrap_or_default();
+        let claude_badge_text = claude_badge.unwrap_or("").to_string();
+        Self {
+            index_text,
+            process_text,
+            badge_text,
+            git_branch_text,
             claude_badge_text,
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(claude_badge_color),
+        }
+    }
+}
+
+/// Slot/key identifiers for the chrome text cache. One slot per text
+/// element so the cache can keep its `Buffer` warm across frames.
+struct HeaderTextSlots {
+    idx_slot: String,
+    idx_key: String,
+    proc_slot: String,
+    proc_key: String,
+    badge_slot: String,
+    badge_key: String,
+    git_slot: String,
+    git_key: String,
+    claude_slot: String,
+    claude_key: String,
+    close_slot: String,
+    close_key: String,
+    zoom_slot: String,
+    zoom_key: String,
+    zoom_label: &'static str,
+    vsplit_slot: String,
+    vsplit_key: String,
+    hsplit_slot: String,
+    hsplit_key: String,
+}
+
+impl HeaderTextSlots {
+    fn new(
+        pane_id: PaneId,
+        strings: &HeaderTextStrings,
+        vp: Rect,
+        is_focused: bool,
+        is_zoomed: bool,
+    ) -> Self {
+        let focus_tag = if is_focused { "f" } else { "u" };
+        let zoom_tag = if is_zoomed { "z" } else { "n" };
+        // Filled square when zoomed (restore), empty square when normal (maximize).
+        let zoom_label: &'static str = if is_zoomed { " \u{25a3}" } else { " \u{25a1}" };
+        Self {
+            idx_slot: format!("hdr_idx_{pane_id}"),
+            idx_key: format!("{}|{:.0}|{focus_tag}", strings.index_text, vp.width()),
+            proc_slot: format!("hdr_proc_{pane_id}"),
+            proc_key: format!("{}|{:.0}|{focus_tag}", strings.process_text, vp.width()),
+            badge_slot: format!("hdr_badge_{pane_id}"),
+            badge_key: format!("{}|{:.0}|{focus_tag}", strings.badge_text, vp.width()),
+            git_slot: format!("hdr_git_{pane_id}"),
+            git_key: format!("{}|{:.0}|{focus_tag}", strings.git_branch_text, vp.width()),
+            claude_slot: format!("hdr_claude_{pane_id}"),
+            claude_key: format!(
+                "{}|{:.0}|{focus_tag}",
+                strings.claude_badge_text,
+                vp.width()
+            ),
+            close_slot: format!("hdr_close_{pane_id}"),
+            close_key: format!("X|{focus_tag}"),
+            zoom_slot: format!("hdr_zoom_{pane_id}"),
+            zoom_key: format!("{zoom_label}|{focus_tag}|{zoom_tag}"),
+            zoom_label,
+            vsplit_slot: format!("hdr_vsplit_{pane_id}"),
+            vsplit_key: format!("V|{focus_tag}"),
+            hsplit_slot: format!("hdr_hsplit_{pane_id}"),
+            hsplit_key: format!("H|{focus_tag}"),
+        }
+    }
+}
+
+/// X positions of the four header buttons (right-to-left).
+struct HeaderButtonLayout {
+    btn_x_close: f32,
+    btn_x_zoom: f32,
+    btn_x_vsplit: f32,
+    btn_x_hsplit: f32,
+    /// Leftmost button x — used to anchor the right edge of the git branch
+    /// text. When zoomed, the split buttons are hidden so this matches
+    /// `btn_x_zoom`; otherwise it matches `btn_x_hsplit`.
+    leftmost_btn_x: f32,
+}
+
+impl HeaderButtonLayout {
+    fn compute(vp: Rect, is_zoomed: bool) -> Self {
+        let btn_x_close = vp.x() + vp.width() - HEADER_BUTTON_MARGIN - HEADER_BUTTON_WIDTH;
+        let btn_x_zoom = btn_x_close - HEADER_BUTTON_WIDTH;
+        let btn_x_vsplit = btn_x_zoom - HEADER_BUTTON_WIDTH;
+        let btn_x_hsplit = btn_x_vsplit - HEADER_BUTTON_WIDTH;
+        let leftmost_btn_x = if is_zoomed { btn_x_zoom } else { btn_x_hsplit };
+        Self {
+            btn_x_close,
+            btn_x_zoom,
+            btn_x_vsplit,
+            btn_x_hsplit,
+            leftmost_btn_x,
+        }
+    }
+}
+
+/// Phase 1: shape every header text buffer that may end up rendered.
+/// Mutates `renderer.font_system` / `renderer.overlay_cache` so the buffers
+/// are warm for the immutable Phase 2.
+fn shape_pane_header_text(
+    strings: &HeaderTextStrings,
+    slots: &HeaderTextSlots,
+    style: &HeaderTextStyle,
+    metrics: Metrics,
+    vp: Rect,
+    header_h: f32,
+    renderer: &mut GridRenderer,
+) {
+    let family = renderer.font_config.family.clone();
+    let attrs =
+        |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Name(&family)).color(c) };
+
+    ensure_shaped(
+        &slots.idx_slot,
+        &slots.idx_key,
+        metrics,
+        vp.width(),
+        header_h,
+        &strings.index_text,
+        attrs(style.index_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    ensure_shaped(
+        &slots.proc_slot,
+        &slots.proc_key,
+        metrics,
+        vp.width(),
+        header_h,
+        &strings.process_text,
+        attrs(style.process_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    if !strings.badge_text.is_empty() {
+        ensure_shaped(
+            &slots.badge_slot,
+            &slots.badge_key,
+            metrics,
+            vp.width(),
+            header_h,
+            &strings.badge_text,
+            attrs(style.index_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+    if !strings.git_branch_text.is_empty() {
+        ensure_shaped(
+            &slots.git_slot,
+            &slots.git_key,
+            metrics,
+            vp.width(),
+            header_h,
+            &strings.git_branch_text,
+            attrs(style.git_branch_color),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+    if !strings.claude_badge_text.is_empty() {
+        ensure_shaped(
+            &slots.claude_slot,
+            &slots.claude_key,
+            metrics,
+            vp.width(),
+            header_h,
+            &strings.claude_badge_text,
+            attrs(style.claude_badge_color),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
     }
     ensure_shaped(
-        &close_slot,
-        &close_key,
+        &slots.close_slot,
+        &slots.close_key,
         metrics,
         HEADER_BUTTON_WIDTH,
         header_h,
         " X",
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(close_color),
+        attrs(style.close_color),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
     ensure_shaped(
-        &zoom_slot,
-        &zoom_key,
+        &slots.zoom_slot,
+        &slots.zoom_key,
         metrics,
         HEADER_BUTTON_WIDTH,
         header_h,
-        zoom_label,
-        Attrs::new()
-            .family(Family::Name(&family))
-            .color(button_color),
+        slots.zoom_label,
+        attrs(style.button_color),
         &mut renderer.font_system,
         &mut renderer.overlay_cache,
     );
-    // Split buttons are hidden when the pane is zoomed — no room to split into.
+    // Split buttons disappear when the pane is zoomed (no room to split).
+    let is_zoomed = slots.zoom_label == " \u{25a3}";
     if !is_zoomed {
         ensure_shaped(
-            &vsplit_slot,
-            &vsplit_key,
+            &slots.vsplit_slot,
+            &slots.vsplit_key,
             metrics,
             HEADER_BUTTON_WIDTH,
             header_h,
             " V",
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(button_color),
+            attrs(style.button_color),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
         ensure_shaped(
-            &hsplit_slot,
-            &hsplit_key,
+            &slots.hsplit_slot,
+            &slots.hsplit_key,
             metrics,
             HEADER_BUTTON_WIDTH,
             header_h,
             " H",
-            Attrs::new()
-                .family(Family::Name(&family))
-                .color(button_color),
+            attrs(style.button_color),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
         );
     }
+}
 
-    // Phase 2: immutable borrow for TextArea references.
-    // If any slot is missing from the cache (shaping failure / programming error),
-    // skip just that element rather than panicking on the render hot path.
-    let Some(index_buf) = cached_buf(&renderer.overlay_cache, &idx_slot) else {
-        tracing::warn!("pane header: index buffer slot missing; skipping header draw");
-        return;
-    };
-    let Some(process_buf) = cached_buf(&renderer.overlay_cache, &proc_slot) else {
-        tracing::warn!("pane header: process buffer slot missing; skipping header draw");
-        return;
-    };
-
-    let process_text_width = process_buf
-        .layout_runs()
-        .next()
-        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-        .unwrap_or(0.0);
-    let center_offset = ((vp.width() - process_text_width) / 2.0).max(0.0);
-
+/// Phase 2: build TextArea references against the cached buffers, prepare
+/// glyphon, and emit the header text render pass.
+#[allow(clippy::too_many_arguments)]
+fn draw_pane_header_text(
+    vp: Rect,
+    is_zoomed: bool,
+    strings: &HeaderTextStrings,
+    slots: &HeaderTextSlots,
+    style: &HeaderTextStyle,
+    layout: &HeaderButtonLayout,
+    renderer: &mut GridRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface_width: u32,
+    surface_height: u32,
+) {
     renderer.viewport.update(
         queue,
         Resolution {
@@ -653,129 +770,19 @@ pub(crate) fn draw_pane_header(
         bottom: surface_height as i32,
     };
 
-    let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(8);
-    text_areas.push(TextArea {
-        buffer: index_buf,
-        left: vp.x(),
-        top: vp.y(),
-        scale: 1.0,
+    let text_areas = match build_header_text_areas(
+        vp,
+        is_zoomed,
+        strings,
+        slots,
+        style,
+        layout,
         bounds,
-        default_color: index_color,
-        custom_glyphs: &[],
-    });
-    text_areas.push(TextArea {
-        buffer: process_buf,
-        left: vp.x() + center_offset,
-        top: vp.y(),
-        scale: 1.0,
-        bounds,
-        default_color: process_color,
-        custom_glyphs: &[],
-    });
-    // Track right edge of badge cluster for claude badge positioning.
-    let mut badge_right = vp.x() + center_offset + process_text_width;
-    if !badge_text.is_empty()
-        && let Some(badge_buf) = cached_buf(&renderer.overlay_cache, &badge_slot)
-    {
-        let badge_left = badge_right + 8.0;
-        let badge_w = badge_buf
-            .layout_runs()
-            .next()
-            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-            .unwrap_or(0.0);
-        badge_right = badge_left + badge_w;
-        text_areas.push(TextArea {
-            buffer: badge_buf,
-            left: badge_left,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: index_color,
-            custom_glyphs: &[],
-        });
-    }
-    // tn-5fgz: Claude agent state badge, positioned after tag badges.
-    if !claude_badge_text.is_empty()
-        && let Some(claude_buf) = cached_buf(&renderer.overlay_cache, &claude_slot)
-    {
-        let claude_left = badge_right + 8.0;
-        text_areas.push(TextArea {
-            buffer: claude_buf,
-            left: claude_left,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: claude_badge_color,
-            custom_glyphs: &[],
-        });
-    }
-    // tn-e97n: git branch, right-aligned before the button cluster.
-    if !git_branch_text.is_empty()
-        && let Some(git_buf) = cached_buf(&renderer.overlay_cache, &git_slot)
-    {
-        let git_text_width = git_buf
-            .layout_runs()
-            .next()
-            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-            .unwrap_or(0.0);
-        let git_left = (leftmost_btn_x - git_text_width - 8.0).max(vp.x());
-        text_areas.push(TextArea {
-            buffer: git_buf,
-            left: git_left,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: git_branch_color,
-            custom_glyphs: &[],
-        });
-    }
-    // Split buttons are hidden when zoomed.
-    if !is_zoomed {
-        if let Some(buf) = cached_buf(&renderer.overlay_cache, &hsplit_slot) {
-            text_areas.push(TextArea {
-                buffer: buf,
-                left: btn_x_hsplit,
-                top: vp.y(),
-                scale: 1.0,
-                bounds,
-                default_color: button_color,
-                custom_glyphs: &[],
-            });
-        }
-        if let Some(buf) = cached_buf(&renderer.overlay_cache, &vsplit_slot) {
-            text_areas.push(TextArea {
-                buffer: buf,
-                left: btn_x_vsplit,
-                top: vp.y(),
-                scale: 1.0,
-                bounds,
-                default_color: button_color,
-                custom_glyphs: &[],
-            });
-        }
-    }
-    if let Some(buf) = cached_buf(&renderer.overlay_cache, &zoom_slot) {
-        text_areas.push(TextArea {
-            buffer: buf,
-            left: btn_x_zoom,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: button_color,
-            custom_glyphs: &[],
-        });
-    }
-    if let Some(buf) = cached_buf(&renderer.overlay_cache, &close_slot) {
-        text_areas.push(TextArea {
-            buffer: buf,
-            left: btn_x_close,
-            top: vp.y(),
-            scale: 1.0,
-            bounds,
-            default_color: close_color,
-            custom_glyphs: &[],
-        });
-    }
+        &renderer.overlay_cache,
+    ) {
+        Some(areas) => areas,
+        None => return,
+    };
 
     if let Err(e) = renderer.overlay_text_renderer.prepare(
         device,
@@ -789,32 +796,182 @@ pub(crate) fn draw_pane_header(
         tracing::warn!("header text prepare failed: {}", e);
     }
 
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("header_text_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        if let Err(e) = renderer.overlay_text_renderer.render(
-            &renderer.overlay_atlas,
-            &renderer.viewport,
-            &mut pass,
-        ) {
+    with_chrome_render_pass(encoder, view, "header_text_pass", |pass| {
+        if let Err(e) =
+            renderer
+                .overlay_text_renderer
+                .render(&renderer.overlay_atlas, &renderer.viewport, pass)
+        {
             tracing::warn!("header text render failed: {}", e);
         }
+    });
+}
+
+/// Build the TextArea list for the pane header. Returns `None` when one of
+/// the required (index/process) text buffers is missing — the caller
+/// should skip the entire text render pass in that case so the warning
+/// matches the pre-refactor behavior.
+#[allow(clippy::too_many_arguments)]
+fn build_header_text_areas<'cache>(
+    vp: Rect,
+    is_zoomed: bool,
+    strings: &HeaderTextStrings,
+    slots: &HeaderTextSlots,
+    style: &HeaderTextStyle,
+    layout: &HeaderButtonLayout,
+    bounds: TextBounds,
+    cache: &'cache super::text_cache::ChromeTextCache,
+) -> Option<Vec<TextArea<'cache>>> {
+    let index_buf = cached_buf(cache, &slots.idx_slot).or_else(|| {
+        tracing::warn!("pane header: index buffer slot missing; skipping header draw");
+        None
+    })?;
+    let process_buf = cached_buf(cache, &slots.proc_slot).or_else(|| {
+        tracing::warn!("pane header: process buffer slot missing; skipping header draw");
+        None
+    })?;
+
+    let process_text_width = buffer_run_width(process_buf);
+    let center_offset = ((vp.width() - process_text_width) / 2.0).max(0.0);
+
+    let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(8);
+    text_areas.push(TextArea {
+        buffer: index_buf,
+        left: vp.x(),
+        top: vp.y(),
+        scale: 1.0,
+        bounds,
+        default_color: style.index_color,
+        custom_glyphs: &[],
+    });
+    text_areas.push(TextArea {
+        buffer: process_buf,
+        left: vp.x() + center_offset,
+        top: vp.y(),
+        scale: 1.0,
+        bounds,
+        default_color: style.process_color,
+        custom_glyphs: &[],
+    });
+
+    // Right edge of the badge cluster — the Claude badge chains off it.
+    let mut badge_right = vp.x() + center_offset + process_text_width;
+    if !strings.badge_text.is_empty()
+        && let Some(badge_buf) = cached_buf(cache, &slots.badge_slot)
+    {
+        let badge_left = badge_right + 8.0;
+        let badge_w = buffer_run_width(badge_buf);
+        badge_right = badge_left + badge_w;
+        text_areas.push(TextArea {
+            buffer: badge_buf,
+            left: badge_left,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: style.index_color,
+            custom_glyphs: &[],
+        });
     }
+    if !strings.claude_badge_text.is_empty()
+        && let Some(claude_buf) = cached_buf(cache, &slots.claude_slot)
+    {
+        text_areas.push(TextArea {
+            buffer: claude_buf,
+            left: badge_right + 8.0,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: style.claude_badge_color,
+            custom_glyphs: &[],
+        });
+    }
+    if !strings.git_branch_text.is_empty()
+        && let Some(git_buf) = cached_buf(cache, &slots.git_slot)
+    {
+        let git_text_width = buffer_run_width(git_buf);
+        let git_left = (layout.leftmost_btn_x - git_text_width - 8.0).max(vp.x());
+        text_areas.push(TextArea {
+            buffer: git_buf,
+            left: git_left,
+            top: vp.y(),
+            scale: 1.0,
+            bounds,
+            default_color: style.git_branch_color,
+            custom_glyphs: &[],
+        });
+    }
+    if !is_zoomed {
+        push_button_area(
+            &mut text_areas,
+            cache,
+            &slots.hsplit_slot,
+            layout.btn_x_hsplit,
+            vp.y(),
+            bounds,
+            style.button_color,
+        );
+        push_button_area(
+            &mut text_areas,
+            cache,
+            &slots.vsplit_slot,
+            layout.btn_x_vsplit,
+            vp.y(),
+            bounds,
+            style.button_color,
+        );
+    }
+    push_button_area(
+        &mut text_areas,
+        cache,
+        &slots.zoom_slot,
+        layout.btn_x_zoom,
+        vp.y(),
+        bounds,
+        style.button_color,
+    );
+    push_button_area(
+        &mut text_areas,
+        cache,
+        &slots.close_slot,
+        layout.btn_x_close,
+        vp.y(),
+        bounds,
+        style.close_color,
+    );
+
+    Some(text_areas)
+}
+
+/// Push a TextArea for one of the right-side header buttons, skipping
+/// silently if the cached buffer is missing.
+fn push_button_area<'cache>(
+    text_areas: &mut Vec<TextArea<'cache>>,
+    cache: &'cache super::text_cache::ChromeTextCache,
+    slot: &str,
+    left: f32,
+    top: f32,
+    bounds: TextBounds,
+    color: GlyphColor,
+) {
+    if let Some(buf) = cached_buf(cache, slot) {
+        text_areas.push(TextArea {
+            buffer: buf,
+            left,
+            top,
+            scale: 1.0,
+            bounds,
+            default_color: color,
+            custom_glyphs: &[],
+        });
+    }
+}
+
+/// Sum the glyph advance widths of the first layout run in `buf`.
+fn buffer_run_width(buf: &glyphon::Buffer) -> f32 {
+    buf.layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
+        .unwrap_or(0.0)
 }
 
 // ── Tag badge formatting (tn-166y) ────────────────────────────────────

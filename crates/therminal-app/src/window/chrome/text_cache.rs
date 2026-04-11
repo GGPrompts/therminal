@@ -8,6 +8,12 @@ use std::collections::HashMap;
 
 use glyphon::{Attrs, Buffer, FontSystem, Metrics, Shaping};
 
+/// The chrome text cache: slot name → (cache key, shaped buffer).
+///
+/// Aliased so helper signatures don't have to repeat the long
+/// `HashMap<String, (String, Buffer)>` literal everywhere.
+pub(super) type ChromeTextCache = HashMap<String, (String, Buffer)>;
+
 /// Ensure a cached shaped Buffer exists for the given slot.
 /// If the cache key matches, this is a no-op. Otherwise creates a new Buffer,
 /// shapes it, and stores it in the cache.

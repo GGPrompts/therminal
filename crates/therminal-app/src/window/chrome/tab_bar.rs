@@ -9,6 +9,7 @@ use crate::grid_renderer::{ColorVertex, GridRenderer};
 use therminal_core::palette::Color as PaletteColor;
 
 use super::colors::{FOCUS_BORDER_COLOR, HEADER_BG_COLOR, STATUS_BAR_BG_COLOR};
+use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
 /// Data collected for the workspace tab bar.
@@ -66,27 +67,11 @@ pub(crate) fn draw_tab_bar(
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("tabbar_bg_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+    with_chrome_render_pass(encoder, view, "tabbar_bg_pass", |pass| {
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.draw(0..6, 0..1);
-    }
+    });
 
     if !show_tabs {
         return;
@@ -139,25 +124,12 @@ pub(crate) fn draw_tab_bar(
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("tabbar_tabs_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
+        let vert_count = tab_verts.len() as u32;
+        with_chrome_render_pass(encoder, view, "tabbar_tabs_pass", |pass| {
+            pass.set_pipeline(&renderer.rect_pipeline);
+            pass.set_vertex_buffer(0, tab_buf.slice(..));
+            pass.draw(0..vert_count, 0..1);
         });
-        pass.set_pipeline(&renderer.rect_pipeline);
-        pass.set_vertex_buffer(0, tab_buf.slice(..));
-        pass.draw(0..tab_verts.len() as u32, 0..1);
     }
 
     // ── Tab label text ──
@@ -323,32 +295,15 @@ pub(crate) fn draw_tab_bar(
         tracing::warn!("tab bar text prepare failed: {}", e);
     }
 
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("tabbar_text_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        if let Err(e) = renderer.overlay_text_renderer.render(
-            &renderer.overlay_atlas,
-            &renderer.viewport,
-            &mut pass,
-        ) {
+    with_chrome_render_pass(encoder, view, "tabbar_text_pass", |pass| {
+        if let Err(e) =
+            renderer
+                .overlay_text_renderer
+                .render(&renderer.overlay_atlas, &renderer.viewport, pass)
+        {
             tracing::warn!("tab bar text render failed: {}", e);
         }
-    }
+    });
 }
 
 /// Return the workspace ID for a click at the given x-position in the tab bar.

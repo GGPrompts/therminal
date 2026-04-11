@@ -105,6 +105,7 @@ impl App {
                     startup_command: None,
                     ratio: None,
                     shell: None,
+                    worktree: None,
                 }),
             )
             .await
@@ -450,6 +451,7 @@ impl App {
             startup_command: None,
             ratio: None,
             shell: None,
+            worktree: None,
         }) {
             Ok(r) => r,
             Err(e) => {
