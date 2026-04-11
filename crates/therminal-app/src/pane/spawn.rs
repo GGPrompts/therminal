@@ -156,6 +156,23 @@ impl PtyReaderHandler for AppPtyHandler {
                 InterceptedEvent::DesktopNotification(text) => {
                     (self.on_notification)(text);
                 }
+                // tn-nhbv: cooperative agent self-report via OSC 7777.
+                // Store tokens + model for the pane-header context gauge.
+                // We deliberately leave `agent_name` to the process-tree
+                // detector path above so tn-5fgz's chrome surface doesn't
+                // race with OSC-reported identity.
+                InterceptedEvent::AgentReport { tokens, model, .. } => {
+                    if (tokens.is_some() || model.is_some())
+                        && let Ok(mut s) = self.status.lock()
+                    {
+                        if let Some(t) = tokens {
+                            s.agent_tokens = Some(t);
+                        }
+                        if let Some(m) = model {
+                            s.agent_model = Some(m);
+                        }
+                    }
+                }
                 _ => {}
             }
         }

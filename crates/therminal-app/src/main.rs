@@ -7,6 +7,7 @@ pub(crate) mod git_state;
 mod grid_renderer;
 mod mcp_stdio;
 mod menu;
+mod model_context;
 mod overlay;
 mod pane;
 mod url_detection;

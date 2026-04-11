@@ -215,14 +215,80 @@ pub(crate) fn draw_pane_header(
     let sw = surface_width as f32;
     let sh = surface_height as f32;
 
-    // ── Header background rect ──
+    // ── Header background rect + tn-nhbv context gauge ──
+    //
+    // Both the header background and the 2px context-window fill gauge
+    // are appended to the same vertex buffer and rendered in a single
+    // pass, so the gauge adds zero additional render passes per pane.
     let bg_color = if is_focused {
         HEADER_BG_COLOR
     } else {
         HEADER_BG_DIM_COLOR
     };
-    let bg_verts = pixel_rect_to_ndc(vp.x(), vp.y(), vp.width(), header_h, sw, sh, bg_color);
+    let mut bg_verts: Vec<ColorVertex> =
+        pixel_rect_to_ndc(vp.x(), vp.y(), vp.width(), header_h, sw, sh, bg_color).to_vec();
 
+    // tn-nhbv: pane-header context gauge. Snapshot tokens + model under
+    // the pane-status lock, then release before rasterising. Graceful
+    // no-op when either input is missing or the model isn't known.
+    let (agent_tokens, agent_model) = {
+        let s = pane.status.lock().unwrap_or_else(|e| e.into_inner());
+        (s.agent_tokens, s.agent_model.clone())
+    };
+    if let (Some(tokens), Some(model)) = (agent_tokens, agent_model)
+        && let Some(window) = crate::model_context::context_window_for_model(&model)
+        && let Some(ratio) = crate::model_context::fill_ratio(tokens, window)
+    {
+        let tier = crate::model_context::gauge_tier(ratio);
+        let color = match tier {
+            crate::model_context::GaugeTier::Green => {
+                let c = PaletteColor::STATUS_OK;
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    if is_focused { 0.95 } else { 0.70 },
+                ]
+            }
+            crate::model_context::GaugeTier::Yellow => {
+                let c = PaletteColor::STATUS_WARN;
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    if is_focused { 0.95 } else { 0.70 },
+                ]
+            }
+            crate::model_context::GaugeTier::Red => {
+                let c = PaletteColor::STATUS_ERROR;
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    if is_focused { 0.95 } else { 0.70 },
+                ]
+            }
+        };
+        let gauge_h = 2.0_f32;
+        // Clamp so overflow (>100%) still renders a full bar rather than
+        // painting past the pane right edge.
+        let clamped = ratio.clamp(0.0, 1.0);
+        let gauge_w = (vp.width() * clamped).max(0.0);
+        if gauge_w > 0.0 {
+            let gauge_y = vp.y() + header_h - gauge_h;
+            bg_verts.extend_from_slice(&pixel_rect_to_ndc(
+                vp.x(),
+                gauge_y,
+                gauge_w,
+                gauge_h,
+                sw,
+                sh,
+                color,
+            ));
+        }
+    }
+
+    let bg_vert_count = bg_verts.len() as u32;
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("header_bg_vbuf"),
         contents: bytemuck::cast_slice(&bg_verts),
@@ -248,7 +314,7 @@ pub(crate) fn draw_pane_header(
         });
         pass.set_pipeline(&renderer.rect_pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
-        pass.draw(0..6, 0..1);
+        pass.draw(0..bg_vert_count, 0..1);
     }
 
     // ── Exit-code indicator stripe (left edge) ──

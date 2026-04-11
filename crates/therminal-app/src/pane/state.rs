@@ -43,6 +43,14 @@ pub struct PaneStatus {
     pub last_exit_code: Option<i32>,
     /// Name of a detected AI agent (from ProcessDetector).
     pub agent_name: Option<String>,
+    /// Cumulative token count reported by a cooperative agent via OSC 7777
+    /// (tn-nhbv). `None` when no report has been seen.
+    pub agent_tokens: Option<u64>,
+    /// Model identifier reported by a cooperative agent via OSC 7777
+    /// (tn-nhbv). Used with `context_window_for_model()` to compute the
+    /// pane-header context gauge fill ratio. `None` when no report has
+    /// been seen.
+    pub agent_model: Option<String>,
     /// Git repository state for the pane's cwd (branch, dirty, detached).
     pub git_state: Option<GitState>,
     /// Opaque key/value tags from the daemon (tn-bbvf).

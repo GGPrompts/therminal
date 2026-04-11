@@ -818,6 +818,20 @@ fn run_remote_worker(
                 InterceptedEvent::DesktopNotification(text) => {
                     (on_notification)(text);
                 }
+                // tn-nhbv: cooperative agent self-report via OSC 7777.
+                // Store tokens + model for the pane-header context gauge.
+                InterceptedEvent::AgentReport { tokens, model, .. } => {
+                    if (tokens.is_some() || model.is_some())
+                        && let Ok(mut s) = status.lock()
+                    {
+                        if let Some(t) = tokens {
+                            s.agent_tokens = Some(t);
+                        }
+                        if let Some(m) = model {
+                            s.agent_model = Some(m);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
