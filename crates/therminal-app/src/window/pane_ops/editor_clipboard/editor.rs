@@ -5,9 +5,7 @@ use crate::window::App;
 
 #[cfg(windows)]
 use super::planner::shell_quote;
-use super::planner::{
-    OpenInEditorPlan, plan_open_in_editor, resolve_editor_chain, which_on_path,
-};
+use super::planner::{OpenInEditorPlan, plan_open_in_editor, resolve_editor_chain, which_on_path};
 
 impl App {
     /// Open a file path in the user's `$EDITOR` or via `xdg-open` / `open`.
