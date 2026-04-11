@@ -56,6 +56,7 @@ pub mod pipeline;
 pub mod session_log;
 pub mod state;
 pub mod tool_call_hotspots;
+pub mod wsl_paths;
 
 pub use agent_events::AgentEvent;
 pub use hook_push::{HookPushSink, HookSignal};

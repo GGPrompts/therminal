@@ -49,6 +49,49 @@ use tracing::{debug, info};
 
 use crate::session::SessionManager;
 
+/// Decide whether a pane spawned with the given shell command should be
+/// scanned via the WSL probe (`wsl.exe -d <distro> ps`) instead of the
+/// host sysinfo walker. tn-966s.
+///
+/// Returns the WSL distro name when:
+/// - the daemon is running on Windows native (`cfg!(windows)`), AND
+/// - the pane's shell command looks like `wsl.exe` (case-insensitive,
+///   ignoring directory prefixes), AND
+/// - a default WSL distro can be detected via `wsl.exe -l -q`.
+///
+/// Returns `None` everywhere else, so the existing host sysinfo path
+/// keeps running unchanged on Linux daemons, WSL-hosted daemons, and
+/// pure-Windows panes (cmd, powershell, pwsh).
+pub(crate) fn wsl_distro_for_shell(shell_command: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    if !shell_command_is_wsl(shell_command) {
+        return None;
+    }
+    therminal_harness_claude::wsl_paths::detect_default_distro()
+}
+
+/// Pure heuristic for "is this shell command an invocation of `wsl.exe`?".
+/// Pulled out so the daemon-only `cfg!(windows)` gate doesn't block tests
+/// from exercising the matching rules on Linux CI.
+pub(crate) fn shell_command_is_wsl(shell_command: &str) -> bool {
+    if shell_command.is_empty() {
+        return false;
+    }
+    // Strip trailing whitespace + everything after the first space (the
+    // user may have appended `--cd ~` or similar).
+    let head = shell_command.split_whitespace().next().unwrap_or("");
+    // Take the basename — accept both forward- and back-slash separators
+    // so a path like `C:\Windows\System32\wsl.exe` or `wsl.exe` both work.
+    let basename = head
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(head)
+        .to_ascii_lowercase();
+    basename == "wsl.exe" || basename == "wsl"
+}
+
 /// Default scan cadence for the process-detector ticker. Matches the
 /// GUI's per-pane default in `AppPtyHandler` (3 seconds).
 const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(3);
@@ -105,34 +148,51 @@ pub async fn tick_once(
     session_mgr: &Arc<Mutex<SessionManager>>,
     detectors: &mut HashMap<PaneId, ProcessDetector>,
 ) {
-    // Snapshot pane → shell_pid pairs under the mutex, then drop it.
-    let pairs = {
+    // Snapshot pane → (shell_pid, shell_command) triples under the mutex,
+    // then drop it. The shell command is needed to recognise WSL panes
+    // on Windows native (tn-966s) so we can route them through the WSL
+    // probe path instead of the blind host sysinfo walker.
+    let triples = {
         let mgr = session_mgr.lock().await;
-        mgr.pane_shell_pids()
+        mgr.pane_detector_specs()
     };
 
     // Reconcile the detector cache against the live pane set.
     let live_pane_ids: std::collections::HashSet<PaneId> =
-        pairs.iter().map(|(pid, _)| *pid).collect();
+        triples.iter().map(|(pid, _, _)| *pid).collect();
     detectors.retain(|pane_id, _| live_pane_ids.contains(pane_id));
 
-    // Lazily create detectors for new panes that have a known shell PID.
-    // Run scans outside the SessionManager lock — sysinfo can be slow.
+    // Lazily create detectors for new panes that have a known shell PID
+    // (or, on Windows native, are WSL panes that don't need a shell PID
+    // because the WSL probe ignores the host process tree). Run scans
+    // outside the SessionManager lock — sysinfo and `wsl.exe ps` can
+    // both be slow.
     let mut results: Vec<(
         PaneId,
         Vec<therminal_terminal::process_detector::DetectedAgent>,
     )> = Vec::new();
 
-    for (pane_id, shell_pid_opt) in pairs {
-        let Some(shell_pid) = shell_pid_opt else {
+    for (pane_id, shell_pid_opt, shell_command) in triples {
+        let wsl_distro = wsl_distro_for_shell(&shell_command);
+        if shell_pid_opt.is_none() && wsl_distro.is_none() {
             // Handoff-restored panes don't carry a shell PID; skip
-            // them silently. They'll get re-detected on the next
-            // session restart when the daemon spawns a fresh shell.
+            // them silently unless they're a WSL pane (where the
+            // probe ignores the shell PID anyway). They'll get
+            // re-detected on the next session restart when the daemon
+            // spawns a fresh shell.
             continue;
-        };
-        let detector = detectors
-            .entry(pane_id)
-            .or_insert_with(|| ProcessDetector::new(Some(shell_pid)));
+        }
+        let detector = detectors.entry(pane_id).or_insert_with(|| {
+            let mut d = ProcessDetector::new(shell_pid_opt);
+            if let Some(distro) = wsl_distro.as_deref() {
+                d = d.with_wsl_distro(distro);
+                debug!(
+                    pane_id,
+                    distro, "process_detector_task: WSL probe enabled for WSL pane"
+                );
+            }
+            d
+        });
         let agents = detector.scan();
         results.push((pane_id, agents));
     }
@@ -345,5 +405,55 @@ mod tests {
         let (tx, _) = tokio::sync::broadcast::channel(16);
         let mgr = SessionManager::new(tx);
         assert!(mgr.pane_shell_pids().is_empty());
+    }
+
+    /// `pane_detector_specs` is the new accessor backing the WSL probe
+    /// path; sanity-check the empty case.
+    #[tokio::test]
+    async fn pane_detector_specs_empty_manager_returns_empty() {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mgr = SessionManager::new(tx);
+        assert!(mgr.pane_detector_specs().is_empty());
+    }
+
+    // ── shell_command_is_wsl (tn-966s) ───────────────────────────────────
+
+    #[test]
+    fn shell_command_is_wsl_recognises_bare_basename() {
+        assert!(shell_command_is_wsl("wsl.exe"));
+        assert!(shell_command_is_wsl("WSL.EXE"));
+        assert!(shell_command_is_wsl("wsl")); // no .exe extension
+    }
+
+    #[test]
+    fn shell_command_is_wsl_recognises_full_windows_path() {
+        assert!(shell_command_is_wsl(r"C:\Windows\System32\wsl.exe"));
+        assert!(shell_command_is_wsl(r"C:/Windows/System32/wsl.exe"));
+    }
+
+    #[test]
+    fn shell_command_is_wsl_strips_trailing_args() {
+        assert!(shell_command_is_wsl("wsl.exe --cd ~"));
+        assert!(shell_command_is_wsl("wsl.exe -d Ubuntu"));
+    }
+
+    #[test]
+    fn shell_command_is_wsl_rejects_other_shells() {
+        assert!(!shell_command_is_wsl("/bin/bash"));
+        assert!(!shell_command_is_wsl("powershell.exe"));
+        assert!(!shell_command_is_wsl("pwsh.exe"));
+        assert!(!shell_command_is_wsl("cmd.exe"));
+        assert!(!shell_command_is_wsl(""));
+    }
+
+    /// `wsl_distro_for_shell` is a no-op on non-Windows builds — even
+    /// if the command is `wsl.exe` it must return `None` so the existing
+    /// host sysinfo path stays in charge.
+    #[cfg(not(windows))]
+    #[test]
+    fn wsl_distro_for_shell_is_noop_on_unix() {
+        assert!(wsl_distro_for_shell("wsl.exe").is_none());
+        assert!(wsl_distro_for_shell(r"C:\Windows\System32\wsl.exe").is_none());
+        assert!(wsl_distro_for_shell("/bin/bash").is_none());
     }
 }

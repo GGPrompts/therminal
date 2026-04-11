@@ -66,6 +66,16 @@ The recommended way to run therminal on Windows is a native build (not WSLg).
 - **IPC on Windows**: `socket_path()` returns `\\.\pipe\therminal-<name>` (named pipe) instead of Unix sockets.
 - **Known issue**: WDAC/SmartScreen may block build-script executables. Fix: `Add-MpExclusion -Path` on the target dir.
 
+### WSL pane observability (tn-966s)
+
+When the daemon runs as a Windows native process **and** the pane's shell is `wsl.exe`, the Claude harness and the daemon-side process detector resolve their inputs through the WSL virtual filesystem so the agent observability pipeline (chrome badges, status bar, auto-tile, `therminal://claude/events`, `terminal.agents.list`) keeps working out of the box. The behavior is implemented in three layers:
+
+1. **State files** — `crates/therminal-harness-claude/src/state.rs` calls `wsl_paths::detect_default_distro()` (cached `wsl.exe -l -q`) and rewrites `/tmp/claude-code-state`, `/tmp/codex-state`, `/tmp/copilot-state` to `\\wsl.localhost\<distro>\tmp\<name>`. The `notify` recommended-watcher handles UNC paths transparently.
+2. **JSONL transcripts** — `crates/therminal-harness-claude/src/jsonl_tailer.rs::home_dir` consults `wsl_paths::detect_wsl_home()` (cached `wsl.exe -e sh -c 'printf %s "$HOME"'`) to resolve `~/.claude/projects/{hash}/...` against the WSL user's home, producing `\\wsl.localhost\<distro>\home\<linux_user>\.claude\projects\...`.
+3. **Process detection** — `crates/therminal-terminal/src/process_detector.rs::ProcessDetector::with_wsl_distro` flips the scanner into WSL probe mode, where `scan()` shells out to `wsl.exe -d <distro> -e ps -eo pid=,ppid=,comm=,args=` and parses the result through the same classifier as the sysinfo path. The daemon's `process_detector_task` activates this mode automatically when `pane_detector_specs` reports `shell_command == "wsl.exe"` (basename match, case-insensitive).
+
+All three paths fall back gracefully to their pre-tn-966s behavior on Linux/macOS daemons, on WSL-hosted daemons, and on pure-Windows panes (cmd, pwsh, powershell). Distro and `$HOME` lookups are cached in `OnceLock`s so they probe `wsl.exe` exactly once per process. The hook-push path (`HookPushSink`) remains as a complementary low-latency signal source — both paths run simultaneously when both work.
+
 ## Code Style
 
 ### Module Size

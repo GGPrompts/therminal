@@ -334,7 +334,29 @@ fn is_valid_session_id(s: &str) -> bool {
 /// Prior to tn-ix8c this function read `$HOME` directly, which is typically
 /// unset on Windows native, so the subagent JSONL tailer silently watched
 /// `/home/builder/.claude/projects/` (nonexistent) and emitted no events.
+///
+/// **tn-966s**: when running as a Windows native daemon, `dirs::home_dir`
+/// returns the Windows host's `%USERPROFILE%`, but Claude Code stores its
+/// JSONL transcripts under the **WSL** user's `$HOME`. Probe for the
+/// default WSL distro and Linux `$HOME` once at boot, and prefer the UNC
+/// path `\\wsl.localhost\<distro>\home\<linux_user>` so the tailer reads
+/// transcripts from the same files Claude is writing. Falls back to the
+/// Windows path when WSL detection fails so a pure Windows-host Claude
+/// install (Codespaces, no WSL) keeps working.
 fn home_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(distro) = crate::wsl_paths::detect_default_distro()
+            && let Some(home) = crate::wsl_paths::detect_wsl_home()
+            && let Some(unc) = crate::wsl_paths::linux_to_unc(&distro, &home)
+        {
+            tracing::debug!(
+                home = %unc.display(),
+                "claude jsonl tailer: using WSL UNC home on Windows native"
+            );
+            return unc;
+        }
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/builder"))
 }
 

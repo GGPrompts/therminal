@@ -30,6 +30,24 @@ use tracing::{debug, trace, warn};
 fn default_state_dir(name: &str) -> PathBuf {
     #[cfg(windows)]
     {
+        // tn-966s: when therminal-daemon runs as a Windows native process,
+        // Claude Code typically runs inside WSL2 and writes its state files
+        // to `/tmp/{name}` *inside the distro*. The Windows host can reach
+        // those files via `\\wsl.localhost\<distro>\tmp\{name}`. Probe for
+        // the default WSL distro once at boot and prefer the UNC path when
+        // it resolves; fall back to `%TEMP%\{name}` (the historical
+        // Windows-native default) when WSL is absent or detection fails so
+        // a pure Windows-host Claude install still works.
+        if let Some(distro) = crate::wsl_paths::detect_default_distro()
+            && let Some(unc) = crate::wsl_paths::linux_to_unc(&distro, &format!("/tmp/{name}"))
+        {
+            tracing::info!(
+                dir = %unc.display(),
+                distro,
+                "claude state poller: using WSL UNC path on Windows native"
+            );
+            return unc;
+        }
         std::env::temp_dir().join(name)
     }
 
@@ -527,19 +545,59 @@ impl ClaudeStatePoller {
     pub fn with_dirs(dirs: Vec<PathBuf>) -> NotifyResult<Self> {
         for dir in &dirs {
             if !dir.exists() {
+                // Best-effort: on Windows, the WSL UNC path's owner is the
+                // Linux process — we can't `mkdir` from the host side and
+                // shouldn't try. The watcher attempt below will surface
+                // the real failure if the directory truly doesn't exist.
                 let _ = std::fs::create_dir_all(dir);
             }
         }
 
         let (tx, rx) = mpsc::channel();
         let mut watchers = Vec::new();
+        let mut watched_dirs: Vec<PathBuf> = Vec::with_capacity(dirs.len());
 
         for dir in &dirs {
             let tx_clone = tx.clone();
-            let mut watcher = notify::recommended_watcher(tx_clone)?;
-            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+            // tn-966s: failures on individual directories are non-fatal so
+            // a missing `\\wsl.localhost\<distro>\tmp\codex-state` doesn't
+            // tank the whole poller. The first dir failure used to bubble
+            // up via `?` and disable the entire harness pipeline; on
+            // Windows native that punished users who only had Claude (and
+            // not Codex/Copilot) installed inside WSL.
+            let mut watcher = match notify::recommended_watcher(tx_clone) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!(
+                        dir = %dir.display(),
+                        error = %e,
+                        "claude state poller: watcher init failed for dir, skipping"
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
+                warn!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "claude state poller: watch failed for dir, skipping"
+                );
+                continue;
+            }
             watchers.push(watcher);
+            watched_dirs.push(dir.clone());
         }
+
+        // If no directories survived, surface a NotifyResult error so the
+        // daemon's existing fallback path (`spawn` returns `None` and the
+        // pipeline disables) keeps working unchanged. Pre-tn-966s
+        // behaviour for the all-fail case.
+        if watchers.is_empty() && !dirs.is_empty() {
+            return Err(notify::Error::generic(
+                "no claude state directories could be watched",
+            ));
+        }
+        let dirs = watched_dirs;
 
         // Initial read: parse every JSON file in each watched dir, then
         // filter out dead-pid sessions BEFORE handing the snapshot to the
