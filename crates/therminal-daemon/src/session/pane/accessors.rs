@@ -174,7 +174,7 @@ impl Pane {
         self.pty_writer.flush()
     }
 
-    pub(crate) fn has_seen_prompt_start(&self) -> bool {
+    pub(in crate::session) fn has_seen_prompt_start(&self) -> bool {
         use therminal_terminal::osc633::CommandState;
 
         self.command_tracker
