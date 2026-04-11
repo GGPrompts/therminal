@@ -27,6 +27,11 @@ const TAB_ACTIVE_BG_COLOR: [f32; 4] = HEADER_BG_COLOR;
 const TAB_ACTIVE_UNDERLINE_COLOR: [f32; 4] = FOCUS_BORDER_COLOR;
 
 /// Draw the workspace tab bar at the top of the window.
+///
+/// `show_tabs` gates tab labels + active highlights: when false (single
+/// workspace without CSD) this function returns before touching the GPU so
+/// no background strip is reserved. With CSD enabled the bar is still drawn
+/// as the title bar chrome even with a single workspace.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_tab_bar(
     info: &TabBarInfo,
@@ -42,6 +47,12 @@ pub(crate) fn draw_tab_bar(
     csd_reserved: f32,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
+
+    // Bar height of 0 means the whole tab-bar chrome is collapsed (single
+    // workspace, no CSD). Nothing to draw — not even the background strip.
+    if bar_h <= 0.0 {
+        return;
+    }
 
     let sw = surface_width as f32;
     let sh = surface_height as f32;

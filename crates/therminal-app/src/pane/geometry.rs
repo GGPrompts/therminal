@@ -49,18 +49,37 @@ pub fn effective_status_bar_height(show: bool) -> f32 {
     if show { STATUS_BAR_HEIGHT } else { 0.0 }
 }
 
-/// Return the effective tab bar height: 0 when disabled, TAB_BAR_HEIGHT otherwise.
+/// Decide whether the workspace tab bar should be visible.
+///
+/// Single-workspace layouts hide the bar automatically — nobody needs a tab
+/// strip to "switch between one thing". A second workspace causes the bar to
+/// appear. This is the single predicate every call site funnels through so
+/// that future overrides (e.g. tn-t2yd.2 focus mode) can be added in one
+/// place.
+pub fn should_show_tab_bar(workspace_count: usize) -> bool {
+    workspace_count >= 2
+}
+
+/// Return the effective tab bar height: 0 when `workspace_count < 2`,
+/// [`TAB_BAR_HEIGHT`] otherwise.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn effective_tab_bar_height(show: bool) -> f32 {
-    if show { TAB_BAR_HEIGHT } else { 0.0 }
+pub fn effective_tab_bar_height(workspace_count: usize) -> f32 {
+    if should_show_tab_bar(workspace_count) {
+        TAB_BAR_HEIGHT
+    } else {
+        0.0
+    }
 }
 
 /// Return the effective tab bar height when CSD may be active.
-/// When CSD is on, the tab bar is always shown (it is the title bar).
-pub fn effective_tab_bar_height_csd(show_tab_bar: bool, use_csd: bool) -> f32 {
+///
+/// When CSD is on, the title-bar strip is always reserved (it hosts the window
+/// control buttons even without tabs). When CSD is off, the bar is hidden for
+/// single-workspace layouts and reserved at [`TAB_BAR_HEIGHT`] otherwise.
+pub fn effective_tab_bar_height_csd(workspace_count: usize, use_csd: bool) -> f32 {
     if use_csd {
         CSD_TAB_BAR_HEIGHT
-    } else if show_tab_bar {
+    } else if should_show_tab_bar(workspace_count) {
         TAB_BAR_HEIGHT
     } else {
         0.0
@@ -73,10 +92,10 @@ pub fn content_area_rect(
     width: f32,
     height: f32,
     show_status_bar: bool,
-    show_tab_bar: bool,
+    workspace_count: usize,
 ) -> Rect {
     let status_bar_h = effective_status_bar_height(show_status_bar);
-    let tab_bar_h = effective_tab_bar_height(show_tab_bar);
+    let tab_bar_h = effective_tab_bar_height(workspace_count);
     Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
 }
 
@@ -86,11 +105,11 @@ pub fn content_area_rect_csd(
     width: f32,
     height: f32,
     show_status_bar: bool,
-    show_tab_bar: bool,
+    workspace_count: usize,
     use_csd: bool,
 ) -> Rect {
     let status_bar_h = effective_status_bar_height(show_status_bar);
-    let tab_bar_h = effective_tab_bar_height_csd(show_tab_bar, use_csd);
+    let tab_bar_h = effective_tab_bar_height_csd(workspace_count, use_csd);
     Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
 }
 
@@ -142,23 +161,61 @@ mod tests {
         assert_eq!(effective_status_bar_height(false), 0.0);
     }
 
-    // ── effective_tab_bar_height ──────────────────────────────────────
+    // ── should_show_tab_bar ───────────────────────────────────────────
 
     #[test]
-    fn tab_bar_height_when_shown() {
-        assert_eq!(effective_tab_bar_height(true), TAB_BAR_HEIGHT);
+    fn tab_bar_hidden_for_zero_or_one_workspace() {
+        assert!(!should_show_tab_bar(0));
+        assert!(!should_show_tab_bar(1));
     }
 
     #[test]
-    fn tab_bar_height_when_hidden() {
-        assert_eq!(effective_tab_bar_height(false), 0.0);
+    fn tab_bar_shown_for_two_or_more_workspaces() {
+        assert!(should_show_tab_bar(2));
+        assert!(should_show_tab_bar(5));
+        assert!(should_show_tab_bar(100));
+    }
+
+    // ── effective_tab_bar_height ──────────────────────────────────────
+
+    #[test]
+    fn tab_bar_height_zero_for_single_workspace() {
+        assert_eq!(effective_tab_bar_height(0), 0.0);
+        assert_eq!(effective_tab_bar_height(1), 0.0);
+    }
+
+    #[test]
+    fn tab_bar_height_reserved_for_multi_workspace() {
+        assert_eq!(effective_tab_bar_height(2), TAB_BAR_HEIGHT);
+        assert_eq!(effective_tab_bar_height(10), TAB_BAR_HEIGHT);
+    }
+
+    // ── effective_tab_bar_height_csd ──────────────────────────────────
+
+    #[test]
+    fn tab_bar_height_csd_always_reserved_with_csd() {
+        // CSD mode reserves the title-bar strip for window controls even
+        // when there is only one workspace.
+        assert_eq!(effective_tab_bar_height_csd(1, true), CSD_TAB_BAR_HEIGHT);
+        assert_eq!(effective_tab_bar_height_csd(3, true), CSD_TAB_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn tab_bar_height_csd_hidden_without_csd_and_single_workspace() {
+        assert_eq!(effective_tab_bar_height_csd(1, false), 0.0);
+        assert_eq!(effective_tab_bar_height_csd(0, false), 0.0);
+    }
+
+    #[test]
+    fn tab_bar_height_csd_shown_without_csd_and_multi_workspace() {
+        assert_eq!(effective_tab_bar_height_csd(2, false), TAB_BAR_HEIGHT);
     }
 
     // ── content_area_rect ────────────────────────────────────────────
 
     #[test]
     fn content_area_no_bars() {
-        let r = content_area_rect(800.0, 600.0, false, false);
+        let r = content_area_rect(800.0, 600.0, false, 1);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), 0.0);
         assert_eq!(r.width(), 800.0);
@@ -167,7 +224,7 @@ mod tests {
 
     #[test]
     fn content_area_status_bar_only() {
-        let r = content_area_rect(800.0, 600.0, true, false);
+        let r = content_area_rect(800.0, 600.0, true, 1);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), 0.0);
         assert_eq!(r.width(), 800.0);
@@ -176,7 +233,7 @@ mod tests {
 
     #[test]
     fn content_area_tab_bar_only() {
-        let r = content_area_rect(800.0, 600.0, false, true);
+        let r = content_area_rect(800.0, 600.0, false, 2);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), TAB_BAR_HEIGHT);
         assert_eq!(r.width(), 800.0);
@@ -185,7 +242,7 @@ mod tests {
 
     #[test]
     fn content_area_both_bars() {
-        let r = content_area_rect(800.0, 600.0, true, true);
+        let r = content_area_rect(800.0, 600.0, true, 2);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), TAB_BAR_HEIGHT);
         assert_eq!(r.width(), 800.0);
@@ -195,14 +252,14 @@ mod tests {
     #[test]
     fn content_area_preserves_width_with_bars() {
         // Width should never be affected by bars.
-        let r = content_area_rect(1920.0, 1080.0, true, true);
+        let r = content_area_rect(1920.0, 1080.0, true, 3);
         assert_eq!(r.width(), 1920.0);
     }
 
     #[test]
     fn content_area_small_window() {
         // Even with a tiny window, the math should not panic.
-        let r = content_area_rect(100.0, 50.0, true, true);
+        let r = content_area_rect(100.0, 50.0, true, 2);
         assert_eq!(r.y(), TAB_BAR_HEIGHT);
         // Height might go negative for pathologically small windows -- that is fine,
         // the layout code handles it. We just verify no panic.
@@ -214,7 +271,7 @@ mod tests {
 
     #[test]
     fn content_area_rect_origin_at_top_left_when_no_tab_bar() {
-        let r = content_area_rect(640.0, 480.0, true, false);
+        let r = content_area_rect(640.0, 480.0, true, 1);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), 0.0);
         assert_eq!(r.right(), 640.0);

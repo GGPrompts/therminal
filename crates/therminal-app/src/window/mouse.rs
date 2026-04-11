@@ -512,8 +512,9 @@ impl App {
 
         // ── CSD button hover: request redraw for hover highlights ─────────
         if self.config.general.use_csd {
-            let bar_h =
-                crate::pane::effective_tab_bar_height_csd(self.config.general.show_tab_bar, true);
+            // CSD mode always reserves the title-bar strip for window
+            // controls — workspace count is irrelevant here.
+            let bar_h = crate::pane::effective_tab_bar_height_csd(1, true);
             if (py as f32) < bar_h {
                 self.request_redraw();
             }
@@ -858,10 +859,9 @@ impl App {
     /// Compute the layout area rect (window minus status bar and tab bar).
     fn layout_area_rect(&self) -> Option<therminal_core::geometry::Rect> {
         let gpu = self.gpu.as_ref()?;
-        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
-            self.config.general.show_tab_bar,
-            self.config.general.use_csd,
-        );
+        let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+        let tab_bar_h =
+            crate::pane::effective_tab_bar_height_csd(workspace_count, self.config.general.use_csd);
         Some(therminal_core::geometry::Rect::new(
             0.0,
             tab_bar_h,

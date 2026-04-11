@@ -54,7 +54,6 @@ impl ThemePreset {
 pub(crate) enum ControlBinding {
     TogglePaneHeaders,
     ToggleStatusBar,
-    ToggleTabBar,
     ApplyThemePreset(ThemePreset),
     // Hotspot controls (tn-avjv.5)
     EditorChainEntry(usize),
@@ -75,7 +74,6 @@ pub(crate) enum ControlBinding {
 pub(crate) enum SettingsCommand {
     TogglePaneHeaders,
     ToggleStatusBar,
-    ToggleTabBar,
     ApplyThemePreset(ThemePreset),
     // Hotspot mutations (tn-avjv.5)
     EditorChainRemove(usize),
@@ -100,7 +98,6 @@ impl ControlBinding {
         match self {
             Self::TogglePaneHeaders => SettingsCommand::TogglePaneHeaders,
             Self::ToggleStatusBar => SettingsCommand::ToggleStatusBar,
-            Self::ToggleTabBar => SettingsCommand::ToggleTabBar,
             Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(*preset),
             Self::EditorChainEntry(idx) => SettingsCommand::EditorChainRemove(*idx),
             Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerRemove(*idx),
@@ -661,9 +658,6 @@ impl SettingsOverlayState {
                     (ControlBinding::ToggleStatusBar, ControlType::Toggle { value }) => {
                         *value = values.show_status_bar;
                     }
-                    (ControlBinding::ToggleTabBar, ControlType::Toggle { value }) => {
-                        *value = values.show_tab_bar;
-                    }
                     (ControlBinding::ToggleHighContrast, ControlType::Toggle { value }) => {
                         *value = values.high_contrast;
                     }
@@ -859,11 +853,6 @@ impl SettingsOverlayState {
                     ControlBinding::ToggleStatusBar,
                     ControlType::toggle(true),
                 ),
-                SettingsControl::with_type(
-                    "Show tab bar",
-                    ControlBinding::ToggleTabBar,
-                    ControlType::toggle(true),
-                ),
             ],
         ));
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
@@ -930,7 +919,6 @@ impl Default for SettingsOverlayState {
 pub(crate) struct SettingsRenderValues {
     pub show_pane_headers: bool,
     pub show_status_bar: bool,
-    pub show_tab_bar: bool,
     pub editor_chain: Vec<String>,
     pub folder_pane_command: Vec<String>,
     pub folder_opener: Vec<String>,
@@ -1660,7 +1648,6 @@ mod tests {
         SettingsRenderValues {
             show_pane_headers: true,
             show_status_bar: true,
-            show_tab_bar: true,
             editor_chain: vec!["$VISUAL".into(), "$EDITOR".into(), "code".into()],
             folder_pane_command: vec!["tfe".into(), "{path}".into()],
             folder_opener: vec!["$FILE_MANAGER".into(), "xdg-open".into()],

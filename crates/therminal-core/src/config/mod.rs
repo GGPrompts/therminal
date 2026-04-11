@@ -558,8 +558,6 @@ pub struct GeneralConfig {
     /// indicated solely by the focus border, and footer surfaces focused-pane
     /// info. Single-pane layouts never show a header regardless.
     pub show_pane_headers: bool,
-    /// Whether to show the workspace tab bar at the top of the window.
-    pub show_tab_bar: bool,
     /// Use client-side decorations (custom title bar with window controls).
     /// Default: true on Linux and Windows, false on macOS.
     pub use_csd: bool,
@@ -606,7 +604,6 @@ impl Default for GeneralConfig {
             padding: 4.0,
             show_status_bar: true,
             show_pane_headers: true,
-            show_tab_bar: true,
             use_csd: default_use_csd(),
             auto_tile: true,
             auto_tile_debounce_ms: 200,

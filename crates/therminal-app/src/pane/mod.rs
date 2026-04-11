@@ -83,7 +83,7 @@ pub use self::geometry::{
     CSD_TAB_BAR_HEIGHT, MIN_PANE_HEIGHT, MIN_PANE_WIDTH, PANE_HEADER_HEIGHT, SEPARATOR_GAP,
     STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, content_area_rect, content_area_rect_csd,
     effective_header_height, effective_status_bar_height, effective_tab_bar_height,
-    effective_tab_bar_height_csd,
+    effective_tab_bar_height_csd, should_show_tab_bar,
 };
 pub use self::layout::{FocusDirection, LayoutNode, LayoutSnapshot, SpatialDirection};
 #[allow(unused_imports)]

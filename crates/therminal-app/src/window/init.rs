@@ -367,10 +367,10 @@ impl App {
         // ── First pane (fills window minus status bar and tab bar) ─────
         let status_bar_h =
             crate::pane::effective_status_bar_height(self.config.general.show_status_bar);
-        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
-            self.config.general.show_tab_bar,
-            self.config.general.use_csd,
-        );
+        // At init there is always exactly one workspace, so the tab bar is
+        // collapsed unless CSD is on (which reserves the title-bar strip for
+        // window controls).
+        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(1, self.config.general.use_csd);
         let full_rect = Rect::new(
             0.0,
             tab_bar_h,

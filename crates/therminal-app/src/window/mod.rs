@@ -670,10 +670,8 @@ impl App {
 
         let status_bar_changed =
             self.config.general.show_status_bar != old_config.general.show_status_bar;
-        let tab_bar_changed = self.config.general.show_tab_bar != old_config.general.show_tab_bar;
 
-        let needs_relayout =
-            font_changed || padding_changed || status_bar_changed || tab_bar_changed;
+        let needs_relayout = font_changed || padding_changed || status_bar_changed;
 
         if needs_relayout
             && let (Some(renderer), Some(gpu), Some(window)) = (
@@ -717,11 +715,12 @@ impl App {
             }
 
             // Resize all panes after font or padding change.
+            let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
             let full_rect = crate::pane::content_area_rect_csd(
                 gpu.config.width as f32,
                 gpu.config.height as f32,
                 self.config.general.show_status_bar,
-                self.config.general.show_tab_bar,
+                workspace_count,
                 self.config.general.use_csd,
             );
             if let Some(wm) = self.workspaces.as_mut() {
@@ -861,11 +860,12 @@ impl App {
     /// Returns `None` if the GPU state is not yet initialized.
     pub(crate) fn compute_layout_rect(&self) -> Option<Rect> {
         let gpu = self.gpu.as_ref()?;
+        let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
         Some(crate::pane::content_area_rect_csd(
             gpu.config.width as f32,
             gpu.config.height as f32,
             self.config.general.show_status_bar,
-            self.config.general.show_tab_bar,
+            workspace_count,
             self.config.general.use_csd,
         ))
     }

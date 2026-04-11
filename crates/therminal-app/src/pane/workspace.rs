@@ -356,6 +356,15 @@ impl WorkspaceManager {
         self.workspaces.is_empty()
     }
 
+    /// Number of workspaces currently managed.
+    ///
+    /// Used by chrome layout code to decide whether to reserve space for the
+    /// tab bar: single-workspace layouts collapse the bar to zero height so
+    /// the terminal grid can claim the extra pixels.
+    pub fn len(&self) -> usize {
+        self.workspaces.len()
+    }
+
     /// Build a list of `WorkspaceInfo` for syncing to the daemon.
     ///
     /// This captures the current workspace topology (IDs, names, pane assignments,

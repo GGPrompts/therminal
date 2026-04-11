@@ -119,7 +119,6 @@ impl App {
         settings_overlay::SettingsRenderValues {
             show_pane_headers: self.config.general.show_pane_headers,
             show_status_bar: self.config.general.show_status_bar,
-            show_tab_bar: self.config.general.show_tab_bar,
             editor_chain: self.config.hotspots.editor_chain.clone(),
             folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
             folder_opener: self.config.hotspots.folder_opener.clone(),
@@ -156,10 +155,6 @@ impl App {
             }
             SettingsCommand::ToggleStatusBar => {
                 self.config.general.show_status_bar = !self.config.general.show_status_bar;
-                self.relayout_and_redraw();
-            }
-            SettingsCommand::ToggleTabBar => {
-                self.config.general.show_tab_bar = !self.config.general.show_tab_bar;
                 self.relayout_and_redraw();
             }
             SettingsCommand::ApplyThemePreset(preset) => {
@@ -896,10 +891,11 @@ impl App {
             && let Some((px, py)) = self.cursor_position
         {
             // Check if the right-click is in the tab bar area.
-            let show_tab_bar = self.config.general.show_tab_bar;
+            let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+            let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
             let use_csd = self.config.general.use_csd;
-            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(show_tab_bar, use_csd);
-            if show_tab_bar && (py as f32) < tab_bar_h {
+            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
+            if tab_bar_visible && (py as f32) < tab_bar_h {
                 // Right-click on a tab: open tab context menu.
                 let workspace_ids = self
                     .workspaces
@@ -949,9 +945,10 @@ impl App {
             && let Some((px, py)) = self.cursor_position
         {
             let use_csd = self.config.general.use_csd;
-            let show_tab_bar = self.config.general.show_tab_bar;
-            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(show_tab_bar, use_csd);
-            if (show_tab_bar || use_csd) && (py as f32) < tab_bar_h {
+            let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+            let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
+            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
+            if (tab_bar_visible || use_csd) && (py as f32) < tab_bar_h {
                 // CSD window control buttons (right side).
                 if use_csd {
                     let surface_w = self
@@ -989,7 +986,7 @@ impl App {
                 }
 
                 // Tab click: switch workspace.
-                if show_tab_bar {
+                if tab_bar_visible {
                     let workspace_ids = self
                         .workspaces
                         .as_ref()

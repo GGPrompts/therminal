@@ -272,7 +272,9 @@ impl App {
 
         // ── Tab bar / CSD title bar ────────────────────────────────────
         let use_csd = self.config.general.use_csd;
-        if self.config.general.show_tab_bar || use_csd {
+        let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+        let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
+        if tab_bar_visible || use_csd {
             let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
                 (wm.workspace_ids(), wm.active_id())
             } else {
@@ -320,10 +322,7 @@ impl App {
                 tab_labels,
             };
 
-            let bar_h = crate::pane::effective_tab_bar_height_csd(
-                self.config.general.show_tab_bar,
-                use_csd,
-            );
+            let bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
 
             let mut encoder = gpu
                 .device
@@ -345,7 +344,7 @@ impl App {
                 gpu.config.width,
                 gpu.config.height,
                 bar_h,
-                self.config.general.show_tab_bar,
+                tab_bar_visible,
                 csd_reserved,
             );
 
@@ -674,6 +673,8 @@ impl App {
             pane.status.lock().ok().and_then(|s| s.agent_name.clone())
         });
 
+        let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+
         // ── Live AgentStatus from the shared registry ───────────────────
         let status_owned = agent_name.as_ref().and_then(|_| {
             let fid = self.workspaces.as_ref().and_then(|wm| wm.focused_pane())?;
@@ -728,7 +729,7 @@ impl App {
 
             let right_inset = 12.0_f32;
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
-                self.config.general.show_tab_bar,
+                workspace_count,
                 self.config.general.use_csd,
             );
             let top_inset = tab_bar_h + 8.0;
@@ -863,7 +864,7 @@ impl App {
                 0.0
             };
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
-                self.config.general.show_tab_bar,
+                workspace_count,
                 self.config.general.use_csd,
             );
 

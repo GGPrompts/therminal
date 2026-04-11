@@ -18,7 +18,7 @@ Implementer references: changes to DELETE flags belong in tn-t2yd; PANEL additio
 | `trust.show_agent_indicator` | `[trust]` | `true` | DELETE |
 | `general.show_pane_headers` | `[general]` | `true` | PANEL |
 | `general.show_status_bar` | `[general]` | `true` | REDESIGN |
-| `general.show_tab_bar` | `[general]` | `true` | REDESIGN |
+| `general.show_tab_bar` | `[general]` | `true` | REDESIGN (resolved tn-t2yd.3) |
 | `font.nerd_font` | `[font]` | `true` | PANEL |
 | `general.use_csd` | `[general]` | platform | PANEL |
 | `general.auto_tile` | `[general]` | `true` | PANEL |
@@ -98,19 +98,11 @@ Verdict counts: **1 DELETE, 4 PANEL, 2 REDESIGN**
 | | |
 |---|---|
 | **Default** | `true` |
-| **Verdict** | REDESIGN |
+| **Verdict** | REDESIGN (resolved tn-t2yd.3) |
 
 **Justification.** The tab bar is the workspace switcher and, under CSD mode, serves as the title bar. Hiding it entirely when CSD is on is already blocked in `effective_tab_bar_height_csd` (the bar is forced visible in CSD mode regardless of the flag). The legitimate use-case is: "I only ever have one workspace, the tab bar wastes space." The right design is auto-suppress the tab bar when there is exactly one workspace (with no rename in progress), not a manual toggle. Once that heuristic is in place the flag is redundant. This flag is a companion to `show_status_bar` in tn-t2yd.
 
-**Code references:**
-- `crates/therminal-core/src/config/mod.rs` — struct field `GeneralConfig::show_tab_bar` (line ~251) and default (line ~296)
-- `crates/therminal-core/src/config/config_text.rs` — template comment (line ~39)
-- `crates/therminal-app/src/pane/geometry.rs` — `effective_tab_bar_height(show_tab_bar)` and `effective_tab_bar_height_csd(show_tab_bar, use_csd)` (lines ~57–60, ~73, ~76, ~86, ~90)
-- `crates/therminal-app/src/window/render_driver.rs` — gate `if show_tab_bar || use_csd` (line ~206); passes to tab bar draw calls (lines ~226, ~245)
-- `crates/therminal-app/src/window/mouse.rs` — hit-tests (lines ~481, ~816)
-- `crates/therminal-app/src/window/event_handler.rs` — right-click and left-click tab bar gates (lines ~539–542, ~582–584, ~615)
-- `crates/therminal-app/src/window/mod.rs` — hot-reload change detection (line ~506); layout reflow (lines ~557, ~648)
-- `crates/therminal-app/src/window/init.rs` — init layout call (line ~319)
+**Resolution (tn-t2yd.3).** Field removed from `GeneralConfig` and the settings overlay "Show tab bar" row deleted. All call sites funnel through `crate::pane::should_show_tab_bar(workspace_count)` / `effective_tab_bar_height_csd(workspace_count, use_csd)`: single-workspace layouts collapse the bar to 0 px; a second workspace makes it appear automatically; CSD mode keeps the title-bar strip reserved regardless (for the window control buttons). Stale `show_tab_bar = ...` entries in existing `therminal.toml` files are silently ignored because `GeneralConfig` has `#[serde(default)]` without `deny_unknown_fields`.
 
 ---
 
@@ -143,7 +135,7 @@ Verdict counts: **1 DELETE, 4 PANEL, 2 REDESIGN**
 **Code references:**
 - `crates/therminal-core/src/config/mod.rs` — `GeneralConfig::use_csd` field (line ~254); `default_use_csd()` fn (line ~280); default (line ~297)
 - `crates/therminal-core/src/config/config_text.rs` — template comment (line ~41)
-- `crates/therminal-app/src/pane/geometry.rs` — `effective_tab_bar_height_csd(show_tab_bar, use_csd)` (lines ~57–60, ~87, ~90)
+- `crates/therminal-app/src/pane/geometry.rs` — `effective_tab_bar_height_csd(workspace_count, use_csd)` (lines ~57–60, ~87, ~90)
 - `crates/therminal-app/src/window/mouse.rs` — CSD button hover (line ~479); edge resize gating (line ~502, ~986); hit-test (line ~817)
 - `crates/therminal-app/src/window/event_handler.rs` — click dispatch into CSD controls (lines ~540, ~581, ~586, ~643, ~695)
 - `crates/therminal-app/src/window/mod.rs` — `with_decorations(false)` when CSD (lines ~898, ~906–907); layout reflow (lines ~558, ~649)

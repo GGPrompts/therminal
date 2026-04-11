@@ -53,7 +53,6 @@ pub(super) fn default_config_text() -> String {
         "# show_pane_headers = {}  # per-pane header strip in multi-pane layouts\n",
         d.general.show_pane_headers
     ));
-    out.push_str(&format!("# show_tab_bar = {}\n", d.general.show_tab_bar));
     out.push_str(&format!(
         "# use_csd = {}  # client-side decorations (default: true on Linux/Windows)\n",
         d.general.use_csd
