@@ -3422,6 +3422,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tempfile",
  "therminal-core",
  "therminal-daemon-client",
  "therminal-harness-claude",

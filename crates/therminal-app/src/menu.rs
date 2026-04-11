@@ -35,8 +35,10 @@ pub(crate) enum MenuContext {
 /// A single item in a context menu.
 #[derive(Debug, Clone)]
 pub(crate) struct MenuItem {
-    /// Display label for the item.
-    pub label: &'static str,
+    /// Display label for the item. `Cow` so dynamic labels (e.g.
+    /// tn-fzr0 git tool entries built from the discovered `git_tools`
+    /// set) are supported alongside static labels with no allocation.
+    pub label: std::borrow::Cow<'static, str>,
     /// Optional hotkey hint displayed right-aligned (e.g. "Ctrl+Shift+C").
     pub hotkey_hint: Option<String>,
     /// Action to execute when the item is selected.
@@ -193,39 +195,39 @@ pub(crate) fn build_pane_menu(
         sections: vec![
             MenuSection(vec![
                 MenuItem {
-                    label: "Split Horizontal",
+                    label: "Split Horizontal".into(),
                     hotkey_hint: hint(&KeyAction::SplitHorizontal),
                     action: KeyAction::SplitHorizontal,
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Split Vertical",
+                    label: "Split Vertical".into(),
                     hotkey_hint: hint(&KeyAction::SplitVertical),
                     action: KeyAction::SplitVertical,
                     enabled: true,
                 },
             ]),
             MenuSection(vec![MenuItem {
-                label: "Close Pane",
+                label: "Close Pane".into(),
                 hotkey_hint: hint(&KeyAction::ClosePane),
                 action: KeyAction::ClosePane,
                 enabled: true,
             }]),
             MenuSection(vec![
                 MenuItem {
-                    label: "Copy",
+                    label: "Copy".into(),
                     hotkey_hint: hint(&KeyAction::Copy),
                     action: KeyAction::Copy,
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Paste",
+                    label: "Paste".into(),
                     hotkey_hint: hint(&KeyAction::Paste),
                     action: KeyAction::Paste,
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Copy pane ID",
+                    label: "Copy pane ID".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotCopy(pane_id.to_string()),
                     enabled: true,
@@ -249,13 +251,13 @@ pub(crate) fn build_selection_menu(
     ContextMenu {
         sections: vec![
             MenuSection(vec![MenuItem {
-                label: "Copy",
+                label: "Copy".into(),
                 hotkey_hint: hint(&KeyAction::Copy),
                 action: KeyAction::Copy,
                 enabled: true,
             }]),
             MenuSection(vec![MenuItem {
-                label: "Paste",
+                label: "Paste".into(),
                 hotkey_hint: hint(&KeyAction::Paste),
                 action: KeyAction::Paste,
                 enabled: true,
@@ -279,19 +281,19 @@ pub(crate) fn build_tab_menu(
         sections: vec![
             MenuSection(vec![
                 MenuItem {
-                    label: "New Tab",
+                    label: "New Tab".into(),
                     hotkey_hint: hint(&KeyAction::NewWorkspace),
                     action: KeyAction::NewWorkspace,
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Rename Tab",
+                    label: "Rename Tab".into(),
                     hotkey_hint: hint(&KeyAction::RenameWorkspace),
                     action: KeyAction::RenameWorkspace,
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Close Tab",
+                    label: "Close Tab".into(),
                     hotkey_hint: hint(&KeyAction::CloseAllPanes),
                     action: KeyAction::CloseAllPanes,
                     enabled: true,
@@ -299,13 +301,13 @@ pub(crate) fn build_tab_menu(
             ]),
             MenuSection(vec![
                 MenuItem {
-                    label: "Split Horizontal",
+                    label: "Split Horizontal".into(),
                     hotkey_hint: hint(&KeyAction::SplitHorizontal),
                     action: KeyAction::SplitHorizontal,
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Split Vertical",
+                    label: "Split Vertical".into(),
                     hotkey_hint: hint(&KeyAction::SplitVertical),
                     action: KeyAction::SplitVertical,
                     enabled: true,
@@ -320,6 +322,19 @@ pub(crate) fn build_tab_menu(
 
 // ── Hotspot action palette ────────────────────────────────────────────
 
+/// Test if the captured `GitRef` text looks like a commit hash (vs a
+/// branch name). Mirrors the regex in
+/// `therminal_terminal::hotspot_detection::GIT_HASH_RE` (7-40 hex
+/// chars), but kept inline so the menu code can branch without
+/// pulling in the regex crate from `therminal-terminal`.
+fn is_git_commit_hash(text: &str) -> bool {
+    let len = text.len();
+    (7..=40).contains(&len)
+        && text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+}
+
 /// Build an action palette for a detected hotspot.
 ///
 /// Shows contextual actions based on the hotspot kind (file path, error
@@ -329,10 +344,18 @@ pub(crate) fn build_tab_menu(
 /// chain (tn-zqwg). Actions use `HotspotCopy` / `HotspotOpenInEditor` /
 /// `HotspotOpenExternal` / `HotspotOpenFolderInPane` /
 /// `HotspotOpenFolderInFileManager` KeyAction variants.
+///
+/// `available_git_tools` is the cached subset of `[hotspots] git_tools`
+/// whose binaries currently resolve on `PATH` (tn-fzr0). When the
+/// hotspot is a `GitRef` whose text matches a commit hash, one menu
+/// entry per discovered tool is appended; the menu order matches
+/// `available_git_tools` order. An empty slice (or a `GitRef` that
+/// looks like a branch name) suppresses tool entries.
 pub(crate) fn build_hotspot_palette(
     kind: therminal_terminal::hotspot_detection::HotspotKind,
     text: String,
     is_dir: bool,
+    available_git_tools: &[String],
     position: (f32, f32),
 ) -> ContextMenu {
     use therminal_terminal::hotspot_detection::HotspotKind;
@@ -345,19 +368,19 @@ pub(crate) fn build_hotspot_palette(
             let path = text.clone();
             vec![MenuSection(vec![
                 MenuItem {
-                    label: "Open in new pane",
+                    label: "Open in new pane".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotOpenFolderInPane(path.clone()),
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Open in file manager",
+                    label: "Open in file manager".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotOpenFolderInFileManager(path.clone()),
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Copy path",
+                    label: "Copy path".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotCopy(path),
                     enabled: true,
@@ -369,13 +392,13 @@ pub(crate) fn build_hotspot_palette(
             let (path, line_suffix) = parse_file_path_parts(&text);
             let mut items = vec![
                 MenuItem {
-                    label: "Open in editor",
+                    label: "Open in editor".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotOpenInEditor(text.clone()),
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Copy path",
+                    label: "Copy path".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotCopy(path.to_string()),
                     enabled: true,
@@ -383,7 +406,7 @@ pub(crate) fn build_hotspot_palette(
             ];
             if !line_suffix.is_empty() {
                 items.push(MenuItem {
-                    label: "Copy path:line",
+                    label: "Copy path:line".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotCopy(text.clone()),
                     enabled: true,
@@ -392,31 +415,42 @@ pub(crate) fn build_hotspot_palette(
             vec![MenuSection(items)]
         }
         HotspotKind::GitRef => {
-            vec![MenuSection(vec![
-                MenuItem {
-                    label: "Copy hash",
-                    hotkey_hint: None,
-                    action: KeyAction::HotspotCopy(text.clone()),
-                    enabled: true,
-                },
-                MenuItem {
-                    label: "Show in git log",
-                    hotkey_hint: None,
-                    action: KeyAction::HotspotCopy(format!("git log {text}")),
-                    enabled: true,
-                },
-            ])]
+            // Always show "Copy hash". For commit hashes (not branch
+            // names) also append one entry per discovered git TUI tool
+            // (tn-fzr0) so users can jump straight from a hash in
+            // `git log` output to lazygit / gitlogue / tig.
+            let mut items = vec![MenuItem {
+                label: "Copy hash".into(),
+                hotkey_hint: None,
+                action: KeyAction::HotspotCopy(text.clone()),
+                enabled: true,
+            }];
+            if is_git_commit_hash(&text) {
+                for tool in available_git_tools {
+                    let label = crate::window::git_ref_open::menu_label_for(tool).to_string();
+                    items.push(MenuItem {
+                        label: label.into(),
+                        hotkey_hint: None,
+                        action: KeyAction::HotspotShowGitRef {
+                            tool: tool.clone(),
+                            hash: text.clone(),
+                        },
+                        enabled: true,
+                    });
+                }
+            }
+            vec![MenuSection(items)]
         }
         HotspotKind::IssueRef => {
             vec![MenuSection(vec![
                 MenuItem {
-                    label: "Copy ref",
+                    label: "Copy ref".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotCopy(text.clone()),
                     enabled: true,
                 },
                 MenuItem {
-                    label: "Open issue",
+                    label: "Open issue".into(),
                     hotkey_hint: None,
                     action: KeyAction::HotspotOpenExternal(text.clone()),
                     enabled: true,
@@ -426,7 +460,7 @@ pub(crate) fn build_hotspot_palette(
         HotspotKind::Url => {
             // URLs are handled by hyperlink click, but included for completeness.
             vec![MenuSection(vec![MenuItem {
-                label: "Open URL",
+                label: "Open URL".into(),
                 hotkey_hint: None,
                 action: KeyAction::HotspotOpenExternal(text.clone()),
                 enabled: true,
@@ -751,7 +785,7 @@ pub(crate) fn render_context_menu(
             );
             label_buf.set_text(
                 &mut renderer.font_system,
-                item.label,
+                item.label.as_ref(),
                 &Attrs::new()
                     .family(Family::Name(&renderer.font_config.family))
                     .color(if item.enabled {
@@ -907,6 +941,7 @@ mod tests {
             HotspotKind::FilePath,
             "src/main.rs:42".to_string(),
             false,
+            &[],
             (0.0, 0.0),
         );
         let hotspot_section_count = hotspot.sections.len();
@@ -924,13 +959,13 @@ mod tests {
         );
         assert_eq!(merged.item_count(), hotspot_item_count + pane_item_count);
         // First item should be the hotspot "Open in editor" action.
-        assert_eq!(merged.flat_items()[0].label, "Open in editor");
+        assert_eq!(merged.flat_items()[0].label.as_ref(), "Open in editor");
         // Pane actions should still be present after the hotspot ones.
         assert!(
             merged
                 .flat_items()
                 .iter()
-                .any(|i| i.label == "Split Horizontal")
+                .any(|i| i.label.as_ref() == "Split Horizontal")
         );
     }
 
@@ -941,7 +976,7 @@ mod tests {
             !menu
                 .flat_items()
                 .iter()
-                .any(|i| i.label == "Open in editor")
+                .any(|i| i.label.as_ref() == "Open in editor")
         );
     }
 
@@ -951,7 +986,7 @@ mod tests {
         let item = menu
             .flat_items()
             .into_iter()
-            .find(|i| i.label == "Copy pane ID")
+            .find(|i| i.label.as_ref() == "Copy pane ID")
             .expect("Copy pane ID entry present");
         match &item.action {
             KeyAction::HotspotCopy(s) => assert_eq!(s, "7"),
@@ -966,9 +1001,10 @@ mod tests {
             HotspotKind::FilePath,
             "/home/me/projects".to_string(),
             true,
+            &[],
             (0.0, 0.0),
         );
-        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label).collect();
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(
             labels,
             vec!["Open in new pane", "Open in file manager", "Copy path"]
@@ -1000,9 +1036,10 @@ mod tests {
             HotspotKind::FilePath,
             "src/main.rs:42".to_string(),
             false,
+            &[],
             (0.0, 0.0),
         );
-        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label).collect();
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
         assert!(labels.contains(&"Open in editor"));
         assert!(!labels.contains(&"Open in new pane"));
     }
@@ -1017,6 +1054,7 @@ mod tests {
             HotspotKind::ErrorLocation,
             "src/lib.rs:10:5".to_string(),
             true,
+            &[],
             (0.0, 0.0),
         );
         assert!(
@@ -1024,5 +1062,118 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i.action, KeyAction::HotspotOpenInEditor(_)))
         );
+    }
+
+    // ── tn-fzr0: git commit hash hotspot menu ──
+
+    #[test]
+    fn git_commit_hash_recognized() {
+        // Boundary cases for the inline hash test used to gate the
+        // tool-tool menu entries.
+        assert!(is_git_commit_hash("abcdef1"));
+        assert!(is_git_commit_hash(
+            "abcdef1234567890abcdef1234567890abcdef12"
+        ));
+        assert!(!is_git_commit_hash("abcdef")); // 6 chars
+        assert!(!is_git_commit_hash(
+            "abcdef1234567890abcdef1234567890abcdef123"
+        )); // 41 chars
+        assert!(!is_git_commit_hash("ABC1234"));
+        assert!(!is_git_commit_hash("feature/foo"));
+        assert!(!is_git_commit_hash("not-a-hash"));
+    }
+
+    #[test]
+    fn git_ref_palette_with_no_tools_only_copies_hash() {
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let menu = build_hotspot_palette(
+            HotspotKind::GitRef,
+            "abc1234".to_string(),
+            false,
+            &[],
+            (0.0, 0.0),
+        );
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, vec!["Copy hash"]);
+        assert!(
+            !menu
+                .flat_items()
+                .iter()
+                .any(|i| matches!(i.action, KeyAction::HotspotShowGitRef { .. }))
+        );
+    }
+
+    #[test]
+    fn git_ref_palette_appends_one_entry_per_discovered_tool_in_order() {
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let tools = vec![
+            "lazygit".to_string(),
+            "gitlogue".to_string(),
+            "tig".to_string(),
+        ];
+        let menu = build_hotspot_palette(
+            HotspotKind::GitRef,
+            "deadbeef".to_string(),
+            false,
+            &tools,
+            (0.0, 0.0),
+        );
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Copy hash",
+                "Show in lazygit",
+                "Replay in gitlogue",
+                "Show in tig",
+            ]
+        );
+        // Check the actions carry the right tool name and hash.
+        let items = menu.flat_items();
+        for (idx, expected_tool) in [(1, "lazygit"), (2, "gitlogue"), (3, "tig")] {
+            match &items[idx].action {
+                KeyAction::HotspotShowGitRef { tool, hash } => {
+                    assert_eq!(tool, expected_tool);
+                    assert_eq!(hash, "deadbeef");
+                }
+                other => panic!("entry {idx}: expected HotspotShowGitRef, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn git_ref_palette_user_reorder_controls_menu_order() {
+        // Reordering the discovered list reorders the menu entries
+        // (the cache mirrors `[hotspots] git_tools` order).
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let tools = vec!["tig".to_string(), "lazygit".to_string()];
+        let menu = build_hotspot_palette(
+            HotspotKind::GitRef,
+            "abc1234".to_string(),
+            false,
+            &tools,
+            (0.0, 0.0),
+        );
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, vec!["Copy hash", "Show in tig", "Show in lazygit"]);
+    }
+
+    #[test]
+    fn git_ref_palette_skips_tool_entries_for_branch_names() {
+        // Branch names also detect as `GitRef` (via `git branch`
+        // output), but the tool invocations only make sense for
+        // commit hashes — `lazygit --filter feature/foo` is not a
+        // valid invocation.
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let tools = vec!["lazygit".to_string()];
+        let menu = build_hotspot_palette(
+            HotspotKind::GitRef,
+            "feature/foo".to_string(),
+            false,
+            &tools,
+            (0.0, 0.0),
+        );
+        let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, vec!["Copy hash"]);
     }
 }

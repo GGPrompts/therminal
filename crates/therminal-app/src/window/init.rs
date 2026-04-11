@@ -188,6 +188,18 @@ impl App {
             tl
         };
 
+        // tn-fzr0: probe PATH for the configured git TUI tools and cache
+        // the available subset. Refreshed on every config reload below.
+        let discovered_git_tools =
+            super::git_ref_open::discover_git_tools(&config.hotspots.git_tools);
+        if !discovered_git_tools.is_empty() {
+            info!(
+                count = discovered_git_tools.len(),
+                tools = ?discovered_git_tools,
+                "discovered git TUI tools on PATH"
+            );
+        }
+
         Self {
             window: None,
             gpu: None,
@@ -209,6 +221,7 @@ impl App {
             last_press_pixel: None,
             click_count: 0,
             config,
+            discovered_git_tools,
             binding_map,
             _config_watcher: config_watcher,
             last_split_direction: crate::pane::SplitDirection::Horizontal,

@@ -832,6 +832,7 @@ impl App {
             kind,
             text.to_string(),
             is_dir,
+            &self.discovered_git_tools,
             (px as f32, py as f32),
         );
         self.active_menu = Some(menu);

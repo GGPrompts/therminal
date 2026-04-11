@@ -91,6 +91,17 @@ pub enum KeyAction {
     /// Reveal a directory using the configured `folder_opener` chain
     /// (e.g. nautilus / dolphin / xdg-open / explorer / Finder).
     HotspotOpenFolderInFileManager(String),
+    /// Spawn a new pane and run a TUI git tool against a commit hash
+    /// (tn-fzr0). The tool name (e.g. `"lazygit"`, `"gitlogue"`, `"tig"`)
+    /// must be one of the binaries the app knows how to invoke and must
+    /// resolve on `PATH`. Falls back to a `git show <hash>` shell line
+    /// when the tool's binary is missing at click time.
+    HotspotShowGitRef {
+        /// Tool binary name (no path, no args). Drives invocation form.
+        tool: String,
+        /// Commit hash captured from the hotspot text.
+        hash: String,
+    },
 }
 
 impl KeyAction {
@@ -136,6 +147,7 @@ impl KeyAction {
             KeyAction::HotspotOpenExternal(_) => "Open externally",
             KeyAction::HotspotOpenFolderInPane(_) => "Open folder in new pane",
             KeyAction::HotspotOpenFolderInFileManager(_) => "Open folder in file manager",
+            KeyAction::HotspotShowGitRef { .. } => "Show git commit in TUI tool",
         }
     }
 
@@ -177,7 +189,8 @@ impl KeyAction {
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
             | KeyAction::HotspotOpenFolderInPane(_)
-            | KeyAction::HotspotOpenFolderInFileManager(_) => "Hotspot",
+            | KeyAction::HotspotOpenFolderInFileManager(_)
+            | KeyAction::HotspotShowGitRef { .. } => "Hotspot",
         }
     }
 }

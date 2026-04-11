@@ -382,7 +382,8 @@ impl App {
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
             | KeyAction::HotspotOpenFolderInPane(_)
-            | KeyAction::HotspotOpenFolderInFileManager(_) => {}
+            | KeyAction::HotspotOpenFolderInFileManager(_)
+            | KeyAction::HotspotShowGitRef { .. } => {}
         }
         true
     }
@@ -531,8 +532,13 @@ impl App {
             // (tn-gidy) so right-click menu actions also survive agent
             // worktree hops.
             let effective = resolved.unwrap_or(text);
-            let hotspot_menu =
-                crate::menu::build_hotspot_palette(kind, effective.to_string(), is_dir, (px, py));
+            let hotspot_menu = crate::menu::build_hotspot_palette(
+                kind,
+                effective.to_string(),
+                is_dir,
+                &self.discovered_git_tools,
+                (px, py),
+            );
             let mut merged = hotspot_menu.sections;
             merged.append(&mut menu.sections);
             menu.sections = merged;
@@ -595,6 +601,9 @@ impl App {
             }
             KeyAction::HotspotOpenFolderInFileManager(ref path) => {
                 self.open_folder_in_file_manager(path);
+            }
+            KeyAction::HotspotShowGitRef { ref tool, ref hash } => {
+                self.show_git_ref_in_pane(tool, hash);
             }
             KeyAction::NewWorkspace => self.create_new_workspace(),
             KeyAction::RenameWorkspace => {

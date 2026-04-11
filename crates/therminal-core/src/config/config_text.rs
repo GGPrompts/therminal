@@ -299,6 +299,14 @@ pub(super) fn default_config_text() -> String {
     out.push_str("# by the secondary directory action. The first found on PATH wins.\n");
     out.push_str("# `$FILE_MANAGER` is substituted from the env var. As a last resort the\n");
     out.push_str("# platform default (xdg-open / open / explorer) is invoked.\n");
+    out.push_str("#\n");
+    out.push_str("# git_tools: TUI git tools probed on PATH. Each tool that resolves gets\n");
+    out.push_str("# a context-menu entry on git commit hash hotspots; clicking it splits a\n");
+    out.push_str("# new pane and runs the tool against the hash. Supported invocations:\n");
+    out.push_str("#   lazygit  -> `lazygit --filter <hash>`\n");
+    out.push_str("#   gitlogue -> `gitlogue -c <hash>`\n");
+    out.push_str("#   tig      -> `tig show <hash>`\n");
+    out.push_str("# Set to [] to disable git-tool menu entries (tn-fzr0).\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("[hotspots]\n");
     let chain_toml = d
@@ -325,6 +333,14 @@ pub(super) fn default_config_text() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("# folder_opener = [{folder_opener_toml}]\n"));
+    let git_tools_toml = d
+        .hotspots
+        .git_tools
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("# git_tools = [{git_tools_toml}]\n"));
     out.push('\n');
 
     // ── [patterns] ──────────────────────────────────────────────────────

@@ -1113,6 +1113,25 @@ pub struct HotspotsConfig {
     /// the last resort, which delegates to `xdg-open` / `open` / `explorer`
     /// depending on the platform.
     pub folder_opener: Vec<String>,
+
+    /// Ordered list of TUI git tool names probed on `PATH` at startup
+    /// (and on config reload). Tools that resolve get a context-menu
+    /// entry on git commit hash hotspots; clicking the entry splits a
+    /// new pane and runs the tool against the hash (tn-fzr0).
+    ///
+    /// Default: `["lazygit", "gitlogue", "tig"]`. The order controls
+    /// the order of menu entries — first listed appears at the top.
+    /// Each entry is a bare binary name; arguments are not configurable
+    /// here because the invocation form differs per tool. The currently
+    /// supported invocations are:
+    ///
+    /// - `lazygit --filter <hash>`
+    /// - `gitlogue -c <hash>`
+    /// - `tig show <hash>`
+    ///
+    /// Unknown tool names are silently ignored. To disable git-tool
+    /// menu entries entirely, set this to `[]`.
+    pub git_tools: Vec<String>,
 }
 
 // ── Section: Patterns ───────────────────────────────────────────────────
@@ -1373,6 +1392,11 @@ impl Default for HotspotsConfig {
             editor_chain: chain.into_iter().map(String::from).collect(),
             folder_pane_command: vec!["tfe".to_string(), "{path}".to_string()],
             folder_opener: folder_opener.into_iter().map(String::from).collect(),
+            git_tools: vec![
+                "lazygit".to_string(),
+                "gitlogue".to_string(),
+                "tig".to_string(),
+            ],
         }
     }
 }
@@ -1436,6 +1460,34 @@ mod tests {
         assert!(
             d.folder_opener.len() >= 2,
             "folder_opener default chain must contain at least one fallback"
+        );
+    }
+
+    #[test]
+    fn hotspots_default_git_tools_includes_known_tools() {
+        // tn-fzr0: default git_tools must contain the three tools whose
+        // invocations the app knows about. Order matters because it
+        // controls menu placement.
+        let d = HotspotsConfig::default();
+        assert_eq!(
+            d.git_tools,
+            vec![
+                "lazygit".to_string(),
+                "gitlogue".to_string(),
+                "tig".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hotspots_git_tools_round_trips() {
+        let mut config = TherminalConfig::default();
+        config.hotspots.git_tools = vec!["tig".to_string(), "lazygit".to_string()];
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            decoded.hotspots.git_tools,
+            vec!["tig".to_string(), "lazygit".to_string()]
         );
     }
 

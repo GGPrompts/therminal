@@ -16,6 +16,7 @@
 mod chrome;
 mod event_handler;
 mod folder_open;
+pub(crate) mod git_ref_open;
 mod help_overlay;
 mod init;
 mod keybindings;
@@ -256,6 +257,14 @@ pub struct App {
 
     /// Current loaded configuration.
     config: TherminalConfig,
+
+    /// Cached subset of `config.hotspots.git_tools` whose binaries were
+    /// found on `PATH` at config-load time (tn-fzr0). Recomputed in
+    /// `apply_config` when the git_tools list changes. Drives the git
+    /// commit hash hotspot context menu — only tools in this set get a
+    /// menu entry, and they appear in `git_tools` order. Empty when no
+    /// tool is installed; the menu then falls back to "Copy hash" only.
+    pub(crate) discovered_git_tools: Vec<String>,
 
     /// Parsed keybinding lookup map (rebuilt on config reload).
     binding_map: HashMap<BindingLookup, KeyAction>,
@@ -633,6 +642,17 @@ impl App {
             "keybinding map rebuilt ({} bindings)",
             self.binding_map.len()
         );
+
+        // ── Git TUI tools rediscovery (tn-fzr0) ────────────────────────
+        if self.config.hotspots.git_tools != old_config.hotspots.git_tools {
+            self.discovered_git_tools =
+                git_ref_open::discover_git_tools(&self.config.hotspots.git_tools);
+            info!(
+                count = self.discovered_git_tools.len(),
+                tools = ?self.discovered_git_tools,
+                "git TUI tools rediscovered on config reload"
+            );
+        }
 
         if self.config.general.title != old_config.general.title
             && let Some(w) = self.window.as_ref()
