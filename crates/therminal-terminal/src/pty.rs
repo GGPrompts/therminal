@@ -60,7 +60,15 @@ pub fn detect_shell_type(shell: &str) -> ShellType {
 ///
 /// Checks `$SHELL` first (Unix), then falls back to passwd database lookup
 /// or `ComSpec` on Windows.
-fn get_default_shell() -> String {
+///
+/// Exposed (`pub`) so callers that need to record the *actual* shell that
+/// will be spawned — not the empty-string request the user passed in — can
+/// mirror the same resolution logic. Before tn-x1h9 this was private and
+/// the daemon silently stored `""` as the pane's shell command, which
+/// broke the `wsl.exe` basename check in `process_detector_task` on
+/// Windows native + WSL panes (no agent registry entry ever got
+/// populated, breaking the Claude observability pipeline).
+pub fn get_default_shell() -> String {
     #[cfg(unix)]
     {
         // Prefer $SHELL, same logic as portable-pty's CommandBuilder::get_shell.
@@ -444,6 +452,23 @@ pub fn spawn_shell(cols: u16, rows: u16) -> Result<SpawnResult, PtyError> {
     spawn_shell_with_options(cols, rows, &SpawnOptions::default())
 }
 
+/// Return the actual shell path that will be used for a PTY spawn with the
+/// given options. If `options.shell` is non-empty, returns it verbatim;
+/// otherwise returns [`get_default_shell`].
+///
+/// This mirrors the resolution branch inside [`spawn_shell_with_options`]
+/// so callers that need to *record* the resolved shell (e.g. the daemon's
+/// `Pane.shell` field, used downstream by `process_detector_task` to
+/// decide whether the pane should use the WSL probe path — tn-x1h9) can
+/// do so without duplicating the logic. tn-966s.
+pub fn resolve_shell(options: &SpawnOptions) -> String {
+    if options.shell.is_empty() {
+        get_default_shell()
+    } else {
+        options.shell.clone()
+    }
+}
+
 /// Spawn a shell in a new PTY with custom options (shell override, extra env vars).
 ///
 /// If `options.shell` is non-empty, it is used instead of the user's default shell.
@@ -549,6 +574,32 @@ mod tests {
         // Confirm CARGO_PKG_VERSION resolves at compile time.
         let version = env!("CARGO_PKG_VERSION");
         assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_with_override_returns_override_verbatim() {
+        let opts = SpawnOptions {
+            shell: "/usr/local/bin/fish".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_shell(&opts), "/usr/local/bin/fish");
+    }
+
+    #[test]
+    fn resolve_shell_empty_returns_default_shell() {
+        // tn-x1h9: empty `options.shell` must resolve to whatever
+        // `get_default_shell()` returns — never the empty string. The
+        // daemon stores this value in `Pane.shell` and the
+        // `process_detector_task::shell_command_is_wsl` heuristic
+        // short-circuits on empty input, which silently defeated the
+        // WSL probe path on Windows + WSL panes.
+        let opts = SpawnOptions::default();
+        let resolved = resolve_shell(&opts);
+        assert!(
+            !resolved.is_empty(),
+            "resolve_shell(default) must never return empty — caught the Windows+WSL observability regression"
+        );
+        assert_eq!(resolved, get_default_shell());
     }
 
     #[test]

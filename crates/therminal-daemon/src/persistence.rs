@@ -338,8 +338,21 @@ mod tests {
         assert_eq!(session.panes[0].cwd, "/tmp");
         assert_eq!(session.panes[0].shell, "/bin/sh");
 
-        // The second pane was spawned with cwd="/var" and default shell.
+        // The second pane was spawned with cwd="/var" and the default
+        // shell. tn-x1h9: `Pane.shell` now records the *resolved* shell
+        // (`resolve_shell(&spawn_options)`), not the caller's empty-string
+        // request. This is load-bearing for `process_detector_task`'s
+        // WSL-probe activation on Windows native; see
+        // `resolved_default_shell_is_never_empty` in process_detector_task.
         assert_eq!(session.panes[1].cwd, "/var");
-        assert_eq!(session.panes[1].shell, "");
+        assert!(
+            !session.panes[1].shell.is_empty(),
+            "restored pane must record a resolved (non-empty) shell command so downstream detectors can classify it"
+        );
+        assert_eq!(
+            session.panes[1].shell,
+            therminal_terminal::pty::get_default_shell(),
+            "restored pane's shell should match the resolved default"
+        );
     }
 }

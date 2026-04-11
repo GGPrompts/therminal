@@ -133,6 +133,21 @@ impl Pane {
         let pty_writer = core.take_writer();
         let pty_master = core.take_pty_master();
 
+        // tn-x1h9: record the *resolved* shell (i.e. what actually got
+        // spawned), not the caller's empty-string request. This is what
+        // `process_detector_task::shell_command_is_wsl` matches against
+        // on Windows native to decide whether to route the pane through
+        // the WSL probe path. Before this fix, GUI-created sessions
+        // stored `""` here — silently defeating every downstream Claude
+        // observability consumer on Windows + WSL panes.
+        let resolved_shell = therminal_terminal::pty::resolve_shell(spawn_options);
+        tracing::info!(
+            pane_id = id,
+            shell = %resolved_shell,
+            requested_shell = %spawn_options.shell,
+            "daemon pane spawned: recording resolved shell command"
+        );
+
         Ok(Self {
             id,
             term,
@@ -142,7 +157,7 @@ impl Pane {
             cols,
             rows,
             cwd,
-            shell: spawn_options.shell.clone(),
+            shell: resolved_shell,
             inference,
             command_tracker,
             event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),

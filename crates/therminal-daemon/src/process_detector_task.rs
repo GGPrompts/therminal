@@ -182,17 +182,36 @@ pub async fn tick_once(
             // spawns a fresh shell.
             continue;
         }
+        let is_new_pane = !detectors.contains_key(&pane_id);
         let detector = detectors.entry(pane_id).or_insert_with(|| {
             let mut d = ProcessDetector::new(shell_pid_opt);
             if let Some(distro) = wsl_distro.as_deref() {
                 d = d.with_wsl_distro(distro);
-                debug!(
-                    pane_id,
-                    distro, "process_detector_task: WSL probe enabled for WSL pane"
-                );
             }
             d
         });
+        // tn-x1h9: log the detector-mode decision exactly once per pane
+        // (the first tick where we see it). Without this, silent failure
+        // modes like "Pane.shell is empty so WSL probe never activates"
+        // leave zero breadcrumbs in the logs. Keep it at INFO so it
+        // surfaces in the default tracing filter; it fires at most once
+        // per pane lifetime.
+        if is_new_pane {
+            let mode = if wsl_distro.is_some() {
+                "wsl_probe"
+            } else {
+                "host_sysinfo"
+            };
+            info!(
+                pane_id,
+                mode,
+                shell_command = %shell_command,
+                shell_pid = ?shell_pid_opt,
+                wsl_distro = ?wsl_distro,
+                is_windows = cfg!(windows),
+                "process_detector_task: initialising detector for pane"
+            );
+        }
         let agents = detector.scan();
         results.push((pane_id, agents));
     }
@@ -455,5 +474,40 @@ mod tests {
         assert!(wsl_distro_for_shell("wsl.exe").is_none());
         assert!(wsl_distro_for_shell(r"C:\Windows\System32\wsl.exe").is_none());
         assert!(wsl_distro_for_shell("/bin/bash").is_none());
+    }
+
+    /// tn-x1h9 regression: the *resolved* shell from
+    /// `therminal_terminal::pty::resolve_shell` on an empty SpawnOptions
+    /// must still be recognised by `shell_command_is_wsl` when the
+    /// default resolves to `wsl.exe`. This is the contract that binds
+    /// `Pane::spawn` (daemon) to `process_detector_task` — if either
+    /// side of it breaks, the Claude observability pipeline goes silent
+    /// on Windows + WSL panes. Cross-platform: we only assert
+    /// non-emptiness of the resolved default here (the actual value is
+    /// OS-dependent) but lock in the matching logic for the
+    /// representative values.
+    #[test]
+    fn resolved_default_shell_is_never_empty() {
+        use therminal_terminal::pty::{SpawnOptions, resolve_shell};
+        let resolved = resolve_shell(&SpawnOptions::default());
+        assert!(
+            !resolved.is_empty(),
+            "resolve_shell(default) must never return \"\" — that would break shell_command_is_wsl short-circuit on empty"
+        );
+    }
+
+    /// tn-x1h9 regression: `shell_command_is_wsl` must NOT silently
+    /// short-circuit on the empty string. Historically, the daemon
+    /// stored `""` in `Pane.shell` for any GUI-spawned session (the
+    /// GUI sends `shell: None` → daemon stored the raw request without
+    /// resolving) which made this path impossible to hit on Windows.
+    /// Guard the invariant explicitly so a future refactor can't
+    /// accidentally regress the resolution step.
+    #[test]
+    fn shell_command_is_wsl_rejects_empty_string_on_purpose() {
+        assert!(
+            !shell_command_is_wsl(""),
+            "empty shell command must not match (the fix is to resolve Pane.shell before storing it)"
+        );
     }
 }
