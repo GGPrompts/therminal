@@ -74,7 +74,18 @@ pub(crate) use types::*;
 /// `terminal://pane/{pane_id}/output` URI scheme. Subscriptions to output
 /// resources spawn a background task that forwards `DaemonEvent::PaneOutput`
 /// events as MCP resource-updated notifications.
+///
+/// Each accepted MCP connection constructs its own `TherminalMcpServer`
+/// instance with a freshly-minted `connection_id` (drawn from a process-wide
+/// monotonic counter). The `connection_id` is the trust key used by
+/// [`SessionGrants`] so that grants approved on one connection cannot be
+/// inherited by another, even if the new connection claims the same
+/// self-reported `Implementation.name` (tn-yuu4).
 pub struct TherminalMcpServer {
+    /// Daemon-assigned per-connection identifier (tn-yuu4). Generated at
+    /// `new_with_bus` time from a process-wide monotonic counter and
+    /// threaded into every `AgentIdentity` constructed for this connection.
+    pub(super) connection_id: u64,
     pub(super) session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     pub(super) trust_config: Arc<TrustConfig>,
     pub(super) rate_limiter: Arc<RateLimiter>,
@@ -121,6 +132,17 @@ pub(super) const AGENT_EVENT_BUFFER_CAP: usize = 256;
 /// Monotonic counter for escalation IDs (tn-b99).
 static ESCALATION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Monotonic counter for per-connection MCP identifiers (tn-yuu4). The trust
+/// layer keys session-scoped grants on this id rather than the client-supplied
+/// agent name, so a fresh connection always starts with an empty grant set
+/// even if the new client spoofs a previously-approved `Implementation.name`.
+static CONNECTION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate the next per-connection MCP identifier (tn-yuu4).
+pub(super) fn next_connection_id() -> u64 {
+    CONNECTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// URI for the global Claude agent-event stream.
 pub(super) const CLAUDE_EVENTS_URI: &str = "therminal://claude/events";
 /// URI for the global agent lifecycle event stream backed by `AgentRegistry`.
@@ -151,6 +173,10 @@ impl TherminalMcpServer {
     }
 
     /// Construct a server wired to the unified event bus (tn-xula).
+    ///
+    /// Allocates a fresh `connection_id` from the process-wide
+    /// `CONNECTION_COUNTER` (tn-yuu4) — every accepted MCP connection gets
+    /// its own server instance and therefore its own connection id.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_bus(
         session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
@@ -162,6 +188,7 @@ impl TherminalMcpServer {
         event_bus: Option<Arc<crate::event_bus::EventBus>>,
     ) -> Self {
         Self {
+            connection_id: next_connection_id(),
             session_mgr,
             trust_config,
             rate_limiter,
@@ -229,7 +256,12 @@ impl TherminalMcpServer {
                     let _ = tx.send(event);
                     match tokio::time::timeout(std::time::Duration::from_secs(60), resp_rx).await {
                         Ok(Ok(true)) => {
-                            self.session_grants.grant(&agent_name, &tn);
+                            // tn-yuu4: grant is keyed by this connection's
+                            // daemon-assigned id, not the client-supplied
+                            // agent name. Spoofing the name on a future
+                            // connection cannot inherit this approval.
+                            self.session_grants
+                                .grant(self.connection_id, &agent_name, &tn);
                             Ok(())
                         }
                         _ => {

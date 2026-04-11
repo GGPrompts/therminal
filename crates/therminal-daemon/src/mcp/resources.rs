@@ -180,7 +180,7 @@ impl TherminalMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
         let uri = &request.uri;
-        let agent = extract_agent_identity(&context);
+        let agent = extract_agent_identity(&context, self.connection_id);
         self.enforce_resource_trust(uri, &agent)?;
 
         // Unified event bus (tn-xula) — `terminal://events?<filters>` and the
@@ -359,7 +359,7 @@ impl TherminalMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
         let uri = &request.uri;
-        let agent = extract_agent_identity(&context);
+        let agent = extract_agent_identity(&context, self.connection_id);
         self.enforce_resource_trust(uri, &agent)?;
 
         // Unified event bus subscription (tn-xula). Handles both the new

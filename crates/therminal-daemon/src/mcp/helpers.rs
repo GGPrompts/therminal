@@ -33,13 +33,24 @@ pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(
 /// Uses the client's `Implementation.name` from the MCP `initialize`
 /// handshake. Falls back to `"unknown"` if the peer info is not available
 /// (e.g. before initialization completes).
-pub(crate) fn extract_agent_identity(context: &RequestContext<RoleServer>) -> AgentIdentity {
+///
+/// `connection_id` is the daemon-assigned per-connection identifier (created
+/// in `transport.rs::spawn_mcp_connection` and stored on the
+/// `TherminalMcpServer` instance). It is used by the trust layer as the key
+/// for session-scoped grants — see [`crate::trust::SessionGrants`] (tn-yuu4).
+pub(crate) fn extract_agent_identity(
+    context: &RequestContext<RoleServer>,
+    connection_id: u64,
+) -> AgentIdentity {
     let name = context
         .peer
         .peer_info()
         .map(|info| info.client_info.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    AgentIdentity { name }
+    AgentIdentity {
+        name,
+        connection_id,
+    }
 }
 
 // ── Shared helpers used across tools/resources ──────────────────────────

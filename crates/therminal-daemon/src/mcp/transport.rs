@@ -178,6 +178,27 @@ async fn start_mcp_server_unix(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _addr)) => {
+                        // tn-yuu4: best-effort SO_PEERCRED audit log so the
+                        // operator can correlate any MCP client back to the
+                        // OS-level process that opened the socket. This is
+                        // diagnostic only — trust enforcement uses the
+                        // per-connection id assigned inside `TherminalMcpServer`.
+                        match stream.peer_cred() {
+                            Ok(cred) => {
+                                info!(
+                                    uid = cred.uid(),
+                                    gid = cred.gid(),
+                                    pid = ?cred.pid(),
+                                    "MCP connection accepted"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    error = %e,
+                                    "MCP connection accepted (peer_cred unavailable)"
+                                );
+                            }
+                        }
                         let (reader, writer) = stream.into_split();
                         spawn_mcp_connection(
                             reader,

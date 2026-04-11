@@ -39,7 +39,7 @@ impl ServerHandler for TherminalMcpServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        let agent = extract_agent_identity(&context);
+        let agent = extract_agent_identity(&context, self.connection_id);
         // Resources are Observer-tier; check against a representative URI.
         self.enforce_resource_trust("terminal://pane/0/content", &agent)?;
         let resources = self.build_resource_list().await;
@@ -95,7 +95,7 @@ impl ServerHandler for TherminalMcpServer {
         let args = request.arguments.unwrap_or_default();
 
         // Extract agent identity from the MCP connection context.
-        let agent = extract_agent_identity(&context);
+        let agent = extract_agent_identity(&context, self.connection_id);
 
         // Enforce trust tier and rate limiting.
         if let Err(denied_result) = self.enforce_trust(name, &agent).await {
