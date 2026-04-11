@@ -679,15 +679,20 @@ impl App {
             (self.config.general.padding - old_config.general.padding).abs() > f32::EPSILON;
 
         // ── Color overrides hot-reload ──────────────────────────────────
-        let colors_changed = self.config.colors.background != old_config.colors.background
-            || self.config.colors.foreground != old_config.colors.foreground
-            || self.config.colors.cursor != old_config.colors.cursor
-            || self.config.colors.selection != old_config.colors.selection
-            || self.config.colors.ansi != old_config.colors.ansi;
-
-        if colors_changed && let Some(renderer) = self.grid_renderer.as_mut() {
+        // Always re-apply on any config change. The prior field-by-field
+        // diff only examined {background, foreground, cursor, selection,
+        // ansi} and missed every chrome/hotspot role override added by
+        // tn-g7oo (chrome_focus_border, chrome_header_bg, chrome_status_bar_bg,
+        // chrome_fg*, hotspot_*, chrome_hyperlink, ...). Editing any of those
+        // silently failed to re-skin the chrome (status bar, tab bar, CSD
+        // strip, pane headers) until the next non-color change or restart.
+        // `apply_color_overrides` is cheap (field assigns + hex parses +
+        // clear_render_caches) and `apply_config` is already debounced at
+        // 500ms by the config watcher, so unconditionally running it on
+        // every config event is the robust fix.
+        if let Some(renderer) = self.grid_renderer.as_mut() {
             renderer.apply_color_overrides(&self.config.colors);
-            info!("color overrides updated via hot-reload");
+            info!("color overrides re-applied via hot-reload");
         }
 
         // Apply accessibility ui_text_scale on every config change (tn-avjv.6).

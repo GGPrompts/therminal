@@ -47,6 +47,14 @@ impl App {
 
     fn open_settings_overlay(&mut self) {
         self.overlay_mode = Some(OverlayMode::Settings);
+        // Seed lazy sections (Shell, Accessibility, Hotspots, ...) before the
+        // first frame. `seed_defaults` registers these sections with empty
+        // control vectors, and `sync_toggle_values` → `rebuild_*_section`
+        // populates them from live values. Without this call the first open
+        // would render empty Shell / Accessibility until the user presses a
+        // key (which is the only other sync_toggle_values site).
+        let values = self.build_settings_render_values();
+        self.settings_overlay.sync_toggle_values(&values);
         self.settings_overlay.reset_navigation();
         self.active_menu = None;
     }
