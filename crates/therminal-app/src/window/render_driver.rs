@@ -334,6 +334,12 @@ impl App {
             } else {
                 0.0
             };
+            // tn-t2yd.4: when the CSD strip is reserved (use_csd = true) we
+            // always render the tab labels even with a single workspace so
+            // the tab is clickable and has a right-click menu. Without CSD
+            // we keep the tn-t2yd.3 behavior of auto-hiding tabs for a lone
+            // workspace.
+            let draw_tabs = tab_bar_visible || use_csd;
             chrome::draw_tab_bar(
                 &tab_info,
                 renderer,
@@ -344,7 +350,7 @@ impl App {
                 gpu.config.width,
                 gpu.config.height,
                 bar_h,
-                tab_bar_visible,
+                draw_tabs,
                 csd_reserved,
             );
 

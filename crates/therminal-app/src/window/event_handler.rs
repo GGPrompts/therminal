@@ -900,11 +900,14 @@ impl App {
             && let Some((px, py)) = self.cursor_position
         {
             // Check if the right-click is in the tab bar area.
+            // tn-t2yd.4: CSD mode keeps the strip reserved even for a single
+            // workspace, and we now render the tab there too, so right-click
+            // should open the tab menu in that case as well.
             let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
             let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
             let use_csd = self.config.general.use_csd;
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
-            if tab_bar_visible && (py as f32) < tab_bar_h {
+            if (tab_bar_visible || use_csd) && (py as f32) < tab_bar_h {
                 // Right-click on a tab: open tab context menu.
                 let workspace_ids = self
                     .workspaces
@@ -995,7 +998,10 @@ impl App {
                 }
 
                 // Tab click: switch workspace.
-                if tab_bar_visible {
+                // tn-t2yd.4: under CSD a single-workspace tab is still
+                // rendered, so we hit-test it here too. `tab_bar_hit_test`
+                // handles the single-entry case natively.
+                if tab_bar_visible || use_csd {
                     let workspace_ids = self
                         .workspaces
                         .as_ref()
