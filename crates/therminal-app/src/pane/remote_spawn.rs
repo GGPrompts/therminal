@@ -862,6 +862,97 @@ fn apply_remote_resize(term: &Arc<FairMutex<Term<PaneListener>>>, cols: usize, r
     if guard.columns() == cols && guard.screen_lines() == rows {
         return;
     }
+    resize_remote_term_without_scrollback_pollution(&mut guard, cols, rows);
+}
+
+/// Resize a remote pane's local shadow `Term` without letting pre-resize
+/// viewport content land in scrollback history (tn-ebdu).
+///
+/// ## Why this exists
+///
+/// A local (GUI-side) `Term` backing a `PaneBackendKind::RemotePty` is a
+/// shadow of the daemon-side authoritative `Term`. It replays whatever
+/// bytes the daemon streams over IPC. On a window resize the GUI has to
+/// resize the shadow before the daemon broadcasts the post-SIGWINCH
+/// repaint — but alacritty's primary-screen resize + TUI repaint
+/// pipeline leaks duplicate content into scrollback every time it runs:
+///
+/// 1. `Grid::shrink_lines` (the path `Term::resize` takes on a row
+///    shrink) scrolls the pre-resize viewport into history via
+///    `scroll_up` so the cursor stays inside the smaller window.
+/// 2. The TUI reacts to SIGWINCH by re-emitting its rendered state. On
+///    the primary screen, `ESC[2J` (clear entire screen) lands as
+///    `Grid::clear_viewport`, which **also** scrolls the visible
+///    non-empty rows into history before blanking. Any streaming TUI
+///    that clears-and-repaints on resize therefore pushes a second copy
+///    of the same content into history.
+/// 3. `grow_lines` on a later grow re-pulls the oldest scrollback rows
+///    back into the viewport, further entangling the state.
+///
+/// In a standard local terminal this is xterm-spec behavior — the
+/// user's `clear` on a primary-screen shell legitimately scrolls
+/// command output into scrollback. But on a RemotePty pane the shadow
+/// has **no independent state** to preserve: the daemon owns the
+/// authoritative Term, and the shadow exists only to render what the
+/// daemon just streamed. Letting `shrink_lines` + `clear_viewport`
+/// push shadow-viewport rows into shadow-history produces a duplicate
+/// of content the user already saw, and the bug scales linearly with
+/// resize count until scrollback becomes unusable.
+///
+/// ## The fix
+///
+/// Before invoking `Term::resize`, blank the **visible** grid rows via
+/// `grid_mut().reset_region(..)`. This is a pure cell reset — no
+/// scroll, no history mutation, no cursor move. Then resize. Now:
+///
+/// - `shrink_lines`'s `scroll_up` scrolls blanks (free rows) into
+///   history, not pre-resize content. The display offset still moves,
+///   but the content that lands in history is inert whitespace.
+/// - The TUI's subsequent `ESC[2J` walks the blank viewport, finds
+///   zero non-empty cells, and `scroll_up(region, 0)` is a no-op. No
+///   new history rows.
+/// - The TUI's re-paint bytes (whether cursor-up + rewrite, or
+///   ESC[2J + rewrite, or any other rewrite strategy) lands on a
+///   clean viewport and repopulates it in the new dimensions.
+/// - Legitimate pre-resize scrollback above the viewport is
+///   preserved untouched — `reset_region(..)` only touches visible
+///   lines 0..screen_lines.
+///
+/// For `ALT_SCREEN` mode this is unnecessary (alt-screen content
+/// never flows to scrollback anyway) and we let the vanilla
+/// `Term::resize` path run. This also avoids an unwanted flash on
+/// full-screen curses apps that rely on their own post-SIGWINCH
+/// `redrawwin`.
+///
+/// ## Cost
+///
+/// A brief visible blank flash on resize if the TUI does not emit a
+/// repaint promptly. In practice the daemon-side PTY receives SIGWINCH
+/// and emits the repaint within a few milliseconds; the user sees the
+/// resize complete and the new content populate in the same frame.
+///
+/// For local PTY panes (`PaneBackendKind::Terminal`) this helper is
+/// not used — those panes are the authoritative Term and their
+/// scrollback growth on resize is spec-compliant xterm behavior.
+fn resize_remote_term_without_scrollback_pollution(
+    guard: &mut Term<PaneListener>,
+    cols: usize,
+    rows: usize,
+) {
+    use alacritty_terminal::term::TermMode;
+
+    // Alt-screen TUIs don't touch primary-screen scrollback, so the
+    // bug doesn't fire and blanking would actively destroy content
+    // the alt-screen curses app expects to still be there after
+    // resize.
+    let is_alt = guard.mode().contains(TermMode::ALT_SCREEN);
+    if !is_alt {
+        // Blank every visible row without scrolling them into history.
+        // `reset_region(..)` takes lines 0..screen_lines and calls
+        // `Row::reset` on each, leaving scrollback storage untouched.
+        guard.grid_mut().reset_region(..);
+    }
+
     guard.resize(TermSize {
         columns: cols,
         screen_lines: rows,
@@ -983,5 +1074,222 @@ mod tests {
         let guard = term.lock();
         assert_eq!(guard.columns(), 120);
         assert_eq!(guard.screen_lines(), 40);
+    }
+
+    /// tn-ebdu regression: resize must not duplicate visible streaming-TUI
+    /// content into scrollback.
+    ///
+    /// Reproduces the Windows-native + WSL pane flagship bug where every
+    /// resize cloned the Claude Code chat into scrollback. The triggering
+    /// path: GUI-side `Term::resize` runs on the main thread before the
+    /// daemon-side resize + SIGWINCH repaint bytes arrive; the resize
+    /// itself preserves the current viewport, but the subsequent in-place
+    /// repaint (common in TUIs that print their entire state from the top
+    /// on SIGWINCH) scrolls the same rows into history on top of the
+    /// already-scrolled initial paint, growing scrollback linearly with
+    /// resize count.
+    ///
+    /// Before the fix: 5 resizes grow scrollback by ~5 * chat_len rows.
+    /// After the fix: scrollback stays within ~baseline + noise.
+    #[test]
+    fn resize_does_not_duplicate_streaming_tui_into_scrollback() {
+        let term_config = TermConfig {
+            scrolling_history: 10_000,
+            ..Default::default()
+        };
+        let initial_size = TermSize {
+            columns: 80,
+            screen_lines: 30,
+        };
+        let listener = PaneListener::new();
+        let term = Arc::new(FairMutex::new(Term::new(
+            term_config,
+            &initial_size,
+            listener,
+        )));
+
+        let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+        let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+
+        // Step 1: paint 200 lines of "chat" — more than one viewport's
+        // worth. The bottom 30 rows are visible; the other 170 scroll
+        // naturally into history.
+        const CHAT_LINES: usize = 200;
+        let mut initial_paint = String::new();
+        initial_paint.push_str("\x1b[H");
+        for i in 1..=CHAT_LINES {
+            if i > 1 {
+                initial_paint.push_str("\r\n");
+            }
+            initial_paint.push_str(&format!("chat line {i:03} content"));
+        }
+        {
+            let mut guard = term.lock();
+            processor.advance_with_interceptor(
+                &mut *guard,
+                &mut interceptor,
+                initial_paint.as_bytes(),
+            );
+        }
+
+        let baseline_history = term.lock().grid().history_size();
+        // Natural scrollback after 200 lines into a 30-row viewport is
+        // ~170. We don't pin an exact number because alacritty may
+        // round by ±1 depending on cursor position.
+        assert!(
+            (168..=172).contains(&baseline_history),
+            "expected ~170 baseline scrollback rows, got {baseline_history}"
+        );
+
+        // Step 2: run a sequence of window resizes. Each one mirrors
+        // what happens when the user drags the window: the local Term
+        // is resized first (via `apply_remote_resize` or the equivalent
+        // main-thread `resize_all_panes` path), then the streaming TUI
+        // re-renders from the top of its buffer.
+        const RESIZE_COUNT: usize = 5;
+        let sizes = [(80usize, 28usize), (80, 26), (80, 24), (80, 26), (80, 28)];
+        assert_eq!(sizes.len(), RESIZE_COUNT);
+
+        for (cols, rows) in sizes.iter().copied() {
+            apply_remote_resize(&term, cols, rows);
+
+            // Some TUIs repaint on SIGWINCH by issuing ESC[2J (clear
+            // entire screen) + ESC[H (home) and re-emitting from the
+            // top. On alacritty this is the worst-case pattern: ESC[2J
+            // scrolls the current viewport content up into history
+            // *before* clearing, so every resize effectively duplicates
+            // whatever was on-screen into scrollback.
+            //
+            // This mirrors what vim, less, ncurses apps, and some
+            // React-terminal renderers do.
+            let mut repaint = String::new();
+            repaint.push_str("\x1b[2J\x1b[H");
+            for i in (CHAT_LINES - rows + 1)..=CHAT_LINES {
+                repaint.push_str(&format!("chat line {i:03} content"));
+                if i < CHAT_LINES {
+                    repaint.push_str("\r\n");
+                }
+            }
+            {
+                let mut guard = term.lock();
+                processor.advance_with_interceptor(
+                    &mut *guard,
+                    &mut interceptor,
+                    repaint.as_bytes(),
+                );
+            }
+        }
+
+        let final_history = term.lock().grid().history_size();
+
+        // Invariant: repaints that don't produce genuinely new content
+        // must not grow scrollback. Tolerance is generous — a handful
+        // of rows per resize covers reflow artifacts and cursor-at-end
+        // rounding.
+        let max_allowed = baseline_history + RESIZE_COUNT * 4;
+        assert!(
+            final_history <= max_allowed,
+            "tn-ebdu regression: {RESIZE_COUNT} resize+repaint cycles grew \
+             scrollback from {baseline_history} to {final_history} rows \
+             (max_allowed={max_allowed}). Every repaint is duplicating the \
+             full chat into history."
+        );
+
+        // Sanity: the visible viewport still shows the bottom of the
+        // chat (the tail), not garbage.
+        let guard = term.lock();
+        use alacritty_terminal::index::{Column, Line};
+        let last_row_idx = Line(guard.screen_lines() as i32 - 1);
+        let last_row: String = (0..guard.columns())
+            .map(|c| guard.grid()[last_row_idx][Column(c)].c)
+            .collect();
+        assert!(
+            last_row.starts_with("chat line 200 content"),
+            "last row should hold the last chat line, got: {last_row:?}"
+        );
+    }
+
+    /// tn-ebdu follow-up: the scrollback-protection fix must NOT wipe
+    /// alt-screen contents. Alt-screen curses apps (htop, vim, less,
+    /// etc.) rely on the fact that resize + SIGWINCH delivers a clean
+    /// new grid dimension and the app itself handles `redrawwin`. If
+    /// we blanked the alt-screen viewport on every resize, the user
+    /// would see a flash of empty cells until the next app tick — and
+    /// worse, the alt-screen has no scrollback, so the vanilla
+    /// `Term::resize` path is already safe.
+    ///
+    /// This test locks down the "alt-screen = keep content" branch of
+    /// `resize_remote_term_without_scrollback_pollution`.
+    #[test]
+    fn alt_screen_resize_preserves_visible_content() {
+        let term_config = TermConfig {
+            scrolling_history: 1000,
+            ..Default::default()
+        };
+        let initial_size = TermSize {
+            columns: 80,
+            screen_lines: 20,
+        };
+        let listener = PaneListener::new();
+        let term = Arc::new(FairMutex::new(Term::new(
+            term_config,
+            &initial_size,
+            listener,
+        )));
+
+        let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+        let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+
+        // Enter alt-screen and paint 10 rows of distinctive content.
+        let mut setup = String::new();
+        setup.push_str("\x1b[?1049h"); // alt-screen on
+        setup.push_str("\x1b[H");
+        for i in 1..=10 {
+            if i > 1 {
+                setup.push_str("\r\n");
+            }
+            setup.push_str(&format!("alt line {i:02}"));
+        }
+        {
+            let mut guard = term.lock();
+            processor.advance_with_interceptor(&mut *guard, &mut interceptor, setup.as_bytes());
+        }
+
+        // Sanity: alt-screen active, row 0 has "alt line 01".
+        {
+            let guard = term.lock();
+            use alacritty_terminal::index::{Column, Line};
+            use alacritty_terminal::term::TermMode;
+            assert!(
+                guard.mode().contains(TermMode::ALT_SCREEN),
+                "alt-screen should be active"
+            );
+            let row0: String = (0..guard.columns())
+                .map(|c| guard.grid()[Line(0)][Column(c)].c)
+                .collect();
+            assert!(
+                row0.starts_with("alt line 01"),
+                "alt-screen row 0 should hold 'alt line 01', got: {row0:?}"
+            );
+        }
+
+        // Resize. The fix branch for alt-screen must NOT blank the
+        // visible rows — curses apps depend on their grid state
+        // surviving a resize until the next redrawwin tick.
+        apply_remote_resize(&term, 80, 18);
+
+        // Row 0 should STILL contain "alt line 01" after the resize.
+        // (alacritty's alt-screen resize does not scroll on shrink —
+        // it preserves the top of the grid when shrinking from bottom.)
+        let guard = term.lock();
+        use alacritty_terminal::index::{Column, Line};
+        let row0: String = (0..guard.columns())
+            .map(|c| guard.grid()[Line(0)][Column(c)].c)
+            .collect();
+        assert!(
+            row0.starts_with("alt line 01"),
+            "alt-screen row 0 must be preserved across resize (tn-ebdu \
+             fix must not blank alt-screen viewports), got: {row0:?}"
+        );
     }
 }

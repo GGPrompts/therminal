@@ -189,7 +189,23 @@ impl PaneBackend for PaneBackendKind {
                 ..
             } => {
                 {
+                    // tn-ebdu: the local shadow `Term` is not the
+                    // authoritative state for this pane — the daemon
+                    // is. Letting `Term::resize` run its normal
+                    // shrink_lines + post-repaint clear_viewport path
+                    // on a streaming-TUI pane duplicates the pre-resize
+                    // viewport into scrollback on every resize (and the
+                    // bug scales linearly with resize count). Blank the
+                    // visible viewport first so the scroll-to-history
+                    // pipeline has nothing to scroll. Legitimate
+                    // scrollback above the viewport is untouched.
+                    // See `resize_remote_term_without_scrollback_pollution`
+                    // in remote_spawn.rs for the full rationale.
+                    use alacritty_terminal::term::TermMode;
                     let mut term_guard = term.lock();
+                    if !term_guard.mode().contains(TermMode::ALT_SCREEN) {
+                        term_guard.grid_mut().reset_region(..);
+                    }
                     let size = PaneTermSize {
                         columns: cols,
                         screen_lines: rows,
