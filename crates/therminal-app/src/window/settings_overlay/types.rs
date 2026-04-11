@@ -1,0 +1,208 @@
+//! Settings overlay types: focus, control bindings/types, section + control
+//! structs, and the `SettingsCommand` enum the App applies to runtime config.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsFocus {
+    Navigation,
+    Controls,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThemePreset {
+    OriginalTherminal,
+    Paper,
+    TokyoNightLight,
+    TomorrowNightBright,
+    HemisuDark,
+}
+
+impl ThemePreset {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::OriginalTherminal => "Original Therminal (default)",
+            Self::Paper => "Paper (light)",
+            Self::TokyoNightLight => "Tokyo Night Light (light)",
+            Self::TomorrowNightBright => "Tomorrow Night Bright (dark)",
+            Self::HemisuDark => "Hemisu Dark (dark)",
+        }
+    }
+
+    pub(crate) fn menu_label(self) -> &'static str {
+        match self {
+            Self::OriginalTherminal => "Original Therminal",
+            Self::Paper => "Paper",
+            Self::TokyoNightLight => "Tokyo Night Light",
+            Self::TomorrowNightBright => "Tomorrow Night Bright",
+            Self::HemisuDark => "Hemisu Dark",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlBinding {
+    TogglePaneHeaders,
+    ToggleStatusBar,
+    ApplyThemePreset(ThemePreset),
+    // Hotspot controls (tn-avjv.5)
+    EditorChainEntry(usize),
+    FolderPaneCommand,
+    FolderOpenerEntry(usize),
+    // Shell controls (tn-avjv.6)
+    DefaultShell,
+    ShellArgs,
+    NewPaneCwd,
+    // Accessibility controls (tn-avjv.6)
+    ToggleHighContrast,
+    ToggleReducedMotion,
+    UiTextScale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // MoveUp/MoveDown wired in future keyboard shortcut pass.
+pub(crate) enum SettingsCommand {
+    TogglePaneHeaders,
+    ToggleStatusBar,
+    ApplyThemePreset(ThemePreset),
+    // Hotspot mutations (tn-avjv.5)
+    EditorChainRemove(usize),
+    EditorChainMoveUp(usize),
+    EditorChainMoveDown(usize),
+    SetFolderPaneCommand(String),
+    FolderOpenerRemove(usize),
+    FolderOpenerMoveUp(usize),
+    FolderOpenerMoveDown(usize),
+    // Shell mutations (tn-avjv.6)
+    SetDefaultShell(String),
+    SetShellArgs(String),
+    SetNewPaneCwd(usize),
+    // Accessibility mutations (tn-avjv.6)
+    ToggleHighContrast,
+    ToggleReducedMotion,
+    SetUiTextScale(usize),
+}
+
+impl ControlBinding {
+    pub(super) fn command(&self) -> SettingsCommand {
+        match self {
+            Self::TogglePaneHeaders => SettingsCommand::TogglePaneHeaders,
+            Self::ToggleStatusBar => SettingsCommand::ToggleStatusBar,
+            Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(*preset),
+            Self::EditorChainEntry(idx) => SettingsCommand::EditorChainRemove(*idx),
+            Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerRemove(*idx),
+            Self::FolderPaneCommand => SettingsCommand::SetFolderPaneCommand(String::new()),
+            Self::DefaultShell => SettingsCommand::SetDefaultShell(String::new()),
+            Self::ShellArgs => SettingsCommand::SetShellArgs(String::new()),
+            Self::NewPaneCwd => SettingsCommand::SetNewPaneCwd(0),
+            Self::ToggleHighContrast => SettingsCommand::ToggleHighContrast,
+            Self::ToggleReducedMotion => SettingsCommand::ToggleReducedMotion,
+            Self::UiTextScale => SettingsCommand::SetUiTextScale(0),
+        }
+    }
+}
+
+// -- Control type variants --
+
+/// Visual/interactive type for a settings control.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Variants used by downstream settings sections (tn-avjv.5, tn-avjv.6).
+pub(crate) enum ControlType {
+    Toggle {
+        value: bool,
+    },
+    Select {
+        options: Vec<String>,
+        selected: usize,
+    },
+    TextInput {
+        value: String,
+        cursor: usize,
+        editing: bool,
+    },
+    ListRow {
+        display_value: String,
+    },
+    Action,
+}
+
+#[allow(dead_code)]
+impl ControlType {
+    pub(crate) fn toggle(initial: bool) -> Self {
+        Self::Toggle { value: initial }
+    }
+
+    pub(crate) fn select(options: Vec<String>, initial: usize) -> Self {
+        let selected = if options.is_empty() {
+            0
+        } else {
+            initial.min(options.len() - 1)
+        };
+        Self::Select { options, selected }
+    }
+
+    pub(crate) fn text_input(initial: impl Into<String>) -> Self {
+        let value: String = initial.into();
+        let cursor = value.len();
+        Self::TextInput {
+            value,
+            cursor,
+            editing: false,
+        }
+    }
+
+    pub(crate) fn list_row(display_value: impl Into<String>) -> Self {
+        Self::ListRow {
+            display_value: display_value.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SettingsControl {
+    pub label: &'static str,
+    pub binding: ControlBinding,
+    pub control_type: ControlType,
+}
+
+impl SettingsControl {
+    pub(crate) fn new(label: &'static str, binding: ControlBinding) -> Self {
+        Self {
+            label,
+            binding,
+            control_type: ControlType::Action,
+        }
+    }
+
+    pub(crate) fn with_type(
+        label: &'static str,
+        binding: ControlBinding,
+        control_type: ControlType,
+    ) -> Self {
+        Self {
+            label,
+            binding,
+            control_type,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SettingsSection {
+    #[allow(dead_code)]
+    pub id: &'static str,
+    pub title: &'static str,
+    pub controls: Vec<SettingsControl>,
+}
+
+impl SettingsSection {
+    pub(crate) fn new(
+        id: &'static str,
+        title: &'static str,
+        controls: Vec<SettingsControl>,
+    ) -> Self {
+        Self {
+            id,
+            title,
+            controls,
+        }
+    }
+}
