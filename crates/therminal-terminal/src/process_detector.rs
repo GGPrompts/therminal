@@ -271,6 +271,12 @@ fn classify_wsl_process(comm: &str, args: &str) -> Option<AgentType> {
     let comm_lower = comm.to_lowercase();
     let args_lower = args.to_lowercase();
 
+    // Guard: skip processes running in server/daemon mode — these are MCP
+    // servers or background services, not interactive agent sessions.
+    if is_server_mode(&args_lower) {
+        return None;
+    }
+
     // Claude Code: Node.js process with "claude" in the command line.
     if comm_lower.contains("node") && args_lower.contains("claude") {
         return Some(AgentType::Claude);
@@ -308,6 +314,12 @@ fn classify_process(process: &Process) -> Option<AgentType> {
         return None;
     }
 
+    // Guard: skip processes running in server/daemon mode — these are MCP
+    // servers or background services, not interactive agent sessions.
+    if is_server_mode(&cmd_joined) {
+        return None;
+    }
+
     // Claude Code: Node.js process with "claude" in the command line.
     if name.contains("node") && cmd_joined.contains("claude") {
         return Some(AgentType::Claude);
@@ -340,6 +352,28 @@ fn classify_process(process: &Process) -> Option<AgentType> {
 /// binfmt_misc interop (i.e., the interpreter is `/init` and the binary path
 /// starts with `/mnt/`).
 ///
+/// Return `true` if the command line indicates a server/daemon mode rather
+/// than an interactive agent session. Matches subcommands like `mcp-server`,
+/// `mcp serve`, `serve`, `daemon` that agents use for background services.
+fn is_server_mode(args_lower: &str) -> bool {
+    // Check for common server-mode subcommands. We look for whole tokens
+    // to avoid false positives on e.g. "serverstatus" or "mcp-server-config".
+    let server_tokens = ["mcp-server", "mcp server", "serve", "daemon"];
+    for token in &server_tokens {
+        // Token must appear as a standalone argument: preceded by whitespace
+        // (or start of string) and followed by whitespace/end-of-string.
+        if let Some(pos) = args_lower.find(token) {
+            let before_ok = pos == 0 || args_lower.as_bytes()[pos - 1] == b' ';
+            let after = pos + token.len();
+            let after_ok = after >= args_lower.len() || args_lower.as_bytes()[after] == b' ';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// On WSL2, Windows `.exe` files run as Linux processes with `/init` as the
 /// actual ELF interpreter. The full command line looks like:
 ///
@@ -470,6 +504,24 @@ mod tests {
     fn wsl2_interop_empty_cmd_not_flagged() {
         assert!(!is_wsl2_interop_process(&[]));
         assert!(!is_wsl2_interop_process(&["/init".to_string()]));
+    }
+
+    // ── Server-mode guard ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_server_mode_catches_known_subcommands() {
+        assert!(is_server_mode("codex mcp-server"));
+        assert!(is_server_mode("codex mcp server"));
+        assert!(is_server_mode("node /usr/bin/claude serve"));
+        assert!(is_server_mode("codex daemon"));
+    }
+
+    #[test]
+    fn is_server_mode_allows_interactive_sessions() {
+        assert!(!is_server_mode("codex --resume"));
+        assert!(!is_server_mode("codex plan"));
+        assert!(!is_server_mode("node /usr/bin/claude --json"));
+        assert!(!is_server_mode("codex --config /home/user/server/config.toml"));
     }
 
     // ── WSL probe parser (tn-966s) ────────────────────────────────────────
@@ -704,6 +756,30 @@ mod tests {
                 stdout: "  42   1 python3 /usr/bin/python3 -m aider --model gpt-4 turbo\n",
                 expected: vec![(AgentType::Aider, 42, "python3")],
             },
+            // --- Server-mode exclusions (tn-mcp-fp) ---
+            Case {
+                label: "codex mcp-server is not an interactive agent",
+                stdout: "  9999  9998 codex codex mcp-server\n",
+                expected: vec![],
+            },
+            Case {
+                label: "node claude mcp serve is not an interactive agent",
+                stdout: "  555   1 node node /usr/bin/claude serve\n",
+                expected: vec![],
+            },
+            Case {
+                label: "codex daemon is not an interactive agent",
+                stdout: "  100   1 codex codex daemon\n",
+                expected: vec![],
+            },
+            Case {
+                label: "mixed: interactive codex detected, mcp-server skipped",
+                stdout: concat!(
+                    "  100   1 codex codex --resume\n",
+                    "  200   1 codex codex mcp-server\n",
+                ),
+                expected: vec![(AgentType::Codex, 100, "codex")],
+            },
         ];
 
         for (i, c) in cases.iter().enumerate() {
@@ -848,6 +924,37 @@ mod tests {
                 label: "Codex: case-insensitive CODEX",
                 comm: "CODEX",
                 args: "CODEX run",
+                expected: Some(AgentType::Codex),
+            },
+            // Server-mode exclusions (tn-mcp-fp)
+            Case {
+                label: "Codex mcp-server is not an agent",
+                comm: "codex",
+                args: "codex mcp-server",
+                expected: None,
+            },
+            Case {
+                label: "Claude mcp serve is not an agent",
+                comm: "node",
+                args: "node /usr/bin/claude serve",
+                expected: None,
+            },
+            Case {
+                label: "Codex daemon mode is not an agent",
+                comm: "codex",
+                args: "codex daemon",
+                expected: None,
+            },
+            Case {
+                label: "Copilot serve is not an agent",
+                comm: "copilot",
+                args: "copilot serve",
+                expected: None,
+            },
+            Case {
+                label: "serve substring in path does not trigger exclusion",
+                comm: "codex",
+                args: "codex --config /home/user/server/config.toml",
                 expected: Some(AgentType::Codex),
             },
         ];
