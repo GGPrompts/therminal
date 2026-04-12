@@ -1460,4 +1460,78 @@ mod tests {
         assert!(state.context_percent.is_none());
         assert!(state.model.is_none());
     }
+
+    // ── Table-driven WSL state path rewriting (tn-cntx) ──────────────────
+
+    /// Exercises the pure path-building half of `default_state_dir` for the
+    /// Windows+WSL branch. On non-Windows the real function takes the Unix
+    /// branch, but the underlying pure functions (`wsl_paths::linux_to_unc`
+    /// and `wsl_paths::state_dir_unc`) are platform-independent.
+    #[test]
+    fn state_dir_rewrite_table_driven() {
+        use crate::wsl_paths;
+
+        struct Case {
+            label: &'static str,
+            distro: &'static str,
+            state_name: &'static str,
+            expected: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                label: "Ubuntu + claude-code-state",
+                distro: "Ubuntu",
+                state_name: "claude-code-state",
+                expected: Some(r"\\wsl.localhost\Ubuntu\tmp\claude-code-state"),
+            },
+            Case {
+                label: "Ubuntu + codex-state",
+                distro: "Ubuntu",
+                state_name: "codex-state",
+                expected: Some(r"\\wsl.localhost\Ubuntu\tmp\codex-state"),
+            },
+            Case {
+                label: "Ubuntu + copilot-state",
+                distro: "Ubuntu",
+                state_name: "copilot-state",
+                expected: Some(r"\\wsl.localhost\Ubuntu\tmp\copilot-state"),
+            },
+            Case {
+                label: "custom distro name",
+                distro: "Debian_12",
+                state_name: "claude-code-state",
+                expected: Some(r"\\wsl.localhost\Debian_12\tmp\claude-code-state"),
+            },
+            Case {
+                label: "distro with dots and hyphens",
+                distro: "Ubuntu-24.04",
+                state_name: "codex-state",
+                expected: Some(r"\\wsl.localhost\Ubuntu-24.04\tmp\codex-state"),
+            },
+            Case {
+                label: "missing distro (empty) -> fallback None",
+                distro: "",
+                state_name: "claude-code-state",
+                expected: None,
+            },
+        ];
+
+        for (i, c) in cases.iter().enumerate() {
+            // Replicate the pure logic of `default_state_dir` Windows branch
+            // without hitting the OnceLock detection path.
+            let linux_path = format!("/tmp/{}", c.state_name);
+            let result = if c.distro.is_empty() {
+                None
+            } else {
+                wsl_paths::linux_to_unc(c.distro, &linux_path)
+            };
+            assert_eq!(
+                result.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                c.expected.map(String::from),
+                "case {i} ({})",
+                c.label
+            );
+        }
+    }
+
 }

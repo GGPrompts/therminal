@@ -285,7 +285,7 @@ pub fn claude_projects_dir_unc() -> Option<PathBuf> {
     expand_home_to_unc(&distro, &home, "~/.claude/projects")
 }
 
-fn state_dir_unc(name: &str) -> Option<PathBuf> {
+pub(crate) fn state_dir_unc(name: &str) -> Option<PathBuf> {
     let distro = detect_default_distro()?;
     let linux_path = format!("/tmp/{name}");
     linux_to_unc(&distro, &linux_path)
@@ -446,5 +446,186 @@ mod tests {
         assert!(codex_state_dir_unc().is_none());
         assert!(copilot_state_dir_unc().is_none());
         assert!(claude_projects_dir_unc().is_none());
+    }
+
+    // ── Table-driven WSL state path rewriting (tn-cntx) ──────────────────
+
+    /// Table-driven: `state_dir_unc` resolves all three state directory
+    /// names through `linux_to_unc` when given a valid distro.
+    #[test]
+    fn state_dir_unc_table_driven() {
+        struct Case {
+            distro: &'static str,
+            state_name: &'static str,
+            expected: &'static str,
+        }
+        let cases = [
+            Case {
+                distro: "Ubuntu",
+                state_name: "claude-code-state",
+                expected: r"\\wsl.localhost\Ubuntu\tmp\claude-code-state",
+            },
+            Case {
+                distro: "Ubuntu",
+                state_name: "codex-state",
+                expected: r"\\wsl.localhost\Ubuntu\tmp\codex-state",
+            },
+            Case {
+                distro: "Ubuntu",
+                state_name: "copilot-state",
+                expected: r"\\wsl.localhost\Ubuntu\tmp\copilot-state",
+            },
+            Case {
+                distro: "Debian_12",
+                state_name: "claude-code-state",
+                expected: r"\\wsl.localhost\Debian_12\tmp\claude-code-state",
+            },
+            Case {
+                distro: "kali-linux",
+                state_name: "codex-state",
+                expected: r"\\wsl.localhost\kali-linux\tmp\codex-state",
+            },
+            Case {
+                distro: "openSUSE-Tumbleweed",
+                state_name: "copilot-state",
+                expected: r"\\wsl.localhost\openSUSE-Tumbleweed\tmp\copilot-state",
+            },
+            Case {
+                distro: "Ubuntu-24.04",
+                state_name: "claude-code-state",
+                expected: r"\\wsl.localhost\Ubuntu-24.04\tmp\claude-code-state",
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            // Inline the logic of `state_dir_unc` so we can inject `distro`.
+            let linux_path = format!("/tmp/{}", c.state_name);
+            let result = linux_to_unc(c.distro, &linux_path);
+            assert_eq!(
+                result.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                Some(c.expected.to_string()),
+                "case {i}: distro={} name={}",
+                c.distro,
+                c.state_name
+            );
+        }
+    }
+
+    /// Missing distro (empty string) causes all state dir lookups to
+    /// return `None`, exercising the fallback-to-non-WSL-path branch.
+    #[test]
+    fn state_dir_unc_missing_distro_returns_none() {
+        for name in &["claude-code-state", "codex-state", "copilot-state"] {
+            let linux_path = format!("/tmp/{name}");
+            assert!(
+                linux_to_unc("", &linux_path).is_none(),
+                "empty distro should return None for {name}"
+            );
+        }
+    }
+
+    /// Distro names with spaces are rejected by `is_safe_distro_name`,
+    /// which the real detect_default_distro checks. Verify `linux_to_unc`
+    /// still produces a path (it does not check safety — that is the
+    /// caller's job) but `is_safe_distro_name` rejects the name.
+    #[test]
+    fn distro_with_spaces_rejected_by_safety_check() {
+        let distro = "My WSL Distro";
+        // The name itself is unsafe:
+        assert!(
+            !is_safe_distro_name(distro),
+            "distro name with spaces must be rejected"
+        );
+        // But linux_to_unc is a pure path builder — it does not safety-check:
+        assert!(linux_to_unc(distro, "/tmp/claude-code-state").is_some());
+    }
+
+    // ── Table-driven WSL home resolution (tn-cntx) ───────────────────────
+
+    #[test]
+    fn expand_home_table_driven() {
+        struct Case {
+            label: &'static str,
+            distro: &'static str,
+            home: &'static str,
+            path: &'static str,
+            expected: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                label: "standard /home/user",
+                distro: "Ubuntu",
+                home: "/home/alice",
+                path: "~/.claude/projects",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\alice\.claude\projects"),
+            },
+            Case {
+                label: "root user /root",
+                distro: "Ubuntu",
+                home: "/root",
+                path: "~/.claude/projects",
+                expected: Some(r"\\wsl.localhost\Ubuntu\root\.claude\projects"),
+            },
+            Case {
+                label: "user with hyphens",
+                distro: "Ubuntu",
+                home: "/home/dev-user",
+                path: "~/.claude/projects",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\dev-user\.claude\projects"),
+            },
+            Case {
+                label: "user with underscores",
+                distro: "Ubuntu",
+                home: "/home/dev_user",
+                path: "~/.claude/projects",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\dev_user\.claude\projects"),
+            },
+            Case {
+                label: "home resolution failure (empty home)",
+                distro: "Ubuntu",
+                home: "",
+                path: "~/.claude/projects",
+                expected: None,
+            },
+            Case {
+                label: "home resolution failure (empty distro)",
+                distro: "",
+                home: "/home/alice",
+                path: "~/.claude/projects",
+                expected: None,
+            },
+            Case {
+                label: "custom distro with nested home",
+                distro: "kali-linux",
+                home: "/home/kali",
+                path: "~/.claude/projects",
+                expected: Some(r"\\wsl.localhost\kali-linux\home\kali\.claude\projects"),
+            },
+            Case {
+                label: "trailing slash on home",
+                distro: "Ubuntu",
+                home: "/home/alice/",
+                path: "~/.config/something",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\alice\.config\something"),
+            },
+            Case {
+                label: "absolute path (no tilde) passes through",
+                distro: "Ubuntu",
+                home: "/home/alice",
+                path: "/var/log/messages",
+                expected: Some(r"\\wsl.localhost\Ubuntu\var\log\messages"),
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            let result = expand_home_to_unc(c.distro, c.home, c.path);
+            assert_eq!(
+                result.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                c.expected.map(String::from),
+                "case {i} ({}): distro={} home={} path={}",
+                c.label,
+                c.distro,
+                c.home,
+                c.path
+            );
+        }
     }
 }

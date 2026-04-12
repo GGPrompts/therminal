@@ -1091,4 +1091,183 @@ mod tests {
         registry.poll_all();
         assert_eq!(registry.subagent_count(), 1);
     }
+
+    // ── Table-driven session ID validation (tn-cntx) ──────────────────────
+
+    /// `is_valid_session_id` is the path-traversal guard that protects
+    /// JSONL resolution. Table-driven coverage of edge cases.
+    #[test]
+    fn is_valid_session_id_table_driven() {
+        struct Case {
+            input: &'static str,
+            valid: bool,
+        }
+        let cases = [
+            Case { input: "abc-123", valid: true },
+            Case { input: "6498af57-2c8b-4a0c-8735-abcdef012345", valid: true },
+            Case { input: "session_with_underscores", valid: true },
+            Case { input: "", valid: false },
+            Case { input: "../../../etc/passwd", valid: false },
+            Case { input: "a b c", valid: false },
+            Case { input: "session/nested", valid: false },
+            Case {
+                input: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 65 chars
+                valid: false,
+            },
+            Case {
+                input: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 64 chars
+                valid: true,
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            assert_eq!(
+                super::is_valid_session_id(c.input),
+                c.valid,
+                "case {i}: input={:?}",
+                c.input
+            );
+        }
+    }
+
+    // ── Table-driven WSL home resolution (tn-cntx) ───────────────────────
+
+    /// Exercises the pure path-building half of `home_dir()` for the
+    /// Windows+WSL branch. The real function uses OnceLock detection; we
+    /// test the underlying pure functions directly.
+    #[test]
+    fn home_dir_wsl_rewrite_table_driven() {
+        use crate::wsl_paths;
+
+        struct Case {
+            label: &'static str,
+            distro: &'static str,
+            home: &'static str,
+            expected: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                label: "standard /home/user",
+                distro: "Ubuntu",
+                home: "/home/alice",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\alice"),
+            },
+            Case {
+                label: "root user /root",
+                distro: "Ubuntu",
+                home: "/root",
+                expected: Some(r"\\wsl.localhost\Ubuntu\root"),
+            },
+            Case {
+                label: "user with hyphens",
+                distro: "Ubuntu",
+                home: "/home/dev-user",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\dev-user"),
+            },
+            Case {
+                label: "user with underscores",
+                distro: "Ubuntu",
+                home: "/home/dev_user",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\dev_user"),
+            },
+            Case {
+                label: "home resolution failure (empty home)",
+                distro: "Ubuntu",
+                home: "",
+                expected: None,
+            },
+            Case {
+                label: "home resolution failure (empty distro)",
+                distro: "",
+                home: "/home/alice",
+                expected: None,
+            },
+            Case {
+                label: "custom distro",
+                distro: "kali-linux",
+                home: "/home/kali",
+                expected: Some(r"\\wsl.localhost\kali-linux\home\kali"),
+            },
+            Case {
+                label: "trailing slash on home",
+                distro: "Ubuntu",
+                home: "/home/alice/",
+                // linux_to_unc does not special-case trailing slash on the input;
+                // it converts `/home/alice/` to `\home\alice\` which produces a
+                // trailing backslash — test the actual behavior.
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\alice\"),
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            // Replicate the pure logic of `home_dir` Windows+WSL branch:
+            // detect_default_distro() -> detect_wsl_home() -> linux_to_unc()
+            let result = if c.distro.is_empty() || c.home.is_empty() {
+                None
+            } else {
+                wsl_paths::linux_to_unc(c.distro, c.home)
+            };
+            assert_eq!(
+                result.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                c.expected.map(String::from),
+                "case {i} ({})",
+                c.label
+            );
+        }
+    }
+
+    /// End-to-end: the projects dir resolution combines home + relative
+    /// path expansion, exercising `expand_home_to_unc` through the same
+    /// logic as `claude_projects_dir_unc`.
+    #[test]
+    fn projects_dir_resolution_table_driven() {
+        use crate::wsl_paths;
+
+        struct Case {
+            label: &'static str,
+            distro: &'static str,
+            home: &'static str,
+            expected: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                label: "standard user",
+                distro: "Ubuntu",
+                home: "/home/alice",
+                expected: Some(r"\\wsl.localhost\Ubuntu\home\alice\.claude\projects"),
+            },
+            Case {
+                label: "root user",
+                distro: "Ubuntu",
+                home: "/root",
+                expected: Some(r"\\wsl.localhost\Ubuntu\root\.claude\projects"),
+            },
+            Case {
+                label: "user with hyphens and underscores",
+                distro: "Debian_12",
+                home: "/home/my-dev_user",
+                expected: Some(r"\\wsl.localhost\Debian_12\home\my-dev_user\.claude\projects"),
+            },
+            Case {
+                label: "missing distro",
+                distro: "",
+                home: "/home/alice",
+                expected: None,
+            },
+            Case {
+                label: "missing home",
+                distro: "Ubuntu",
+                home: "",
+                expected: None,
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            // Replicate the pure logic of `claude_projects_dir_unc`:
+            let result = wsl_paths::expand_home_to_unc(c.distro, c.home, "~/.claude/projects");
+            assert_eq!(
+                result.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                c.expected.map(String::from),
+                "case {i} ({})",
+                c.label
+            );
+        }
+    }
 }

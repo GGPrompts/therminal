@@ -566,4 +566,298 @@ mod tests {
         let detector = ProcessDetector::new(Some(42)).with_wsl_distro("");
         assert!(detector.wsl_distro.is_none());
     }
+
+    // ── Table-driven WSL ps parsing (tn-cntx) ────────────────────────────
+
+    /// Comprehensive table-driven test for `parse_wsl_ps` covering Claude
+    /// Code, Codex, Aider, Copilot process trees, mixed processes, empty
+    /// output, malformed lines, and interop processes.
+    #[test]
+    fn parse_wsl_ps_table_driven() {
+        struct Case {
+            label: &'static str,
+            stdout: &'static str,
+            expected: Vec<(AgentType, u32, &'static str)>,
+        }
+        let cases = [
+            // --- Claude Code process tree ---
+            Case {
+                label: "Claude Code: node with claude in args",
+                stdout: "  12345  12340 node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n",
+                expected: vec![(AgentType::Claude, 12345, "node")],
+            },
+            Case {
+                label: "Claude Code: node18 variant",
+                stdout: "  555    1 node18 /home/u/.nvm/versions/node/v18/bin/node /usr/local/bin/claude\n",
+                expected: vec![(AgentType::Claude, 555, "node18")],
+            },
+            // --- Codex process tree ---
+            Case {
+                label: "Codex: exact name",
+                stdout: "  9999  9998 codex codex --resume\n",
+                expected: vec![(AgentType::Codex, 9999, "codex")],
+            },
+            Case {
+                label: "Codex: prefixed name",
+                stdout: "  100   1 codex-cli codex-cli run\n",
+                expected: vec![(AgentType::Codex, 100, "codex-cli")],
+            },
+            // --- Aider (Python) ---
+            Case {
+                label: "Aider: python3 with aider in args",
+                stdout: "  4242  4240 python3 /usr/bin/python3 /home/u/.local/bin/aider\n",
+                expected: vec![(AgentType::Aider, 4242, "python3")],
+            },
+            Case {
+                label: "Aider: python (no version suffix)",
+                stdout: "  300   1 python python -m aider --model gpt-4\n",
+                expected: vec![(AgentType::Aider, 300, "python")],
+            },
+            // --- Copilot CLI ---
+            Case {
+                label: "Copilot: exact name",
+                stdout: "  800   1 copilot copilot --help\n",
+                expected: vec![(AgentType::Copilot, 800, "copilot")],
+            },
+            Case {
+                label: "Copilot: prefixed name",
+                stdout: "  801   1 copilot-cli copilot-cli suggest\n",
+                expected: vec![(AgentType::Copilot, 801, "copilot-cli")],
+            },
+            // --- Mixed Linux + unrelated processes ---
+            Case {
+                label: "mixed: agents among non-agents",
+                stdout: concat!(
+                    "  1     0 systemd /sbin/init splash\n",
+                    "  100   1 sshd /usr/sbin/sshd -D\n",
+                    "  200 100 bash -bash\n",
+                    "  300 200 node /usr/local/bin/claude --json\n",
+                    "  400 200 vim foo.rs\n",
+                    "  500 200 codex codex plan\n",
+                ),
+                expected: vec![
+                    (AgentType::Claude, 300, "node"),
+                    (AgentType::Codex, 500, "codex"),
+                ],
+            },
+            // --- Empty ps output ---
+            Case {
+                label: "empty output",
+                stdout: "",
+                expected: vec![],
+            },
+            Case {
+                label: "only whitespace and blank lines",
+                stdout: "\n  \n\n  \n",
+                expected: vec![],
+            },
+            // --- Malformed ps lines ---
+            Case {
+                label: "malformed: no fields at all",
+                stdout: "not-a-row\n",
+                expected: vec![],
+            },
+            Case {
+                label: "malformed: non-numeric PID",
+                stdout: "  X     Y bash bash\n",
+                expected: vec![],
+            },
+            Case {
+                label: "malformed: only one field",
+                stdout: "  123\n",
+                expected: vec![],
+            },
+            Case {
+                label: "malformed: only two fields",
+                stdout: "  123  456\n",
+                expected: vec![],
+            },
+            Case {
+                label: "malformed mixed with valid",
+                stdout: "garbage line\n  X Y bash bash\n  500   1 codex codex\n",
+                expected: vec![(AgentType::Codex, 500, "codex")],
+            },
+            // --- Interop processes (Windows .exe via WSL) ---
+            // Note: parse_wsl_ps does NOT filter interop — it runs
+            // classify_wsl_process which classifies by comm+args, and
+            // interop processes appear with /init as comm. /init does
+            // not match any agent pattern, so they are naturally skipped.
+            Case {
+                label: "interop: /init with Windows exe not classified",
+                stdout: "  700   1 init /init /mnt/c/Windows/System32/cmd.exe\n",
+                expected: vec![],
+            },
+            Case {
+                label: "interop: Windows node with claude (init comm) not classified",
+                stdout: "  701   1 init /init /mnt/c/Program Files/nodejs/node.exe claude\n",
+                expected: vec![],
+            },
+            // --- Right-aligned wide PID columns ---
+            Case {
+                label: "wide PIDs with extra padding",
+                stdout: "    12345678     1234 node /usr/bin/node /opt/claude/cli.js\n",
+                expected: vec![(AgentType::Claude, 12345678, "node")],
+            },
+            // --- Args with spaces preserved ---
+            Case {
+                label: "args with spaces preserved for matching",
+                stdout: "  42   1 python3 /usr/bin/python3 -m aider --model gpt-4 turbo\n",
+                expected: vec![(AgentType::Aider, 42, "python3")],
+            },
+        ];
+
+        for (i, c) in cases.iter().enumerate() {
+            let agents = parse_wsl_ps(c.stdout);
+            assert_eq!(
+                agents.len(),
+                c.expected.len(),
+                "case {i} ({}) expected {} agents, got {}: {:?}",
+                c.label,
+                c.expected.len(),
+                agents.len(),
+                agents
+            );
+            for (j, (exp_type, exp_pid, exp_name)) in c.expected.iter().enumerate() {
+                assert_eq!(
+                    agents[j].agent_type, *exp_type,
+                    "case {i}.{j} ({}) agent_type mismatch",
+                    c.label
+                );
+                assert_eq!(
+                    agents[j].pid, *exp_pid,
+                    "case {i}.{j} ({}) pid mismatch",
+                    c.label
+                );
+                assert_eq!(
+                    agents[j].name, *exp_name,
+                    "case {i}.{j} ({}) name mismatch",
+                    c.label
+                );
+            }
+        }
+    }
+
+    /// Table-driven test for `classify_wsl_process` ensuring parity with
+    /// the sysinfo-based `classify_process` for all known agent types.
+    #[test]
+    fn classify_wsl_process_table_driven() {
+        struct Case {
+            label: &'static str,
+            comm: &'static str,
+            args: &'static str,
+            expected: Option<AgentType>,
+        }
+        let cases = [
+            // Claude variants
+            Case {
+                label: "Claude: node + claude in args",
+                comm: "node",
+                args: "node /usr/lib/claude-code/cli.js",
+                expected: Some(AgentType::Claude),
+            },
+            Case {
+                label: "Claude: nodejs + claude in args",
+                comm: "nodejs",
+                args: "nodejs /opt/claude",
+                expected: Some(AgentType::Claude),
+            },
+            Case {
+                label: "Claude: node without claude => None",
+                comm: "node",
+                args: "node /usr/lib/something-else.js",
+                expected: None,
+            },
+            // Codex variants
+            Case {
+                label: "Codex: exact match",
+                comm: "codex",
+                args: "codex --resume",
+                expected: Some(AgentType::Codex),
+            },
+            Case {
+                label: "Codex: prefixed",
+                comm: "codex-agent",
+                args: "codex-agent run",
+                expected: Some(AgentType::Codex),
+            },
+            Case {
+                label: "Codex: substring not matched (mycodex)",
+                comm: "mycodex",
+                args: "mycodex run",
+                expected: None,
+            },
+            // Aider variants
+            Case {
+                label: "Aider: python3 + aider",
+                comm: "python3",
+                args: "python3 /usr/bin/aider",
+                expected: Some(AgentType::Aider),
+            },
+            Case {
+                label: "Aider: python + aider",
+                comm: "python",
+                args: "python -m aider",
+                expected: Some(AgentType::Aider),
+            },
+            Case {
+                label: "Aider: python without aider => None",
+                comm: "python3",
+                args: "python3 /usr/bin/flask run",
+                expected: None,
+            },
+            // Copilot variants
+            Case {
+                label: "Copilot: exact match",
+                comm: "copilot",
+                args: "copilot suggest",
+                expected: Some(AgentType::Copilot),
+            },
+            Case {
+                label: "Copilot: prefixed",
+                comm: "copilot-cli",
+                args: "copilot-cli suggest",
+                expected: Some(AgentType::Copilot),
+            },
+            // Non-agent processes
+            Case {
+                label: "bash is not an agent",
+                comm: "bash",
+                args: "bash -i",
+                expected: None,
+            },
+            Case {
+                label: "vim is not an agent",
+                comm: "vim",
+                args: "vim foo.rs",
+                expected: None,
+            },
+            Case {
+                label: "empty comm",
+                comm: "",
+                args: "",
+                expected: None,
+            },
+            // Case sensitivity
+            Case {
+                label: "Claude: case-insensitive NODE + CLAUDE",
+                comm: "NODE",
+                args: "NODE /usr/lib/CLAUDE/cli.js",
+                expected: Some(AgentType::Claude),
+            },
+            Case {
+                label: "Codex: case-insensitive CODEX",
+                comm: "CODEX",
+                args: "CODEX run",
+                expected: Some(AgentType::Codex),
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            let result = classify_wsl_process(c.comm, c.args);
+            assert_eq!(
+                result, c.expected,
+                "case {i} ({}): comm={:?} args={:?}",
+                c.label, c.comm, c.args
+            );
+        }
+    }
 }
