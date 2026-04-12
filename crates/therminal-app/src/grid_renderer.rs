@@ -806,6 +806,9 @@ impl GridRenderer {
         self.pane_last_display_offset.clear();
         self.pane_last_column_count.clear();
         self.hotspot_map.clear();
+        // Chrome text buffers cache GlyphColor in shaped Attrs — stale
+        // after a palette change.  Force reshape on the next frame.
+        self.overlay_cache.clear();
     }
 
     /// Returns true when the cached viewport rows for `pane_id` match the
