@@ -38,6 +38,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-monad"
@@ -64,6 +65,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-bfs"
@@ -90,6 +92,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-mutex"
@@ -116,6 +119,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-kernel"
@@ -142,6 +146,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-semaphore"
@@ -168,6 +173,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-osc"
@@ -194,6 +200,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-pty"
@@ -220,6 +227,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-mcp"
@@ -246,6 +254,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-deadlock"
@@ -272,6 +281,7 @@ action = "hotspot"
 on_click = "emit_event"
 label = "Explain: {term}"
 kind = "hotspot.explain"
+highlight = "term"
 
 [[pattern]]
 name = "event-syscall"

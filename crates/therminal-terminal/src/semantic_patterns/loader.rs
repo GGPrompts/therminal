@@ -260,6 +260,7 @@ fn compile_hotspot(raw: &HotspotActionToml) -> Result<HotspotAction, String> {
         target_template: raw.target.clone(),
         label_template: raw.label.clone(),
         kind: raw.kind.clone().unwrap_or_else(|| "pattern".to_string()),
+        highlight: raw.highlight.clone(),
     })
 }
 

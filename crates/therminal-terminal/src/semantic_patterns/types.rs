@@ -112,6 +112,10 @@ pub struct HotspotAction {
     pub target_template: Option<String>,
     pub label_template: Option<String>,
     pub kind: String,
+    /// Named capture group whose byte span defines the visual hotspot.
+    /// When `Some`, the engine narrows `PatternMatch.byte_start/byte_end`
+    /// to this group's span instead of the full match.
+    pub highlight: Option<String>,
 }
 
 /// Click-handler variants for hotspot actions.

@@ -2251,6 +2251,95 @@ kind = "pattern-demo"
         assert_eq!(ps.declared_kind, "pattern-demo");
     }
 
+    #[test]
+    fn hotspot_highlight_group_narrows_byte_span() {
+        use crate::semantic_patterns::{PatternEngine, PatternEngineConfig};
+        use std::path::PathBuf;
+
+        // Build an engine with a hotspot that uses highlight = "term"
+        // to restrict the underline to just the keyword, not the trailing
+        // context captured by `(?P<ctx>...)`.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("hl.toml"),
+            r#"
+pack_name = "hl"
+[[pattern]]
+name = "glossary"
+match = '\b(?P<term>PTY)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+highlight = "term"
+"#,
+        )
+        .unwrap();
+
+        let engine = PatternEngine::new(PatternEngineConfig {
+            enabled: true,
+            user_pattern_dir: Some(tmp.path().to_path_buf()),
+            shipped_pattern_dir: Some(PathBuf::new()),
+            ..PatternEngineConfig::new_default()
+        });
+
+        let line = "daemon PTY/session flows that are still ignored";
+        let matches = engine.process_finalized_line(1, line, None, None);
+        assert_eq!(matches.len(), 1);
+        // byte_start/byte_end should cover only "PTY", not the trailing ctx.
+        assert_eq!(matches[0].byte_start, 7);
+        assert_eq!(matches[0].byte_end, 10);
+
+        let hotspots = hotspots_from_pattern_matches_simple(&matches, 0);
+        assert_eq!(hotspots.len(), 1);
+        assert_eq!(hotspots[0].start_col, 7);
+        assert_eq!(hotspots[0].end_col, 10);
+    }
+
+    #[test]
+    fn hotspot_without_highlight_uses_full_match() {
+        use crate::semantic_patterns::{PatternEngine, PatternEngineConfig};
+        use std::path::PathBuf;
+
+        // Same regex but without highlight — byte span should cover the
+        // full match including the trailing context.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("nohl.toml"),
+            r#"
+pack_name = "nohl"
+[[pattern]]
+name = "glossary-nohl"
+match = '\b(?P<term>PTY)\b(?P<ctx>.{0,200})'
+scope = "finalized_line"
+action = "hotspot"
+
+[pattern.hotspot]
+on_click = "emit_event"
+label = "Explain: {term}"
+kind = "hotspot.explain"
+"#,
+        )
+        .unwrap();
+
+        let engine = PatternEngine::new(PatternEngineConfig {
+            enabled: true,
+            user_pattern_dir: Some(tmp.path().to_path_buf()),
+            shipped_pattern_dir: Some(PathBuf::new()),
+            ..PatternEngineConfig::new_default()
+        });
+
+        let line = "daemon PTY/session flows";
+        let matches = engine.process_finalized_line(1, line, None, None);
+        assert_eq!(matches.len(), 1);
+        // Without highlight, full match spans PTY + trailing context.
+        assert_eq!(matches[0].byte_start, 7);
+        assert_eq!(matches[0].byte_end, line.len());
+    }
+
     // ── Windows drive-letter absolute paths (tn-v974) ─────────────────
 
     #[test]

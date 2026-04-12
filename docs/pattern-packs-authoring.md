@@ -146,10 +146,11 @@ therminal executes the click handler.
 action = "hotspot"
 
 [pattern.hotspot]
-on_click = "open_editor"   # required
-target   = "{file}"        # required for open_editor and open_url
-label    = "Open {file}"   # optional tooltip
-kind     = "error"         # optional filter hint (default: "pattern")
+on_click  = "open_editor"   # required
+target    = "{file}"        # required for open_editor and open_url
+label     = "Open {file}"   # optional tooltip
+kind      = "error"         # optional filter hint (default: "pattern")
+highlight = "file"          # optional: underline only this capture group (default: full match)
 ```
 
 **`on_click` values:**

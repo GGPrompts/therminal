@@ -422,6 +422,13 @@ fn run_pattern_against(
     // elapsed down for shorter inputs (no sense penalising a 3-char line).
     let start = Instant::now();
     let mut matched_any = false;
+    // If the pattern is a hotspot with a `highlight` group, we'll narrow
+    // the byte span to that group instead of the full match.
+    let highlight_group: Option<&str> = match &pat.action {
+        PatternAction::Hotspot(h) => h.highlight.as_deref(),
+        _ => None,
+    };
+
     for caps in pat.regex.captures_iter(input) {
         matched_any = true;
         let m0 = caps.get(0).expect("capture 0 always present");
@@ -435,14 +442,22 @@ fn run_pattern_against(
             capture_map.insert(name.to_string(), val);
         }
 
+        // When a highlight group is specified, use its byte span for the
+        // visual hotspot extent instead of the full match. Falls back to
+        // the full match if the group didn't participate.
+        let (byte_start, byte_end) = match highlight_group.and_then(|name| caps.name(name)) {
+            Some(hm) => (hm.start(), hm.end()),
+            None => (m0.start(), m0.end()),
+        };
+
         let resolved = resolve_action(&pat.action, &capture_map);
         out.push(PatternMatch {
             pack_name: pat.pack_name.clone(),
             pattern_name: pat.name.clone(),
             scope,
             pane_id,
-            byte_start: m0.start(),
-            byte_end: m0.end(),
+            byte_start,
+            byte_end,
             matched_text,
             captures: capture_map,
             action: resolved,

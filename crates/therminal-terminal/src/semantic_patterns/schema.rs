@@ -107,6 +107,13 @@ pub struct HotspotActionToml {
     /// Optional hotspot kind hint. Defaults to `"pattern"`.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Named capture group whose byte span defines the visual hotspot
+    /// extent (underline + click target). When absent the full regex
+    /// match (group 0) is used. Useful when the regex captures trailing
+    /// context for event payloads but only the leading term should be
+    /// highlighted.
+    #[serde(default)]
+    pub highlight: Option<String>,
 }
 
 /// Widget action configuration.
