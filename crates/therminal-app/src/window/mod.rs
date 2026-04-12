@@ -1184,6 +1184,7 @@ impl ApplicationHandler<UserEvent> for App {
         let use_csd = self.config.general.use_csd;
         let mut attrs = Window::default_attributes()
             .with_title(&self.config.general.title)
+            .with_window_icon(load_window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.general.window_width,
                 self.config.general.window_height,
@@ -1341,6 +1342,30 @@ pub fn run(
     event_loop.run_app(&mut app)?;
 
     Ok(())
+}
+
+/// Load the embedded 32×32 app icon for the window/taskbar.
+///
+/// On Windows the taskbar icon comes from the HWND's `HICON`, not the exe's
+/// embedded resource, so we must set it explicitly via winit.  On X11/Wayland
+/// the same mechanism sets the desktop/panel icon.  macOS ignores it (uses
+/// the app bundle icon) so returning `None` there is fine.
+fn load_window_icon() -> Option<winit::window::Icon> {
+    static ICON_PNG: &[u8] = include_bytes!("../../../../resources/therminal-32.png");
+    let pixmap = tiny_skia::Pixmap::decode_png(ICON_PNG).ok()?;
+    let (w, h) = (pixmap.width(), pixmap.height());
+    // tiny-skia stores premultiplied RGBA; winit expects straight RGBA.
+    let mut rgba = pixmap.take();
+    for pixel in rgba.chunks_exact_mut(4) {
+        let a = pixel[3] as f32;
+        if a > 0.0 && a < 255.0 {
+            let inv = 255.0 / a;
+            pixel[0] = (pixel[0] as f32 * inv).min(255.0) as u8;
+            pixel[1] = (pixel[1] as f32 * inv).min(255.0) as u8;
+            pixel[2] = (pixel[2] as f32 * inv).min(255.0) as u8;
+        }
+    }
+    winit::window::Icon::from_rgba(rgba, w, h).ok()
 }
 
 #[cfg(test)]
