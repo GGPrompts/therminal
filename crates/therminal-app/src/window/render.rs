@@ -33,7 +33,7 @@ use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separat
 /// Complexity: O(H + C) where H = number of hotspots, C = number of cells.
 /// Builds a `HashMap<row, Vec<&Hotspot>>` so each cell only checks hotspots
 /// on its own row, avoiding the previous O(H * C) nested loop.
-fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
+pub(super) fn apply_hotspots_to_cells(cells: &mut [RenderCell], hotspots: &[TextHotspot]) {
     if hotspots.is_empty() {
         return;
     }
@@ -105,7 +105,7 @@ fn promote_directory_hotspots_from_fs(hotspots: &mut [TextHotspot], pane_cwd: Op
 /// `WRAPLINE` (alacritty's hard-wrap marker). Used to suppress hotspot
 /// matches anchored at column 0 of a wrapped line — see
 /// `detect_hotspots_from_text_with_wrap`.
-fn compute_wrap_continuation(cells: &[RenderCell], screen_lines: usize) -> Vec<bool> {
+pub(super) fn compute_wrap_continuation(cells: &[RenderCell], screen_lines: usize) -> Vec<bool> {
     // Track the max column with a WRAPLINE flag per row, then convert to
     // "row r+1 is continuation" by shifting.
     let mut row_wraps = vec![false; screen_lines];
@@ -122,7 +122,7 @@ fn compute_wrap_continuation(cells: &[RenderCell], screen_lines: usize) -> Vec<b
 }
 
 /// Extract row text strings from a cell grid for text-based hotspot detection.
-fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec<String> {
+pub(super) fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec<String> {
     let mut rows: Vec<Vec<char>> = vec![Vec::new(); screen_lines];
     for cell in cells {
         if cell.row < screen_lines {

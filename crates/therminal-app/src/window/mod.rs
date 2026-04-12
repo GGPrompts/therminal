@@ -23,6 +23,8 @@ mod keybindings;
 mod mouse;
 mod pane_ops;
 mod render;
+#[cfg(test)]
+mod render_tests;
 mod render_driver;
 mod settings_overlay;
 pub(crate) mod toast;
