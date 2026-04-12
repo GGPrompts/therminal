@@ -1103,13 +1103,34 @@ mod tests {
             valid: bool,
         }
         let cases = [
-            Case { input: "abc-123", valid: true },
-            Case { input: "6498af57-2c8b-4a0c-8735-abcdef012345", valid: true },
-            Case { input: "session_with_underscores", valid: true },
-            Case { input: "", valid: false },
-            Case { input: "../../../etc/passwd", valid: false },
-            Case { input: "a b c", valid: false },
-            Case { input: "session/nested", valid: false },
+            Case {
+                input: "abc-123",
+                valid: true,
+            },
+            Case {
+                input: "6498af57-2c8b-4a0c-8735-abcdef012345",
+                valid: true,
+            },
+            Case {
+                input: "session_with_underscores",
+                valid: true,
+            },
+            Case {
+                input: "",
+                valid: false,
+            },
+            Case {
+                input: "../../../etc/passwd",
+                valid: false,
+            },
+            Case {
+                input: "a b c",
+                valid: false,
+            },
+            Case {
+                input: "session/nested",
+                valid: false,
+            },
             Case {
                 input: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 65 chars
                 valid: false,

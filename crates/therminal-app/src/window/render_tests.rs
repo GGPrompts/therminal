@@ -29,7 +29,9 @@ use crate::pane::PaneListener;
 use crate::pane::state::PaneTermSize;
 use crate::widgets::pattern_widget::PatternWidgetMatch;
 
-use super::render::{apply_hotspots_to_cells, compute_wrap_continuation, extract_row_text_from_cells};
+use super::render::{
+    apply_hotspots_to_cells, compute_wrap_continuation, extract_row_text_from_cells,
+};
 
 // ── Test helper ─────────────────────────────────────────────────────────
 
@@ -37,11 +39,7 @@ use super::render::{apply_hotspots_to_cells, compute_wrap_continuation, extract_
 ///
 /// Returns `(cells, screen_lines, columns)` so callers can run hotspot
 /// detection and apply results.
-fn feed_and_extract(
-    cols: usize,
-    rows: usize,
-    input: &[u8],
-) -> (Vec<RenderCell>, usize, usize) {
+fn feed_and_extract(cols: usize, rows: usize, input: &[u8]) -> (Vec<RenderCell>, usize, usize) {
     let listener = PaneListener::new();
     let size = PaneTermSize {
         columns: cols,

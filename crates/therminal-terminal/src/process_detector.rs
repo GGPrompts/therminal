@@ -521,7 +521,9 @@ mod tests {
         assert!(!is_server_mode("codex --resume"));
         assert!(!is_server_mode("codex plan"));
         assert!(!is_server_mode("node /usr/bin/claude --json"));
-        assert!(!is_server_mode("codex --config /home/user/server/config.toml"));
+        assert!(!is_server_mode(
+            "codex --config /home/user/server/config.toml"
+        ));
     }
 
     // ── WSL probe parser (tn-966s) ────────────────────────────────────────

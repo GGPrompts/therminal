@@ -122,7 +122,10 @@ pub(super) fn compute_wrap_continuation(cells: &[RenderCell], screen_lines: usiz
 }
 
 /// Extract row text strings from a cell grid for text-based hotspot detection.
-pub(super) fn extract_row_text_from_cells(cells: &[RenderCell], screen_lines: usize) -> Vec<String> {
+pub(super) fn extract_row_text_from_cells(
+    cells: &[RenderCell],
+    screen_lines: usize,
+) -> Vec<String> {
     let mut rows: Vec<Vec<char>> = vec![Vec::new(); screen_lines];
     for cell in cells {
         if cell.row < screen_lines {
