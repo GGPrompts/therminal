@@ -13,10 +13,11 @@
 //! 1. The focused pane is split (cwd inheritance is irrelevant — we
 //!    immediately `cd` to the target directory).
 //! 2. We pre-check that the first token of `folder_pane_command` resolves
-//!    on `PATH`. If yes, we send `cd '/path' && exec <cmd> '/path' …\r`
-//!    so the command replaces the shell and exiting the command closes
-//!    the pane. If the binary is missing, we toast and send only `cd`
-//!    so the user lands in a working shell at the right directory.
+//!    on `PATH`. If yes, we send `cd '/path' && clear && <cmd> '/path' …\n`
+//!    so the command runs as a child of the shell. When the command exits
+//!    (including via Ctrl+C), the user gets a prompt back. If the binary
+//!    is missing, we toast and send only `cd` so the user lands in a
+//!    working shell at the right directory.
 //!
 //! This keeps `pane_ops.rs` and the existing split machinery untouched
 //! while still satisfying "reuse the pane-split + cwd plumbing".
@@ -38,7 +39,7 @@ pub(crate) enum FolderPaneOpenPlan {
     /// The first token of `folder_pane_command` resolved on `PATH`. The
     /// pane should be split, then `bytes` should be written to the new
     /// pane's PTY. `bytes` includes a leading `cd` to the target dir
-    /// followed by `exec <cmd> [args…]\n`.
+    /// followed by `<cmd> [args…]\n`.
     SpawnCommand { cmd_display: String, bytes: Vec<u8> },
     /// The configured command's binary is missing on `PATH`. The pane
     /// should still be split and `bytes` (just the `cd`) should be
@@ -94,16 +95,20 @@ where
     let cd_clear = format!("cd {} && clear", shell_quote(path));
 
     if which_fn(head) {
-        // Build `exec <head> [args…]` with shell-quoted arguments so
+        // Build `<head> [args…]` with shell-quoted arguments so
         // paths with spaces / special characters are passed verbatim.
-        let mut exec_line = String::from("exec ");
+        // We deliberately do NOT use `exec` here: exec replaces the
+        // shell with the command, so Ctrl+C or a crash kills the PTY
+        // with no way to recover. Without exec, the shell survives
+        // and the user gets a prompt back after the command exits.
+        let mut cmd_line = String::new();
         for (i, arg) in substituted.iter().enumerate() {
             if i > 0 {
-                exec_line.push(' ');
+                cmd_line.push(' ');
             }
-            exec_line.push_str(&shell_quote(arg));
+            cmd_line.push_str(&shell_quote(arg));
         }
-        let bytes = format!("{cd_clear} && {exec_line}\n").into_bytes();
+        let bytes = format!("{cd_clear} && {cmd_line}\n").into_bytes();
         FolderPaneOpenPlan::SpawnCommand {
             cmd_display: substituted.join(" "),
             bytes,
@@ -192,8 +197,8 @@ impl App {
         }
 
         // Expand `~/…` / `~` before building the `cd` line. The shell
-        // we're `exec`-ing into can't expand `~` inside single quotes,
-        // so an un-expanded path would land us in `/~/…` (nonexistent).
+        // can't expand `~` inside single quotes, so an un-expanded path
+        // would land us in `/~/…` (nonexistent).
         let home = super::platform_home_dir();
         let expanded = expand_tilde(path, home.as_deref());
         // tn-vm2j: join relative paths against the focused pane's
@@ -262,7 +267,7 @@ impl App {
     /// Mirrors [`App::open_in_wsl_pane_editor`] but for directories:
     /// splits a new pane, `cd`'s to the originating pane's cwd so
     /// relatives resolve, `cd`'s into the target directory, and
-    /// `exec`'s the configured `folder_pane_command` (default `tfe`).
+    /// runs the configured `folder_pane_command` (default `tfe`).
     /// Hands off everything to the WSL shell so `~`, `$HOME`, and
     /// `$PATH` all come from the Linux environment.
     #[cfg(windows)]
@@ -304,7 +309,7 @@ impl App {
         }
         cmd.push_str("cd ");
         cmd.push_str(path);
-        cmd.push_str(" && clear && exec ");
+        cmd.push_str(" && clear && ");
         cmd.push_str(&args_line);
         cmd.push('\n');
 
@@ -445,7 +450,7 @@ fn which_on_path(cmd: &str) -> bool {
 }
 
 /// Minimal POSIX shell single-quote escape. Wraps in `'…'` and escapes
-/// embedded single quotes. Used for the `cd` and `exec` lines we send
+/// embedded single quotes. Used for the `cd` and command lines we send
 /// into the freshly-spawned shell.
 fn shell_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -533,14 +538,15 @@ mod tests {
     }
 
     #[test]
-    fn plan_resolved_binary_emits_exec_line() {
+    fn plan_resolved_binary_emits_cmd_line() {
         let plan =
             plan_folder_pane_open("/srv/data", &argv(&["tfe", "{path}"]), |head| head == "tfe");
         match plan {
             FolderPaneOpenPlan::SpawnCommand { cmd_display, bytes } => {
                 assert_eq!(cmd_display, "tfe /srv/data");
                 let s = String::from_utf8(bytes).unwrap();
-                assert!(s.starts_with("cd '/srv/data' && clear && exec 'tfe' '/srv/data'"));
+                assert!(s.starts_with("cd '/srv/data' && clear && 'tfe' '/srv/data'"));
+                assert!(!s.contains("exec"), "should not use exec: {s}");
                 assert!(s.ends_with('\n'));
             }
             other => panic!("expected SpawnCommand, got {other:?}"),
@@ -610,7 +616,7 @@ mod tests {
                     "cd line should be absolute, got {s:?}"
                 );
                 // And the un-resolved relative path must NOT leak into
-                // the exec line.
+                // the command line.
                 assert!(!s.contains("'some/subdir'"));
             }
             other => panic!("expected SpawnCommand, got {other:?}"),
