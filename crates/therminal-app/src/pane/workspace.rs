@@ -475,6 +475,16 @@ impl WorkspaceManager {
             .map(|ws| ws.name.as_str())
     }
 
+    /// Iterate over all workspaces (read-only).
+    pub fn iter_workspaces(&self) -> impl Iterator<Item = &Workspace> {
+        self.workspaces.iter()
+    }
+
+    /// Iterate over all workspaces (mutable).
+    pub fn iter_workspaces_mut(&mut self) -> impl Iterator<Item = &mut Workspace> {
+        self.workspaces.iter_mut()
+    }
+
     /// Total pane count across all workspaces.
     pub fn total_pane_count(&self) -> usize {
         self.workspaces

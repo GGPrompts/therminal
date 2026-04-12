@@ -22,7 +22,7 @@ pub use split_ops::{DaemonSplitOnComplete, DaemonSplitResult};
 
 /// Timeout for daemon pane-op RPCs driven from the UI thread. Chosen so a
 /// hung daemon rolls back to a local error instead of freezing the GUI.
-const DAEMON_OP_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DAEMON_OP_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl App {
     /// Returns `true` if the GUI should drive pane lifecycle through the

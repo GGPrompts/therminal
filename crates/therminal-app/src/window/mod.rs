@@ -22,10 +22,11 @@ mod init;
 mod keybindings;
 mod mouse;
 mod pane_ops;
+mod reconcile;
 mod render;
+mod render_driver;
 #[cfg(test)]
 mod render_tests;
-mod render_driver;
 mod settings_overlay;
 pub(crate) mod toast;
 pub(crate) mod trust_escalation_overlay;
@@ -95,6 +96,13 @@ impl PaneIdMap {
     pub(crate) fn any_daemon_id(&self) -> Option<therminal_protocol::PaneId> {
         self.local_to_daemon.values().next().copied()
     }
+
+    /// All daemon pane IDs currently mapped. Used by workspace
+    /// reconciliation (tn-9jhx) to diff against the daemon's authoritative
+    /// pane set.
+    pub(crate) fn all_daemon_ids(&self) -> Vec<therminal_protocol::PaneId> {
+        self.daemon_to_local.keys().copied().collect()
+    }
 }
 use therminal_core::config::{KeyAction, TherminalConfig};
 use therminal_core::config_watcher::ConfigWatcher;
@@ -130,6 +138,17 @@ enum UserEvent {
     /// Carries everything needed to finish the local layout insert on the
     /// main thread without ever blocking the event loop.
     DaemonSplitComplete(crate::window::pane_ops::DaemonSplitResult),
+    /// The daemon broadcast a `WorkspaceChanged` event for our session
+    /// (tn-9jhx). An external mutator (MCP tool, CLI command) changed the
+    /// workspace topology. The main thread should query `GetWorkspaces`
+    /// and reconcile the local layout.
+    DaemonWorkspaceChanged {
+        session_id: therminal_protocol::SessionId,
+    },
+    /// Async `build_remote_pane_state` completed for a pane discovered
+    /// during workspace reconciliation (tn-9jhx). Mount the pane into the
+    /// local layout tree and re-render.
+    DaemonReconcilePanesReady(Box<ReconcileResult>),
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -140,6 +159,40 @@ pub enum NotificationSource {
     Osc9,
     /// Triggered by an agent state change (e.g. `AwaitingInput`).
     Agent,
+}
+
+/// Result of the async reconciliation pass (tn-9jhx).
+///
+/// Built on the tokio runtime after a `DaemonWorkspaceChanged` event.
+/// Contains the daemon's authoritative workspace state and newly-built
+/// `PaneState` objects for daemon panes the GUI didn't know about.
+/// Delivered to the main thread via `UserEvent::DaemonReconcilePanesReady`.
+struct ReconcileResult {
+    /// Workspace topology from the daemon (authoritative).
+    workspaces: Vec<therminal_protocol::daemon::WorkspaceInfo>,
+    /// Which workspace the daemon considers active.
+    active_workspace: therminal_protocol::WorkspaceId,
+    /// Freshly built `PaneState`s for daemon panes that the GUI didn't
+    /// already have locally. Each entry is `(local_id, daemon_pane_id, state)`.
+    new_panes: Vec<(
+        crate::pane::PaneId,
+        therminal_protocol::PaneId,
+        crate::pane::PaneState,
+    )>,
+    /// Daemon pane IDs that disappeared (present locally but absent in the
+    /// daemon's workspace list). The main thread should close these without
+    /// issuing a `KillPane` RPC (the daemon already removed them).
+    removed_daemon_ids: Vec<therminal_protocol::PaneId>,
+}
+
+impl std::fmt::Debug for ReconcileResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReconcileResult")
+            .field("workspaces", &self.workspaces.len())
+            .field("new_panes", &self.new_panes.len())
+            .field("removed_daemon_ids", &self.removed_daemon_ids)
+            .finish()
+    }
 }
 
 /// Active top-level overlay mode.
@@ -1255,6 +1308,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.send_desktop_notification(&title, &body);
                 }
             }
+            UserEvent::DaemonWorkspaceChanged { session_id } => {
+                info!(session_id, "received DaemonWorkspaceChanged event");
+                self.handle_daemon_workspace_changed(session_id);
+            }
+            UserEvent::DaemonReconcilePanesReady(result) => {
+                info!(?result, "applying reconciliation result");
+                self.apply_reconcile_result(*result);
+            }
         }
     }
 
@@ -1336,11 +1397,78 @@ pub fn run(
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(proxy);
-    app.daemon_client = daemon_client;
-    app.daemon_runtime = daemon_runtime;
+    let mut app = App::new(proxy.clone());
+    app.daemon_client = daemon_client.clone();
+    app.daemon_runtime = daemon_runtime.clone();
+
+    // tn-9jhx: spawn a daemon event listener that forwards workspace
+    // topology changes to the winit event loop. Uses a dedicated
+    // DaemonClient connection (separate from the GUI's primary client)
+    // so Subscribe doesn't contend with request/response traffic.
+    if let (Some(client), Some(handle)) = (&daemon_client, &daemon_runtime) {
+        let proxy_for_listener = proxy.clone();
+        let socket = client.socket_path().to_path_buf();
+        handle.spawn(async move {
+            if let Err(e) = daemon_event_listener(socket, proxy_for_listener).await {
+                warn!("daemon event listener exited: {e}");
+            }
+        });
+    }
+
     event_loop.run_app(&mut app)?;
 
+    Ok(())
+}
+
+/// Daemon event listener task (tn-9jhx).
+///
+/// Opens a dedicated `DaemonClient` connection and subscribes to
+/// `WorkspaceChanged` events. Each event is forwarded to the winit event
+/// loop via `EventLoopProxy`. The dedicated connection avoids contention
+/// with the GUI's primary client and its per-pane `PaneOutput`
+/// subscriptions.
+async fn daemon_event_listener(
+    socket: std::path::PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+) -> anyhow::Result<()> {
+    use therminal_daemon_client::DaemonClient;
+    use therminal_protocol::daemon::{DaemonEvent, EventKind, IpcResponse};
+
+    let client =
+        DaemonClient::connect_with_timeout(&socket, therminal_daemon_client::GUI_REQUEST_TIMEOUT)
+            .await?;
+
+    match client
+        .subscribe_events(vec![EventKind::WorkspaceChanged])
+        .await?
+    {
+        IpcResponse::Subscribed { .. } => {}
+        IpcResponse::Error { message } => {
+            anyhow::bail!("subscribe failed: {message}");
+        }
+        other => {
+            anyhow::bail!("unexpected subscribe response: {other:?}");
+        }
+    }
+    info!("daemon event listener subscribed to WorkspaceChanged");
+
+    loop {
+        let event = match client.recv_event().await {
+            Some(e) => e,
+            None => {
+                info!("daemon event listener: connection closed");
+                break;
+            }
+        };
+        if let DaemonEvent::WorkspaceChanged { session_id, .. } = event
+            && proxy
+                .send_event(UserEvent::DaemonWorkspaceChanged { session_id })
+                .is_err()
+        {
+            // Event loop closed — exit gracefully.
+            break;
+        }
+    }
     Ok(())
 }
 
