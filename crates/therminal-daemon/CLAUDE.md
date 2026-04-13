@@ -159,7 +159,7 @@ per-tool classification table. The short version:
 - `terminal.sessions.destroy`, `terminal.panes.destroy` — Admin tier; trust
   enforcement is enforced at the MCP layer, not the CLI layer.
 
-Tools exposed (30 tools):
+Tools exposed (31 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -230,7 +230,7 @@ All MCP tools follow a `terminal.<domain>.<verb>` naming convention with dot-sep
 |--------|-------|
 | `terminal.sessions` | Session lifecycle (list, get, create, destroy) |
 | `terminal.panes` | Pane I/O, state, and geometry (list, create, destroy, get_content, get_geometry, write, wait_for_output) |
-| `terminal.semantic` | Semantic region queries (query_history, get_hotspots) |
+| `terminal.semantic` | Semantic region queries (query_history, query_commands, get_hotspots) |
 | `terminal.workspaces` | Workspace tab introspection (list) |
 | `terminal.agents` | Agent detection, status, and cadence (list, find_with_capacity, get_status, get_details, get_cadence, get_session_detail) |
 | `terminal.events` | Unified event bus diagnostics (stats) |

@@ -19,22 +19,51 @@ src/
 │   │   ├── csd.rs           # Client-side decorations
 │   │   ├── colors.rs        # Chrome color helpers
 │   │   ├── text_cache.rs    # Chrome text caching (ChromeTextCache type alias)
-│   │   ├── render_pass.rs   # Shared `with_chrome_render_pass` helper (tn-ppub)
-│   │   └── overlays.rs      # Chrome overlay helpers
+│   │   ├── render_pass.rs       # Shared `with_chrome_render_pass` helper (tn-ppub)
+│   │   ├── delegate_summary.rs  # Delegate result summary in chrome
+│   │   └── overlays.rs          # Chrome overlay helpers
 │   ├── help_overlay.rs  # Keybinding help overlay
-│   ├── settings_overlay.rs  # Settings panel overlay
+│   ├── settings_overlay/
+│   │   ├── mod.rs       # Settings panel overlay entry point
+│   │   ├── types.rs     # Settings data types
+│   │   ├── nav.rs       # Keyboard navigation logic
+│   │   ├── state.rs     # Panel state management
+│   │   ├── sections.rs  # Section definitions (Shell, Hotspots, Theme, Accessibility)
+│   │   ├── theme.rs     # Theme preset handling
+│   │   ├── tests.rs     # Settings overlay tests
+│   │   └── renderer/
+│   │       ├── mod.rs   # Renderer entry point
+│   │       ├── layout.rs # Layout computation
+│   │       ├── rects.rs  # Rectangle drawing
+│   │       └── text.rs   # Text rendering
 │   ├── trust_escalation_overlay.rs # Trust tier escalation dialog
 │   ├── toast.rs         # Toast notification overlay
 │   ├── event_handler.rs # winit event handler dispatch
 │   ├── init.rs          # Window initialization
 │   ├── render_driver.rs # Render orchestration, widget overlay drawing
+│   ├── render_tests.rs  # Render driver tests
+│   ├── reconcile.rs     # Layout reconciliation
+│   ├── git_ref_open.rs  # Git ref hotspot click handling
 │   ├── pane_ops/
 │   │   ├── mod.rs              # Shared helpers (daemon_rpc, make_pane_callbacks), re-exports
-│   │   ├── split_ops.rs        # split_focused_pane, split_pane_by_id, split_pane_remote, finish_split_pane_remote
+│   │   ├── split_ops/
+│   │   │   ├── mod.rs          # split_focused_pane, split_pane_by_id
+│   │   │   ├── local.rs        # Local split implementation
+│   │   │   ├── remote.rs       # Remote split via daemon IPC
+│   │   │   └── remote_helpers.rs # Remote split helper utilities
 │   │   ├── close_ops.rs        # close_focused_pane, close_pane_by_id, close_all_panes, kill_pane_remote
 │   │   ├── focus_and_nav.rs    # move_focus, swap_focused_pane, zoom_toggle, adjust_ratio, select_pane_remote
-│   │   ├── workspace_ops.rs    # restore_layout, switch_workspace, send_to_workspace, poll_auto_tile, poll_swarm_watcher
-│   │   └── editor_clipboard.rs # copy/paste, open_in_editor, plan_open_in_editor, shell_quote
+│   │   ├── workspace_ops/
+│   │   │   ├── mod.rs          # Re-exports, poll_auto_tile, poll_swarm_watcher
+│   │   │   ├── restore.rs      # restore_layout
+│   │   │   ├── switch.rs       # switch_workspace, send_to_workspace
+│   │   │   ├── auto_tile.rs    # Auto-tile event handling
+│   │   │   └── swarm.rs        # Swarm watcher polling
+│   │   └── editor_clipboard/
+│   │       ├── mod.rs          # Re-exports
+│   │       ├── clipboard.rs    # copy/paste
+│   │       ├── editor.rs       # open_in_editor, plan_open_in_editor
+│   │       └── planner.rs      # shell_quote, planning helpers
 │   ├── folder_open.rs   # Directory hotspot routing (tn-zqwg)
 │   ├── wsl_paths.rs     # WSL2 path translation helpers
 │   └── render.rs        # Per-frame rendering, damage tracking
