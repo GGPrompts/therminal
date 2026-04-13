@@ -566,6 +566,7 @@ pub(crate) fn render_context_menu(
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
+    chrome_palette: &therminal_core::palette::ChromePalette,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
     use crate::grid_renderer::ColorVertex;
@@ -573,7 +574,6 @@ pub(crate) fn render_context_menu(
         Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea,
         TextBounds,
     };
-    use therminal_core::palette::Color as PaletteColor;
     use wgpu::util::DeviceExt;
 
     let sw = surface_width as f32;
@@ -582,43 +582,23 @@ pub(crate) fn render_context_menu(
 
     // ── Background rect (dark surface with slight transparency) ─────────
     let bg_color: [f32; 4] = {
-        let c = PaletteColor::VOID_1;
-        [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            0.95,
-        ]
+        let [r, g, b, _] = chrome_palette.status_bar_bg;
+        [r, g, b, 0.95]
     };
 
     let border_color: [f32; 4] = {
-        let c = PaletteColor::LINE;
-        [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            0.8,
-        ]
+        let [r, g, b, _] = chrome_palette.separator;
+        [r, g, b, 0.8]
     };
 
     let highlight_color: [f32; 4] = {
-        let c = PaletteColor::PLATE_STRONG;
-        [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            0.9,
-        ]
+        let [r, g, b, _] = chrome_palette.focus_border;
+        [r, g, b, 0.9]
     };
 
     let separator_color: [f32; 4] = {
-        let c = PaletteColor::LINE;
-        [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            0.4,
-        ]
+        let [r, g, b, _] = chrome_palette.separator;
+        [r, g, b, 0.4]
     };
 
     let mut verts: Vec<ColorVertex> = Vec::new();
@@ -745,21 +725,21 @@ pub(crate) fn render_context_menu(
     );
 
     let label_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
+        chrome_palette.chrome_fg.r,
+        chrome_palette.chrome_fg.g,
+        chrome_palette.chrome_fg.b,
         240,
     );
     let label_disabled_color = GlyphColor::rgba(
-        PaletteColor::INK_DIM.r,
-        PaletteColor::INK_DIM.g,
-        PaletteColor::INK_DIM.b,
+        chrome_palette.chrome_fg_muted.r,
+        chrome_palette.chrome_fg_muted.g,
+        chrome_palette.chrome_fg_muted.b,
         180,
     );
     let hint_color = GlyphColor::rgba(
-        PaletteColor::INK_DIM.r,
-        PaletteColor::INK_DIM.g,
-        PaletteColor::INK_DIM.b,
+        chrome_palette.chrome_fg_muted.r,
+        chrome_palette.chrome_fg_muted.g,
+        chrome_palette.chrome_fg_muted.b,
         200,
     );
 

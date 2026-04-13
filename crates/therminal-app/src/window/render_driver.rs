@@ -441,6 +441,7 @@ impl App {
 
         // ── Context menu overlay (on top of everything) ────────────────
         if let Some(ref menu) = self.active_menu {
+            let menu_palette = renderer.chrome_palette;
             crate::menu::render_context_menu(
                 menu,
                 renderer,
@@ -449,6 +450,7 @@ impl App {
                 &view,
                 gpu.config.width,
                 gpu.config.height,
+                &menu_palette,
             );
         }
 
