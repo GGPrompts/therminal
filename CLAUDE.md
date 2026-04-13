@@ -118,7 +118,7 @@ Chrome modules read directly from `&renderer.chrome_palette.<role>`. There is no
 | `chrome_fg_focus` | `Color::FOCUS` | Workspace number, agent indicator, claude badge, topic-branch text |
 | `chrome_fg_warn` | `Color::WARN` | Git detached HEAD label |
 | `chrome_fg_alert` | `Color::ALERT` | Pane header close-button glyph |
-| `selection` | `Color::ACCENT_COOL` @ α=0.35 | Terminal text selection rect |
+| `selection` | `Color::ACCENT_COOL` @ α=0.45 | Terminal text selection rect |
 | `cursor` | `Color::WHITE_HOT` @ α=0.85 | Cursor block / underline |
 | `hyperlink` | `Color::ACCENT_COOL` | OSC 8 + regex URL underlines (and the linked-cell glyph color); override independently via `chrome_hyperlink` |
 | `hotspot_filepath` | `Color::ACCENT_NEUTRAL` | Dotted underline for `FilePath` hotspots |
@@ -169,7 +169,7 @@ A few derivation rules to know:
 - **`chrome_header_bg` propagates** to `tab_active_bg`.
 - **`chrome_status_bar_bg` propagates** to `tab_bar_bg`. To re-skin only the tab bar, set `chrome_tab_bar_bg` (which does not propagate).
 - **`hotspot_url` propagates** to the OSC 8 `hyperlink` underline so hand-rolled and regex-detected URLs match. Set `chrome_hyperlink` to override only the OSC 8 underline without affecting the click-to-open URL hotspot color.
-- **`cursor` and `selection` overrides** keep their default alpha (0.85 / 0.35) — only the RGB channels are replaced.
+- **`cursor` and `selection` overrides** keep their default alpha (0.85 / 0.45) — only the RGB channels are replaced.
 
 Invalid hex strings fall back to the default for that single role; the rest of the palette is unaffected.
 

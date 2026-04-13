@@ -3161,8 +3161,8 @@ working_dir = "scratch/{random}"
         assert!((p.selection[0] - 0x11 as f32 / 255.0).abs() < 1e-6);
         assert!((p.selection[1] - 1.0).abs() < 1e-6);
         assert!((p.selection[2] - 0x22 as f32 / 255.0).abs() < 1e-6);
-        // Selection highlight alpha (0.35) is preserved through the override.
-        assert!((p.selection[3] - 0.35).abs() < 1e-6);
+        // Selection highlight alpha (0.45) is preserved through the override.
+        assert!((p.selection[3] - 0.45).abs() < 1e-6);
     }
 
     #[test]

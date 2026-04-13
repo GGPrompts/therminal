@@ -370,7 +370,7 @@ impl Default for ChromePalette {
             csd_close: [0.85, 0.25, 0.25, 1.0],
             csd_button_hover: [1.0, 1.0, 1.0, 0.1],
 
-            selection: with_alpha(Color::ACCENT_COOL, 0.35),
+            selection: with_alpha(Color::ACCENT_COOL, 0.45),
             cursor: with_alpha(Color::WHITE_HOT, 0.85),
 
             chrome_fg: Color::INK,
@@ -484,7 +484,7 @@ impl ChromePalette {
             // because alpha=0.1.
             csd_button_hover: [1.0, 1.0, 1.0, 0.1],
 
-            selection: with_alpha(accent_focus, 0.35),
+            selection: with_alpha(accent_focus, 0.45),
             cursor: with_alpha(fg, 0.85),
 
             chrome_fg: fg,
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn chrome_palette_default_selection_alpha_baked() {
         let p = ChromePalette::default();
-        assert!((p.selection[3] - 0.35).abs() < 1e-6);
+        assert!((p.selection[3] - 0.45).abs() < 1e-6);
     }
 
     #[test]
@@ -1198,7 +1198,7 @@ mod tests {
         assert!((p.tab_active_underline[3] - 0.92).abs() < 1e-6);
         assert!((p.exit_ok[3] - 0.90).abs() < 1e-6);
         assert!((p.exit_error[3] - 0.90).abs() < 1e-6);
-        assert!((p.selection[3] - 0.35).abs() < 1e-6);
+        assert!((p.selection[3] - 0.45).abs() < 1e-6);
         assert!((p.cursor[3] - 0.85).abs() < 1e-6);
     }
 
