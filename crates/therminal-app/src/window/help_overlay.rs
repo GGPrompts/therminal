@@ -965,6 +965,23 @@ mod tests {
         assert_eq!(section_names, expected_order);
     }
 
+    /// `max_scroll_rows` returns 0 when the window is tall enough to fit all
+    /// content, and a positive value when it overflows.
+    #[test]
+    fn max_scroll_rows_tall_window_returns_zero() {
+        let kb = KeybindingsConfig::default();
+        // A very tall window should not need scrolling.
+        assert_eq!(max_scroll_rows(&kb, 800, 2000), 0);
+    }
+
+    #[test]
+    fn max_scroll_rows_tiny_window_returns_positive() {
+        let kb = KeybindingsConfig::default();
+        // A tiny window must require scrolling.
+        let rows = max_scroll_rows(&kb, 400, 200);
+        assert!(rows > 0, "expected scrollable overflow, got {rows}");
+    }
+
     #[test]
     fn format_shortcut_named_keys() {
         assert_eq!(format_shortcut("ctrl+alt+pageup"), "Ctrl+Alt+PgUp");
