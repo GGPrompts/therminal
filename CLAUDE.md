@@ -61,8 +61,30 @@ Therminal runs fine on WSL2. Key quirks:
 
 The recommended way to run therminal on Windows is a native build (not WSLg).
 
+**Primary dev setup**: therminal runs as a native Windows binary (`therminal.exe` + `therminal-daemon.exe`) with WSL2 (Ubuntu-24.04) as the default shell. Code is edited in WSL2 (`~/projects/therminal`), built via cross-compilation to Windows, and the binaries are copied to the Windows Desktop. This means debugging often involves both sides: Windows-native process behavior (named pipes, `%APPDATA%`, taskkill) and WSL2-side state (PTY, shell integration, `/tmp/` state files, `~/.claude/`).
+
+### Build & Dev Scripts
+
 - `scripts/build-windows.sh` — Bash wrapper for WSL. Syncs repo, invokes PowerShell build, copies exe + resources.
 - `scripts/build-windows.ps1` — PowerShell script. Auto-finds cargo, bootstraps MSVC, builds, copies to Desktop + `%APPDATA%\therminal\resources`.
+
+### Windows Desktop Shortcuts
+
+All live at `C:\Users\marci\Desktop\` (accessible from WSL at `/mnt/c/Users/marci/Desktop/`):
+
+| Script | What it does |
+|---|---|
+| `build-therminal-windows.cmd` | Invokes `build-windows.ps1` via the WSL UNC path |
+| `kill-therminal.cmd` | `taskkill /F` both `therminal.exe` and `therminal-daemon.exe`, verifies no processes remain |
+| `wipe-therminal-sessions.cmd` | Deletes `%APPDATA%\therminal\sessions.json` (must kill daemon first or it re-saves) |
+| `reset-and-trace-therminal.cmd` | All-in-one: kill → wipe sessions → start daemon in new window → launch GUI with `RUST_LOG` trace to `%TEMP%\therminal-wlu6.log` |
+| `run-therminal-trace.cmd` | Launch GUI with trace logging (daemon must already be running), logs via PowerShell `Tee-Object` |
+| `therminal.lnk` | Normal launch shortcut |
+
+**Typical dev cycle**: edit in WSL2 → double-click `build-therminal-windows.cmd` → `kill-therminal.cmd` → double-click `therminal.lnk` (or `reset-and-trace-therminal.cmd` for debugging).
+
+### Platform Notes
+
 - **IPC on Windows**: `socket_path()` returns `\\.\pipe\therminal-<name>` (named pipe) instead of Unix sockets.
 - **Known issue**: WDAC/SmartScreen may block build-script executables. Fix: `Add-MpExclusion -Path` on the target dir.
 
