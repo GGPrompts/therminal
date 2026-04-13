@@ -13,19 +13,29 @@ This document resolves the blockers called out in tn-avjv: panel placement, keyb
 
 ## Scope Boundary (V1)
 
-In scope:
-- Appearance (font, theme/palette, cursor style/blink)
-- Hotspots and folder-open behavior (`editor_chain`, `folder_opener`, `folder_pane_command`, highlight/underline controls)
-- Shell (default shell override, new-pane cwd behavior)
-- Accessibility (high contrast, reduce motion, UI text scale)
+Implemented sections (in order as they appear in the panel):
 
-Out of scope:
+1. **Shell** — default shell path, shell arguments, new-pane cwd behavior (inherit from focused pane or home directory)
+2. **Hotspots** — editor chain entries (`Editor #1`…`#16`), folder pane command, folder opener entries
+3. **Theme Presets** — one-click apply for bundled palette presets (Original Therminal, Paper, Tokyo Night Light, Tomorrow Night Bright, Hemisu Dark)
+4. **Accessibility** — high contrast mode toggle, reduced motion toggle, UI text scale (75%–300%)
+
+Out of scope for V1 (not implemented):
+- Font family and size controls (see Future section below)
+- Cursor style and blink controls (see Future section below)
 - Trust-tier editing and harness configuration
 - MCP/daemon/runtime path configuration
 - Pattern-pack management
 - Separate keybinding viewer panel (existing help overlay remains the source of truth)
 - Full keybinding editor
 - Command actions (restart daemon, clear scrollback, etc.)
+
+## Future
+
+Planned additions beyond V1:
+
+- **Font controls** (tn-340u) — font family selector and font size control, to replace the current keyboard-only `Ctrl+=`/`Ctrl+-`/`Ctrl+0` bindings with a visible panel control.
+- **Cursor style/blink** — cursor shape (block, underline, beam) and blink toggle.
 
 ## Decision 1: Placement and Layout
 
