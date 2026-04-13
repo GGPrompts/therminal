@@ -4,6 +4,74 @@
 use super::state::SettingsOverlayState;
 use super::types::{ControlBinding, ControlType, SettingsControl, SettingsSection, ThemePreset};
 
+/// Snapshot of in-progress editing state for a single control.
+enum ControlSnapshot {
+    SelectEditing { selected: usize, expanded: bool },
+    TextEditing { value: String, cursor: usize },
+    None,
+}
+
+/// Capture editing state for every control in a section so we can restore
+/// it after rebuilding the controls vector from config values.
+fn snapshot_control_states(controls: &[SettingsControl]) -> Vec<ControlSnapshot> {
+    controls
+        .iter()
+        .map(|c| match &c.control_type {
+            ControlType::Select {
+                selected, expanded, ..
+            } if *expanded => ControlSnapshot::SelectEditing {
+                selected: *selected,
+                expanded: true,
+            },
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } if *editing => ControlSnapshot::TextEditing {
+                value: value.clone(),
+                cursor: *cursor,
+            },
+            _ => ControlSnapshot::None,
+        })
+        .collect()
+}
+
+/// Restore in-progress editing state that was captured before a rebuild.
+fn restore_control_states(controls: &mut [SettingsControl], snapshots: &[ControlSnapshot]) {
+    for (control, snapshot) in controls.iter_mut().zip(snapshots.iter()) {
+        match (&mut control.control_type, snapshot) {
+            (
+                ControlType::Select {
+                    selected, expanded, ..
+                },
+                ControlSnapshot::SelectEditing {
+                    selected: prev_sel,
+                    expanded: prev_exp,
+                },
+            ) => {
+                *selected = *prev_sel;
+                *expanded = *prev_exp;
+            }
+            (
+                ControlType::TextInput {
+                    value,
+                    cursor,
+                    editing,
+                },
+                ControlSnapshot::TextEditing {
+                    value: prev_val,
+                    cursor: prev_cur,
+                },
+            ) => {
+                *value = prev_val.clone();
+                *cursor = *prev_cur;
+                *editing = true;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Predefined UI text scale options (select control values).
 pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 
@@ -106,6 +174,7 @@ impl SettingsOverlayState {
             Some(idx) => idx,
             None => return,
         };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
         let mut controls = Vec::new();
         for (i, entry) in values.editor_chain.iter().enumerate() {
             controls.push(SettingsControl::with_type(
@@ -127,6 +196,7 @@ impl SettingsOverlayState {
                 ControlType::list_row(entry.clone()),
             ));
         }
+        restore_control_states(&mut controls, &prev_states);
         let prev_sel = self
             .selected_control_by_section
             .get(section_idx)
@@ -144,12 +214,17 @@ impl SettingsOverlayState {
             Some(idx) => idx,
             None => return,
         };
+        // Preserve in-progress Select/TextInput editing state so that
+        // sync_toggle_values (called after every key event) doesn't reset
+        // the user's mid-edit expanded dropdown or text cursor.
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
         let cwd_options = vec![
             "Inherit from focused pane".to_string(),
             "Home directory".to_string(),
         ];
         let cwd_selected = values.new_pane_cwd_index;
-        let controls = vec![
+        let mut controls = vec![
             SettingsControl::with_type(
                 "Default shell",
                 ControlBinding::DefaultShell,
@@ -166,6 +241,7 @@ impl SettingsOverlayState {
                 ControlType::select(cwd_options, cwd_selected),
             ),
         ];
+        restore_control_states(&mut controls, &prev_states);
         let prev_sel = self
             .selected_control_by_section
             .get(section_idx)
@@ -183,12 +259,14 @@ impl SettingsOverlayState {
             Some(idx) => idx,
             None => return,
         };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
         let scale_options: Vec<String> = UI_TEXT_SCALE_OPTIONS
             .iter()
             .map(|s| format!("{:.0}%", s * 100.0))
             .collect();
         let scale_selected = values.ui_text_scale_index;
-        let controls = vec![
+        let mut controls = vec![
             SettingsControl::with_type(
                 "High contrast mode",
                 ControlBinding::ToggleHighContrast,
@@ -205,6 +283,7 @@ impl SettingsOverlayState {
                 ControlType::select(scale_options, scale_selected),
             ),
         ];
+        restore_control_states(&mut controls, &prev_states);
         let prev_sel = self
             .selected_control_by_section
             .get(section_idx)

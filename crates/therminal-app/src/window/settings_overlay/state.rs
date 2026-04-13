@@ -3,7 +3,7 @@
 //! Constructor + simple accessors live here. Keyboard event handling is
 //! in [`super::nav`]; section seeding + value sync is in [`super::sections`].
 
-use super::types::{ControlType, SettingsFocus, SettingsSection};
+use super::types::{ControlType, SettingsFocus, SettingsSection, ThemePreset};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsOverlayState {
@@ -12,6 +12,7 @@ pub(crate) struct SettingsOverlayState {
     pub(super) selected_control_by_section: Vec<usize>,
     pub(super) focus: SettingsFocus,
     pub(super) panel_rect: Option<[f32; 4]>,
+    pub(super) active_theme: Option<ThemePreset>,
 }
 
 impl SettingsOverlayState {
@@ -22,6 +23,7 @@ impl SettingsOverlayState {
             selected_control_by_section: Vec::new(),
             focus: SettingsFocus::Navigation,
             panel_rect: None,
+            active_theme: None,
         };
         s.seed_defaults();
         s
@@ -84,6 +86,14 @@ impl SettingsOverlayState {
             .get(self.selected_section)
             .copied()
             .unwrap_or(0)
+    }
+
+    pub(crate) fn set_active_theme(&mut self, preset: ThemePreset) {
+        self.active_theme = Some(preset);
+    }
+
+    pub(crate) fn active_theme(&self) -> Option<ThemePreset> {
+        self.active_theme
     }
 }
 

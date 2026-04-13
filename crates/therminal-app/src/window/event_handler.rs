@@ -160,6 +160,7 @@ impl App {
                 if let Some(renderer) = self.grid_renderer.as_mut() {
                     renderer.apply_color_overrides(&self.config.colors);
                 }
+                self.settings_overlay.set_active_theme(preset);
                 self.show_toast(format!("theme preset applied: {}", preset.label()));
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();

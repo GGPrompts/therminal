@@ -624,3 +624,60 @@ fn ui_text_scale_index_finds_closest_match() {
     let idx = ui_text_scale_index(1.15);
     assert!(idx == 1 || idx == 2);
 }
+
+#[test]
+fn select_expanded_state_survives_sync_toggle_values() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    // Navigate to "shell" section (index 0), "New pane cwd" Select (control 2).
+    state.tab(false);
+    state.arrow_down();
+    state.arrow_down();
+    // Expand the select.
+    assert_eq!(state.enter(), None);
+    assert!(state.is_select_expanded());
+    // Cycle to next option.
+    state.arrow_down();
+    // Now sync_toggle_values fires (as it does after every key event in the
+    // event handler). The expanded + selected state must survive.
+    state.sync_toggle_values(&test_render_values());
+    assert!(
+        state.is_select_expanded(),
+        "Select should remain expanded after sync_toggle_values"
+    );
+    // Confirm — should produce the cycled index, not the original.
+    let cmd = state.enter();
+    assert!(matches!(cmd, Some(SettingsCommand::SetNewPaneCwd(1))));
+}
+
+#[test]
+fn text_editing_state_survives_sync_toggle_values() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    // Navigate to "shell" section (index 0), "Default shell" TextInput (control 0).
+    state.tab(false);
+    // Enter to start editing.
+    assert_eq!(state.enter(), None);
+    assert!(state.is_text_editing());
+    state.char_input('/');
+    state.char_input('b');
+    // sync_toggle_values fires — editing state must survive.
+    state.sync_toggle_values(&test_render_values());
+    assert!(
+        state.is_text_editing(),
+        "TextInput should remain in editing mode after sync_toggle_values"
+    );
+    // Confirm should emit the edited value, not the original.
+    let cmd = state.enter();
+    assert!(matches!(cmd, Some(SettingsCommand::SetDefaultShell(ref s)) if s.contains("/b")));
+}
+
+#[test]
+fn active_theme_indicator_tracks_applied_preset() {
+    let mut state = SettingsOverlayState::new();
+    assert_eq!(state.active_theme(), None);
+    state.set_active_theme(ThemePreset::Paper);
+    assert_eq!(state.active_theme(), Some(ThemePreset::Paper));
+    state.set_active_theme(ThemePreset::HemisuDark);
+    assert_eq!(state.active_theme(), Some(ThemePreset::HemisuDark));
+}

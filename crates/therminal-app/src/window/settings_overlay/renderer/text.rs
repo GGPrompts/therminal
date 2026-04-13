@@ -7,7 +7,7 @@ use crate::grid_renderer::GridRenderer;
 use therminal_core::palette::ChromePalette;
 
 use super::super::state::SettingsOverlayState;
-use super::super::types::{ControlType, SettingsFocus};
+use super::super::types::{ControlBinding, ControlType, SettingsFocus};
 use super::layout::PanelLayout;
 
 /// One placed glyph buffer with the per-area metadata `glyphon::TextArea`
@@ -353,17 +353,26 @@ pub(super) fn build_text_buffers(
                     );
                 }
                 ControlType::Action => {
+                    let is_active_theme = matches!(
+                        &control.binding,
+                        ControlBinding::ApplyThemePreset(p) if state.active_theme() == Some(*p)
+                    );
+                    let suffix = if is_active_theme { "  (active)" } else { "" };
+                    let color = if is_active_theme { signal } else { row_color };
                     add_text(
                         &mut buffers,
                         &mut placements,
                         renderer,
-                        truncate_for_width(&format!("{marker} {}", control.label), row_width),
+                        truncate_for_width(
+                            &format!("{marker} {}{suffix}", control.label),
+                            row_width,
+                        ),
                         content_x + 28.0,
                         row_y,
                         row_width,
                         32.0,
                         metrics,
-                        row_color,
+                        color,
                         Weight::NORMAL,
                     );
                 }
