@@ -780,7 +780,7 @@ impl App {
                     let font_size = (widget_h as f32) * 0.52;
                     let line_height = font_size * 1.1;
                     let metrics = Metrics::new(font_size, line_height);
-                    let family = renderer.font_config.family.clone();
+                    let family = renderer.font_config.chrome_font_family().to_string();
                     let mut buf = Buffer::new(&mut renderer.font_system, metrics);
                     buf.set_size(
                         &mut renderer.font_system,

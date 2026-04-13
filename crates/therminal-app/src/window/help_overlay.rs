@@ -284,7 +284,7 @@ pub(crate) fn draw_help_overlay(
         &mut renderer.font_system,
         "Keybindings",
         &Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(Weight::BOLD)
             .color(text_color),
         Shaping::Basic,
@@ -350,7 +350,7 @@ pub(crate) fn draw_help_overlay(
             &mut renderer.font_system,
             section_name,
             &Attrs::new()
-                .family(Family::Name(&renderer.font_config.family))
+                .family(Family::Name(renderer.font_config.chrome_font_family()))
                 .weight(Weight::BOLD)
                 .color(accent_color),
             Shaping::Basic,
@@ -379,7 +379,7 @@ pub(crate) fn draw_help_overlay(
                 &mut renderer.font_system,
                 shortcut,
                 &Attrs::new()
-                    .family(Family::Name(&renderer.font_config.family))
+                    .family(Family::Name(renderer.font_config.chrome_font_family()))
                     .color(text_color),
                 Shaping::Basic,
                 None,
@@ -405,7 +405,7 @@ pub(crate) fn draw_help_overlay(
                 &mut renderer.font_system,
                 description,
                 &Attrs::new()
-                    .family(Family::Name(&renderer.font_config.family))
+                    .family(Family::Name(renderer.font_config.chrome_font_family()))
                     .color(muted_color),
                 Shaping::Basic,
                 None,
@@ -440,7 +440,7 @@ pub(crate) fn draw_help_overlay(
             &mut renderer.font_system,
             &hint,
             &Attrs::new()
-                .family(Family::Name(&renderer.font_config.family))
+                .family(Family::Name(renderer.font_config.chrome_font_family()))
                 .color(muted_color),
             Shaping::Basic,
             None,

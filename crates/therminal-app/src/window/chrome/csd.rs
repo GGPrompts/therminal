@@ -334,7 +334,7 @@ fn shape_csd_icons(
     close_icon_color: GlyphColor,
     renderer: &mut GridRenderer,
 ) {
-    let family = renderer.font_config.family.clone();
+    let family = renderer.font_config.chrome_font_family().to_string();
     let attrs =
         |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Name(&family)).color(c) };
 

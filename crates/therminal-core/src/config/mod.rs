@@ -660,15 +660,16 @@ pub struct FontConfig {
     pub extra_fallbacks: Vec<String>,
     /// Whether to try Nerd Font variant of the primary family.
     pub nerd_font: bool,
-    /// UI chrome font family (tabs, status bar, menus).
+    /// UI chrome font family (tabs, status bar, pane headers, CSD, overlays).
     ///
-    /// **Not yet wired.** Reserved for Phase 3 chrome rendering. Parsed and
-    /// round-tripped through TOML but not consumed by any renderer today.
+    /// When non-empty, all chrome text renders with this family while the
+    /// terminal grid keeps using `family`. Falls back to `family` when empty.
     pub ui_font_family: String,
     /// Display/brand font family (splash, about).
     ///
-    /// **Not yet wired.** Reserved for Phase 3 splash/about screen. Parsed
-    /// and round-tripped through TOML but not consumed by any renderer today.
+    /// **Not yet wired.** Will be wired when the splash/about screen ships.
+    /// Parsed and round-tripped through TOML but not consumed by any renderer
+    /// today.
     pub display_font_family: String,
 }
 

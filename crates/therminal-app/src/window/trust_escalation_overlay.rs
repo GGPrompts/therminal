@@ -222,7 +222,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         &mut renderer.font_system,
         "Trust Escalation Required",
         &Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(Weight::BOLD)
             .color(text_color),
         Shaping::Basic,
@@ -248,7 +248,7 @@ pub(crate) fn draw_trust_escalation_overlay(
             &mut renderer.font_system,
             &line,
             &Attrs::new()
-                .family(Family::Name(&renderer.font_config.family))
+                .family(Family::Name(renderer.font_config.chrome_font_family()))
                 .color(muted_color),
             Shaping::Basic,
             None,
@@ -269,7 +269,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         &mut renderer.font_system,
         "Approve (Enter)",
         &Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(Weight::BOLD)
             .color(white),
         Shaping::Basic,
@@ -284,7 +284,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         &mut renderer.font_system,
         "Deny (Esc)",
         &Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(Weight::BOLD)
             .color(white),
         Shaping::Basic,

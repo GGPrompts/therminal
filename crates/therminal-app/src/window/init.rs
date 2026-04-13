@@ -351,6 +351,7 @@ impl App {
         };
         let mut font_config = FontConfig::new(effective_family, self.config.font.size);
         font_config.fallback_families = self.config.font.extra_fallbacks.clone();
+        font_config.ui_font_family = self.config.font.ui_font_family.clone();
         font_config.font_size *= scale;
         font_config.line_height = font_config.font_size * self.config.font.line_height_scale;
         info!(

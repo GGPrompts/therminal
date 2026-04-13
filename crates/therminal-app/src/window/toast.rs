@@ -109,7 +109,7 @@ pub(crate) fn draw_toast(
         PaletteColor::INK.b,
         240,
     );
-    let family = renderer.font_config.family.clone();
+    let family = renderer.font_config.chrome_font_family().to_string();
     let key = format!("{}|{:.0}", toast.text, sw);
     ensure_shaped(
         &key,

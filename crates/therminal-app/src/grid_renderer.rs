@@ -46,6 +46,9 @@ pub struct FontConfig {
     pub line_height: f32,
     /// The original font size at startup, used for reset.
     default_font_size: f32,
+    /// UI chrome font family (tabs, status bar, pane headers, CSD).
+    /// When empty, falls back to the grid `family`.
+    pub ui_font_family: String,
 }
 
 const LINE_HEIGHT_RATIO: f32 = 1.375;
@@ -61,6 +64,7 @@ impl Default for FontConfig {
             font_size,
             line_height: font_size * LINE_HEIGHT_RATIO,
             default_font_size: font_size,
+            ui_font_family: String::new(),
         }
     }
 }
@@ -74,6 +78,7 @@ impl FontConfig {
             font_size,
             line_height: font_size * LINE_HEIGHT_RATIO,
             default_font_size: font_size,
+            ui_font_family: String::new(),
         }
     }
 
@@ -90,6 +95,16 @@ impl FontConfig {
             PLATFORM_MONOSPACE
         } else {
             &self.family
+        }
+    }
+
+    /// The effective UI chrome family (tabs, status bar, pane headers, CSD).
+    /// Falls back to the grid font family when `ui_font_family` is empty.
+    pub fn chrome_font_family(&self) -> &str {
+        if self.ui_font_family.is_empty() {
+            self.effective_family()
+        } else {
+            &self.ui_font_family
         }
     }
 }

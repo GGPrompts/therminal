@@ -767,7 +767,7 @@ pub(crate) fn render_context_menu(
                 &mut renderer.font_system,
                 item.label.as_ref(),
                 &Attrs::new()
-                    .family(Family::Name(&renderer.font_config.family))
+                    .family(Family::Name(renderer.font_config.chrome_font_family()))
                     .color(if item.enabled {
                         label_color
                     } else {
@@ -791,7 +791,7 @@ pub(crate) fn render_context_menu(
                     &mut renderer.font_system,
                     hint_text,
                     &Attrs::new()
-                        .family(Family::Name(&renderer.font_config.family))
+                        .family(Family::Name(renderer.font_config.chrome_font_family()))
                         .color(hint_color),
                     Shaping::Basic,
                     None,

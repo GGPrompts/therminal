@@ -729,6 +729,19 @@ impl App {
             || (self.config.font.line_height_scale - old_config.font.line_height_scale).abs()
                 > f32::EPSILON;
 
+        // UI font family change only needs an overlay cache clear, not a full
+        // cell-metrics rebuild, so handle it separately from grid font changes.
+        if self.config.font.ui_font_family != old_config.font.ui_font_family
+            && let Some(renderer) = self.grid_renderer.as_mut()
+        {
+            renderer.font_config.ui_font_family = self.config.font.ui_font_family.clone();
+            renderer.clear_render_caches();
+            info!(
+                ui_font_family = %self.config.font.ui_font_family,
+                "UI font family updated via hot-reload"
+            );
+        }
+
         // ── Padding hot-reload ───────────────────────────────────────────
         let padding_changed =
             (self.config.general.padding - old_config.general.padding).abs() > f32::EPSILON;
@@ -782,6 +795,7 @@ impl App {
                 let mut new_font_config =
                     FontConfig::new(effective_family, self.config.font.size * scale);
                 new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
+                new_font_config.ui_font_family = self.config.font.ui_font_family.clone();
                 new_font_config.line_height =
                     self.config.font.size * self.config.font.line_height_scale * scale;
                 renderer.update_font(

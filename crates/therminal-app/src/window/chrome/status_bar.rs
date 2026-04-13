@@ -275,7 +275,7 @@ fn shape_status_bar_text(
     bar_h: f32,
     renderer: &mut GridRenderer,
 ) {
-    let family = renderer.font_config.family.clone();
+    let family = renderer.font_config.chrome_font_family().to_string();
     let attrs =
         |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Name(&family)).color(c) };
 

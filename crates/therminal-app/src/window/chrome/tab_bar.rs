@@ -147,7 +147,7 @@ pub(crate) fn draw_tab_bar(
     let inactive_color =
         GlyphColor::rgba(chrome_fg_muted.r, chrome_fg_muted.g, chrome_fg_muted.b, 200);
 
-    let family = renderer.font_config.family.clone();
+    let family = renderer.font_config.chrome_font_family().to_string();
     let mut tab_slots: Vec<(String, f32, f32, GlyphColor)> = Vec::new();
     for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
         let tab_x = tab_offsets[i];

@@ -58,7 +58,7 @@ fn add_text(
         &mut renderer.font_system,
         &text,
         &Attrs::new()
-            .family(Family::Name(&renderer.font_config.family))
+            .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(weight)
             .color(color),
         Shaping::Basic,
