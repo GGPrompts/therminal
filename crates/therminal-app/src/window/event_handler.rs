@@ -173,6 +173,26 @@ impl App {
                     self.show_toast(format!("removed editor: {removed}"));
                 }
             }
+            SettingsCommand::EditorChainEdit(idx, value) => {
+                if value.is_empty() {
+                    if idx < self.config.hotspots.editor_chain.len() {
+                        let removed = self.config.hotspots.editor_chain.remove(idx);
+                        self.show_toast(format!("removed editor: {removed}"));
+                    }
+                } else if idx < self.config.hotspots.editor_chain.len() {
+                    self.config.hotspots.editor_chain[idx] = value;
+                    self.show_toast("editor updated");
+                }
+            }
+            SettingsCommand::EditorChainAdd(value) => {
+                let entry = if value.is_empty() {
+                    "nano".to_string()
+                } else {
+                    value
+                };
+                self.config.hotspots.editor_chain.push(entry.clone());
+                self.show_toast(format!("added editor: {entry}"));
+            }
             SettingsCommand::EditorChainMoveUp(idx) => {
                 if idx > 0 && idx < self.config.hotspots.editor_chain.len() {
                     self.config.hotspots.editor_chain.swap(idx, idx - 1);
@@ -193,6 +213,26 @@ impl App {
                     let removed = self.config.hotspots.folder_opener.remove(idx);
                     self.show_toast(format!("removed opener: {removed}"));
                 }
+            }
+            SettingsCommand::FolderOpenerEdit(idx, value) => {
+                if value.is_empty() {
+                    if idx < self.config.hotspots.folder_opener.len() {
+                        let removed = self.config.hotspots.folder_opener.remove(idx);
+                        self.show_toast(format!("removed opener: {removed}"));
+                    }
+                } else if idx < self.config.hotspots.folder_opener.len() {
+                    self.config.hotspots.folder_opener[idx] = value;
+                    self.show_toast("opener updated");
+                }
+            }
+            SettingsCommand::FolderOpenerAdd(value) => {
+                let entry = if value.is_empty() {
+                    "xdg-open".to_string()
+                } else {
+                    value
+                };
+                self.config.hotspots.folder_opener.push(entry.clone());
+                self.show_toast(format!("added opener: {entry}"));
             }
             SettingsCommand::FolderOpenerMoveUp(idx) => {
                 if idx > 0 && idx < self.config.hotspots.folder_opener.len() {
@@ -1384,7 +1424,9 @@ impl App {
                         self.settings_overlay.backspace();
                     }
                     Key::Named(NamedKey::Delete) => {
-                        self.settings_overlay.delete();
+                        if let Some(cmd) = self.settings_overlay.delete() {
+                            self.apply_settings_command(cmd);
+                        }
                     }
                     Key::Character(s) if is_editing => {
                         for ch in s.chars() {

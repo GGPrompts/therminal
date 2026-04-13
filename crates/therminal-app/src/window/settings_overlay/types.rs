@@ -43,8 +43,10 @@ pub(crate) enum ControlBinding {
     ApplyThemePreset(ThemePreset),
     // Hotspot controls (tn-avjv.5)
     EditorChainEntry(usize),
+    AddEditorChainEntry,
     FolderPaneCommand,
     FolderOpenerEntry(usize),
+    AddFolderOpenerEntry,
     // Shell controls (tn-avjv.6)
     DefaultShell,
     ShellArgs,
@@ -61,10 +63,14 @@ pub(crate) enum SettingsCommand {
     ApplyThemePreset(ThemePreset),
     // Hotspot mutations (tn-avjv.5)
     EditorChainRemove(usize),
+    EditorChainEdit(usize, String),
+    EditorChainAdd(String),
     EditorChainMoveUp(usize),
     EditorChainMoveDown(usize),
     SetFolderPaneCommand(String),
     FolderOpenerRemove(usize),
+    FolderOpenerEdit(usize, String),
+    FolderOpenerAdd(String),
     FolderOpenerMoveUp(usize),
     FolderOpenerMoveDown(usize),
     // Shell mutations (tn-avjv.6)
@@ -81,8 +87,10 @@ impl ControlBinding {
     pub(super) fn command(&self) -> SettingsCommand {
         match self {
             Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(*preset),
-            Self::EditorChainEntry(idx) => SettingsCommand::EditorChainRemove(*idx),
-            Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerRemove(*idx),
+            Self::EditorChainEntry(idx) => SettingsCommand::EditorChainEdit(*idx, String::new()),
+            Self::AddEditorChainEntry => SettingsCommand::EditorChainAdd(String::new()),
+            Self::FolderOpenerEntry(idx) => SettingsCommand::FolderOpenerEdit(*idx, String::new()),
+            Self::AddFolderOpenerEntry => SettingsCommand::FolderOpenerAdd(String::new()),
             Self::FolderPaneCommand => SettingsCommand::SetFolderPaneCommand(String::new()),
             Self::DefaultShell => SettingsCommand::SetDefaultShell(String::new()),
             Self::ShellArgs => SettingsCommand::SetShellArgs(String::new()),
@@ -90,6 +98,15 @@ impl ControlBinding {
             Self::ToggleHighContrast => SettingsCommand::ToggleHighContrast,
             Self::ToggleReducedMotion => SettingsCommand::ToggleReducedMotion,
             Self::UiTextScale => SettingsCommand::SetUiTextScale(0),
+        }
+    }
+
+    /// Build the remove command for ListRow entries (fired on Delete key).
+    pub(super) fn remove_command(&self) -> Option<SettingsCommand> {
+        match self {
+            Self::EditorChainEntry(idx) => Some(SettingsCommand::EditorChainRemove(*idx)),
+            Self::FolderOpenerEntry(idx) => Some(SettingsCommand::FolderOpenerRemove(*idx)),
+            _ => None,
         }
     }
 }
@@ -115,6 +132,9 @@ pub(crate) enum ControlType {
     },
     ListRow {
         display_value: String,
+        editing: bool,
+        cursor: usize,
+        original_value: String,
     },
     Action,
 }
@@ -149,8 +169,12 @@ impl ControlType {
     }
 
     pub(crate) fn list_row(display_value: impl Into<String>) -> Self {
+        let value: String = display_value.into();
         Self::ListRow {
-            display_value: display_value.into(),
+            original_value: value.clone(),
+            cursor: 0,
+            editing: false,
+            display_value: value,
         }
     }
 }

@@ -226,7 +226,37 @@ pub(super) fn build_rect_vertices(
                         text_field_bg,
                     ));
                 }
-                ControlType::ListRow { .. } | ControlType::Action => {}
+                ControlType::ListRow {
+                    cursor, editing, ..
+                } => {
+                    let field_w = (panel_w - nav_w - 56.0) * 0.42;
+                    let field_h = 24.0_f32;
+                    let field_y = row_y + (ctrl_row_h - field_h) * 0.5;
+                    if *editing {
+                        verts.extend_from_slice(&pixel_rect_to_ndc(
+                            value_col_x,
+                            field_y,
+                            field_w,
+                            field_h,
+                            sw,
+                            sh,
+                            text_field_editing_bg,
+                        ));
+                        let char_w = 9.0_f32;
+                        let cursor_x =
+                            value_col_x + 4.0 + (*cursor as f32 * char_w).min(field_w - 8.0);
+                        verts.extend_from_slice(&pixel_rect_to_ndc(
+                            cursor_x,
+                            field_y + 2.0,
+                            2.0,
+                            field_h - 4.0,
+                            sw,
+                            sh,
+                            text_cursor_color,
+                        ));
+                    }
+                }
+                ControlType::Action => {}
             }
         }
     }

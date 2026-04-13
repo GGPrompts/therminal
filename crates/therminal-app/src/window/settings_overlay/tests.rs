@@ -263,7 +263,7 @@ fn text_input_backspace() {
         assert_eq!(value, "ab");
         assert_eq!(*cursor, 2);
     }
-    assert!(!state.delete());
+    assert!(state.delete().is_none());
 }
 #[test]
 fn escape_cancels_text_editing() {
@@ -440,32 +440,109 @@ fn hotspots_section_rebuilds_from_config() {
         .iter()
         .find(|s| s.id == "hotspots")
         .unwrap();
-    assert_eq!(hotspots.controls.len(), 6);
+    // 3 editors + 1 "Add editor" + 1 folder_pane_command + 2 openers + 1 "Add opener" = 8
+    assert_eq!(hotspots.controls.len(), 8);
     assert!(matches!(
         hotspots.controls[0].control_type,
         ControlType::ListRow { .. }
     ));
     assert_eq!(hotspots.controls[0].label, "Editor #1");
+    assert_eq!(hotspots.controls[3].label, "+ Add editor");
     assert!(matches!(
         hotspots.controls[3].control_type,
-        ControlType::TextInput { .. }
+        ControlType::Action
     ));
-    assert_eq!(hotspots.controls[3].label, "Folder pane command");
     assert!(matches!(
         hotspots.controls[4].control_type,
+        ControlType::TextInput { .. }
+    ));
+    assert_eq!(hotspots.controls[4].label, "Folder pane command");
+    assert!(matches!(
+        hotspots.controls[5].control_type,
         ControlType::ListRow { .. }
     ));
-    assert_eq!(hotspots.controls[4].label, "Opener #1");
+    assert_eq!(hotspots.controls[5].label, "Opener #1");
+    assert_eq!(hotspots.controls[7].label, "+ Add opener");
 }
 #[test]
-fn editor_chain_remove_produces_command() {
+fn editor_chain_enter_enters_edit_mode() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
     // Navigate to "hotspots" section (index 1: shell=0, hotspots=1).
     state.arrow_down();
     state.tab(false);
+    // First Enter enters edit mode (returns None).
     let cmd = state.enter();
+    assert_eq!(cmd, None);
+    assert!(state.is_text_editing());
+}
+
+#[test]
+fn editor_chain_enter_confirms_edit() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
+    state.tab(false);
+    // Enter edit mode.
+    state.enter();
+    assert!(state.is_text_editing());
+    // Type a character.
+    state.char_input('!');
+    // Second Enter confirms.
+    let cmd = state.enter();
+    assert!(matches!(
+        cmd,
+        Some(SettingsCommand::EditorChainEdit(0, ref v)) if v == "$VISUAL!"
+    ));
+    assert!(!state.is_text_editing());
+}
+
+#[test]
+fn editor_chain_escape_cancels_edit() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
+    state.tab(false);
+    state.enter(); // enter edit mode
+    state.char_input('X');
+    assert!(state.cancel_text_editing());
+    assert!(!state.is_text_editing());
+    // Value should be restored to original.
+    let hotspots = state
+        .sections()
+        .iter()
+        .find(|s| s.id == "hotspots")
+        .unwrap();
+    if let ControlType::ListRow { display_value, .. } = &hotspots.controls[0].control_type {
+        assert_eq!(display_value, "$VISUAL");
+    } else {
+        panic!("expected ListRow");
+    }
+}
+
+#[test]
+fn editor_chain_delete_removes_entry() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
+    state.tab(false);
+    // Delete on non-editing ListRow should produce remove command.
+    let cmd = state.delete();
     assert_eq!(cmd, Some(SettingsCommand::EditorChainRemove(0)));
+}
+
+#[test]
+fn add_editor_button_produces_command() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
+    state.tab(false);
+    // The "Add editor" button is after the 3 editor chain entries (index 3).
+    for _ in 0..3 {
+        state.arrow_down();
+    }
+    let cmd = state.enter();
+    assert!(matches!(cmd, Some(SettingsCommand::EditorChainAdd(_))));
 }
 #[test]
 fn folder_pane_command_text_edit_produces_command() {
@@ -474,6 +551,8 @@ fn folder_pane_command_text_edit_produces_command() {
     // Navigate to "hotspots" section (index 1: shell=0, hotspots=1).
     state.arrow_down();
     state.tab(false);
+    // Folder pane command is now at index 4 (3 editors + 1 "Add editor" button).
+    state.arrow_down();
     state.arrow_down();
     state.arrow_down();
     state.arrow_down();

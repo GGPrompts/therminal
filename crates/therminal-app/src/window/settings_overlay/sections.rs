@@ -6,8 +6,19 @@ use super::types::{ControlBinding, ControlType, SettingsControl, SettingsSection
 
 /// Snapshot of in-progress editing state for a single control.
 enum ControlSnapshot {
-    SelectEditing { selected: usize, expanded: bool },
-    TextEditing { value: String, cursor: usize },
+    SelectEditing {
+        selected: usize,
+        expanded: bool,
+    },
+    TextEditing {
+        value: String,
+        cursor: usize,
+    },
+    ListRowEditing {
+        value: String,
+        cursor: usize,
+        original: String,
+    },
     None,
 }
 
@@ -30,6 +41,16 @@ fn snapshot_control_states(controls: &[SettingsControl]) -> Vec<ControlSnapshot>
             } if *editing => ControlSnapshot::TextEditing {
                 value: value.clone(),
                 cursor: *cursor,
+            },
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                original_value,
+            } if *editing => ControlSnapshot::ListRowEditing {
+                value: display_value.clone(),
+                cursor: *cursor,
+                original: original_value.clone(),
             },
             _ => ControlSnapshot::None,
         })
@@ -65,6 +86,24 @@ fn restore_control_states(controls: &mut [SettingsControl], snapshots: &[Control
             ) => {
                 *value = prev_val.clone();
                 *cursor = *prev_cur;
+                *editing = true;
+            }
+            (
+                ControlType::ListRow {
+                    display_value,
+                    cursor,
+                    editing,
+                    original_value,
+                },
+                ControlSnapshot::ListRowEditing {
+                    value: prev_val,
+                    cursor: prev_cur,
+                    original: prev_orig,
+                },
+            ) => {
+                *display_value = prev_val.clone();
+                *cursor = *prev_cur;
+                *original_value = prev_orig.clone();
                 *editing = true;
             }
             _ => {}
@@ -183,6 +222,11 @@ impl SettingsOverlayState {
                 ControlType::list_row(entry.clone()),
             ));
         }
+        controls.push(SettingsControl::with_type(
+            "+ Add editor",
+            ControlBinding::AddEditorChainEntry,
+            ControlType::Action,
+        ));
         let cmd_text = values.folder_pane_command.join(" ");
         controls.push(SettingsControl::with_type(
             "Folder pane command",
@@ -196,6 +240,11 @@ impl SettingsOverlayState {
                 ControlType::list_row(entry.clone()),
             ));
         }
+        controls.push(SettingsControl::with_type(
+            "+ Add opener",
+            ControlBinding::AddFolderOpenerEntry,
+            ControlType::Action,
+        ));
         restore_control_states(&mut controls, &prev_states);
         let prev_sel = self
             .selected_control_by_section

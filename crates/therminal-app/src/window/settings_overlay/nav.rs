@@ -124,9 +124,32 @@ impl SettingsOverlayState {
                             None
                         }
                     }
-                    ControlType::ListRow { .. } | ControlType::Action => {
-                        Some(control.binding.command())
+                    ControlType::ListRow {
+                        display_value,
+                        editing,
+                        cursor,
+                        original_value,
+                    } => {
+                        if *editing {
+                            *editing = false;
+                            let val = display_value.clone();
+                            Some(match &control.binding {
+                                ControlBinding::EditorChainEntry(i) => {
+                                    SettingsCommand::EditorChainEdit(*i, val)
+                                }
+                                ControlBinding::FolderOpenerEntry(i) => {
+                                    SettingsCommand::FolderOpenerEdit(*i, val)
+                                }
+                                other => other.command(),
+                            })
+                        } else {
+                            *editing = true;
+                            *cursor = display_value.len();
+                            *original_value = display_value.clone();
+                            None
+                        }
                     }
+                    ControlType::Action => Some(control.binding.command()),
                 }
             }
         }
@@ -169,6 +192,18 @@ impl SettingsOverlayState {
                 }
                 None
             }
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } => {
+                if *editing {
+                    display_value.insert(*cursor, ' ');
+                    *cursor += 1;
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -184,16 +219,27 @@ impl SettingsOverlayState {
         let Some(control) = section.controls.get_mut(idx) else {
             return false;
         };
-        if let ControlType::TextInput {
-            value,
-            cursor,
-            editing,
-        } = &mut control.control_type
-            && *editing
-        {
-            value.insert(*cursor, ch);
-            *cursor += ch.len_utf8();
-            return true;
+        match &mut control.control_type {
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } if *editing => {
+                value.insert(*cursor, ch);
+                *cursor += ch.len_utf8();
+                return true;
+            }
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } if *editing => {
+                display_value.insert(*cursor, ch);
+                *cursor += ch.len_utf8();
+                return true;
+            }
+            _ => {}
         }
         false
     }
@@ -209,54 +255,85 @@ impl SettingsOverlayState {
         let Some(control) = section.controls.get_mut(idx) else {
             return false;
         };
-        if let ControlType::TextInput {
-            value,
-            cursor,
-            editing,
-        } = &mut control.control_type
-            && *editing
-            && *cursor > 0
-        {
-            let prev = value[..*cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            value.drain(prev..*cursor);
-            *cursor = prev;
-            return true;
+        match &mut control.control_type {
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } if *editing && *cursor > 0 => {
+                let prev = value[..*cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                value.drain(prev..*cursor);
+                *cursor = prev;
+                true
+            }
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } if *editing && *cursor > 0 => {
+                let prev = display_value[..*cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                display_value.drain(prev..*cursor);
+                *cursor = prev;
+                true
+            }
+            _ => false,
         }
-        false
     }
 
-    pub(crate) fn delete(&mut self) -> bool {
+    pub(crate) fn delete(&mut self) -> Option<SettingsCommand> {
         if self.focus != SettingsFocus::Controls {
-            return false;
+            return None;
         }
         let idx = self.active_control_index();
-        let Some(section) = self.sections.get_mut(self.selected_section) else {
-            return false;
-        };
-        let Some(control) = section.controls.get_mut(idx) else {
-            return false;
-        };
-        if let ControlType::TextInput {
-            value,
-            cursor,
-            editing,
-        } = &mut control.control_type
-            && *editing
-            && *cursor < value.len()
-        {
-            let next = value[*cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| *cursor + i)
-                .unwrap_or(value.len());
-            value.drain(*cursor..next);
-            return true;
+        let section = self.sections.get_mut(self.selected_section)?;
+        let control = section.controls.get_mut(idx)?;
+        match &mut control.control_type {
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } if *editing && *cursor < value.len() => {
+                let next = value[*cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| *cursor + i)
+                    .unwrap_or(value.len());
+                value.drain(*cursor..next);
+                None
+            }
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } => {
+                if *editing && *cursor < display_value.len() {
+                    // Delete char at cursor while editing.
+                    let next = display_value[*cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| *cursor + i)
+                        .unwrap_or(display_value.len());
+                    display_value.drain(*cursor..next);
+                    None
+                } else if !*editing {
+                    // Delete key on non-editing ListRow removes the entry.
+                    control.binding.remove_command()
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
-        false
     }
 
     fn text_cursor_left(&mut self) -> bool {
@@ -267,22 +344,34 @@ impl SettingsOverlayState {
         let Some(control) = section.controls.get_mut(idx) else {
             return false;
         };
-        if let ControlType::TextInput {
-            value,
-            cursor,
-            editing,
-        } = &mut control.control_type
-            && *editing
-            && *cursor > 0
-        {
-            *cursor = value[..*cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            return true;
+        match &mut control.control_type {
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } if *editing && *cursor > 0 => {
+                *cursor = value[..*cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                true
+            }
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } if *editing && *cursor > 0 => {
+                *cursor = display_value[..*cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     fn text_cursor_right(&mut self) -> bool {
@@ -293,22 +382,34 @@ impl SettingsOverlayState {
         let Some(control) = section.controls.get_mut(idx) else {
             return false;
         };
-        if let ControlType::TextInput {
-            value,
-            cursor,
-            editing,
-        } = &mut control.control_type
-            && *editing
-            && *cursor < value.len()
-        {
-            *cursor = value[*cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| *cursor + i)
-                .unwrap_or(value.len());
-            return true;
+        match &mut control.control_type {
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } if *editing && *cursor < value.len() => {
+                *cursor = value[*cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| *cursor + i)
+                    .unwrap_or(value.len());
+                true
+            }
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } if *editing && *cursor < display_value.len() => {
+                *cursor = display_value[*cursor..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| *cursor + i)
+                    .unwrap_or(display_value.len());
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     pub(crate) fn is_text_editing(&self) -> bool {
@@ -321,6 +422,7 @@ impl SettingsOverlayState {
         matches!(
             control.control_type,
             ControlType::TextInput { editing: true, .. }
+                | ControlType::ListRow { editing: true, .. }
         )
     }
 
@@ -332,13 +434,23 @@ impl SettingsOverlayState {
         let Some(control) = section.controls.get_mut(ctrl_idx) else {
             return false;
         };
-        if let ControlType::TextInput { editing, .. } = &mut control.control_type
-            && *editing
-        {
-            *editing = false;
-            return true;
+        match &mut control.control_type {
+            ControlType::TextInput { editing, .. } if *editing => {
+                *editing = false;
+                true
+            }
+            ControlType::ListRow {
+                display_value,
+                editing,
+                original_value,
+                ..
+            } if *editing => {
+                *display_value = original_value.clone();
+                *editing = false;
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     pub(crate) fn is_select_expanded(&self) -> bool {

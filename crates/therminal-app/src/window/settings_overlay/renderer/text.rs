@@ -143,11 +143,11 @@ pub(super) fn build_text_buffers(
         Weight::SEMIBOLD,
     );
     let hint = if state.is_text_editing() {
-        "Type to edit, Enter to confirm, Esc to cancel"
+        "Type to edit, Enter confirm, Esc cancel, Del remove"
     } else if state.is_select_expanded() {
         "Arrows change value, Enter/Space confirm, Esc cancel"
     } else {
-        "Tab/Shift+Tab focus, Arrows move, Enter/Space activate, Esc close"
+        "Tab/Shift+Tab focus, Arrows move, Enter edit, Del remove, Esc close"
     };
     add_text(
         &mut buffers,
@@ -324,12 +324,17 @@ pub(super) fn build_text_buffers(
                         Weight::NORMAL,
                     );
                 }
-                ControlType::ListRow { display_value } => {
+                ControlType::ListRow {
+                    display_value,
+                    editing,
+                    ..
+                } => {
+                    let em = if *editing { "*" } else { "" };
                     add_text(
                         &mut buffers,
                         &mut placements,
                         renderer,
-                        truncate_for_width(&format!("{marker} {}", control.label), label_width),
+                        truncate_for_width(&format!("{marker} {}{em}", control.label), label_width),
                         content_x + 28.0,
                         row_y,
                         label_width,
@@ -338,17 +343,29 @@ pub(super) fn build_text_buffers(
                         row_color,
                         Weight::NORMAL,
                     );
+                    let display = if display_value.is_empty() && !*editing {
+                        "(empty)".to_string()
+                    } else {
+                        display_value.clone()
+                    };
+                    let text_color = if display_value.is_empty() && !*editing {
+                        muted
+                    } else if *editing {
+                        ink
+                    } else {
+                        muted
+                    };
                     add_text(
                         &mut buffers,
                         &mut placements,
                         renderer,
-                        truncate_for_width(display_value, value_width),
+                        truncate_for_width(&display, value_width - 8.0),
                         value_col_x + 4.0,
                         row_y + 2.0,
-                        value_width,
+                        value_width - 8.0,
                         24.0,
                         metrics,
-                        muted,
+                        text_color,
                         Weight::NORMAL,
                     );
                 }
