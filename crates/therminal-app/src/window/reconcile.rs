@@ -255,6 +255,14 @@ async fn build_reconcile_result(
     // 4. Build PaneState for each new daemon pane. These need a full
     //    RemotePty setup (dedicated connection, worker thread, etc.).
     //    Use a placeholder viewport — the main thread will relayout.
+    //
+    //    tn-x2yh: `build_remote_pane_state` uses `Handle::block_on`
+    //    internally, which panics inside a tokio runtime context. Since
+    //    this function runs as a spawned async task, we must move each
+    //    build call onto the blocking thread pool via `spawn_blocking`.
+    //    The blocking pool is separate from the (single) async worker
+    //    thread, so `block_on` from the blocking thread can schedule
+    //    futures back onto the worker without deadlocking.
     let placeholder_viewport = therminal_core::geometry::Rect::new(0.0, 0.0, 800.0, 600.0);
     let (cols, rows) = (80usize, 24usize);
 
@@ -285,28 +293,43 @@ async fn build_reconcile_result(
                 });
             }),
         };
-        match crate::pane::remote_spawn::build_remote_pane_state(
-            local_id,
-            daemon_pane_id,
-            placeholder_viewport,
-            cols,
-            rows,
-            scrollback,
-            interceptor_config.clone(),
-            Arc::clone(&client),
-            handle.clone(),
-            daemon_socket.clone(),
-            callbacks,
-            None,
-        ) {
-            Ok(state) => {
+        let client_for_build = Arc::clone(&client);
+        let handle_for_build = handle.clone();
+        let socket_for_build = daemon_socket.clone();
+        let icfg = interceptor_config.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::pane::remote_spawn::build_remote_pane_state(
+                local_id,
+                daemon_pane_id,
+                placeholder_viewport,
+                cols,
+                rows,
+                scrollback,
+                icfg,
+                client_for_build,
+                handle_for_build,
+                socket_for_build,
+                callbacks,
+                None,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(state)) => {
                 new_panes.push((local_id, daemon_pane_id, state));
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    daemon_pane_id,
+                    error = %e,
+                    "reconcile: build_remote_pane_state failed — skipping pane"
+                );
             }
             Err(e) => {
                 warn!(
                     daemon_pane_id,
                     error = %e,
-                    "reconcile: build_remote_pane_state failed — skipping pane"
+                    "reconcile: build_remote_pane_state panicked — skipping pane"
                 );
             }
         }

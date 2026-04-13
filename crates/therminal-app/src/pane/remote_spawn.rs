@@ -619,6 +619,10 @@ pub(crate) fn build_remote_pane_state(
     // initialized before this function returns. Capture failure is
     // non-fatal: we log and fall through, leaving the tn-wlu6 heuristic
     // to handle the local Term startup.
+    //
+    // IMPORTANT (tn-x2yh): this function must NOT be called from a tokio
+    // task — block_on panics inside a runtime context. The reconciliation
+    // path uses spawn_blocking to avoid this.
     {
         let capture_client = Arc::clone(&daemon_client);
         // tn-l3hk: time the CapturePaneState round-trip (includes snapshot
