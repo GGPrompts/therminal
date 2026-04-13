@@ -43,8 +43,10 @@ fn section_order(name: &str) -> u8 {
         "Pane Management" => 0,
         "Font" => 1,
         "General" => 2,
-        "Mouse" => 4,
-        _ => 3,
+        "Navigation" => 3,
+        "Widgets" => 4,
+        "Mouse" => 5,
+        _ => 6,
     }
 }
 
@@ -701,6 +703,15 @@ fn format_shortcut(key: &str) -> String {
                 "down" | "arrowdown" => "Down".to_string(),
                 "left" | "arrowleft" => "Left".to_string(),
                 "right" | "arrowright" => "Right".to_string(),
+                "pageup" | "page_up" => "PgUp".to_string(),
+                "pagedown" | "page_down" => "PgDn".to_string(),
+                "backspace" => "Backspace".to_string(),
+                "delete" | "del" => "Delete".to_string(),
+                "insert" | "ins" => "Insert".to_string(),
+                "home" => "Home".to_string(),
+                "end" => "End".to_string(),
+                "tab" => "Tab".to_string(),
+                s if s.starts_with('f') && s[1..].parse::<u8>().is_ok() => s.to_uppercase(),
                 "/" => "?".to_string(), // Ctrl+Shift+/ produces ?
                 other => {
                     let mut c = other.chars();
@@ -881,5 +892,87 @@ mod tests {
         assert_eq!(cats.len(), 2);
         let (_, rows) = &cats[0];
         assert_eq!(rows.len(), 2, "distinct actions must not be collapsed");
+    }
+
+    /// Navigation and Widgets sections must be separate, not merged.
+    #[test]
+    fn navigation_and_widgets_are_separate_sections() {
+        use therminal_core::config::{KeyAction, Keybinding, KeybindingsConfig};
+        let kb = KeybindingsConfig {
+            bindings: vec![
+                Keybinding {
+                    key: "ctrl+alt+t".to_string(),
+                    action: KeyAction::ToggleAgentTimeline,
+                },
+                Keybinding {
+                    key: "ctrl+alt+up".to_string(),
+                    action: KeyAction::JumpRegionPrev,
+                },
+            ],
+        };
+        let cats = build_help_categories(&kb);
+        let section_names: Vec<&str> = cats.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            section_names.contains(&"Navigation"),
+            "expected Navigation section, got {section_names:?}"
+        );
+        assert!(
+            section_names.contains(&"Widgets"),
+            "expected Widgets section, got {section_names:?}"
+        );
+        // They must be distinct entries.
+        assert_ne!(
+            section_names.iter().position(|&s| s == "Navigation"),
+            section_names.iter().position(|&s| s == "Widgets"),
+        );
+    }
+
+    /// Default keybindings produce all expected sections.
+    #[test]
+    fn default_keybindings_produce_all_sections() {
+        let kb = KeybindingsConfig::default();
+        let cats = build_help_categories(&kb);
+        let section_names: Vec<&str> = cats.iter().map(|(n, _)| n.as_str()).collect();
+        for expected in &[
+            "Pane Management",
+            "Font",
+            "General",
+            "Navigation",
+            "Widgets",
+            "Mouse",
+        ] {
+            assert!(
+                section_names.contains(expected),
+                "missing section {expected:?}, got {section_names:?}"
+            );
+        }
+    }
+
+    /// Sections appear in the documented order.
+    #[test]
+    fn default_keybindings_section_order() {
+        let kb = KeybindingsConfig::default();
+        let cats = build_help_categories(&kb);
+        let section_names: Vec<&str> = cats.iter().map(|(n, _)| n.as_str()).collect();
+        let expected_order = vec![
+            "Pane Management",
+            "Font",
+            "General",
+            "Navigation",
+            "Widgets",
+            "Mouse",
+        ];
+        assert_eq!(section_names, expected_order);
+    }
+
+    #[test]
+    fn format_shortcut_named_keys() {
+        assert_eq!(format_shortcut("ctrl+alt+pageup"), "Ctrl+Alt+PgUp");
+        assert_eq!(format_shortcut("ctrl+alt+pagedown"), "Ctrl+Alt+PgDn");
+        assert_eq!(format_shortcut("f11"), "F11");
+        assert_eq!(format_shortcut("f1"), "F1");
+        assert_eq!(format_shortcut("ctrl+alt+up"), "Ctrl+Alt+Up");
+        assert_eq!(format_shortcut("ctrl+shift+enter"), "Ctrl+Shift+Enter");
+        assert_eq!(format_shortcut("ctrl+,"), "Ctrl+,");
     }
 }
