@@ -1348,13 +1348,16 @@ impl App {
             }
             Some(OverlayMode::Settings) => {
                 let is_editing = self.settings_overlay.is_text_editing();
+                let is_select_expanded = self.settings_overlay.is_select_expanded();
                 match &key_event.logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        if !self.settings_overlay.cancel_text_editing() {
+                        if !self.settings_overlay.cancel_text_editing()
+                            && !self.settings_overlay.cancel_select_expanded()
+                        {
                             self.close_overlay();
                         }
                     }
-                    Key::Named(NamedKey::Tab) if !is_editing => {
+                    Key::Named(NamedKey::Tab) if !is_editing && !is_select_expanded => {
                         let reverse = self.modifiers.state().shift_key();
                         self.settings_overlay.tab(reverse);
                     }

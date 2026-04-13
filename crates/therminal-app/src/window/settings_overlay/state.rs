@@ -47,8 +47,14 @@ impl SettingsOverlayState {
         }
         for section in &mut self.sections {
             for control in &mut section.controls {
-                if let ControlType::TextInput { editing, .. } = &mut control.control_type {
-                    *editing = false;
+                match &mut control.control_type {
+                    ControlType::TextInput { editing, .. } => {
+                        *editing = false;
+                    }
+                    ControlType::Select { expanded, .. } => {
+                        *expanded = false;
+                    }
+                    _ => {}
                 }
             }
         }

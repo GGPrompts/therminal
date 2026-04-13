@@ -106,6 +106,7 @@ pub(crate) enum ControlType {
     Select {
         options: Vec<String>,
         selected: usize,
+        expanded: bool,
     },
     TextInput {
         value: String,
@@ -130,7 +131,11 @@ impl ControlType {
         } else {
             initial.min(options.len() - 1)
         };
-        Self::Select { options, selected }
+        Self::Select {
+            options,
+            selected,
+            expanded: false,
+        }
     }
 
     pub(crate) fn text_input(initial: impl Into<String>) -> Self {

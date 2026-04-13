@@ -144,6 +144,8 @@ pub(super) fn build_text_buffers(
     );
     let hint = if state.is_text_editing() {
         "Type to edit, Enter to confirm, Esc to cancel"
+    } else if state.is_select_expanded() {
+        "Arrows change value, Enter/Space confirm, Esc cancel"
     } else {
         "Tab/Shift+Tab focus, Arrows move, Enter/Space activate, Esc close"
     };
@@ -249,12 +251,14 @@ pub(super) fn build_text_buffers(
                 ControlType::Select {
                     options,
                     selected: sel_idx,
+                    expanded,
                 } => {
+                    let em = if *expanded { "*" } else { "" };
                     add_text(
                         &mut buffers,
                         &mut placements,
                         renderer,
-                        truncate_for_width(&format!("{marker} {}", control.label), label_width),
+                        truncate_for_width(&format!("{marker} {}{em}", control.label), label_width),
                         content_x + 28.0,
                         row_y,
                         label_width,

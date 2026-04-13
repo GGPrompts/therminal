@@ -96,7 +96,7 @@ fn register_section_extends_navigation_model() {
     assert_eq!(state.active_section().map(|s| s.id), Some("test"));
 }
 #[test]
-fn select_arrows_cycle_options() {
+fn select_arrows_cycle_options_when_expanded() {
     let mut state = SettingsOverlayState::new();
     state.register_section(SettingsSection::new(
         "ts",
@@ -112,6 +112,9 @@ fn select_arrows_cycle_options() {
         state.arrow_down();
     }
     state.tab(false);
+    // Expand the select first.
+    state.enter();
+    assert!(state.is_select_expanded());
     state.arrow_right();
     if let ControlType::Select { selected, .. } =
         &state.sections[state.selected_section].controls[0].control_type
@@ -126,7 +129,7 @@ fn select_arrows_cycle_options() {
     }
 }
 #[test]
-fn select_up_down_arrows_cycle_options() {
+fn select_up_down_arrows_cycle_options_when_expanded() {
     let mut state = SettingsOverlayState::new();
     state.register_section(SettingsSection::new(
         "ts2",
@@ -142,6 +145,9 @@ fn select_up_down_arrows_cycle_options() {
         state.arrow_down();
     }
     state.tab(false);
+    // Expand the select first.
+    state.enter();
+    assert!(state.is_select_expanded());
     // Down arrow should cycle forward.
     state.arrow_down();
     if let ControlType::Select { selected, .. } =
@@ -153,6 +159,52 @@ fn select_up_down_arrows_cycle_options() {
     state.arrow_up();
     if let ControlType::Select { selected, .. } =
         &state.sections[state.selected_section].controls[0].control_type
+    {
+        assert_eq!(*selected, 0);
+    }
+}
+#[test]
+fn select_up_down_navigate_when_not_expanded() {
+    let mut state = SettingsOverlayState::new();
+    state.register_section(SettingsSection::new(
+        "ts3",
+        "TS3",
+        vec![
+            SettingsControl::with_type(
+                "Toggle",
+                ControlBinding::ToggleHighContrast,
+                ControlType::toggle(false),
+            ),
+            SettingsControl::with_type(
+                "Sel",
+                ControlBinding::UiTextScale,
+                ControlType::select(vec!["X".into(), "Y".into()], 0),
+            ),
+            SettingsControl::with_type(
+                "Another",
+                ControlBinding::ToggleReducedMotion,
+                ControlType::toggle(false),
+            ),
+        ],
+    ));
+    let target = state.sections().len() - 1;
+    for _ in 0..target {
+        state.arrow_down();
+    }
+    state.tab(false);
+    // Navigate down to the Select control (index 1).
+    state.arrow_down();
+    assert_eq!(state.active_control_index(), 1);
+    assert!(!state.is_select_expanded());
+    // Arrow down should navigate past the Select to control index 2.
+    state.arrow_down();
+    assert_eq!(state.active_control_index(), 2);
+    // Arrow up should navigate back to the Select.
+    state.arrow_up();
+    assert_eq!(state.active_control_index(), 1);
+    // The Select value should be unchanged.
+    if let ControlType::Select { selected, .. } =
+        &state.sections[state.selected_section].controls[1].control_type
     {
         assert_eq!(*selected, 0);
     }
@@ -481,9 +533,15 @@ fn shell_new_pane_cwd_select_produces_command() {
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
-    // Enter cycles the select and returns a command.
+    // First Enter expands the select (returns None).
+    assert_eq!(state.enter(), None);
+    assert!(state.is_select_expanded());
+    // Cycle to next option while expanded.
+    state.arrow_down();
+    // Second Enter confirms and returns the command.
     let cmd = state.enter();
     assert!(matches!(cmd, Some(SettingsCommand::SetNewPaneCwd(1))));
+    assert!(!state.is_select_expanded());
 }
 #[test]
 fn accessibility_section_is_registered() {
@@ -540,9 +598,15 @@ fn accessibility_ui_text_scale_select_produces_command() {
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
+    // First Enter expands the select (returns None).
+    assert_eq!(state.enter(), None);
+    assert!(state.is_select_expanded());
+    // Cycle from index 1 (100%) to index 2 (125%).
+    state.arrow_down();
+    // Second Enter confirms and returns the command.
     let cmd = state.enter();
-    // Cycles from index 1 (100%) to index 2 (125%).
     assert_eq!(cmd, Some(SettingsCommand::SetUiTextScale(2)));
+    assert!(!state.is_select_expanded());
 }
 #[test]
 fn ui_text_scale_index_finds_exact_match() {

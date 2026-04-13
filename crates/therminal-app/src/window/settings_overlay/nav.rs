@@ -6,7 +6,7 @@
 //! the App applies to runtime config separately.
 
 use super::state::SettingsOverlayState;
-use super::types::{ControlBinding, ControlType, SettingsCommand, SettingsControl, SettingsFocus};
+use super::types::{ControlBinding, ControlType, SettingsCommand, SettingsFocus};
 
 impl SettingsOverlayState {
     pub(crate) fn tab(&mut self, reverse: bool) {
@@ -27,7 +27,7 @@ impl SettingsOverlayState {
         match self.focus {
             SettingsFocus::Navigation => self.move_section(-1),
             SettingsFocus::Controls => {
-                if self.active_control_is_select() {
+                if self.active_control_is_select_expanded() {
                     self.cycle_select(-1);
                 } else {
                     self.move_control(-1);
@@ -40,7 +40,7 @@ impl SettingsOverlayState {
         match self.focus {
             SettingsFocus::Navigation => self.move_section(1),
             SettingsFocus::Controls => {
-                if self.active_control_is_select() {
+                if self.active_control_is_select_expanded() {
                     self.cycle_select(1);
                 } else {
                     self.move_control(1);
@@ -54,7 +54,7 @@ impl SettingsOverlayState {
             if self.text_cursor_left() {
                 return;
             }
-            if self.active_control_is_select() {
+            if self.active_control_is_select_expanded() {
                 self.cycle_select(-1);
                 return;
             }
@@ -67,7 +67,7 @@ impl SettingsOverlayState {
             if self.text_cursor_right() {
                 return;
             }
-            if self.active_control_is_select() {
+            if self.active_control_is_select_expanded() {
                 self.cycle_select(1);
                 return;
             }
@@ -90,11 +90,19 @@ impl SettingsOverlayState {
                         *value = !*value;
                         Some(control.binding.command())
                     }
-                    ControlType::Select { .. } => {
-                        self.cycle_select(1);
-                        let section = self.sections.get(self.selected_section)?;
-                        let control = section.controls.get(idx)?;
-                        Some(self.select_command_for(control))
+                    ControlType::Select {
+                        expanded, selected, ..
+                    } => {
+                        if *expanded {
+                            // Confirm selection and collapse.
+                            *expanded = false;
+                            let sel = *selected;
+                            Some(Self::select_command_inline(&control.binding, sel))
+                        } else {
+                            // Expand the dropdown for arrow key cycling.
+                            *expanded = true;
+                            None
+                        }
                     }
                     ControlType::TextInput { value, editing, .. } => {
                         if *editing {
@@ -136,11 +144,19 @@ impl SettingsOverlayState {
                 *value = !*value;
                 Some(control.binding.command())
             }
-            ControlType::Select { .. } => {
-                self.cycle_select(1);
-                let section = self.sections.get(self.selected_section)?;
-                let control = section.controls.get(idx)?;
-                Some(self.select_command_for(control))
+            ControlType::Select {
+                expanded, selected, ..
+            } => {
+                if *expanded {
+                    // Confirm selection and collapse.
+                    *expanded = false;
+                    let sel = *selected;
+                    Some(Self::select_command_inline(&control.binding, sel))
+                } else {
+                    // Expand the dropdown for arrow key cycling.
+                    *expanded = true;
+                    None
+                }
             }
             ControlType::TextInput {
                 value,
@@ -325,6 +341,36 @@ impl SettingsOverlayState {
         false
     }
 
+    pub(crate) fn is_select_expanded(&self) -> bool {
+        let Some(section) = self.sections.get(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get(self.active_control_index()) else {
+            return false;
+        };
+        matches!(
+            control.control_type,
+            ControlType::Select { expanded: true, .. }
+        )
+    }
+
+    pub(crate) fn cancel_select_expanded(&mut self) -> bool {
+        let ctrl_idx = self.active_control_index();
+        let Some(section) = self.sections.get_mut(self.selected_section) else {
+            return false;
+        };
+        let Some(control) = section.controls.get_mut(ctrl_idx) else {
+            return false;
+        };
+        if let ControlType::Select { expanded, .. } = &mut control.control_type
+            && *expanded
+        {
+            *expanded = false;
+            return true;
+        }
+        false
+    }
+
     pub(super) fn cycle_select(&mut self, delta: i32) {
         let idx = self.active_control_index();
         let Some(section) = self.sections.get_mut(self.selected_section) else {
@@ -333,7 +379,10 @@ impl SettingsOverlayState {
         let Some(control) = section.controls.get_mut(idx) else {
             return;
         };
-        if let ControlType::Select { options, selected } = &mut control.control_type {
+        if let ControlType::Select {
+            options, selected, ..
+        } = &mut control.control_type
+        {
             if options.is_empty() {
                 return;
             }
@@ -344,23 +393,19 @@ impl SettingsOverlayState {
 
     /// Produce a [`SettingsCommand`] for a `Select` control, embedding the
     /// current `selected` index into bindings that need it.
-    fn select_command_for(&self, control: &SettingsControl) -> SettingsCommand {
-        let selected = match &control.control_type {
-            ControlType::Select { selected, .. } => *selected,
-            _ => 0,
-        };
-        match &control.binding {
+    fn select_command_inline(binding: &ControlBinding, selected: usize) -> SettingsCommand {
+        match binding {
             ControlBinding::NewPaneCwd => SettingsCommand::SetNewPaneCwd(selected),
             ControlBinding::UiTextScale => SettingsCommand::SetUiTextScale(selected),
-            _ => control.binding.command(),
+            _ => binding.command(),
         }
     }
 
-    fn active_control_is_select(&self) -> bool {
+    fn active_control_is_select_expanded(&self) -> bool {
         self.sections
             .get(self.selected_section)
             .and_then(|s| s.controls.get(self.active_control_index()))
-            .is_some_and(|c| matches!(c.control_type, ControlType::Select { .. }))
+            .is_some_and(|c| matches!(c.control_type, ControlType::Select { expanded: true, .. }))
     }
 
     pub(super) fn move_section(&mut self, delta: i32) {
