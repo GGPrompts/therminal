@@ -473,4 +473,100 @@ mod tests {
         assert!((ndc[0] - 0.0).abs() < 1e-5);
         assert!((ndc[1] - 0.0).abs() < 1e-5);
     }
+
+    // --- Rect::split_horizontal_ratio ---
+
+    #[test]
+    fn split_horizontal_ratio_even_split() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let (left, right) = r.split_horizontal_ratio(0.5, 0.0);
+        assert!((left.width() - 50.0).abs() < 1e-4);
+        assert!((right.width() - 50.0).abs() < 1e-4);
+        assert!((left.x() - 0.0).abs() < 1e-4);
+        assert!((right.x() - 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_horizontal_ratio_with_gap() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let (left, right) = r.split_horizontal_ratio(0.5, 4.0);
+        // usable = 96.0, each half = 48.0
+        assert!((left.width() - 48.0).abs() < 1e-4);
+        assert!((right.width() - 48.0).abs() < 1e-4);
+        // Gap should separate them
+        assert!((right.x() - (left.width() + 4.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_horizontal_ratio_clamps_extreme_low() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let (left, _right) = r.split_horizontal_ratio(0.01, 0.0);
+        // 0.01 should be clamped to 0.05
+        assert!((left.width() - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_horizontal_ratio_clamps_extreme_high() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let (_left, right) = r.split_horizontal_ratio(0.99, 0.0);
+        // 0.99 should be clamped to 0.95
+        assert!((right.width() - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_horizontal_ratio_preserves_height() {
+        let r = Rect::new(10.0, 20.0, 200.0, 80.0);
+        let (left, right) = r.split_horizontal_ratio(0.3, 2.0);
+        assert_eq!(left.height(), 80.0);
+        assert_eq!(right.height(), 80.0);
+        assert_eq!(left.y(), 20.0);
+        assert_eq!(right.y(), 20.0);
+    }
+
+    // --- Rect::split_vertical_ratio ---
+
+    #[test]
+    fn split_vertical_ratio_even_split() {
+        let r = Rect::new(0.0, 0.0, 80.0, 100.0);
+        let (top, bottom) = r.split_vertical_ratio(0.5, 0.0);
+        assert!((top.height() - 50.0).abs() < 1e-4);
+        assert!((bottom.height() - 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_vertical_ratio_with_gap() {
+        let r = Rect::new(0.0, 0.0, 80.0, 100.0);
+        let (top, bottom) = r.split_vertical_ratio(0.5, 6.0);
+        // usable = 94.0, each half = 47.0
+        assert!((top.height() - 47.0).abs() < 1e-4);
+        assert!((bottom.height() - 47.0).abs() < 1e-4);
+        assert!((bottom.y() - (top.height() + 6.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_vertical_ratio_clamps_extreme_low() {
+        let r = Rect::new(0.0, 0.0, 80.0, 100.0);
+        let (top, _bottom) = r.split_vertical_ratio(0.01, 0.0);
+        assert!((top.height() - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_vertical_ratio_preserves_width() {
+        let r = Rect::new(5.0, 10.0, 120.0, 200.0);
+        let (top, bottom) = r.split_vertical_ratio(0.7, 2.0);
+        assert_eq!(top.width(), 120.0);
+        assert_eq!(bottom.width(), 120.0);
+        assert_eq!(top.x(), 5.0);
+        assert_eq!(bottom.x(), 5.0);
+    }
+
+    #[test]
+    fn split_horizontal_ratio_zero_width_gap_larger_than_rect() {
+        // Gap larger than rect width should produce max(0.0, ...) = 0.0 usable,
+        // then each half is max(1.0, ...) = 1.0 pixel minimum.
+        let r = Rect::new(0.0, 0.0, 2.0, 50.0);
+        let (left, right) = r.split_horizontal_ratio(0.5, 10.0);
+        assert!(left.width() >= 1.0);
+        assert!(right.width() >= 1.0);
+    }
 }

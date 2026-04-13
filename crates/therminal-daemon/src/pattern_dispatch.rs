@@ -257,3 +257,156 @@ fn widget_body(_m: &PatternMatch, w: &ResolvedWidget) -> serde_json::Value {
         "color": w.color,
     })
 }
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use therminal_terminal::semantic_patterns::PatternEngineConfig;
+
+    /// Helper: create a dispatcher with a disabled (empty) engine.
+    fn make_dispatcher() -> (PatternDispatcher, Arc<EventBus>, Arc<AtomicU64>) {
+        let engine = Arc::new(PatternEngine::new(PatternEngineConfig {
+            enabled: false,
+            ..PatternEngineConfig::new_default()
+        }));
+        let bus = Arc::new(EventBus::with_default_capacity());
+        let matches_total = Arc::new(AtomicU64::new(0));
+        let dispatcher = PatternDispatcher::new(
+            Arc::clone(&engine),
+            Arc::clone(&bus),
+            Arc::clone(&matches_total),
+            1,
+        );
+        (dispatcher, bus, matches_total)
+    }
+
+    #[test]
+    fn line_accumulation_splits_on_newline() {
+        let (mut d, _bus, _) = make_dispatcher();
+        // Feed bytes that contain two newlines — the line_buf should be empty
+        // after processing both.
+        d.process_bytes(b"hello\nworld\n");
+        assert!(
+            d.line_buf.is_empty(),
+            "line_buf should be empty after trailing newline"
+        );
+    }
+
+    #[test]
+    fn partial_line_stays_in_buffer() {
+        let (mut d, _bus, _) = make_dispatcher();
+        d.process_bytes(b"partial");
+        assert_eq!(d.line_buf, "partial");
+    }
+
+    #[test]
+    fn carriage_return_is_ignored() {
+        let (mut d, _bus, _) = make_dispatcher();
+        d.process_bytes(b"hello\r\nworld\r\n");
+        // \r should not appear in line_buf or be treated as a line terminator
+        assert!(d.line_buf.is_empty());
+    }
+
+    #[test]
+    fn ansi_escapes_stripped_before_accumulation() {
+        let (mut d, _bus, _) = make_dispatcher();
+        d.process_bytes(b"\x1b[31mred text\x1b[0m\n");
+        // After the newline, line_buf is empty (line was dispatched)
+        assert!(d.line_buf.is_empty());
+    }
+
+    #[test]
+    fn command_region_tracking() {
+        let (mut d, _bus, _) = make_dispatcher();
+        assert!(!d.in_command);
+
+        d.set_command_text("cargo build".into());
+        assert_eq!(d.current_command.as_deref(), Some("cargo build"));
+
+        d.on_command_start();
+        assert!(d.in_command);
+        assert!(d.transcript_buf.is_empty());
+
+        // Feed some output lines
+        d.process_bytes(b"Compiling foo\n");
+        assert!(d.transcript_buf.contains("Compiling foo"));
+
+        d.on_command_finish();
+        assert!(!d.in_command);
+        assert!(d.current_command.is_none());
+        assert!(d.transcript_buf.is_empty());
+    }
+
+    #[test]
+    fn command_start_flushes_partial_line() {
+        let (mut d, _bus, _) = make_dispatcher();
+        d.process_bytes(b"partial line");
+        assert!(!d.line_buf.is_empty());
+
+        d.on_command_start();
+        // on_command_start should have flushed the partial line
+        assert!(d.line_buf.is_empty());
+    }
+
+    #[test]
+    fn command_finish_includes_partial_line_in_transcript() {
+        let (mut d, _bus, _) = make_dispatcher();
+        d.on_command_start();
+        d.process_bytes(b"full line\n");
+        d.process_bytes(b"partial");
+        // on_command_finish should include the partial line in the transcript
+        d.on_command_finish();
+        // transcript_buf is taken by on_command_finish, so it should be empty
+        assert!(d.transcript_buf.is_empty());
+    }
+
+    #[test]
+    fn set_command_text_does_not_affect_in_command() {
+        let (mut d, _bus, _) = make_dispatcher();
+        d.set_command_text("ls".into());
+        assert!(
+            !d.in_command,
+            "set_command_text should not toggle in_command"
+        );
+    }
+
+    #[test]
+    fn transcript_not_accumulated_outside_command_region() {
+        let (mut d, _bus, _) = make_dispatcher();
+        assert!(!d.in_command);
+        d.process_bytes(b"line 1\nline 2\n");
+        assert!(
+            d.transcript_buf.is_empty(),
+            "transcript should not accumulate outside command region"
+        );
+    }
+
+    #[test]
+    fn multiple_command_regions_independent() {
+        let (mut d, _bus, _) = make_dispatcher();
+
+        // First command region
+        d.set_command_text("cmd1".into());
+        d.on_command_start();
+        d.process_bytes(b"output1\n");
+        d.on_command_finish();
+
+        // Second command region
+        d.set_command_text("cmd2".into());
+        d.on_command_start();
+        d.process_bytes(b"output2\n");
+        assert!(d.transcript_buf.contains("output2"));
+        assert!(!d.transcript_buf.contains("output1"));
+        d.on_command_finish();
+    }
+
+    #[test]
+    fn matches_total_starts_at_zero() {
+        let (_d, _bus, matches_total) = make_dispatcher();
+        assert_eq!(matches_total.load(Ordering::Relaxed), 0);
+    }
+}

@@ -309,4 +309,109 @@ mod tests {
         let out2 = stripper.feed(b"Bafter");
         assert_eq!(format!("{out1}{out2}"), "beforeafter");
     }
+
+    // -- Control characters ----------------------------------------------------
+
+    #[test]
+    fn strip_control_characters_except_whitespace() {
+        // BEL (0x07), BS (0x08), and other C0 controls should be stripped,
+        // but \n, \r, and \t should be preserved.
+        let text = b"\x07hello\x08\tworld\x01\x02";
+        assert_eq!(strip_ansi_visible(text), "hello\tworld");
+    }
+
+    #[test]
+    fn strip_nul_bytes() {
+        let text = b"abc\x00def";
+        assert_eq!(strip_ansi_visible(text), "abcdef");
+    }
+
+    // -- UTF-8 handling -------------------------------------------------------
+
+    #[test]
+    fn strip_preserves_multibyte_utf8() {
+        let text = "hello 世界 🌍".as_bytes();
+        assert_eq!(strip_ansi_visible(text), "hello 世界 🌍");
+    }
+
+    #[test]
+    fn strip_utf8_with_ansi_interleaved() {
+        let text = "\x1b[32m日本語\x1b[0m テスト".as_bytes();
+        assert_eq!(strip_ansi_visible(text), "日本語 テスト");
+    }
+
+    // -- Two-byte ESC sequences -----------------------------------------------
+
+    #[test]
+    fn strip_two_byte_esc_sequences() {
+        // ESC 7 (save cursor), ESC 8 (restore cursor), ESC = (app keypad)
+        let text = b"\x1b7hello\x1b8\x1b=world";
+        assert_eq!(strip_ansi_visible(text), "helloworld");
+    }
+
+    // -- Charset designator variants ------------------------------------------
+
+    #[test]
+    fn strip_all_charset_designators() {
+        // ESC (B, ESC )0, ESC *A, ESC +B
+        let text = b"\x1b(Bhello\x1b)0\x1b*A\x1b+Bworld";
+        assert_eq!(strip_ansi_visible(text), "helloworld");
+    }
+
+    // -- OSC terminated by BEL vs ST ------------------------------------------
+
+    #[test]
+    fn strip_osc_terminated_by_st() {
+        let text = b"\x1b]2;title\x1b\\visible";
+        assert_eq!(strip_ansi_visible(text), "visible");
+    }
+
+    // -- Empty inputs ---------------------------------------------------------
+
+    #[test]
+    fn strip_empty_input() {
+        assert_eq!(strip_ansi_visible(b""), "");
+    }
+
+    #[test]
+    fn strip_only_escape_sequences() {
+        let text = b"\x1b[31m\x1b[0m\x1b]2;title\x07";
+        assert_eq!(strip_ansi_visible(text), "");
+    }
+
+    // -- decode_utf8_char edge cases ------------------------------------------
+
+    #[test]
+    fn decode_utf8_char_ascii() {
+        assert_eq!(decode_utf8_char(b"A"), Some('A'));
+    }
+
+    #[test]
+    fn decode_utf8_char_multibyte() {
+        assert_eq!(decode_utf8_char("é".as_bytes()), Some('é'));
+        assert_eq!(decode_utf8_char("日".as_bytes()), Some('日'));
+        assert_eq!(decode_utf8_char("🌍".as_bytes()), Some('🌍'));
+    }
+
+    #[test]
+    fn decode_utf8_char_empty_returns_none() {
+        assert_eq!(decode_utf8_char(b""), None);
+    }
+
+    #[test]
+    fn decode_utf8_char_invalid_byte_returns_none() {
+        // 0xFF is not a valid UTF-8 start byte
+        assert_eq!(decode_utf8_char(&[0xFF]), None);
+    }
+
+    // -- Stateful: ESC at very end of input -----------------------------------
+
+    #[test]
+    fn esc_at_end_of_chunk_is_consumed_by_next() {
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"text\x1b");
+        // Next chunk starts a CSI, OSC, or just a 2-byte ESC seq
+        let out2 = stripper.feed(b"M more"); // ESC M = reverse index (2-byte)
+        assert_eq!(format!("{out1}{out2}"), "text more");
+    }
 }

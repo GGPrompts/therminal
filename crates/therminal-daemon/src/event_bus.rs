@@ -447,6 +447,103 @@ mod tests {
     }
 
     #[test]
+    fn glob_empty_pattern_matches_empty_text() {
+        assert!(glob_match("", ""));
+    }
+
+    #[test]
+    fn glob_empty_pattern_does_not_match_nonempty() {
+        assert!(!glob_match("", "something"));
+    }
+
+    #[test]
+    fn glob_star_matches_empty() {
+        assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_double_star() {
+        assert!(glob_match("**", "anything"));
+        assert!(glob_match("a**b", "ab"));
+        assert!(glob_match("a**b", "aXYZb"));
+    }
+
+    #[test]
+    fn glob_star_in_middle() {
+        assert!(glob_match("a*c", "ac"));
+        assert!(glob_match("a*c", "abc"));
+        assert!(glob_match("a*c", "aXYZc"));
+        assert!(!glob_match("a*c", "aXYZd"));
+    }
+
+    #[test]
+    fn glob_multiple_stars() {
+        assert!(glob_match("*.*.*", "a.b.c"));
+        assert!(glob_match("*.*.*", "..."));
+        assert!(!glob_match("*.*.*", "a.b"));
+    }
+
+    #[test]
+    fn glob_exact_match() {
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "EXACT"));
+    }
+
+    #[test]
+    fn filter_query_empty_string_returns_default() {
+        let f = EventFilter::from_query("").unwrap();
+        assert!(f.source_class.is_none());
+        assert!(f.source_id.is_none());
+        assert!(f.kinds.is_empty());
+        assert!(f.panes.is_empty());
+        assert_eq!(f.since, 0);
+    }
+
+    #[test]
+    fn filter_query_unknown_source_class_is_error() {
+        let err = EventFilter::from_query("source_class=unknown").unwrap_err();
+        assert!(err.contains("unknown source_class"));
+    }
+
+    #[test]
+    fn filter_query_malformed_param_is_error() {
+        let err = EventFilter::from_query("no_equals_sign").unwrap_err();
+        assert!(err.contains("malformed"));
+    }
+
+    #[test]
+    fn filter_query_invalid_pane_id_is_error() {
+        let err = EventFilter::from_query("panes=abc").unwrap_err();
+        assert!(err.contains("invalid pane id"));
+    }
+
+    #[test]
+    fn filter_query_unknown_param_is_error() {
+        let err = EventFilter::from_query("foo=bar").unwrap_err();
+        assert!(err.contains("unknown filter param"));
+    }
+
+    #[test]
+    fn filter_matches_kind_glob() {
+        let f = EventFilter {
+            kinds: vec!["claude.*".to_string()],
+            ..Default::default()
+        };
+        assert!(f.matches(&ev(SourceClass::Harness, "claude", "claude.thinking", None)));
+        assert!(!f.matches(&ev(SourceClass::Harness, "claude", "tool_call", None)));
+    }
+
+    #[test]
+    fn filter_matches_source_id() {
+        let f = EventFilter {
+            source_id: Some("claude".to_string()),
+            ..Default::default()
+        };
+        assert!(f.matches(&ev(SourceClass::Harness, "claude", "k", None)));
+        assert!(!f.matches(&ev(SourceClass::Harness, "codex", "k", None)));
+    }
+
+    #[test]
     fn filter_query_parsing() {
         let f = EventFilter::from_query(
             "source_class=harness&source_id=claude&kinds=tool_call,*.error&panes=1,2&since=42",

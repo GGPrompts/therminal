@@ -527,6 +527,225 @@ mod tests {
     }
 
     #[test]
+    fn expand_template_consecutive_placeholders() {
+        let mut caps = HashMap::new();
+        caps.insert("a".to_string(), "X".to_string());
+        caps.insert("b".to_string(), "Y".to_string());
+        assert_eq!(expand_template("{a}{b}", &caps), "XY");
+    }
+
+    #[test]
+    fn expand_template_empty_template() {
+        let caps = HashMap::new();
+        assert_eq!(expand_template("", &caps), "");
+    }
+
+    #[test]
+    fn expand_template_no_placeholders() {
+        let caps = HashMap::new();
+        assert_eq!(expand_template("plain text", &caps), "plain text");
+    }
+
+    #[test]
+    fn expand_template_escaped_closing_brace() {
+        let caps = HashMap::new();
+        assert_eq!(expand_template("a}}b", &caps), "a}b");
+    }
+
+    #[test]
+    fn expand_template_mixed_escaped_and_real() {
+        let mut caps = HashMap::new();
+        caps.insert("x".to_string(), "val".to_string());
+        assert_eq!(expand_template("{{x}} = {x}", &caps), "{x} = val");
+    }
+
+    #[test]
+    fn expand_template_unclosed_brace_is_literal() {
+        let caps = HashMap::new();
+        assert_eq!(expand_template("a{b", &caps), "a{b");
+    }
+
+    #[test]
+    fn expand_template_empty_capture_name_is_literal() {
+        let caps = HashMap::new();
+        // {} has an empty name, treated as literal per the code path
+        assert_eq!(expand_template("a{}b", &caps), "a{}b");
+    }
+
+    // ── PatternScope ───────────────────────────────────────────────────
+
+    #[test]
+    fn pattern_scope_parse_all_variants() {
+        assert_eq!(
+            PatternScope::parse("finalized_line"),
+            Some(PatternScope::FinalizedLine)
+        );
+        assert_eq!(
+            PatternScope::parse("prompt_boundary"),
+            Some(PatternScope::PromptBoundary)
+        );
+        assert_eq!(PatternScope::parse("region"), Some(PatternScope::Region));
+        assert_eq!(PatternScope::parse("unknown"), None);
+    }
+
+    #[test]
+    fn pattern_scope_as_str_round_trip() {
+        for scope in [
+            PatternScope::FinalizedLine,
+            PatternScope::PromptBoundary,
+            PatternScope::Region,
+        ] {
+            assert_eq!(PatternScope::parse(scope.as_str()), Some(scope));
+        }
+    }
+
+    // ── AppliesTo::HarnessAndCommand ───────────────────────────────────
+
+    #[test]
+    fn applies_to_harness_and_command_requires_both() {
+        let at = AppliesTo::HarnessAndCommand {
+            harness: "claude".into(),
+            command: "cargo".into(),
+        };
+        assert!(at.matches(Some("claude"), Some("cargo build")));
+        assert!(!at.matches(Some("claude"), None));
+        assert!(!at.matches(None, Some("cargo build")));
+        assert!(!at.matches(Some("codex"), Some("cargo build")));
+    }
+
+    // ── CompiledPattern ────────────────────────────────────────────────
+
+    #[test]
+    fn compiled_pattern_full_id() {
+        let pat = CompiledPattern {
+            pack_name: "my-pack".into(),
+            name: "my-pattern".into(),
+            description: None,
+            regex: Regex::new("x").unwrap(),
+            scope: PatternScope::FinalizedLine,
+            applies_to: AppliesTo::Global,
+            action: PatternAction::EmitEvent(EmitEventAction::default()),
+            match_count: AtomicU64::new(0),
+            miss_count: AtomicU64::new(0),
+            total_match_us: AtomicU64::new(0),
+            slow_count: AtomicU64::new(0),
+            strike_count: AtomicU64::new(0),
+            last_match_ts_ms: AtomicU64::new(0),
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert_eq!(pat.full_id(), "my-pack/my-pattern");
+    }
+
+    #[test]
+    fn avg_match_ms_zero_evals() {
+        let pat = CompiledPattern {
+            pack_name: "t".into(),
+            name: "p".into(),
+            description: None,
+            regex: Regex::new("x").unwrap(),
+            scope: PatternScope::FinalizedLine,
+            applies_to: AppliesTo::Global,
+            action: PatternAction::EmitEvent(EmitEventAction::default()),
+            match_count: AtomicU64::new(0),
+            miss_count: AtomicU64::new(0),
+            total_match_us: AtomicU64::new(0),
+            slow_count: AtomicU64::new(0),
+            strike_count: AtomicU64::new(0),
+            last_match_ts_ms: AtomicU64::new(0),
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert_eq!(pat.avg_match_ms(), 0.0);
+    }
+
+    #[test]
+    fn avg_match_ms_computed_from_total_and_count() {
+        let pat = CompiledPattern {
+            pack_name: "t".into(),
+            name: "p".into(),
+            description: None,
+            regex: Regex::new("x").unwrap(),
+            scope: PatternScope::FinalizedLine,
+            applies_to: AppliesTo::Global,
+            action: PatternAction::EmitEvent(EmitEventAction::default()),
+            match_count: AtomicU64::new(5),
+            miss_count: AtomicU64::new(5),
+            total_match_us: AtomicU64::new(10_000), // 10k us total, 10 evals
+            slow_count: AtomicU64::new(0),
+            strike_count: AtomicU64::new(0),
+            last_match_ts_ms: AtomicU64::new(0),
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        };
+        // 10_000 us / 10 evals / 1000 = 1.0 ms
+        assert!((pat.avg_match_ms() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn record_miss_counts_toward_slow_circuit() {
+        let pat = CompiledPattern {
+            pack_name: "t".into(),
+            name: "p".into(),
+            description: None,
+            regex: Regex::new("x").unwrap(),
+            scope: PatternScope::FinalizedLine,
+            applies_to: AppliesTo::Global,
+            action: PatternAction::EmitEvent(EmitEventAction::default()),
+            match_count: AtomicU64::new(0),
+            miss_count: AtomicU64::new(0),
+            total_match_us: AtomicU64::new(0),
+            slow_count: AtomicU64::new(0),
+            strike_count: AtomicU64::new(0),
+            last_match_ts_ms: AtomicU64::new(0),
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        };
+        // Three slow misses should also disable
+        pat.record_miss(2000, 1000, 3);
+        pat.record_miss(2000, 1000, 3);
+        assert!(!pat.is_disabled());
+        assert!(pat.record_miss(2000, 1000, 3));
+        assert!(pat.is_disabled());
+    }
+
+    // ── WidgetKind / WidgetAnchor / HotspotOnClick as_str ──────────────
+
+    #[test]
+    fn widget_kind_as_str_values() {
+        assert_eq!(WidgetKind::Badge.as_str(), "badge");
+        assert_eq!(WidgetKind::Gauge.as_str(), "gauge");
+        assert_eq!(WidgetKind::Sparkline.as_str(), "sparkline");
+        assert_eq!(WidgetKind::Card.as_str(), "card");
+    }
+
+    #[test]
+    fn widget_anchor_as_str_values() {
+        assert_eq!(WidgetAnchor::Inline.as_str(), "inline");
+        assert_eq!(WidgetAnchor::LineRight.as_str(), "line_right");
+        assert_eq!(WidgetAnchor::Overlay.as_str(), "overlay");
+    }
+
+    #[test]
+    fn hotspot_on_click_as_str_values() {
+        assert_eq!(HotspotOnClick::OpenEditor.as_str(), "open_editor");
+        assert_eq!(HotspotOnClick::OpenUrl.as_str(), "open_url");
+        assert_eq!(HotspotOnClick::EmitEvent.as_str(), "emit_event");
+    }
+
+    #[test]
+    fn pattern_action_kind_str() {
+        assert_eq!(
+            PatternAction::EmitEvent(EmitEventAction::default()).kind_str(),
+            "emit_event"
+        );
+    }
+
+    #[test]
+    fn resolved_action_kind_str() {
+        let ra = ResolvedAction::EmitEvent(ResolvedEmitEvent {
+            extra: HashMap::new(),
+        });
+        assert_eq!(ra.kind_str(), "emit_event");
+    }
+
+    #[test]
     fn fast_match_resets_strike_counter() {
         let pat = CompiledPattern {
             pack_name: "t".into(),
