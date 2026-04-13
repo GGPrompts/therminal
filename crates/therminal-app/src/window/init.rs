@@ -258,6 +258,7 @@ impl App {
             agent_timeline,
             initial_pane_pending: false,
             focus_mode: false,
+            focus_mode_hint_visible: false,
             deferred_remote_spawn: None,
             scrollback_compact_countdown: 0,
         }
@@ -384,7 +385,11 @@ impl App {
         // At init there is always exactly one workspace, so the tab bar is
         // collapsed unless CSD is on (which reserves the title-bar strip for
         // window controls).
-        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(1, self.config.general.use_csd);
+        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+            1,
+            self.config.general.use_csd,
+            self.focus_mode,
+        );
         let full_rect = Rect::new(
             0.0,
             tab_bar_h,

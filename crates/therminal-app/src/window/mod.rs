@@ -15,6 +15,7 @@
 
 mod chrome;
 mod event_handler;
+mod focus_hint;
 mod folder_open;
 pub(crate) mod git_ref_open;
 mod help_overlay;
@@ -487,6 +488,11 @@ pub struct App {
     /// preference.
     pub(crate) focus_mode: bool,
 
+    /// tn-sfn9: hover-reveal hint visible at top edge when focus mode is
+    /// active. Set to `true` when the mouse Y is within 4 px of the top
+    /// edge, `false` otherwise.
+    pub(crate) focus_mode_hint_visible: bool,
+
     /// Stashed state for a deferred remote fresh-spawn. `None` when the
     /// deferred spawn is local-mode or when no spawn is pending.
     pub(crate) deferred_remote_spawn: Option<DeferredRemoteSpawn>,
@@ -815,13 +821,13 @@ impl App {
             // Resize all panes after font or padding change.
             let chrome_visible = !self.focus_mode;
             let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
-            let effective_workspace_count = if chrome_visible { workspace_count } else { 1 };
             let full_rect = crate::pane::content_area_rect_csd(
                 gpu.config.width as f32,
                 gpu.config.height as f32,
                 chrome_visible,
-                effective_workspace_count,
+                workspace_count,
                 self.config.general.use_csd,
+                self.focus_mode,
             );
             if let Some(wm) = self.workspaces.as_mut() {
                 let layout = wm.layout_mut();
@@ -977,21 +983,13 @@ impl App {
     pub(crate) fn compute_layout_rect(&self) -> Option<Rect> {
         let gpu = self.gpu.as_ref()?;
         let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
-        // In focus mode we tell the layout helper "no workspaces to render
-        // a tab bar for" so the top strip collapses — but if CSD is active
-        // we still pass use_csd=true because CSD reserves the title bar
-        // strip regardless of chrome.
-        let effective_workspace_count = if self.chrome_visible() {
-            workspace_count
-        } else {
-            1
-        };
         Some(crate::pane::content_area_rect_csd(
             gpu.config.width as f32,
             gpu.config.height as f32,
             self.chrome_visible(),
-            effective_workspace_count,
+            workspace_count,
             self.config.general.use_csd,
+            self.focus_mode,
         ))
     }
 

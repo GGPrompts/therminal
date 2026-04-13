@@ -270,14 +270,14 @@ impl App {
         }
 
         // ── Tab bar / CSD title bar ────────────────────────────────────
-        // tn-t2yd.2: focus mode hides the tab bar entirely unless CSD is
-        // active, in which case the CSD title strip must still render so
-        // the user retains access to the window close/min/max buttons.
+        // tn-sfn9: focus mode now hides the CSD strip entirely (previously
+        // CSD was kept visible for the close/min/max buttons — the hover
+        // hint replaces that affordance).
         let use_csd = self.config.general.use_csd;
         let chrome_visible = !self.focus_mode;
         let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
         let tab_bar_visible = chrome_visible && crate::pane::should_show_tab_bar(workspace_count);
-        if tab_bar_visible || use_csd {
+        if chrome_visible && (tab_bar_visible || use_csd) {
             let (workspace_ids, active_workspace) = if let Some(wm) = self.workspaces.as_ref() {
                 (wm.workspace_ids(), wm.active_id())
             } else {
@@ -325,7 +325,11 @@ impl App {
                 tab_labels,
             };
 
-            let bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
+            let bar_h = crate::pane::effective_tab_bar_height_csd(
+                workspace_count,
+                use_csd,
+                self.focus_mode,
+            );
 
             let mut encoder = gpu
                 .device
@@ -473,6 +477,21 @@ impl App {
             // Push visual bell quad to overlay layer (Modal tier, on top of everything).
             chrome::push_visual_bell_overlay(
                 bell_intensity,
+                gpu.config.width,
+                gpu.config.height,
+                &mut chrome_overlay,
+            );
+        }
+
+        // ── tn-sfn9: Focus mode hover-reveal hint ────────────────────────
+        // When focus mode is active and the mouse hovers near the top edge,
+        // show a translucent bar with "F11 to exit focus mode".
+        if self.focus_mode && self.focus_mode_hint_visible {
+            super::focus_hint::draw_focus_mode_hint(
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &view,
                 gpu.config.width,
                 gpu.config.height,
                 &mut chrome_overlay,
@@ -745,6 +764,7 @@ impl App {
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
                 workspace_count,
                 self.config.general.use_csd,
+                self.focus_mode,
             );
             let top_inset = tab_bar_h + 8.0;
             let x = gpu.config.width as f32 - width as f32 - right_inset;
@@ -876,6 +896,7 @@ impl App {
             let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
                 workspace_count,
                 self.config.general.use_csd,
+                self.focus_mode,
             );
 
             let (tl_x, tl_y) = match self.agent_timeline.position() {

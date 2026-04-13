@@ -510,11 +510,21 @@ impl App {
         self.cursor_position = Some((px, py));
 
         // ── CSD button hover: request redraw for hover highlights ─────────
-        if self.config.general.use_csd {
-            // CSD mode always reserves the title-bar strip for window
-            // controls — workspace count is irrelevant here.
-            let bar_h = crate::pane::effective_tab_bar_height_csd(1, true);
+        // tn-sfn9: skip CSD hover highlights in focus mode (the bar is hidden).
+        if self.config.general.use_csd && !self.focus_mode {
+            let bar_h = crate::pane::effective_tab_bar_height_csd(1, true, false);
             if (py as f32) < bar_h {
+                self.request_redraw();
+            }
+        }
+
+        // ── tn-sfn9: focus mode hover-reveal hint ───────────────────────
+        // When focus_mode is active and the mouse is within 4 px of the
+        // top edge, show a small translucent "F11 to exit focus mode" bar.
+        if self.focus_mode {
+            let near_top = (py as f32) < 4.0;
+            if near_top != self.focus_mode_hint_visible {
+                self.focus_mode_hint_visible = near_top;
                 self.request_redraw();
             }
         }
@@ -860,8 +870,11 @@ impl App {
     fn layout_area_rect(&self) -> Option<therminal_core::geometry::Rect> {
         let gpu = self.gpu.as_ref()?;
         let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
-        let tab_bar_h =
-            crate::pane::effective_tab_bar_height_csd(workspace_count, self.config.general.use_csd);
+        let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+            workspace_count,
+            self.config.general.use_csd,
+            self.focus_mode,
+        );
         Some(therminal_core::geometry::Rect::new(
             0.0,
             tab_bar_h,

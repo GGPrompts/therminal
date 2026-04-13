@@ -419,6 +419,10 @@ impl App {
             KeyAction::FocusMode => {
                 // tn-t2yd.2: toggle runtime focus mode (hide/show all chrome).
                 self.focus_mode = !self.focus_mode;
+                // tn-sfn9: clear hover hint when leaving focus mode.
+                if !self.focus_mode {
+                    self.focus_mode_hint_visible = false;
+                }
                 info!(focus_mode = self.focus_mode, "focus mode toggled");
                 self.relayout_and_redraw();
             }
@@ -951,8 +955,13 @@ impl App {
             let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
             let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
             let use_csd = self.config.general.use_csd;
-            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
-            if (tab_bar_visible || use_csd) && (py as f32) < tab_bar_h {
+            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+                workspace_count,
+                use_csd,
+                self.focus_mode,
+            );
+            // tn-sfn9: focus mode hides the tab bar entirely, skip hit-testing.
+            if !self.focus_mode && (tab_bar_visible || use_csd) && (py as f32) < tab_bar_h {
                 // Right-click on a tab: open tab context menu.
                 let workspace_ids = self
                     .workspaces
@@ -1004,8 +1013,13 @@ impl App {
             let use_csd = self.config.general.use_csd;
             let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
             let tab_bar_visible = crate::pane::should_show_tab_bar(workspace_count);
-            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(workspace_count, use_csd);
-            if (tab_bar_visible || use_csd) && (py as f32) < tab_bar_h {
+            let tab_bar_h = crate::pane::effective_tab_bar_height_csd(
+                workspace_count,
+                use_csd,
+                self.focus_mode,
+            );
+            // tn-sfn9: focus mode hides the CSD/tab bar, skip hit-testing.
+            if !self.focus_mode && (tab_bar_visible || use_csd) && (py as f32) < tab_bar_h {
                 // CSD window control buttons (right side).
                 if use_csd {
                     let surface_w = self

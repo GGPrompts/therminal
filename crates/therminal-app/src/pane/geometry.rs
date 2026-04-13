@@ -74,10 +74,18 @@ pub fn effective_tab_bar_height(workspace_count: usize) -> f32 {
 /// Return the effective tab bar height when CSD may be active.
 ///
 /// When CSD is on, the title-bar strip is always reserved (it hosts the window
-/// control buttons even without tabs). When CSD is off, the bar is hidden for
-/// single-workspace layouts and reserved at [`TAB_BAR_HEIGHT`] otherwise.
-pub fn effective_tab_bar_height_csd(workspace_count: usize, use_csd: bool) -> f32 {
-    if use_csd {
+/// control buttons even without tabs) — **unless** `focus_mode` is active, in
+/// which case the strip collapses to 0 so the terminal grid owns the full
+/// window (tn-sfn9). When CSD is off, the bar is hidden for single-workspace
+/// layouts and reserved at [`TAB_BAR_HEIGHT`] otherwise.
+pub fn effective_tab_bar_height_csd(
+    workspace_count: usize,
+    use_csd: bool,
+    focus_mode: bool,
+) -> f32 {
+    if focus_mode {
+        0.0
+    } else if use_csd {
         CSD_TAB_BAR_HEIGHT
     } else if should_show_tab_bar(workspace_count) {
         TAB_BAR_HEIGHT
@@ -107,9 +115,10 @@ pub fn content_area_rect_csd(
     show_status_bar: bool,
     workspace_count: usize,
     use_csd: bool,
+    focus_mode: bool,
 ) -> Rect {
     let status_bar_h = effective_status_bar_height(show_status_bar);
-    let tab_bar_h = effective_tab_bar_height_csd(workspace_count, use_csd);
+    let tab_bar_h = effective_tab_bar_height_csd(workspace_count, use_csd, focus_mode);
     Rect::new(0.0, tab_bar_h, width, height - status_bar_h - tab_bar_h)
 }
 
@@ -196,19 +205,36 @@ mod tests {
     fn tab_bar_height_csd_always_reserved_with_csd() {
         // CSD mode reserves the title-bar strip for window controls even
         // when there is only one workspace.
-        assert_eq!(effective_tab_bar_height_csd(1, true), CSD_TAB_BAR_HEIGHT);
-        assert_eq!(effective_tab_bar_height_csd(3, true), CSD_TAB_BAR_HEIGHT);
+        assert_eq!(
+            effective_tab_bar_height_csd(1, true, false),
+            CSD_TAB_BAR_HEIGHT
+        );
+        assert_eq!(
+            effective_tab_bar_height_csd(3, true, false),
+            CSD_TAB_BAR_HEIGHT
+        );
     }
 
     #[test]
     fn tab_bar_height_csd_hidden_without_csd_and_single_workspace() {
-        assert_eq!(effective_tab_bar_height_csd(1, false), 0.0);
-        assert_eq!(effective_tab_bar_height_csd(0, false), 0.0);
+        assert_eq!(effective_tab_bar_height_csd(1, false, false), 0.0);
+        assert_eq!(effective_tab_bar_height_csd(0, false, false), 0.0);
     }
 
     #[test]
     fn tab_bar_height_csd_shown_without_csd_and_multi_workspace() {
-        assert_eq!(effective_tab_bar_height_csd(2, false), TAB_BAR_HEIGHT);
+        assert_eq!(
+            effective_tab_bar_height_csd(2, false, false),
+            TAB_BAR_HEIGHT
+        );
+    }
+
+    #[test]
+    fn tab_bar_height_csd_zero_in_focus_mode() {
+        // tn-sfn9: focus mode collapses the CSD strip entirely.
+        assert_eq!(effective_tab_bar_height_csd(1, true, true), 0.0);
+        assert_eq!(effective_tab_bar_height_csd(3, true, true), 0.0);
+        assert_eq!(effective_tab_bar_height_csd(2, false, true), 0.0);
     }
 
     // ── content_area_rect ────────────────────────────────────────────
