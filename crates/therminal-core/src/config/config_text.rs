@@ -190,10 +190,6 @@ pub(super) fn default_config_text() -> String {
         trust_tier_str(&d.trust.default_tier)
     ));
     out.push_str(&format!(
-        "# show_agent_indicator = {}\n",
-        d.trust.show_agent_indicator
-    ));
-    out.push_str(&format!(
         "# agent_scan_interval = {}  # seconds (0 = disabled)\n",
         d.trust.agent_scan_interval
     ));

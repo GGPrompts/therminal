@@ -26,8 +26,6 @@ pub(crate) struct StatusBarInfo {
     pub dimensions: (usize, usize),
     /// Last command exit code (from OSC 633 D mark).
     pub last_exit_code: Option<i32>,
-    /// Whether the config allows showing the agent indicator.
-    pub show_agent_indicator: bool,
     /// IDs of all existing workspaces (sorted).
     pub workspace_ids: Vec<usize>,
     /// Currently active workspace number.
@@ -86,8 +84,7 @@ pub(crate) fn draw_status_bar(
     // ── 2. Compose strings + colors ──
     let strings = StatusBarStrings::compute(info);
     let colors = StatusBarColors::compute(info.last_exit_code, &renderer.chrome_palette);
-    let needs_prefix_measure =
-        info.is_zoomed && info.show_agent_indicator && info.agent_name.is_some();
+    let needs_prefix_measure = info.is_zoomed && info.agent_name.is_some();
 
     let font_size = renderer.chrome_font_size((bar_h * 0.55).max(10.0));
     let metrics = Metrics::new(font_size, bar_h);
@@ -194,12 +191,10 @@ impl StatusBarStrings {
                 parts.push_str(" [ZOOM]");
             }
             // tn-5fgz: prefer enriched Claude state text over generic agent name.
-            if info.show_agent_indicator {
-                if let Some(ref text) = info.claude_status_text {
-                    parts.push_str(&format!(" [{text}]"));
-                } else if let Some(name) = &info.agent_name {
-                    parts.push_str(&format!(" [agent: {name}]"));
-                }
+            if let Some(ref text) = info.claude_status_text {
+                parts.push_str(&format!(" [{text}]"));
+            } else if let Some(name) = &info.agent_name {
+                parts.push_str(&format!(" [agent: {name}]"));
             }
             parts
         };
@@ -518,7 +513,7 @@ fn build_status_bar_text_areas<'cache>(
             0.0
         };
 
-        if info.show_agent_indicator && info.agent_name.is_some() {
+        if info.agent_name.is_some() {
             let agent_x = workspace_text_width + agent_prefix_width;
             let agent_w = (left_total_w - agent_prefix_width).max(0.0);
             hit_areas.agent_indicator = Some((agent_x, bar_y, agent_w, bar_h));
@@ -756,7 +751,6 @@ mod tests {
             cwd: cwd.map(String::from),
             dimensions: (80, 24),
             last_exit_code: None,
-            show_agent_indicator: false,
             workspace_ids: vec![1],
             active_workspace: 1,
             is_zoomed: false,

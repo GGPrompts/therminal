@@ -1131,8 +1131,6 @@ pub struct TrustConfig {
     ///
     /// Agents not listed here fall back to `default_tier`.
     pub agents: HashMap<String, AgentTrust>,
-    /// Whether to show visual indicators when agents are detected.
-    pub show_agent_indicator: bool,
     /// Interval in seconds between process-tree scans for agent detection.
     ///
     /// Set to `0` to disable automatic process-tree scanning.
@@ -1173,7 +1171,6 @@ impl Default for TrustConfig {
         Self {
             default_tier: TrustTier::Supervised,
             agents: HashMap::new(),
-            show_agent_indicator: true,
             agent_scan_interval: 3,
             destructive_rate_limit: 5,
             auto_approve_tier: None,
@@ -1962,7 +1959,6 @@ allowed_tools = ["read_file", "write_file"]
 "#;
         let config: TherminalConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.trust.default_tier, TrustTier::Sandboxed);
-        assert!(!config.trust.show_agent_indicator);
         assert_eq!(config.trust.agents["claude"].tier, TrustTier::Trusted);
     }
 
@@ -2320,7 +2316,6 @@ size = 16.0
         assert_eq!(config.general.padding, 4.0);
         assert_eq!(config.general.scrollback_lines, 10_000);
         assert_eq!(config.trust.default_tier, TrustTier::Supervised);
-        assert!(config.trust.show_agent_indicator);
         assert_eq!(config.trust.agent_scan_interval, 3);
         assert!(config.terminal.osc_633);
         assert!(config.terminal.osc_133);
@@ -2382,7 +2377,6 @@ size = 16.0
         original.colors.cursor = Some("#56a7ff".to_string());
         // Trust
         original.trust.default_tier = TrustTier::Sandboxed;
-        original.trust.show_agent_indicator = false;
         original.trust.agent_scan_interval = 10;
         // Terminal
         original.terminal.osc_633 = false;
@@ -2423,7 +2417,6 @@ size = 16.0
         assert_eq!(fg, Color::INK, "loaded foreground should parse to INK");
         // Verify trust
         assert_eq!(loaded.trust.default_tier, TrustTier::Sandboxed);
-        assert!(!loaded.trust.show_agent_indicator);
         assert_eq!(loaded.trust.agent_scan_interval, 10);
         // Verify terminal
         assert!(!loaded.terminal.osc_633);

@@ -241,7 +241,6 @@ impl App {
                 cwd,
                 dimensions,
                 last_exit_code,
-                show_agent_indicator: self.config.trust.show_agent_indicator,
                 workspace_ids,
                 active_workspace,
                 is_zoomed: self.zoomed_layout.is_some(),

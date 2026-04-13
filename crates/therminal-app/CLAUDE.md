@@ -180,13 +180,13 @@ Pattern packs can declare `action = "widget"` rules that produce `ResolvedAction
 
 A full-width status bar at the bottom of the window (24px tall) with three sections:
 
-- **Left**: Agent indicator (`[agent: <name>]`) when a process-tree agent is detected and `trust.show_agent_indicator` is enabled.
+- **Left**: Agent indicator (`[agent: <name>]`) when a process-tree agent is detected.
 - **Center**: Current working directory (from OSC 7), with home directory abbreviated to `~`.
 - **Right**: Pane dimensions (`cols x rows`) and last command exit code (from OSC 633 D mark), color-coded green (exit 0) or red (non-zero).
 
 **Data flow**: The PTY reader thread in `pane/spawn.rs` drains `InterceptedEvent`s from the `TherminalInterceptor` and `ProcessDetector` results into a shared `Arc<Mutex<PaneStatus>>` on `PaneState`. The render loop reads this to populate `StatusBarInfo` passed to `draw_status_bar()` in `chrome/status_bar.rs`.
 
-**Config**: the status bar is on by default. To hide it along with the rest of the chrome (pane headers, tab bar) press F11 to toggle `KeyAction::FocusMode` (tn-t2yd.2). `trust.show_agent_indicator` controls the agent name in the left section.
+**Config**: the status bar is on by default. To hide it along with the rest of the chrome (pane headers, tab bar) press F11 to toggle `KeyAction::FocusMode` (tn-t2yd.2).
 
 ## Workspace Tabs
 
