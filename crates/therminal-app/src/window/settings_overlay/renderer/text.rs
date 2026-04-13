@@ -4,7 +4,7 @@
 use glyphon::{Attrs, Buffer, Color as GlyphColor, Family, Metrics, Shaping, TextBounds, Weight};
 
 use crate::grid_renderer::GridRenderer;
-use therminal_core::palette::Color as PaletteColor;
+use therminal_core::palette::ChromePalette;
 
 use super::super::state::SettingsOverlayState;
 use super::super::types::{ControlType, SettingsFocus};
@@ -85,6 +85,7 @@ pub(super) fn build_text_buffers(
     state: &SettingsOverlayState,
     layout: &PanelLayout,
     renderer: &mut GridRenderer,
+    chrome_palette: &ChromePalette,
 ) -> (Vec<Buffer>, Vec<TextPlacement>) {
     let PanelLayout {
         panel_x,
@@ -101,22 +102,27 @@ pub(super) fn build_text_buffers(
     let title_metrics = Metrics::new(22.0, 28.0);
 
     let ink = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
+        chrome_palette.chrome_fg.r,
+        chrome_palette.chrome_fg.g,
+        chrome_palette.chrome_fg.b,
         242,
     );
     let muted = GlyphColor::rgba(
-        PaletteColor::INK_DIM.r,
-        PaletteColor::INK_DIM.g,
-        PaletteColor::INK_DIM.b,
+        chrome_palette.chrome_fg_muted.r,
+        chrome_palette.chrome_fg_muted.g,
+        chrome_palette.chrome_fg_muted.b,
         220,
     );
-    let accent = GlyphColor::rgba(87, 161, 255, 255);
+    let accent = GlyphColor::rgba(
+        (chrome_palette.focus_border[0] * 255.0) as u8,
+        (chrome_palette.focus_border[1] * 255.0) as u8,
+        (chrome_palette.focus_border[2] * 255.0) as u8,
+        255,
+    );
     let signal = GlyphColor::rgba(
-        PaletteColor::SIGNAL.r,
-        PaletteColor::SIGNAL.g,
-        PaletteColor::SIGNAL.b,
+        chrome_palette.chrome_fg_focus.r,
+        chrome_palette.chrome_fg_focus.g,
+        chrome_palette.chrome_fg_focus.b,
         255,
     );
 

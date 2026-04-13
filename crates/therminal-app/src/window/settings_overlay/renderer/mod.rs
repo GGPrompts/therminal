@@ -38,8 +38,12 @@ pub(crate) fn draw_settings_overlay(
         layout.panel_h,
     );
 
+    // Snapshot the chrome palette (`Copy`) so both passes can reference it
+    // without conflicting with the `&mut renderer` borrow in pass 2.
+    let chrome_palette = renderer.chrome_palette;
+
     // ── Pass 1: rect pipeline (scrim + panel + nav + focus + control bgs) ──
-    let verts = rects::build_rect_vertices(state, &layout);
+    let verts = rects::build_rect_vertices(state, &layout, &chrome_palette);
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("settings_overlay_rects"),
         contents: bytemuck::cast_slice(&verts),
@@ -80,7 +84,7 @@ pub(crate) fn draw_settings_overlay(
             height: surface_height,
         },
     );
-    let (buffers, placements) = text::build_text_buffers(state, &layout, renderer);
+    let (buffers, placements) = text::build_text_buffers(state, &layout, renderer, &chrome_palette);
     let text_areas: Vec<glyphon::TextArea<'_>> = placements
         .iter()
         .map(|p| glyphon::TextArea {

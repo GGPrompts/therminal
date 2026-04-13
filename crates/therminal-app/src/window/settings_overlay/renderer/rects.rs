@@ -3,7 +3,7 @@
 
 use crate::color_mapping::pixel_rect_to_ndc;
 use crate::grid_renderer::ColorVertex;
-use therminal_core::palette::Color as PaletteColor;
+use therminal_core::palette::ChromePalette;
 
 use super::super::state::SettingsOverlayState;
 use super::super::types::{ControlType, SettingsFocus};
@@ -12,6 +12,7 @@ use super::layout::PanelLayout;
 pub(super) fn build_rect_vertices(
     state: &SettingsOverlayState,
     layout: &PanelLayout,
+    chrome_palette: &ChromePalette,
 ) -> Vec<ColorVertex> {
     let PanelLayout {
         sw,
@@ -30,20 +31,35 @@ pub(super) fn build_rect_vertices(
 
     let scrim_color = [0.0, 0.0, 0.0, 0.64];
     let panel_bg = [
-        PaletteColor::PLATE.r as f32 / 255.0,
-        PaletteColor::PLATE.g as f32 / 255.0,
-        PaletteColor::PLATE.b as f32 / 255.0,
+        chrome_palette.header_bg[0],
+        chrome_palette.header_bg[1],
+        chrome_palette.header_bg[2],
         0.97,
     ];
     let nav_bg = [
-        PaletteColor::BG_SURFACE.r as f32 / 255.0,
-        PaletteColor::BG_SURFACE.g as f32 / 255.0,
-        PaletteColor::BG_SURFACE.b as f32 / 255.0,
+        chrome_palette.status_bar_bg[0],
+        chrome_palette.status_bar_bg[1],
+        chrome_palette.status_bar_bg[2],
         0.94,
     ];
-    let nav_focus = [0.12, 0.40, 0.86, 0.24];
-    let item_focus = [0.12, 0.40, 0.86, 0.28];
-    let divider = [1.0, 1.0, 1.0, 0.08];
+    let nav_focus = [
+        chrome_palette.focus_border[0],
+        chrome_palette.focus_border[1],
+        chrome_palette.focus_border[2],
+        0.24,
+    ];
+    let item_focus = [
+        chrome_palette.focus_border[0],
+        chrome_palette.focus_border[1],
+        chrome_palette.focus_border[2],
+        0.28,
+    ];
+    let divider = [
+        chrome_palette.separator[0],
+        chrome_palette.separator[1],
+        chrome_palette.separator[2],
+        0.08,
+    ];
 
     let mut verts: Vec<ColorVertex> = Vec::new();
     verts.extend_from_slice(&pixel_rect_to_ndc(0.0, 0.0, sw, sh, sw, sh, scrim_color));
@@ -78,7 +94,12 @@ pub(super) fn build_rect_vertices(
         }
     }
 
-    let focus_ring_border = [0.34, 0.65, 1.0, 0.6];
+    let focus_ring_border = [
+        chrome_palette.focus_border[0],
+        chrome_palette.focus_border[1],
+        chrome_palette.focus_border[2],
+        0.6,
+    ];
     if state.focus() == SettingsFocus::Controls {
         let y = ctrl_start_y + state.active_control_index() as f32 * ctrl_row_h;
         let row_x = content_x + 22.0;
@@ -131,7 +152,12 @@ pub(super) fn build_rect_vertices(
         let toggle_off_bg = [0.35, 0.38, 0.44, 0.65];
         let text_field_bg = [0.0, 0.0, 0.0, 0.30];
         let text_field_editing_bg = [0.0, 0.0, 0.0, 0.50];
-        let text_cursor_color = [0.34, 0.65, 1.0, 0.9];
+        let text_cursor_color = [
+            chrome_palette.focus_border[0],
+            chrome_palette.focus_border[1],
+            chrome_palette.focus_border[2],
+            0.9,
+        ];
         let value_col_x = content_x + 28.0 + (panel_w - nav_w - 56.0) * 0.55;
         for (i, control) in section.controls.iter().enumerate() {
             let row_y = ctrl_start_y + i as f32 * ctrl_row_h;
