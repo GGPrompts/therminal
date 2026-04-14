@@ -173,14 +173,21 @@ impl App {
             .join(format!("{session_id}.events.jsonl"));
         let log_path_str = log_path.to_string_lossy().into_owned();
 
+        // On Windows+WSL the runtime_dir is a Windows path (C:\Users\...)
+        // but `tail` runs inside WSL bash where it needs /mnt/c/... form.
+        let tail_path = windows_path_to_wsl(&log_path_str).unwrap_or(log_path_str.clone());
+
         info!(
             "Opening agent event log tail pane for pane {} at {}",
-            focused, log_path_str
+            focused, tail_path
         );
 
         // `tail -F` follows file rotation/recreation and tolerates a
         // non-existent file (it will retry until the file appears).
-        let cmd = format!("tail -F {log_path_str}\n");
+        let cmd = format!(
+            "tail -F {}\n",
+            super::super::editor_clipboard::shell_quote(&tail_path),
+        );
 
         // In daemon mode the split is async — carry the command bytes in the
         // completion callback so they're written after the PTY is live.
@@ -317,5 +324,44 @@ impl App {
         }
 
         info!("Spawned {n} additional panes via auto-split");
+    }
+}
+
+/// Convert a Windows path (`C:\Users\...`) to WSL `/mnt/c/Users/...` form.
+/// Returns `None` if the path doesn't match the `X:\...` pattern.
+fn windows_path_to_wsl(path: &str) -> Option<String> {
+    if path.len() < 3 {
+        return None;
+    }
+    let (drive, rest) = path.split_at(2);
+    if !drive.ends_with(':') {
+        return None;
+    }
+    let drive_letter = drive.chars().next()?.to_ascii_lowercase();
+    let rest = rest.trim_start_matches(['\\', '/']);
+    let rest = rest.replace('\\', "/");
+    Some(format!("/mnt/{drive_letter}/{rest}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::windows_path_to_wsl;
+
+    #[test]
+    fn converts_windows_path() {
+        assert_eq!(
+            windows_path_to_wsl(
+                r"C:\Users\marci\AppData\Local\therminal\sessions\pane-1.events.jsonl"
+            ),
+            Some(
+                "/mnt/c/Users/marci/AppData/Local/therminal/sessions/pane-1.events.jsonl"
+                    .to_string()
+            ),
+        );
+    }
+
+    #[test]
+    fn returns_none_for_linux_path() {
+        assert_eq!(windows_path_to_wsl("/home/marci/foo"), None);
     }
 }
