@@ -10,7 +10,10 @@ src/
 ├── pty.rs               # Shell spawn, ShellType detection, SpawnOptions
 ├── pty_runtime.rs       # PtyPaneCore — shared PTY lifecycle for app + daemon
 ├── interceptor.rs       # TherminalInterceptor, SequenceInterceptor trait
-├── process_detector.rs  # Process tree BFS, agent classification
+├── process_detector/
+│   ├── mod.rs           # ProcessDetector struct, scan(), public API
+│   ├── classifier.rs    # classify_process, classify_wsl_process, AgentType matching
+│   └── wsl_probe.rs     # fetch_wsl_ps_stdout, parse_wsl_ps, parse_wsl_ps_tree
 ├── state_inference/
 │   ├── mod.rs           # AgentStateInference, feed_bytes(), update_command_state()
 │   ├── types.rs         # AgentType, InferredStatus, StateChangeNotification

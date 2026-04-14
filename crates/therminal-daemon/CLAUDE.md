@@ -47,7 +47,7 @@ The daemon exposes a multiplexed IPC protocol over Unix domain sockets with leng
 
 **Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
 
-**Events** (`DaemonEvent`): `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`, `PaneExited`, `PaneResized`, `AgentChanged`, `SubagentStarted`, `SubagentStopped`. Clients subscribe via `Subscribe { filter: Vec<EventKind> }` -- empty filter = all events. `SubagentStarted`/`SubagentStopped` (tn-s8w3) are emitted when hook-push `subagent_start`/`subagent_stop` signals arrive and the parent session can be resolved to a pane via the `PaneCapacityCache`.
+**Events** (`DaemonEvent`): `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`, `PaneExited`, `PaneResized`, `AgentChanged`, `SubagentStarted`, `SubagentStopped`, `ToggleTimeline`. Clients subscribe via `Subscribe { filter: Vec<EventKind> }` -- empty filter = all events. `SubagentStarted`/`SubagentStopped` (tn-s8w3) are emitted when hook-push `subagent_start`/`subagent_stop` signals arrive and the parent session can be resolved to a pane via the `PaneCapacityCache`.
 
 **Client API** (`DaemonClient`): Persistent connection with `connect()`, `send_request()`, `ping()`, `shutdown()`, `subscribe_events()`, `recv_event()`. Uses internal reader/writer tasks for full-duplex communication.
 
@@ -159,7 +159,7 @@ per-tool classification table. The short version:
 - `terminal.sessions.destroy`, `terminal.panes.destroy` — Admin tier; trust
   enforcement is enforced at the MCP layer, not the CLI layer.
 
-Tools exposed (31 tools):
+Tools exposed (32 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -192,6 +192,8 @@ Tools exposed (31 tools):
 | `terminal.agents.get_cadence` | Observer | Get output cadence metrics for a pane's agent: `chunk_count`, `avg_arrival_ms`, `max_gap_ms`, `is_spinner`, `is_streaming`, plus `recent_samples` (oldest first, capped at 50). Backed by the per-pane `AgentStateInference` engine's chunk-stats sliding window. Sample timestamps are converted from monotonic `Instant` to wall-clock Unix seconds at snapshot time. Useful for predicting time-to-completion, animating progress, and distinguishing stalled vs thinking agents. Returns an error only if the pane does not exist; panes with no streaming activity return zero / false / empty defaults. |
 | `terminal.agents.get_session_detail` | Observer | Get the enriched Claude Code session detail for a pane (tn-ifee): session_title, current_tool, working_dir, context_percent, model. Sourced from the per-pane `PaneCapacityCache` populated by the Claude state poller from `/tmp/claude-code-state/`. Every field is nullable — absence is normal when hooks aren't installed or haven't ticked yet. Returns an error only if the pane does not exist. |
 | `terminal.events.stats` | Observer | Return aggregate stats for the unified event bus (tn-xula): total events published, per-source-class counts (harness/pattern/core), dropped-subscriber count, current ring buffer fill, and the current monotonic cursor. |
+| `terminal.panes.create_tail` | Writer | Create a read-only JSONL tail pane for structured agent event viewing (tn-14c0). Params: `path` (absolute file path), optional `format`. |
+| `terminal.widgets.timeline.toggle` | Writer | Toggle agent timeline widget visibility (tn-cnfi). Broadcasts `ToggleTimeline` daemon event consumed by the GUI. Params: `visible: bool`. |
 | `terminal.patterns.stats` | Observer | Return match statistics for every loaded semantic pattern pack (tn-yrjd): per-pattern match_count/miss_count/avg_match_ms/slow_count/status, per-pack active/disabled/error counts plus load_errors, and global total_loaded/total_active/total_disabled/cap_reached/cap_limit plus pack_load_errors. |
 
 Agent identity is extracted from the MCP `initialize` handshake and passed to trust enforcement on every tool call. Both the daemon and the stdio bridge read `[mcp]` config via `McpConfig::resolved_socket_path()` — a single source of truth in `therminal-core`.

@@ -83,7 +83,8 @@ src/
 │   ├── spawn.rs         # spawn_pane(), PTY reader loop
 │   ├── remote_spawn.rs  # Remote pane spawn via daemon IPC
 │   ├── swarm_watcher.rs # Agent swarm monitoring
-│   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView)
+│   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView | JsonlTail)
+│   ├── jsonl_tail.rs    # JsonlTailState — file watcher, JSONL parser, structured rendering (tn-14c0)
 │   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
 ├── widgets/
 │   ├── mod.rs              # WidgetId, re-exports
