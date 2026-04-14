@@ -331,6 +331,15 @@ impl TherminalInterceptor {
             Err(_) => return false,
         };
 
+        // Filter spurious ConPTY/PowerShell interop notifications.
+        // When WSL panes tear down, ConPTY may inject an OSC 9 with a bare
+        // shell name and exit code (e.g. "Powershell: 4", "cmd: 0").
+        // These are not user-facing notifications — suppress them.
+        if is_spurious_conpty_notification(text) {
+            debug!("OSC 9 suppressed (ConPTY interop): {}", text);
+            return true;
+        }
+
         debug!("OSC 9 (notification): {}", text);
         self.emit(InterceptedEvent::DesktopNotification(text.to_string()));
 
@@ -630,6 +639,46 @@ fn parse_633_mark(mark_param: &[u8], data_param: Option<&[u8]>) -> Option<Osc633
         }
         _ => None,
     }
+}
+
+// -- OSC 9 filtering ----------------------------------------------------------
+
+/// Known shell process names that ConPTY may inject as spurious OSC 9
+/// notifications during pane teardown or interop transitions (e.g.
+/// `"Powershell: 4"`, `"cmd: 0"`).
+const CONPTY_SHELL_NAMES: &[&str] = &[
+    "powershell",
+    "pwsh",
+    "cmd",
+    "bash",
+    "wsl",
+    "conhost",
+    "windows terminal",
+    "windowsterminal",
+    "openssh",
+];
+
+/// Returns `true` if the OSC 9 text looks like a spurious ConPTY notification.
+///
+/// ConPTY emits notifications shaped `"<ProcessName>: <number>"` when a child
+/// process exits — these are status messages, not user-facing notifications.
+/// We match case-insensitively against a list of known shell/terminal process
+/// names.
+fn is_spurious_conpty_notification(text: &str) -> bool {
+    // Shape: "<name>: <integer>"  (single colon, space, integer with optional sign)
+    let Some((name, rest)) = text.split_once(": ") else {
+        return false;
+    };
+
+    // The "rest" after the colon-space must be a bare integer (the exit code).
+    let rest = rest.trim();
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        return false;
+    }
+
+    // Case-insensitive match against known ConPTY shell names.
+    let name_lower = name.trim().to_ascii_lowercase();
+    CONPTY_SHELL_NAMES.iter().any(|known| name_lower == *known)
 }
 
 // -- Tests --------------------------------------------------------------------
@@ -942,6 +991,125 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    // -- OSC 9 ConPTY filter tests -----------------------------------------------
+
+    #[test]
+    fn osc_9_filters_powershell_exit_code() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"Powershell: 4"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        // Consumed (so alacritty_terminal ignores it) but no event emitted.
+        assert!(consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_filters_cmd_exit_code() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"cmd: 0"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_filters_pwsh_exit_code() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"pwsh: 1"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_filters_case_insensitive() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"POWERSHELL: 4"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_passes_legitimate_notification() {
+        // A real notification containing a colon should NOT be filtered.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"Build complete: 42 tests passed"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => {
+                assert_eq!(t, "Build complete: 42 tests passed");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_passes_notification_with_unknown_process_name() {
+        // A process name not in the known list should pass through.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"myapp: 1"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => {
+                assert_eq!(t, "myapp: 1");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spurious_conpty_filter_unit_tests() {
+        // Positive matches (should be filtered).
+        assert!(is_spurious_conpty_notification("Powershell: 4"));
+        assert!(is_spurious_conpty_notification("powershell: 0"));
+        assert!(is_spurious_conpty_notification("POWERSHELL: 1"));
+        assert!(is_spurious_conpty_notification("cmd: 0"));
+        assert!(is_spurious_conpty_notification("CMD: 255"));
+        assert!(is_spurious_conpty_notification("pwsh: 1"));
+        assert!(is_spurious_conpty_notification("bash: 127"));
+        assert!(is_spurious_conpty_notification("wsl: 0"));
+        assert!(is_spurious_conpty_notification("conhost: 0"));
+        assert!(is_spurious_conpty_notification("Windows Terminal: 0"));
+
+        // Negative matches (should NOT be filtered).
+        assert!(!is_spurious_conpty_notification("Build complete!"));
+        assert!(!is_spurious_conpty_notification(
+            "Build complete: 42 tests passed",
+        ));
+        assert!(!is_spurious_conpty_notification("myapp: 1"));
+        assert!(!is_spurious_conpty_notification("Powershell: running"));
+        assert!(!is_spurious_conpty_notification("Powershell:4")); // no space after colon
+        assert!(!is_spurious_conpty_notification(""));
+        assert!(!is_spurious_conpty_notification("Powershell: ")); // empty after colon-space
     }
 
     // -- OSC 7777 tests ---------------------------------------------------------
