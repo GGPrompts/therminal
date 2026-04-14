@@ -443,6 +443,11 @@ pub struct App {
     /// `publish_workspace_state()` helper short-circuits.
     pub(crate) daemon_session_id: Option<therminal_protocol::SessionId>,
 
+    /// Shared system metrics snapshot (tn-l6y3). Updated by a background
+    /// poller thread; read each frame to populate the status bar right
+    /// section with CPU/memory stats.
+    pub(crate) system_metrics: Option<crate::system_metrics::SharedMetrics>,
+
     /// App-side read-only pattern engine (tn-f9cl).
     pub(crate) pattern_engine: Option<therminal_terminal::semantic_patterns::PatternEngine>,
 

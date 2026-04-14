@@ -10,6 +10,7 @@ mod menu;
 mod model_context;
 mod overlay;
 mod pane;
+pub(crate) mod system_metrics;
 mod url_detection;
 mod widgets;
 mod window;

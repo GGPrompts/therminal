@@ -1,6 +1,8 @@
 //! Unit tests for the settings overlay model + theme palettes.
 
-use super::sections::{FONT_FAMILY_OPTIONS, SettingsRenderValues, font_family_index, ui_text_scale_index};
+use super::sections::{
+    FONT_FAMILY_OPTIONS, SettingsRenderValues, font_family_index, ui_text_scale_index,
+};
 use super::state::SettingsOverlayState;
 use super::theme::apply_theme_preset;
 use super::types::{

@@ -234,6 +234,13 @@ impl App {
             // the footer matches the header and "Copy pane ID" (tn-5wrx).
             let focused_pane_id = self.workspaces.as_ref().and_then(|wm| wm.focused_pane());
 
+            // tn-l6y3: Read the system metrics snapshot for the status bar.
+            let system_metrics_text = self.system_metrics.as_ref().and_then(|sm| {
+                let snap = sm.lock().ok()?;
+                let text = snap.format_status_bar(cfg!(windows));
+                if text.is_empty() { None } else { Some(text) }
+            });
+
             let status_info = chrome::StatusBarInfo {
                 agent_name,
                 claude_title,
@@ -248,6 +255,7 @@ impl App {
                 git_branch,
                 template_status: self.config.template_status.clone(),
                 delegate_summary: delegate_summary_text.clone(),
+                system_metrics_text,
             };
 
             let mut encoder = gpu

@@ -1569,6 +1569,10 @@ pub struct WidgetsConfig {
     /// Agent timeline bar: shows recent tool activity color-coded by
     /// category, with subagent entries visually distinguished.
     pub agent_timeline: AgentTimelineConfig,
+    /// System resource metrics displayed in the status bar right section
+    /// (tn-l6y3). Shows CPU usage and memory consumption for the host
+    /// and optionally for the WSL environment when running on Windows.
+    pub system_metrics: SystemMetricsConfig,
 }
 
 /// Position of the agent timeline bar relative to the window.
@@ -1613,6 +1617,41 @@ impl Default for AgentTimelineConfig {
             height_px: 48,
             max_entries: 500,
             position: TimelinePosition::default(),
+        }
+    }
+}
+
+/// Configuration for system resource metrics in the status bar (tn-l6y3).
+///
+/// When enabled, a background thread polls CPU and memory usage at a
+/// configurable interval and the status bar right section shows a
+/// compact summary like "38% 7.4G" (Linux) or "Win 38% 7.4G | WSL 0.8
+/// 2.1G" (Windows native with WSL panes).
+///
+/// All fields are wired into the rendering code via
+/// `system_metrics::spawn_metrics_poller`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SystemMetricsConfig {
+    /// Whether system metrics are shown in the status bar.
+    /// Default: true (baked in by default per "surface over flags" philosophy).
+    pub enabled: bool,
+    /// Polling interval in milliseconds. Lower values give more
+    /// responsive readings but consume more CPU. Default: 2000.
+    pub poll_interval_ms: u64,
+    /// Whether to show WSL-side metrics when running on Windows.
+    /// When `true`, the poller shells out to `wsl.exe` to read
+    /// `/proc/loadavg` and `/proc/meminfo` from the default distro.
+    /// Default: auto-detect (enabled on Windows when WSL is present).
+    pub show_wsl: Option<bool>,
+}
+
+impl Default for SystemMetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_ms: 2000,
+            show_wsl: None, // auto-detect
         }
     }
 }

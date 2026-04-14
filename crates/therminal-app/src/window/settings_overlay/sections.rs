@@ -244,7 +244,10 @@ impl SettingsOverlayState {
         };
         let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
 
-        let options: Vec<String> = FONT_FAMILY_OPTIONS.iter().map(|s| (*s).to_string()).collect();
+        let options: Vec<String> = FONT_FAMILY_OPTIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
         let selected = values.font_family_index.unwrap_or(0);
         let mut controls = vec![SettingsControl::with_type(
             "Font family",

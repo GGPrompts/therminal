@@ -314,8 +314,7 @@ impl App {
                         family.to_string(),
                         self.config.font.size * scale,
                     );
-                    new_font_config.fallback_families =
-                        self.config.font.extra_fallbacks.clone();
+                    new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
                     new_font_config.ui_font_family = family.to_string();
                     new_font_config.line_height =
                         self.config.font.size * self.config.font.line_height_scale * scale;

@@ -188,6 +188,20 @@ impl App {
             tl
         };
 
+        // tn-l6y3: Spawn the background system metrics poller if enabled.
+        let system_metrics = if config.widgets.system_metrics.enabled {
+            let mc = &config.widgets.system_metrics;
+            let show_wsl = mc
+                .show_wsl
+                .unwrap_or_else(crate::system_metrics::auto_detect_wsl);
+            let interval = std::time::Duration::from_millis(mc.poll_interval_ms.max(500));
+            Some(crate::system_metrics::spawn_metrics_poller(
+                interval, show_wsl,
+            ))
+        } else {
+            None
+        };
+
         // tn-fzr0: probe PATH for the configured git TUI tools and cache
         // the available subset. Refreshed on every config reload below.
         let discovered_git_tools =
@@ -252,6 +266,7 @@ impl App {
             daemon_runtime: None,
             pane_id_map: super::PaneIdMap::default(),
             daemon_session_id: None,
+            system_metrics,
             pattern_engine,
             widget_renderer: None,
             widget_manager: crate::widgets::WidgetManager::new(),

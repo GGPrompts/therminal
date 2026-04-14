@@ -49,6 +49,10 @@ pub(crate) struct StatusBarInfo {
     /// one delegate-tagged pane is being tracked by
     /// [`super::DelegateSummaryState`].
     pub delegate_summary: Option<String>,
+    /// System resource metrics text (tn-l6y3). When present, shown in the
+    /// status bar right section to the left of the dimensions/exit-code.
+    /// Formatted by `system_metrics::SystemMetricsSnapshot::format_status_bar`.
+    pub system_metrics_text: Option<String>,
 }
 
 /// Pixel rect (x, y, width, height) returned by chrome hit-test producers.
@@ -167,6 +171,9 @@ struct StatusBarStrings {
     right_text: String,
     template_hint: String,
     delegate_text: String,
+    /// System metrics text (tn-l6y3), e.g. "38% 7.4G" or
+    /// "Win 38% 7.4G | WSL 0.8 2.1G". Empty when disabled or no data yet.
+    metrics_text: String,
 }
 
 impl StatusBarStrings {
@@ -214,6 +221,7 @@ impl StatusBarStrings {
 
         let template_hint = compose_template_hint(&info.template_status);
         let delegate_text = info.delegate_summary.clone().unwrap_or_default();
+        let metrics_text = info.system_metrics_text.clone().unwrap_or_default();
 
         Self {
             workspace_text,
@@ -222,6 +230,7 @@ impl StatusBarStrings {
             right_text,
             template_hint,
             delegate_text,
+            metrics_text,
         }
     }
 }
@@ -340,6 +349,23 @@ fn shape_status_bar_text(
             sw * 0.5,
             bar_h,
             &strings.template_hint,
+            attrs(colors.muted),
+            &mut renderer.font_system,
+            &mut renderer.overlay_cache,
+        );
+    }
+
+    // tn-l6y3: System metrics text. Empty string means metrics are
+    // disabled or no data has been collected yet.
+    if !strings.metrics_text.is_empty() {
+        let metrics_key = format!("{}|{:.0}", strings.metrics_text, sw * 0.35);
+        ensure_shaped(
+            "sb_metrics",
+            &metrics_key,
+            metrics,
+            sw * 0.35,
+            bar_h,
+            &strings.metrics_text,
             attrs(colors.muted),
             &mut renderer.font_system,
             &mut renderer.overlay_cache,
@@ -556,11 +582,29 @@ fn build_status_bar_text_areas<'cache>(
         });
     }
 
-    // tn-3ge3 + tn-ztv3.4: stack the template hint and delegate summary
-    // to the left of the right_text. Each section advances `next_right`
-    // so they don't overlap.
+    // tn-l6y3 + tn-3ge3 + tn-ztv3.4: stack metrics, template hint, and
+    // delegate summary to the left of the right_text. Each section
+    // advances `next_right` so they don't overlap.
     let gap = font_size * 0.5;
     let mut next_right = right_x;
+
+    // tn-l6y3: System metrics (CPU/memory) immediately left of dimensions.
+    if !strings.metrics_text.is_empty()
+        && let Some(buf) = cached_buf(cache, "sb_metrics")
+    {
+        let metrics_w = buffer_run_width(buf);
+        let metrics_x = (next_right - metrics_w - gap).max(0.0);
+        text_areas.push(TextArea {
+            buffer: buf,
+            left: metrics_x,
+            top: bar_y,
+            scale: 1.0,
+            bounds,
+            default_color: colors.muted,
+            custom_glyphs: &[],
+        });
+        next_right = metrics_x;
+    }
 
     if !strings.template_hint.is_empty()
         && let Some(buf) = cached_buf(cache, "sb_template_hint")
@@ -758,6 +802,7 @@ mod tests {
             git_branch: None,
             template_status: ConfigTemplateStatus::UpToDate,
             delegate_summary: None,
+            system_metrics_text: None,
         }
     }
 
