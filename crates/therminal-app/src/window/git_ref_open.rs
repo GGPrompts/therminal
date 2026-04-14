@@ -3,7 +3,7 @@
 //! Right-clicking a git commit hash hotspot opens an action palette
 //! built from the subset of `[hotspots] git_tools` whose binaries
 //! resolve on `PATH`. Picking a tool splits the focused pane, `cd`s
-//! into the nearest git working tree root, and `exec`s the tool with
+//! into the nearest git working tree root, and runs the tool with
 //! the appropriate per-tool argv:
 //!
 //! - `lazygit --filter <hash>` — interactive commit explorer.
@@ -117,7 +117,7 @@ where
 pub(crate) enum GitRefOpenPlan {
     /// The tool's binary resolved on `PATH`. Split the focused pane,
     /// then write `bytes` into the new pane: `cd '<root>' && clear &&
-    /// exec <tool> [args…]\n`.
+    /// <tool> [args…]\n`.
     SpawnTool { cmd_display: String, bytes: Vec<u8> },
     /// The tool was discovered earlier but its binary disappeared
     /// between discovery and click. Split the pane, write a
@@ -157,7 +157,7 @@ where
         // Tool went missing between discovery and click. `git show`
         // is universally available wherever a git repo exists, so
         // fall back to that and let the user see the diff inline.
-        let bytes = format!("{cd_clear} && exec git show {}\n", shell_quote(hash)).into_bytes();
+        let bytes = format!("{cd_clear} && git show {}\n", shell_quote(hash)).into_bytes();
         return GitRefOpenPlan::FallbackGitShow {
             missing_binary: spec.binary.to_string(),
             bytes,
@@ -165,20 +165,24 @@ where
     }
 
     // Substitute `{hash}` in the argv template, then build a
-    // shell-quoted `exec` line.
+    // shell-quoted command line. We deliberately do NOT use `exec`
+    // here: exec replaces the shell with the command, so Ctrl+C or
+    // a crash kills the PTY with no way to recover. Without exec,
+    // the shell survives and the user gets a prompt back after the
+    // command exits.
     let substituted: Vec<String> = spec
         .args_template
         .iter()
         .map(|a| a.replace("{hash}", hash))
         .collect();
 
-    let mut exec_line = String::from("exec ");
-    exec_line.push_str(&shell_quote(spec.binary));
+    let mut cmd_line = String::new();
+    cmd_line.push_str(&shell_quote(spec.binary));
     for arg in &substituted {
-        exec_line.push(' ');
-        exec_line.push_str(&shell_quote(arg));
+        cmd_line.push(' ');
+        cmd_line.push_str(&shell_quote(arg));
     }
-    let bytes = format!("{cd_clear} && {exec_line}\n").into_bytes();
+    let bytes = format!("{cd_clear} && {cmd_line}\n").into_bytes();
 
     let mut display = String::from(spec.binary);
     for arg in &substituted {
@@ -431,7 +435,8 @@ mod tests {
                 assert_eq!(cmd_display, "lazygit --filter abc1234");
                 let s = String::from_utf8(bytes).unwrap();
                 assert!(s.starts_with("cd '/repo' && clear && "));
-                assert!(s.contains("exec 'lazygit' '--filter' 'abc1234'"));
+                assert!(s.contains("'lazygit' '--filter' 'abc1234'"));
+                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
                 assert!(s.ends_with('\n'));
             }
             other => panic!("expected SpawnTool, got {other:?}"),
@@ -445,7 +450,8 @@ mod tests {
             GitRefOpenPlan::SpawnTool { cmd_display, bytes } => {
                 assert_eq!(cmd_display, "gitlogue -c deadbeef");
                 let s = String::from_utf8(bytes).unwrap();
-                assert!(s.contains("exec 'gitlogue' '-c' 'deadbeef'"));
+                assert!(s.contains("'gitlogue' '-c' 'deadbeef'"));
+                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
             }
             other => panic!("expected SpawnTool, got {other:?}"),
         }
@@ -458,7 +464,8 @@ mod tests {
             GitRefOpenPlan::SpawnTool { cmd_display, bytes } => {
                 assert_eq!(cmd_display, "tig show feedface");
                 let s = String::from_utf8(bytes).unwrap();
-                assert!(s.contains("exec 'tig' 'show' 'feedface'"));
+                assert!(s.contains("'tig' 'show' 'feedface'"));
+                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
             }
             other => panic!("expected SpawnTool, got {other:?}"),
         }
@@ -480,7 +487,8 @@ mod tests {
             } => {
                 assert_eq!(missing_binary, "lazygit");
                 let s = String::from_utf8(bytes).unwrap();
-                assert!(s.contains("exec git show 'abc1234'"));
+                assert!(s.contains("git show 'abc1234'"));
+                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
                 assert!(s.starts_with("cd '/r' && clear && "));
             }
             other => panic!("expected FallbackGitShow, got {other:?}"),

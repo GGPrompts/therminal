@@ -146,7 +146,7 @@ impl App {
     /// native Windows.
     ///
     /// Splits the focused pane and writes a shell command into the new
-    /// PTY that `cd`'s to the containing directory and `exec`'s the
+    /// PTY that `cd`'s to the containing directory and runs the
     /// user's Linux `$EDITOR` (with `$VISUAL` and `nvim` fallbacks) on
     /// the file. Line / column suffixes in the hotspot string are
     /// translated to `+<line>` so vim-family editors jump to the right
@@ -215,7 +215,11 @@ impl App {
             cmd.push_str(&shell_quote(cwd));
             cmd.push_str(" && ");
         }
-        cmd.push_str("clear && exec ");
+        // We deliberately do NOT use `exec` here: exec replaces the
+        // shell with the command, so Ctrl+C or a crash kills the PTY
+        // with no way to recover. Without exec, the shell survives
+        // and the user gets a prompt back after the editor exits.
+        cmd.push_str("clear && ");
         cmd.push_str(&editor_cmd);
         // Only emit +line for editors that support it. For env-var
         // expansions (${EDITOR:-...}) we can't know at build time,
