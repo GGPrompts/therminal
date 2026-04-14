@@ -175,14 +175,19 @@ impl App {
         // pane. The shell — not the Windows host — handles:
         //   - `~` expansion via the Linux `$HOME`
         //   - relative path resolution against `$PWD`
-        //   - `$EDITOR` / `$VISUAL` lookup from the Linux environment
+        //   - env-var expansion (`$EDITOR`, `$VISUAL`)
         //   - file I/O on the Linux filesystem
         //
         // We `cd` to the originating pane's cwd first so relative
         // paths (`./src/main.rs`, `../Cargo.toml`) resolve correctly.
-        // `${EDITOR:-${VISUAL:-nvim}}` gives the user's configured
-        // editor with a sensible default. `+<line>` is the universal
-        // vi/vim/nvim jump syntax.
+        // `+<line>` is the universal vi/vim/nvim jump syntax.
+        //
+        // The editor command is taken from the first entry in the
+        // configured `editor_chain`. Env-var tokens (`$EDITOR`,
+        // `$VISUAL`) are emitted verbatim so the WSL shell expands
+        // them. Literal entries (`tfe`, `micro`) are emitted as-is.
+        // Falls back to `${EDITOR:-${VISUAL:-nvim}}` if the chain is
+        // empty.
         //
         // The path is intentionally NOT shell-quoted with single
         // quotes — that would prevent `~` expansion. Instead we rely
@@ -191,13 +196,28 @@ impl App {
         // `[A-Za-z0-9_\-./]` bodies, which are all shell-safe). If a
         // future regex widens the charset we'll need a smarter
         // escaper that expands tildes and quotes the rest.
+        let chain = &self.config.hotspots.editor_chain;
+        let editor_cmd = chain
+            .first()
+            .map(|entry| {
+                if let Some(var) = entry.strip_prefix('$') {
+                    // Env-var token: emit as shell expansion with nvim fallback
+                    format!("${{{var}:-nvim}}")
+                } else {
+                    entry.clone()
+                }
+            })
+            .unwrap_or_else(|| "${EDITOR:-${VISUAL:-nvim}}".to_string());
+
         let mut cmd = String::new();
         if let Some(cwd) = pane_cwd {
             cmd.push_str("cd ");
             cmd.push_str(&shell_quote(cwd));
             cmd.push_str(" && ");
         }
-        cmd.push_str("clear && exec ${EDITOR:-${VISUAL:-nvim}} ");
+        cmd.push_str("clear && exec ");
+        cmd.push_str(&editor_cmd);
+        cmd.push(' ');
         cmd.push_str(path);
         cmd.push_str(" +");
         cmd.push_str(line);
