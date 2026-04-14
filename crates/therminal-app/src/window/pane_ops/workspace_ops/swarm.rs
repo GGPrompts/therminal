@@ -12,7 +12,6 @@ use crate::pane::state::{PaneState, PaneStatus};
 use crate::pane::{LayoutNode, SplitDirection};
 use therminal_terminal::region_index::RegionIndex;
 
-use super::super::split_ops::DaemonSplitOnComplete;
 use crate::window::App;
 
 impl App {
@@ -55,9 +54,10 @@ impl App {
 
     /// Open a new pane that tails a Claude subagent JSONL file.
     ///
-    /// Splits the largest existing pane (mirroring `poll_auto_tile`) and
-    /// writes a `tail -F <path>` command into the new PTY so the user sees the
-    /// subagent's events as they're written.
+    /// Creates a local `JsonlTail` pane (read-only, no PTY needed) that
+    /// renders structured, color-coded JSONL output. Works identically in
+    /// both local and daemon modes — the `JsonlTail` backend uses a
+    /// `notify` file watcher, not a daemon-managed PTY (tn-xdgp).
     pub(crate) fn spawn_subagent_pane(&mut self, agent_id: String, jsonl_path: std::path::PathBuf) {
         if self.swarm_panes.contains_key(&agent_id) {
             debug!(agent = %agent_id, "swarm: pane already exists, ignoring duplicate spawn");
@@ -76,30 +76,6 @@ impl App {
                 return;
             }
         };
-
-        // tn-ll6l: in daemon mode, route through split_pane_remote so the
-        // new pane is daemon-managed. SplitPane has no command-override, so
-        // we follow up with a SendKeys RPC carrying the `tail` command.
-        // Both the split and the SendKeys are deferred off the event loop;
-        // the SwarmTail on_complete handler fires them in sequence once the
-        // pane is mounted.
-        if self.is_daemon_mode() {
-            let direction = self
-                .get_layout()
-                .and_then(|l| l.find_pane(target_pane_id))
-                .map(|p| LayoutNode::auto_split_direction(p.viewport, SplitDirection::Horizontal))
-                .unwrap_or(SplitDirection::Horizontal);
-
-            self.split_pane_remote(
-                target_pane_id,
-                direction,
-                DaemonSplitOnComplete::SwarmTail {
-                    agent_id,
-                    jsonl_path,
-                },
-            );
-            return;
-        }
 
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,

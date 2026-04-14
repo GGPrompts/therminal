@@ -38,11 +38,6 @@ pub enum DaemonSplitOnComplete {
     /// Auto-tile: register the new pane with the auto-tile debouncer and relayout.
     /// `parent_pane_id` is the pane whose agent spawned the split.
     AutoTile { parent_pane_id: PaneId },
-    /// Swarm: send a `tail` command into the new pane and register it in `swarm_panes`.
-    SwarmTail {
-        agent_id: String,
-        jsonl_path: std::path::PathBuf,
-    },
     /// Write bytes to the new pane after it mounts (used by hotspot "Open in
     /// new pane" and WSL editor open, which need the daemon split to complete
     /// before the PTY is ready to accept input).

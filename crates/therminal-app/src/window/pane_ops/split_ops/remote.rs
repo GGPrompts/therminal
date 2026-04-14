@@ -211,37 +211,6 @@ impl App {
                     self.relayout_and_redraw();
                     self.publish_workspace_state();
                 }
-                DaemonSplitOnComplete::SwarmTail {
-                    agent_id,
-                    jsonl_path,
-                } => {
-                    // Daemon-mode fallback: the daemon's RemotePty panes
-                    // don't support JsonlTail yet, so we still send a
-                    // `tail -F` command. Local-mode panes use the native
-                    // JsonlTail backend (tn-14c0).
-                    //
-                    // On Windows+WSL, the jsonl_path may be a UNC path
-                    // (\\wsl.localhost\<distro>\...) but `tail` runs inside
-                    // a WSL shell where it needs the Linux path form.
-                    let path_str = jsonl_path.display().to_string();
-                    let tail_path = unc_to_linux_path(&path_str).unwrap_or(path_str);
-                    let cmd = format!(
-                        "clear && tail --lines=+1 -F {}\n",
-                        super::super::editor_clipboard::shell_quote(&tail_path),
-                    );
-                    if let Some(daemon_id) = self.pane_id_map.daemon_for_local(new_id) {
-                        match self.daemon_rpc_blocking(IpcRequest::SendKeys {
-                            pane_id: daemon_id,
-                            keys: cmd.into_bytes(),
-                        }) {
-                            Ok(_) => {}
-                            Err(e) => warn!(error = %e, "swarm: SendKeys for tail command failed"),
-                        }
-                    }
-                    self.swarm_panes.insert(agent_id, new_id);
-                    self.relayout_and_redraw();
-                    self.publish_workspace_state();
-                }
                 DaemonSplitOnComplete::WriteBytesAndFocus { bytes, toast } => {
                     self.last_split_direction = direction;
                     self.set_focused_pane(Some(new_id));
@@ -292,51 +261,5 @@ impl App {
                 });
             }
         }
-    }
-}
-
-/// Convert a WSL UNC path (`\\wsl.localhost\<distro>\<rest>`) back to a
-/// Linux absolute path (`/<rest>`).  Returns `None` if the path doesn't
-/// match the UNC pattern — the caller should fall back to the original.
-fn unc_to_linux_path(path: &str) -> Option<String> {
-    // Normalise forward-slash variant that PathBuf::display() may emit.
-    let p = path.replace('/', "\\");
-    let p = p.strip_prefix(r"\\wsl.localhost\")?;
-    // Skip the distro component.
-    let after_distro = p.find('\\')?;
-    let linux = p[after_distro..].replace('\\', "/");
-    if linux.starts_with('/') {
-        Some(linux)
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::unc_to_linux_path;
-
-    #[test]
-    fn converts_typical_unc_path() {
-        let unc = r"\\wsl.localhost\Ubuntu-24.04\home\marci\.claude\projects\foo\bar.jsonl";
-        assert_eq!(
-            unc_to_linux_path(unc),
-            Some("/home/marci/.claude/projects/foo/bar.jsonl".to_string()),
-        );
-    }
-
-    #[test]
-    fn returns_none_for_non_unc_path() {
-        assert_eq!(unc_to_linux_path("/home/marci/foo.jsonl"), None);
-        assert_eq!(unc_to_linux_path("C:\\Users\\foo"), None);
-    }
-
-    #[test]
-    fn handles_forward_slash_variant() {
-        let p = "//wsl.localhost/Ubuntu-24.04/home/marci/foo.jsonl";
-        assert_eq!(
-            unc_to_linux_path(p),
-            Some("/home/marci/foo.jsonl".to_string()),
-        );
     }
 }
