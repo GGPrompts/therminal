@@ -168,7 +168,20 @@ pub fn detect_default_distro() -> Option<String> {
                     );
                     return None;
                 }
-                let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
+                // Strip the UTF-16 LE BOM (0xFF 0xFE) if present before
+                // NUL-stripping. `wsl.exe -l -q` on Windows always
+                // outputs UTF-16 LE with a BOM when captured via pipe;
+                // the BOM bytes survive the NUL filter and end up as
+                // U+FFFD replacement characters after `from_utf8_lossy`,
+                // which causes `is_safe_distro_name` to reject an
+                // otherwise valid distro name like "Ubuntu-24.04".
+                let raw = &output.stdout;
+                let raw = if raw.starts_with(&[0xFF, 0xFE]) {
+                    &raw[2..]
+                } else {
+                    raw
+                };
+                let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
                 let s = String::from_utf8_lossy(&cleaned);
                 let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
                 if first.is_empty() {
@@ -433,6 +446,63 @@ mod tests {
         assert!(!is_safe_distro_name(""));
         assert!(!is_safe_distro_name(r"foo\bar"));
         assert!(!is_safe_distro_name("foo/bar"));
+    }
+
+    /// Regression: `wsl.exe -l -q` on Windows outputs UTF-16 LE with a
+    /// BOM (0xFF 0xFE). Without stripping the BOM, the NUL-filter leaves
+    /// `\xFF\xFE` in the byte stream → `from_utf8_lossy` converts them to
+    /// U+FFFD → `is_safe_distro_name` rejects the distro name → the WSL
+    /// probe never activates → no agent detection on Windows+WSL panes.
+    #[test]
+    fn utf16_le_bom_stripped_before_distro_parse() {
+        // Simulate `wsl.exe -l -q` raw UTF-16 LE output for "Ubuntu-24.04\r\n"
+        // with a BOM prefix.
+        let raw: Vec<u8> = {
+            let mut v = vec![0xFF, 0xFE]; // BOM
+            for ch in "Ubuntu-24.04\r\n".encode_utf16() {
+                v.push(ch as u8);
+                v.push((ch >> 8) as u8);
+            }
+            v
+        };
+        // Replicate the fix: strip BOM, then strip NULs, then parse.
+        let raw = if raw.starts_with(&[0xFF, 0xFE]) {
+            &raw[2..]
+        } else {
+            &raw[..]
+        };
+        let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
+        let s = String::from_utf8_lossy(&cleaned);
+        let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap();
+        assert_eq!(first, "Ubuntu-24.04");
+        assert!(is_safe_distro_name(first));
+    }
+
+    /// Verify the old (broken) behavior: without BOM stripping, the distro
+    /// name would contain replacement characters and be rejected.
+    #[test]
+    fn utf16_le_bom_without_stripping_produces_invalid_name() {
+        let raw: Vec<u8> = {
+            let mut v = vec![0xFF, 0xFE]; // BOM
+            for ch in "Ubuntu\r\n".encode_utf16() {
+                v.push(ch as u8);
+                v.push((ch >> 8) as u8);
+            }
+            v
+        };
+        // Old behavior: NUL-strip without BOM removal.
+        let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
+        let s = String::from_utf8_lossy(&cleaned);
+        let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap();
+        // The BOM bytes become replacement characters:
+        assert!(
+            first.starts_with('\u{FFFD}'),
+            "expected replacement chars from BOM bytes"
+        );
+        assert!(
+            !is_safe_distro_name(first),
+            "distro with BOM remnants must be rejected"
+        );
     }
 
     // On non-Windows builds the detection helpers must short-circuit so

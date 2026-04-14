@@ -222,11 +222,17 @@ pub fn detect_default_distro() -> Option<String> {
                 if !output.status.success() {
                     return None;
                 }
-                // Strip UTF-16 BOM-ish null bytes that wsl.exe emits on
-                // some builds: `U\x00b\x00u\x00n\x00t\x00u\x00`. Drop
-                // every zero byte before UTF-8 decoding — cheap and
-                // good enough for ASCII distro names.
-                let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
+                // `wsl.exe -l -q` outputs UTF-16 LE with a BOM (0xFF 0xFE)
+                // when captured via pipe. Strip the BOM first, then drop
+                // the interleaved NUL bytes to recover the ASCII distro
+                // name as valid UTF-8.
+                let raw = &output.stdout;
+                let raw = if raw.starts_with(&[0xFF, 0xFE]) {
+                    &raw[2..]
+                } else {
+                    raw
+                };
+                let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
                 let s = String::from_utf8_lossy(&cleaned);
                 let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
                 if first.is_empty() {
