@@ -3,8 +3,8 @@
 
 use crate::window::App;
 
-#[cfg(windows)]
 use super::planner::shell_quote;
+#[allow(unused_imports)]
 use super::planner::{OpenInEditorPlan, plan_open_in_editor, resolve_editor_chain, which_on_path};
 
 impl App {
@@ -76,6 +76,9 @@ impl App {
                         self.show_toast(format!("$EDITOR ({editor}) failed to launch"));
                     }
                 }
+            }
+            OpenInEditorPlan::SpawnInPane { editor, path, line } => {
+                self.open_tui_editor_in_pane(&editor, &path, &line);
             }
             OpenInEditorPlan::OpenFallback { path } => {
                 if let Err(e) = open::that(&path) {
@@ -220,6 +223,67 @@ impl App {
             Some(id) if Some(id) != original_focus => id,
             _ => {
                 tracing::warn!("open_in_wsl_pane_editor: split did not produce a new pane");
+                self.show_toast("failed to split pane for editor");
+                return;
+            }
+        };
+
+        self.pty_write_to_pane(cmd.as_bytes(), new_pane);
+    }
+
+    /// Open a TUI editor in a new pane by splitting the focused pane and
+    /// writing a shell command into the PTY.
+    ///
+    /// This is the non-WSL counterpart to `open_in_wsl_pane_editor`: it
+    /// handles TUI editors (vim, nvim, helix, micro, nano, tfe, etc.)
+    /// that need a terminal to render. GUI editors use `Command::spawn()`
+    /// directly and never reach this path.
+    fn open_tui_editor_in_pane(&mut self, editor: &str, path: &str, line: &str) {
+        // Build the directory from the file path so we cd there first.
+        let dir = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+
+        // Build a shell one-liner: cd to dir, clear, launch editor with +line.
+        // The editor string may contain args (e.g. "emacs -nw"), so we
+        // interpolate it directly rather than quoting it.
+        let mut cmd = String::new();
+        cmd.push_str("cd ");
+        cmd.push_str(&shell_quote(&dir));
+        cmd.push_str(" && clear && ");
+        cmd.push_str(editor);
+        cmd.push_str(" +");
+        cmd.push_str(line);
+        cmd.push(' ');
+        cmd.push_str(&shell_quote(path));
+        cmd.push('\n');
+
+        tracing::info!(
+            editor = %editor,
+            path = %path,
+            line = %line,
+            "open_tui_editor_in_pane: spawning editor in new pane"
+        );
+
+        // Daemon mode: the split is async — carry the command bytes in the
+        // completion callback so they're written after the PTY is live.
+        if self.is_daemon_mode() {
+            use crate::window::pane_ops::DaemonSplitOnComplete;
+            self.split_focused_pane_auto_with(DaemonSplitOnComplete::WriteBytesAndFocus {
+                bytes: cmd.into_bytes(),
+                toast: None,
+            });
+            return;
+        }
+
+        // Local mode: split is synchronous — write immediately.
+        let original_focus = self.focused_pane();
+        self.split_focused_pane_auto();
+        let new_pane = match self.focused_pane() {
+            Some(id) if Some(id) != original_focus => id,
+            _ => {
+                tracing::warn!("open_tui_editor_in_pane: split did not produce a new pane");
                 self.show_toast("failed to split pane for editor");
                 return;
             }

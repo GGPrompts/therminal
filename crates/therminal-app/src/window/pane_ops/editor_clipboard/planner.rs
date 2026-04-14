@@ -7,8 +7,16 @@
 /// filesystem / process spawn so it can be unit tested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpenInEditorPlan {
-    /// Spawn `editor +line path`.
+    /// Spawn `editor +line path` as a detached OS process (GUI editors).
     Spawn {
+        editor: String,
+        path: String,
+        line: String,
+    },
+    /// Spawn the editor inside a new terminal pane (TUI editors like
+    /// vim, nvim, helix, micro, nano, tfe, etc.). The caller should
+    /// split the focused pane and write a shell command into the PTY.
+    SpawnInPane {
         editor: String,
         path: String,
         line: String,
@@ -63,15 +71,44 @@ where
     }
 
     match resolve_fn(chain) {
-        Some(editor) => OpenInEditorPlan::Spawn {
-            editor,
-            path: path.to_string(),
-            line: line.to_string(),
-        },
+        Some(editor) => {
+            if is_tui_editor(&editor) {
+                OpenInEditorPlan::SpawnInPane {
+                    editor,
+                    path: path.to_string(),
+                    line: line.to_string(),
+                }
+            } else {
+                OpenInEditorPlan::Spawn {
+                    editor,
+                    path: path.to_string(),
+                    line: line.to_string(),
+                }
+            }
+        }
         None => OpenInEditorPlan::OpenFallback {
             path: path.to_string(),
         },
     }
+}
+
+/// Known TUI editors that require a terminal pane to render. The check
+/// extracts the head token (first whitespace-delimited word) and compares
+/// its basename against a known list. GUI editors (`code`, `subl`, etc.)
+/// are intentionally absent — they work fine as detached OS processes.
+pub(crate) fn is_tui_editor(cmd: &str) -> bool {
+    const TUI_EDITORS: &[&str] = &[
+        "tfe", "micro", "vim", "nvim", "vi", "nano", "helix", "hx", "emacs", "ne", "mcedit", "joe",
+        "jed", "kakoune", "kak", "amp", "zee", "ox", "dte",
+    ];
+
+    let head = cmd.split_whitespace().next().unwrap_or("");
+    // Extract basename: `/usr/bin/nvim` -> `nvim`
+    let basename = std::path::Path::new(head)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(head);
+    TUI_EDITORS.contains(&basename)
 }
 
 /// Resolve an entry from the editor fallback chain to a concrete command.
@@ -264,17 +301,31 @@ mod tests {
     }
 
     #[test]
-    fn plan_happy_path_yields_spawn_with_line() {
+    fn plan_tui_editor_yields_spawn_in_pane() {
         let c = chain(&["nvim"]);
         let plan = plan_open_in_editor("/tmp/foo.rs:42:7", &c, ok_file, |_| {
             Some("nvim".to_string())
         });
         assert_eq!(
             plan,
-            OpenInEditorPlan::Spawn {
+            OpenInEditorPlan::SpawnInPane {
                 editor: "nvim".to_string(),
                 path: "/tmp/foo.rs".to_string(),
                 line: "42".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_gui_editor_yields_spawn() {
+        let c = chain(&["code"]);
+        let plan = plan_open_in_editor("/tmp/foo.rs:10", &c, ok_file, |_| Some("code".to_string()));
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::Spawn {
+                editor: "code".to_string(),
+                path: "/tmp/foo.rs".to_string(),
+                line: "10".to_string(),
             }
         );
     }
@@ -284,9 +335,99 @@ mod tests {
         let c = chain(&["vim"]);
         let plan = plan_open_in_editor("/tmp/bar.md", &c, ok_file, |_| Some("vim".to_string()));
         match plan {
-            OpenInEditorPlan::Spawn { line, .. } => assert_eq!(line, "1"),
-            other => panic!("expected Spawn, got {other:?}"),
+            OpenInEditorPlan::SpawnInPane { line, .. } => assert_eq!(line, "1"),
+            other => panic!("expected SpawnInPane, got {other:?}"),
         }
+    }
+
+    // ── is_tui_editor ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_tui_detects_known_tui_editors() {
+        for name in &[
+            "tfe", "micro", "vim", "nvim", "vi", "nano", "helix", "hx", "emacs", "kak",
+        ] {
+            assert!(is_tui_editor(name), "{name} should be TUI");
+        }
+    }
+
+    #[test]
+    fn is_tui_rejects_gui_editors() {
+        for name in &["code", "subl", "gedit", "notepad++", "kate"] {
+            assert!(!is_tui_editor(name), "{name} should NOT be TUI");
+        }
+    }
+
+    #[test]
+    fn is_tui_extracts_head_token() {
+        assert!(is_tui_editor("nvim --clean"));
+        assert!(is_tui_editor("emacs -nw"));
+        assert!(!is_tui_editor("code --wait"));
+    }
+
+    #[test]
+    fn is_tui_handles_absolute_path() {
+        assert!(is_tui_editor("/usr/bin/nvim"));
+        assert!(!is_tui_editor("/usr/bin/code"));
+    }
+
+    // ── plan_open_in_editor: TUI vs GUI via $EDITOR ─────────────────
+
+    #[test]
+    fn plan_env_editor_vim_yields_spawn_in_pane() {
+        let c = chain(&["$EDITOR"]);
+        let plan = plan_open_in_editor("/tmp/foo.rs:5", &c, ok_file, |_| Some("vim".to_string()));
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::SpawnInPane {
+                editor: "vim".to_string(),
+                path: "/tmp/foo.rs".to_string(),
+                line: "5".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_env_editor_code_yields_spawn() {
+        let c = chain(&["$EDITOR"]);
+        let plan = plan_open_in_editor("/tmp/foo.rs:5", &c, ok_file, |_| Some("code".to_string()));
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::Spawn {
+                editor: "code".to_string(),
+                path: "/tmp/foo.rs".to_string(),
+                line: "5".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_tfe_yields_spawn_in_pane() {
+        let c = chain(&["tfe"]);
+        let plan = plan_open_in_editor("/tmp/foo.rs:1", &c, ok_file, |_| Some("tfe".to_string()));
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::SpawnInPane {
+                editor: "tfe".to_string(),
+                path: "/tmp/foo.rs".to_string(),
+                line: "1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_micro_yields_spawn_in_pane() {
+        let c = chain(&["micro"]);
+        let plan =
+            plan_open_in_editor("/tmp/foo.rs:20", &c, ok_file, |_| Some("micro".to_string()));
+        assert_eq!(
+            plan,
+            OpenInEditorPlan::SpawnInPane {
+                editor: "micro".to_string(),
+                path: "/tmp/foo.rs".to_string(),
+                line: "20".to_string(),
+            }
+        );
     }
 
     #[test]
