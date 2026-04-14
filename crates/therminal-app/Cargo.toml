@@ -33,6 +33,7 @@ arboard = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 open = { workspace = true }
+notify = { workspace = true }
 notify-rust = { workspace = true }
 sysinfo = { workspace = true }
 serde = { workspace = true }

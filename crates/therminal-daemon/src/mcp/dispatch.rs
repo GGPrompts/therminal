@@ -212,6 +212,10 @@ impl ServerHandler for TherminalMcpServer {
                 let params: FindWithCapacityParam = parse_args(args)?;
                 self.handle_find_with_capacity(params).await
             }
+            "terminal.panes.create_tail" => {
+                let params: CreateTailParam = parse_args(args)?;
+                self.handle_create_tail(params).await
+            }
             "terminal.patterns.stats" => self.handle_patterns_stats().await,
             "terminal.events.stats" => self.handle_events_stats().await,
             other => Err(ErrorData::invalid_params(

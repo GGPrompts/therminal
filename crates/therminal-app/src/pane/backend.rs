@@ -28,7 +28,9 @@
 //!   the same `UserEvent::PaneExited` flow used for local panes.
 
 use std::io::Write as IoWrite;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alacritty_terminal::sync::FairMutex;
@@ -37,6 +39,7 @@ use portable_pty::MasterPty;
 use tracing::warn;
 
 use super::PaneListener;
+use super::jsonl_tail::{JsonlTailState, JsonlTailWatcher};
 use super::state::PaneTermSize;
 use crate::grid_renderer::GridRenderer;
 
@@ -108,6 +111,20 @@ pub enum PaneBackendKind {
         #[allow(dead_code)]
         content: String,
     },
+    /// A read-only pane that tails a JSONL file with structured rendering.
+    ///
+    /// Replaces the old `tail -F` shell pane approach for subagent
+    /// observation. The `notify` file watcher detects appended lines
+    /// and renders them with format-aware color coding.
+    JsonlTail {
+        /// Path to the JSONL file being tailed.
+        path: PathBuf,
+        /// Shared state with the file watcher (rows, offset, formatting).
+        state: Arc<Mutex<JsonlTailState>>,
+        /// RAII guard — dropping this stops the file watcher.
+        #[allow(dead_code)]
+        watcher: JsonlTailWatcher,
+    },
     /// A pane whose PTY lives in the daemon. Bytes flow over IPC.
     ///
     /// The local `Term` is fed by a worker thread, identical to the
@@ -145,6 +162,10 @@ impl PaneBackend for PaneBackendKind {
                 // WebView input handling is a stub for now.
                 Ok(())
             }
+            PaneBackendKind::JsonlTail { .. } => {
+                // Read-only pane — input is silently discarded.
+                Ok(())
+            }
             PaneBackendKind::RemotePty { input_tx, .. } => {
                 // Fire-and-forget; the writer task drains and forwards
                 // via DaemonClient::send_request(SendKeys).
@@ -180,6 +201,12 @@ impl PaneBackend for PaneBackendKind {
             }
             PaneBackendKind::WebView { .. } => {
                 // WebView resize is a stub for now.
+            }
+            PaneBackendKind::JsonlTail { state, .. } => {
+                if let Ok(mut s) = state.lock() {
+                    s.cols = cols.max(20);
+                    s.reformat_all();
+                }
             }
             PaneBackendKind::RemotePty {
                 pane_id,
@@ -260,6 +287,10 @@ impl PaneBackend for PaneBackendKind {
                 content
             }
             PaneBackendKind::WebView { content, .. } => content.clone(),
+            PaneBackendKind::JsonlTail { state, .. } => state
+                .lock()
+                .map(|s| s.formatted_content())
+                .unwrap_or_default(),
         }
     }
 
@@ -267,19 +298,21 @@ impl PaneBackend for PaneBackendKind {
         match self {
             PaneBackendKind::Terminal { .. } => "terminal",
             PaneBackendKind::WebView { .. } => "webview",
+            PaneBackendKind::JsonlTail { .. } => "jsonl_tail",
             PaneBackendKind::RemotePty { .. } => "remote_pty",
         }
     }
 }
 
 impl PaneBackendKind {
-    /// Returns the terminal term if this is a Terminal backend, `None` otherwise.
+    /// Returns the terminal term if this is a Terminal or RemotePty backend,
+    /// `None` for WebView and JsonlTail.
     pub fn term(&self) -> Option<&Arc<FairMutex<Term<PaneListener>>>> {
         match self {
             PaneBackendKind::Terminal { term, .. } | PaneBackendKind::RemotePty { term, .. } => {
                 Some(term)
             }
-            _ => None,
+            PaneBackendKind::WebView { .. } | PaneBackendKind::JsonlTail { .. } => None,
         }
     }
 
@@ -314,7 +347,7 @@ impl PaneBackendKind {
             PaneBackendKind::Terminal { term, .. } | PaneBackendKind::RemotePty { term, .. } => {
                 term
             }
-            PaneBackendKind::WebView { .. } => return,
+            PaneBackendKind::WebView { .. } | PaneBackendKind::JsonlTail { .. } => return,
         };
         let mut guard = term.lock();
         use alacritty_terminal::grid::Dimensions;

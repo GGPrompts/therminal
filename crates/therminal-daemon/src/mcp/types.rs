@@ -283,6 +283,39 @@ pub(crate) struct SpawnPaneParam {
     pub(crate) worktree: Option<String>,
 }
 
+/// Parameters for `terminal.panes.create_tail` — create a pane that
+/// tails a file with structured rendering. Currently a stub: creates a
+/// normal PTY pane and injects `tail -F <path>` as a startup command.
+/// Full native `JsonlTail` backend integration will follow once the
+/// daemon supports the new backend kind over IPC (tn-14c0).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CreateTailParam {
+    /// Absolute path to the file to tail.
+    pub(crate) path: String,
+    /// Format hint for structured rendering. Known formats: "jsonl",
+    /// "claude-events". When omitted, the backend sniffs the first line.
+    /// Currently ignored by the stub implementation.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) format: Option<String>,
+    /// Session ID to create the pane in. If omitted, uses the default session.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
+    pub(crate) session_id: Option<u64>,
+    /// Pane ID to split from. If specified, the new pane is created as a
+    /// sibling of this pane.
+    #[serde(default, deserialize_with = "deser_compat::u64_opt_flexible")]
+    pub(crate) split_from: Option<u64>,
+}
+
+/// Result from `terminal.panes.create_tail`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CreateTailResult {
+    pub(crate) pane_id: u64,
+    pub(crate) session_id: u64,
+    /// Backend type used: "jsonl_tail" (native) or "terminal" (stub fallback).
+    pub(crate) backend: String,
+}
+
 // ── Tool result types ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -430,7 +463,7 @@ pub(crate) struct ListPanesResult {
     pub(crate) panes: Vec<PaneInfo>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct SpawnPaneResult {
     pub(crate) pane_id: u64,
     pub(crate) session_id: u64,

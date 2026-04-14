@@ -717,13 +717,12 @@ fn sandboxed_is_minimum_tier_for_resources() {
 
 // ── tool_definitions() surface lock ─────────────────────────────────
 
-/// Lock in the count: exactly 29 tools must be returned. Bumped from
-/// 27 to 29: +1 in tn-ifee (`terminal.agents.get_session_detail`),
-/// +1 in tn-xula (`terminal.events.stats`).
+/// Lock in the count: exactly 31 tools must be returned. Bumped from
+/// 30 to 31: +1 in tn-14c0 (`terminal.panes.create_tail`).
 #[test]
-fn tool_definitions_returns_30_tools() {
+fn tool_definitions_returns_31_tools() {
     let tools = tool_definitions();
-    assert_eq!(tools.len(), 30, "expected exactly 30 tool definitions");
+    assert_eq!(tools.len(), 31, "expected exactly 31 tool definitions");
 }
 
 /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -760,6 +759,7 @@ fn tool_definitions_contains_all_expected_names() {
         "terminal.agents.get_session_detail",
         "terminal.agents.get_cadence",
         "terminal.agents.find_with_capacity",
+        "terminal.panes.create_tail",
         "terminal.patterns.stats",
         "terminal.events.stats",
     ];

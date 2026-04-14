@@ -8,6 +8,7 @@
 pub mod auto_tile;
 pub mod backend;
 pub mod geometry;
+pub mod jsonl_tail;
 pub mod layout;
 pub mod remote_spawn;
 pub mod spawn;

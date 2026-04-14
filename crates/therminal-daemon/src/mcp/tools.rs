@@ -57,14 +57,14 @@ use tracing::debug;
 use super::{
     AgentCadenceResult, AgentCapacityInfo, AgentDetailsResult, AgentInfoResult, AgentSessionDetail,
     AgentStatusResult, CadenceSampleResult, CaptureResultParam, CaptureResultResult, CommandInfo,
-    CreateSessionParam, DestroyPaneResult, EmptyParams, EventInfo, FindWithCapacityParam,
-    FindWithCapacityResult, GetContentParam, GetHotspotsParam, GetHotspotsResult,
-    GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam, GetWorkspaceLayoutResult,
-    HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult, ListPanesParam,
-    ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS, MIN_PANE_ROWS,
-    PaneContentResult, PaneIdParam, PaneInfo, PanePeekResult, PaneSummaryResult, PaneTagsResult,
-    PeekPaneParam, QueryCommandsParam, QueryCommandsResult, QueryEventsParam, QueryEventsResult,
-    QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
+    CreateSessionParam, CreateTailParam, CreateTailResult, DestroyPaneResult, EmptyParams,
+    EventInfo, FindWithCapacityParam, FindWithCapacityResult, GetContentParam, GetHotspotsParam,
+    GetHotspotsResult, GetPaneGeometryParam, GetPaneGeometryResult, GetWorkspaceLayoutParam,
+    GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult,
+    ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
+    MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, PanePeekResult, PaneSummaryResult,
+    PaneTagsResult, PeekPaneParam, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
+    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
     SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
     SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam, TherminalMcpServer,
     UntagPaneParam, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
@@ -1570,6 +1570,62 @@ impl TherminalMcpServer {
         };
         Ok(CallToolResult::success(vec![json_content(&stats)?]))
     }
+
+    /// Stub handler for `terminal.panes.create_tail` (tn-14c0).
+    ///
+    /// Creates a normal PTY pane with `tail -F <path>` as a startup command.
+    /// Full native `JsonlTail` backend integration will replace this once
+    /// the daemon supports the new backend kind over IPC.
+    pub(super) async fn handle_create_tail(
+        &self,
+        params: CreateTailParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = &params.path;
+
+        // Build a startup command that tails the file from the beginning.
+        let startup_cmd = format!("tail --lines=+1 -F {path}");
+
+        // Delegate to the existing spawn_pane path with the tail command.
+        let spawn_params = SpawnPaneParam {
+            session_id: params.session_id,
+            command: None,
+            cwd: None,
+            split_direction: None,
+            split_from: params.split_from,
+            startup_command: Some(startup_cmd),
+            ratio: None,
+            shell: None,
+            worktree: None,
+        };
+
+        // Reuse the spawn pane handler.
+        let result = self.handle_spawn_pane(spawn_params).await?;
+
+        // If spawn succeeded, re-wrap the response with create_tail metadata.
+        // For now we just pass through the spawn result. When the native
+        // backend lands, this will return CreateTailResult with
+        // backend="jsonl_tail".
+        if result.is_error.unwrap_or(false) {
+            return Ok(result);
+        }
+
+        // Extract pane_id and session_id from the spawn result content.
+        // The spawn result is a SpawnPaneResult JSON blob.
+        if let Some(content) = result.content.first()
+            && let Some(text) = content.raw.as_text()
+            && let Ok(spawn_result) = serde_json::from_str::<SpawnPaneResult>(&text.text)
+        {
+            let tail_result = CreateTailResult {
+                pane_id: spawn_result.pane_id,
+                session_id: spawn_result.session_id,
+                backend: "terminal".to_string(), // stub uses PTY + tail
+            };
+            return Ok(CallToolResult::success(vec![json_content(&tail_result)?]));
+        }
+
+        // Fallback: return the raw spawn result.
+        Ok(result)
+    }
 }
 
 // ── Tool definitions ────────────────────────────────────────────────────
@@ -1715,6 +1771,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.agents.find_with_capacity",
             "Return all detected agents whose REMAINING context-window capacity is at least `threshold_percent` (0.0 - 100.0). `remaining_percent = 100.0 - context_percent`. Agents whose capacity is unknown (no PaneCapacityCache entry) are INCLUDED — treated as 'potentially has capacity' so callers don't accidentally exclude fresh panes. Results are sorted by `remaining_percent` descending; agents with unknown capacity sort last.",
             schema_for_type::<FindWithCapacityParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.create_tail",
+            "Create a pane that tails a file with structured rendering. Known formats: 'jsonl' (JSONL lines with Claude agent event detection), 'claude-events'. When format is omitted, the backend sniffs the first line. Currently a stub: creates a normal PTY pane running `tail -F <path>` as a startup command. Full native JsonlTail backend integration will follow once the daemon supports the new backend kind over IPC (tn-14c0).",
+            schema_for_type::<CreateTailParam>(),
         ),
         Tool::new(
             "terminal.events.stats",

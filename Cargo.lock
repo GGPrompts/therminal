@@ -3414,6 +3414,7 @@ dependencies = [
  "dirs",
  "glyphon",
  "libc",
+ "notify",
  "notify-rust",
  "open",
  "pollster",

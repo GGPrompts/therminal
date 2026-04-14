@@ -215,6 +215,10 @@ impl App {
                     agent_id,
                     jsonl_path,
                 } => {
+                    // Daemon-mode fallback: the daemon's RemotePty panes
+                    // don't support JsonlTail yet, so we still send a
+                    // `tail -F` command. Local-mode panes use the native
+                    // JsonlTail backend (tn-14c0).
                     let cmd = format!(
                         "clear && tail --lines=+1 -F {}\n",
                         super::super::editor_clipboard::shell_quote(
