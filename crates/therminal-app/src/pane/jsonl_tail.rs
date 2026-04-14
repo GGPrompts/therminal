@@ -14,23 +14,87 @@
 //!
 //! ## Format awareness
 //!
-//! The parser detects Claude agent event schemas (`type`, `message`,
-//! `subagent` fields) and renders them with structured columns.
-//! Unknown JSON lines are pretty-printed with basic key highlighting.
+//! The parser detects Claude Code agent event schemas (nested
+//! `message.content` arrays with `type` discriminators) and renders them
+//! with structured columns, expandable tool sections, and visual hierarchy
+//! ported from thermal-desktop's viewer (tn-bjvl).
+//!
+//! ## Keyboard interaction
+//!
+//! The pane supports navigation via `handle_input`:
+//! - Arrow up/down, j/k: scroll one line
+//! - PageUp/PageDown: scroll one page
+//! - Enter/Space: toggle expand/collapse on tool entries
+//! - `e`: toggle expand/collapse all
+//! - `f`: toggle auto-follow mode
+//! - `g`/Home: scroll to top
+//! - `G`/End: scroll to bottom
+//! - `t`/`T`: jump to next/previous tool call
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, warn};
 
 /// Maximum number of parsed rows retained in the ring buffer.
 const DEFAULT_MAX_ROWS: usize = 1000;
 
+/// Default max lines shown for collapsed assistant text.
+const COLLAPSED_ASSISTANT_LINES: usize = 4;
+
+/// Default max lines shown for collapsed user messages.
+const COLLAPSED_USER_LINES: usize = 5;
+
+// ── Structured event types ────────────────────────────────────────────
+
+/// Classification of a parsed JSONL event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    UserMessage,
+    AssistantText,
+    ToolUse,
+    ToolResult,
+    Thinking,
+    Progress,
+    SystemMessage,
+}
+
+/// A parsed, structured event from a JSONL line.
+#[derive(Debug, Clone)]
+pub struct StructuredEvent {
+    /// Event classification.
+    pub kind: EventKind,
+    /// ISO 8601 timestamp string.
+    pub timestamp: String,
+    /// Primary content (message text, tool output, thinking, etc.).
+    pub content: String,
+    /// Tool name for tool-related events.
+    pub tool_name: Option<String>,
+    /// Tool use ID for pairing ToolUse <-> ToolResult.
+    #[allow(dead_code)]
+    pub tool_use_id: Option<String>,
+    /// Whether a ToolResult was an error.
+    pub is_error: bool,
+}
+
+/// A single display row with its formatted ANSI string and metadata.
+#[derive(Debug, Clone)]
+pub struct DisplayRow {
+    /// Pre-formatted single-line string with ANSI color codes.
+    pub formatted: String,
+    /// Index of the source event in `events` that produced this row.
+    pub event_index: usize,
+    /// Whether this row is an expandable/collapsible indicator.
+    pub is_expandable: bool,
+}
+
 /// A single parsed JSONL row with its formatted representation.
+/// Kept for backward compatibility with `get_content()`.
 #[derive(Debug, Clone)]
 pub struct JsonlRow {
     /// The original JSON value (retained for search / MCP queries).
@@ -44,14 +108,30 @@ pub struct JsonlRow {
 pub struct JsonlTailState {
     /// Path being watched.
     pub path: PathBuf,
-    /// Ring buffer of parsed rows.
+    /// Ring buffer of parsed rows (legacy flat format).
     pub rows: VecDeque<JsonlRow>,
     /// Maximum rows to retain.
     pub max_rows: usize,
     /// Current column width for formatting.
     pub cols: usize,
+    /// Current visible rows (viewport height).
+    pub visible_rows: usize,
     /// Byte offset into the file (next read starts here).
     pub file_offset: u64,
+
+    // ── Structured viewer state (tn-bjvl) ─────────────────────────────
+    /// Parsed structured events.
+    pub events: Vec<StructuredEvent>,
+    /// Pre-rendered display rows.
+    pub display: Vec<DisplayRow>,
+    /// Scroll offset (display row index at top of viewport).
+    pub scroll: usize,
+    /// Whether auto-follow is active (scroll to bottom on new content).
+    pub following: bool,
+    /// Set of event indices that the user has manually expanded.
+    pub expanded_events: HashSet<usize>,
+    /// Whether all events are expanded (toggle-all state).
+    pub all_expanded: bool,
 }
 
 impl JsonlTailState {
@@ -61,7 +141,14 @@ impl JsonlTailState {
             rows: VecDeque::with_capacity(DEFAULT_MAX_ROWS),
             max_rows: DEFAULT_MAX_ROWS,
             cols: cols.max(20),
+            visible_rows: 24,
             file_offset: 0,
+            events: Vec::new(),
+            display: Vec::new(),
+            scroll: 0,
+            following: true,
+            expanded_events: HashSet::new(),
+            all_expanded: false,
         }
     }
 
@@ -87,6 +174,9 @@ impl JsonlTailState {
             );
             self.file_offset = 0;
             self.rows.clear();
+            self.events.clear();
+            self.display.clear();
+            self.expanded_events.clear();
         }
 
         if let Err(e) = file.seek(SeekFrom::Start(self.file_offset)) {
@@ -109,28 +199,73 @@ impl JsonlTailState {
                         continue;
                     }
 
-                    let row = match serde_json::from_str::<Value>(trimmed) {
+                    match serde_json::from_str::<Value>(trimmed) {
                         Ok(val) => {
+                            // Parse structured events from the CC JSONL format.
+                            let structured = parse_jsonl_event(trimmed);
+                            if !structured.is_empty() {
+                                for event in structured {
+                                    let idx = self.events.len();
+                                    let expanded =
+                                        self.all_expanded || self.expanded_events.contains(&idx);
+                                    let new_display_rows =
+                                        render_event(&event, self.cols, expanded, idx);
+                                    self.display.extend(new_display_rows);
+                                    self.events.push(event);
+                                }
+                            } else {
+                                // Fall back to generic JSON formatting.
+                                let formatted = format_generic_json(&val, self.cols);
+                                let idx = self.events.len();
+                                self.display.push(DisplayRow {
+                                    formatted,
+                                    event_index: idx,
+                                    is_expandable: false,
+                                });
+                                self.events.push(StructuredEvent {
+                                    kind: EventKind::SystemMessage,
+                                    timestamp: String::new(),
+                                    content: serde_json::to_string(&val).unwrap_or_default(),
+                                    tool_name: None,
+                                    tool_use_id: None,
+                                    is_error: false,
+                                });
+                            }
+
+                            // Legacy row for get_content().
                             let formatted = format_json_row(&val, self.cols);
-                            JsonlRow {
+                            self.rows.push_back(JsonlRow {
                                 value: val,
                                 formatted,
-                            }
+                            });
                         }
                         Err(_) => {
                             // Not valid JSON — render as raw text.
                             let formatted = format_raw_line(trimmed, self.cols);
-                            JsonlRow {
+                            self.rows.push_back(JsonlRow {
                                 value: Value::String(trimmed.to_string()),
+                                formatted: formatted.clone(),
+                            });
+                            let idx = self.events.len();
+                            self.display.push(DisplayRow {
                                 formatted,
-                            }
+                                event_index: idx,
+                                is_expandable: false,
+                            });
+                            self.events.push(StructuredEvent {
+                                kind: EventKind::SystemMessage,
+                                timestamp: String::new(),
+                                content: trimmed.to_string(),
+                                tool_name: None,
+                                tool_use_id: None,
+                                is_error: false,
+                            });
                         }
-                    };
+                    }
 
-                    self.rows.push_back(row);
                     new_rows += 1;
 
-                    // Enforce ring buffer cap.
+                    // Enforce ring buffer cap on legacy rows.
                     while self.rows.len() > self.max_rows {
                         self.rows.pop_front();
                     }
@@ -143,36 +278,878 @@ impl JsonlTailState {
         }
 
         self.file_offset += bytes_read;
+
+        // Auto-follow: scroll to bottom when new content arrives.
+        if new_rows > 0 && self.following {
+            self.scroll_to_bottom();
+        }
+
         if new_rows > 0 {
             debug!(
                 path = %self.path.display(),
                 new_rows,
-                total = self.rows.len(),
+                total_events = self.events.len(),
+                total_display = self.display.len(),
                 offset = self.file_offset,
                 "jsonl_tail: appended rows"
             );
         }
     }
 
-    /// Re-format all rows (e.g. after a column width change).
+    /// Re-render all display rows (e.g. after a column width change or
+    /// expansion toggle).
     pub fn reformat_all(&mut self) {
+        self.display.clear();
+        for (i, event) in self.events.iter().enumerate() {
+            let expanded = self.all_expanded || self.expanded_events.contains(&i);
+            let new_rows = render_event(event, self.cols, expanded, i);
+            self.display.extend(new_rows);
+        }
+        // Also reformat legacy rows.
         for row in &mut self.rows {
             row.formatted = format_json_row(&row.value, self.cols);
         }
     }
 
-    /// Return the formatted content for display, joining rows with newlines.
+    /// Return the formatted content for display, joining visible rows
+    /// with newlines. Shows the structured view with scroll position.
     pub fn formatted_content(&self) -> String {
         let mut out = String::new();
-        for row in &self.rows {
+
+        // Header line.
+        let event_count = self.events.len();
+        let follow_indicator = if self.following { " [follow]" } else { "" };
+        out.push_str(&format!(
+            "{}{} events{}{}\n",
+            ansi::DIM,
+            event_count,
+            follow_indicator,
+            ansi::RESET
+        ));
+
+        // Visible display rows.
+        let total = self.display.len();
+        let start = self.scroll.min(total);
+        let end = (start + self.visible_rows.saturating_sub(2)).min(total);
+        for row in &self.display[start..end] {
             out.push_str(&row.formatted);
             out.push('\n');
         }
+
+        // Footer with keybinding hints.
+        let footer = format!(
+            "{}\u{2191}\u{2193}{}:scroll  {}Enter{}:expand  {}e{}:expand-all  {}f{}:follow  {}G{}:bottom{}",
+            ansi::CYAN,
+            ansi::DIM,
+            ansi::CYAN,
+            ansi::DIM,
+            ansi::CYAN,
+            ansi::DIM,
+            ansi::CYAN,
+            ansi::DIM,
+            ansi::CYAN,
+            ansi::DIM,
+            ansi::RESET
+        );
+        out.push_str(&footer);
+        out.push('\n');
+
         out
+    }
+
+    /// Total number of display rows.
+    pub fn display_line_count(&self) -> usize {
+        self.display.len()
+    }
+
+    /// Scroll to the bottom.
+    pub fn scroll_to_bottom(&mut self) {
+        let total = self.display_line_count();
+        let viewport = self.visible_rows.saturating_sub(2); // header + footer
+        if total > viewport {
+            self.scroll = total - viewport;
+        } else {
+            self.scroll = 0;
+        }
+    }
+
+    /// Handle a single input byte sequence (keyboard event).
+    /// Returns `true` if the input was consumed.
+    pub fn handle_input(&mut self, data: &[u8]) -> bool {
+        // Parse escape sequences and single-byte keys.
+        match data {
+            // Arrow Up or 'k'
+            b"\x1b[A" | b"k" => {
+                self.scroll = self.scroll.saturating_sub(1);
+                self.following = false;
+                true
+            }
+            // Arrow Down or 'j'
+            b"\x1b[B" | b"j" => {
+                let max_scroll = self.max_scroll();
+                self.scroll = (self.scroll + 1).min(max_scroll);
+                if self.scroll >= max_scroll {
+                    self.following = true;
+                }
+                true
+            }
+            // Page Up
+            b"\x1b[5~" => {
+                let page = self.visible_rows.saturating_sub(2);
+                self.scroll = self.scroll.saturating_sub(page);
+                self.following = false;
+                true
+            }
+            // Page Down
+            b"\x1b[6~" => {
+                let page = self.visible_rows.saturating_sub(2);
+                let max_scroll = self.max_scroll();
+                self.scroll = (self.scroll + page).min(max_scroll);
+                if self.scroll >= max_scroll {
+                    self.following = true;
+                }
+                true
+            }
+            // Home or 'g'
+            b"\x1b[H" | b"g" => {
+                self.scroll = 0;
+                self.following = false;
+                true
+            }
+            // End or 'G'
+            b"\x1b[F" | b"G" => {
+                self.scroll_to_bottom();
+                self.following = true;
+                true
+            }
+            // Enter or Space — toggle expand/collapse
+            b"\r" | b" " => {
+                self.toggle_nearest_expandable();
+                true
+            }
+            // 'e' — toggle expand/collapse all
+            b"e" => {
+                self.toggle_all_expansion();
+                true
+            }
+            // 'f' — toggle follow mode
+            b"f" => {
+                self.following = !self.following;
+                if self.following {
+                    self.scroll_to_bottom();
+                }
+                true
+            }
+            // 't' — jump to next tool call
+            b"t" => {
+                self.jump_next_tool();
+                true
+            }
+            // 'T' — jump to previous tool call
+            b"T" => {
+                self.jump_prev_tool();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn max_scroll(&self) -> usize {
+        let viewport = self.visible_rows.saturating_sub(2);
+        self.display_line_count().saturating_sub(viewport)
+    }
+
+    /// Toggle expand/collapse on the nearest expandable row visible in
+    /// the viewport (starting from scroll position).
+    fn toggle_nearest_expandable(&mut self) {
+        let viewport = self.visible_rows.saturating_sub(2);
+        let start = self.scroll;
+        let end = (start + viewport).min(self.display.len());
+        for i in start..end {
+            if self.display[i].is_expandable {
+                let event_idx = self.display[i].event_index;
+                if self.expanded_events.contains(&event_idx) {
+                    self.expanded_events.remove(&event_idx);
+                } else {
+                    self.expanded_events.insert(event_idx);
+                }
+                let old_scroll = self.scroll;
+                self.reformat_all();
+                // Adjust scroll if lines were removed above viewport.
+                let max = self.max_scroll();
+                self.scroll = old_scroll.min(max);
+                return;
+            }
+        }
+    }
+
+    /// Toggle expand/collapse all events.
+    fn toggle_all_expansion(&mut self) {
+        self.all_expanded = !self.all_expanded;
+        if !self.all_expanded {
+            self.expanded_events.clear();
+        }
+        let old_scroll = self.scroll;
+        self.reformat_all();
+        let max = self.max_scroll();
+        self.scroll = old_scroll.min(max);
+    }
+
+    /// Jump to the next tool call event after current scroll position.
+    fn jump_next_tool(&mut self) {
+        let mut line_idx = 0;
+        for (i, event) in self.events.iter().enumerate() {
+            let expanded = self.all_expanded || self.expanded_events.contains(&i);
+            let n = render_event(event, self.cols, expanded, i).len();
+            if line_idx > self.scroll
+                && matches!(event.kind, EventKind::ToolUse | EventKind::ToolResult)
+            {
+                self.scroll = line_idx;
+                self.following = false;
+                return;
+            }
+            line_idx += n;
+        }
+        // No more tool calls — scroll to bottom.
+        self.scroll_to_bottom();
+    }
+
+    /// Jump to the previous tool call event before current scroll position.
+    fn jump_prev_tool(&mut self) {
+        let mut positions = Vec::new();
+        let mut line_idx = 0;
+        for (i, event) in self.events.iter().enumerate() {
+            let expanded = self.all_expanded || self.expanded_events.contains(&i);
+            let n = render_event(event, self.cols, expanded, i).len();
+            if matches!(event.kind, EventKind::ToolUse | EventKind::ToolResult) {
+                positions.push(line_idx);
+            }
+            line_idx += n;
+        }
+        if let Some(&pos) = positions.iter().rev().find(|&&p| p < self.scroll) {
+            self.scroll = pos;
+            self.following = false;
+        }
     }
 }
 
-// ── Format helpers ─────────────────────────────────────────────────────
+// ── CC JSONL parsing (ported from thermal-desktop session_log.rs) ─────
+
+/// Flexible deserialization envelope for CC JSONL lines.
+///
+/// CC JSONL uses a nested format:
+/// - `{"type":"user", "message":{"role":"user","content":"..." or [...]}, ...}`
+/// - `{"type":"assistant", "message":{"role":"assistant","content":[...]}, ...}`
+/// - `{"type":"system", "content":"...", ...}`
+///
+/// Assistant content arrays contain items with discriminator types:
+/// `"text"`, `"tool_use"`, `"thinking"`. Tool results appear in user
+/// messages as `"tool_result"` content items.
+#[derive(Deserialize)]
+struct RawLine {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    /// Top-level content (used by `system` type and legacy flat format).
+    #[serde(default)]
+    content: Option<Value>,
+    /// Nested message envelope (used by `user` and `assistant` types).
+    #[serde(default)]
+    message: Option<Value>,
+    // Legacy flat fields.
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+    #[serde(default)]
+    input: Option<Value>,
+    #[serde(default)]
+    output: Option<String>,
+    #[serde(default)]
+    is_error: Option<bool>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Parse a single JSONL line into structured events.
+///
+/// A single line may produce multiple events because CC nests multiple
+/// content items (text, tool_use, thinking) inside a single assistant
+/// message.
+fn parse_jsonl_event(line: &str) -> Vec<StructuredEvent> {
+    let raw: RawLine = match serde_json::from_str(line) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let msg_type = match raw.msg_type.as_deref() {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let timestamp = raw.timestamp.clone().unwrap_or_default();
+
+    let make = |kind,
+                content: String,
+                tool_name: Option<String>,
+                tool_use_id: Option<String>,
+                is_error: bool| {
+        StructuredEvent {
+            kind,
+            timestamp: timestamp.clone(),
+            content,
+            tool_name,
+            tool_use_id,
+            is_error,
+        }
+    };
+
+    let msg_content = raw.message.as_ref().and_then(|m| m.get("content"));
+
+    match msg_type {
+        "user" => {
+            match msg_content {
+                Some(Value::String(s)) => {
+                    vec![make(EventKind::UserMessage, s.clone(), None, None, false)]
+                }
+                Some(Value::Array(arr)) => {
+                    let mut events = Vec::new();
+                    for item in arr {
+                        match item.get("type").and_then(|t| t.as_str()) {
+                            Some("tool_result") => {
+                                let content = item
+                                    .get("content")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let tool_use_id = item
+                                    .get("tool_use_id")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string());
+                                let is_error = item
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false);
+                                events.push(make(
+                                    EventKind::ToolResult,
+                                    content,
+                                    None,
+                                    tool_use_id,
+                                    is_error,
+                                ));
+                            }
+                            Some("text") => {
+                                let text = item
+                                    .get("text")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !text.is_empty() {
+                                    events.push(make(
+                                        EventKind::UserMessage,
+                                        text,
+                                        None,
+                                        None,
+                                        false,
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    events
+                }
+                // Fallback: try top-level content.
+                None => {
+                    let content = extract_content_string(&raw.content);
+                    if content.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![make(EventKind::UserMessage, content, None, None, false)]
+                    }
+                }
+                _ => Vec::new(),
+            }
+        }
+
+        "assistant" => match msg_content {
+            Some(Value::Array(arr)) => {
+                let mut events = Vec::new();
+                for item in arr {
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            let text = item
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !text.is_empty() {
+                                events.push(make(
+                                    EventKind::AssistantText,
+                                    text,
+                                    None,
+                                    None,
+                                    false,
+                                ));
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = item
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("?")
+                                .to_string();
+                            let id = item
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .map(|s| s.to_string());
+                            let input_json = item
+                                .get("input")
+                                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                                .unwrap_or_default();
+                            events.push(make(
+                                EventKind::ToolUse,
+                                input_json,
+                                Some(name),
+                                id,
+                                false,
+                            ));
+                        }
+                        Some("thinking") => {
+                            let thinking = item
+                                .get("thinking")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !thinking.is_empty() {
+                                events.push(make(EventKind::Thinking, thinking, None, None, false));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                events
+            }
+            _ => {
+                let content = extract_content_string(&raw.content);
+                if content.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![make(EventKind::AssistantText, content, None, None, false)]
+                }
+            }
+        },
+
+        "system" | "permission-mode" | "last-prompt" | "attachment" => {
+            let content = extract_content_string(&raw.content);
+            if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![make(EventKind::SystemMessage, content, None, None, false)]
+            }
+        }
+
+        // Legacy flat format fields.
+        "tool_use" | "tool_call" => {
+            let tool = raw.tool.clone().or(raw.name.clone());
+            let content = raw
+                .input
+                .as_ref()
+                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                .unwrap_or_default();
+            vec![make(
+                EventKind::ToolUse,
+                content,
+                tool,
+                raw.tool_use_id.clone(),
+                false,
+            )]
+        }
+        "tool_result" | "toolUseResult" => {
+            let tool = raw.tool.clone().or(raw.name.clone());
+            let content = raw.output.clone().unwrap_or_default();
+            vec![make(
+                EventKind::ToolResult,
+                content,
+                tool,
+                raw.tool_use_id.clone(),
+                raw.is_error.unwrap_or(false),
+            )]
+        }
+        "thinking" => {
+            let content = extract_content_string(&raw.content);
+            vec![make(EventKind::Thinking, content, None, None, false)]
+        }
+        "progress" => {
+            let content = raw
+                .message
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or(raw.status.clone())
+                .unwrap_or_default();
+            vec![make(
+                EventKind::Progress,
+                content,
+                raw.tool.clone(),
+                None,
+                false,
+            )]
+        }
+
+        _ => Vec::new(),
+    }
+}
+
+/// Extract text from CC's polymorphic `content` field.
+fn extract_content_string(value: &Option<Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => {
+            let mut parts = Vec::new();
+            for item in arr {
+                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                    parts.push(text);
+                }
+            }
+            parts.join("")
+        }
+        _ => String::new(),
+    }
+}
+
+// ── Structured event rendering ────────────────────────────────────────
+
+/// Render a structured event into display rows.
+fn render_event(
+    event: &StructuredEvent,
+    cols: usize,
+    expanded: bool,
+    event_idx: usize,
+) -> Vec<DisplayRow> {
+    let mut rows = Vec::new();
+    let content_width = cols.saturating_sub(6);
+
+    match event.kind {
+        EventKind::UserMessage => {
+            // Header line.
+            let ts = format_time(&event.timestamp);
+            rows.push(DisplayRow {
+                formatted: format!(
+                    "  {}\u{2503}{} {}{}USER{:<8}{}  {}{}{}",
+                    ansi::GREEN,
+                    ansi::RESET,
+                    ansi::BOLD,
+                    ansi::GREEN,
+                    "",
+                    ansi::RESET,
+                    ansi::DIM,
+                    ts,
+                    ansi::RESET
+                ),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+
+            let max_lines = if expanded { 100 } else { COLLAPSED_USER_LINES };
+            for line in event.content.lines().take(max_lines) {
+                let text = truncate_str(line, content_width);
+                rows.push(DisplayRow {
+                    formatted: format!("  {}\u{2503}{} {}", ansi::GREEN, ansi::RESET, text),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
+            let total = event.content.lines().count();
+            if total > max_lines {
+                let remaining = total - max_lines;
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "  {}\u{2503}{} {}\u{25b8} +{} more lines{}",
+                        ansi::GREEN,
+                        ansi::RESET,
+                        ansi::CYAN,
+                        remaining,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: true,
+                });
+            } else if expanded && total > COLLAPSED_USER_LINES {
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "  {}\u{2503}{} {}\u{25be} collapse{}",
+                        ansi::GREEN,
+                        ansi::RESET,
+                        ansi::CYAN,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: true,
+                });
+            }
+            // Blank separator.
+            rows.push(DisplayRow {
+                formatted: String::new(),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+
+        EventKind::AssistantText => {
+            let max_lines = if expanded {
+                200
+            } else {
+                COLLAPSED_ASSISTANT_LINES
+            };
+            for line in event.content.lines().take(max_lines) {
+                let text = truncate_str(line, content_width);
+                rows.push(DisplayRow {
+                    formatted: format!("    {}{}{}", ansi::MAGENTA, text, ansi::RESET),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
+            let total = event.content.lines().count();
+            if total > max_lines {
+                let remaining = total - max_lines;
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "    {}\u{25b8} +{} more lines{}",
+                        ansi::CYAN,
+                        remaining,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: true,
+                });
+            } else if expanded && total > COLLAPSED_ASSISTANT_LINES {
+                rows.push(DisplayRow {
+                    formatted: format!("    {}\u{25be} collapse{}", ansi::CYAN, ansi::RESET),
+                    event_index: event_idx,
+                    is_expandable: true,
+                });
+            }
+            // Blank separator.
+            rows.push(DisplayRow {
+                formatted: String::new(),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+
+        EventKind::Thinking => {
+            let preview = truncate_str(
+                event.content.lines().next().unwrap_or(""),
+                content_width.saturating_sub(14),
+            );
+            rows.push(DisplayRow {
+                formatted: format!(
+                    "  {}{}\u{25b8} Thinking{}  {}{}{}",
+                    ansi::DIM,
+                    ansi::BLUE,
+                    ansi::RESET,
+                    ansi::DIM,
+                    preview,
+                    ansi::RESET
+                ),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+
+        EventKind::ToolUse => {
+            let tool = event.tool_name.as_deref().unwrap_or("?");
+            let summary = extract_tool_summary(
+                tool,
+                &event.content,
+                content_width.saturating_sub(tool.len() + 6),
+            );
+            let tool_color = tool_ansi_color(tool);
+            rows.push(DisplayRow {
+                formatted: format!(
+                    "  {}{}\u{25b8} {}{}{}  {}{}{}",
+                    ansi::BOLD,
+                    tool_color,
+                    tool,
+                    ansi::RESET,
+                    "",
+                    ansi::DIM,
+                    summary,
+                    ansi::RESET
+                ),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+
+        EventKind::ToolResult => {
+            let (icon, color) = if event.is_error {
+                ("\u{2717}", ansi::RED) // ✗
+            } else {
+                ("\u{2713}", ansi::GREEN) // ✓
+            };
+
+            let preview = truncate_str(
+                event.content.lines().next().unwrap_or(""),
+                content_width.saturating_sub(6),
+            );
+            let total_lines = event.content.lines().count();
+            let line_info = if total_lines > 1 {
+                format!(" +{} lines", total_lines - 1)
+            } else {
+                String::new()
+            };
+
+            rows.push(DisplayRow {
+                formatted: format!(
+                    "    {}{} {}{}{}{}{}{}",
+                    color,
+                    icon,
+                    ansi::RESET,
+                    ansi::DIM,
+                    preview,
+                    line_info,
+                    ansi::RESET,
+                    ""
+                ),
+                event_index: event_idx,
+                is_expandable: total_lines > 1,
+            });
+
+            // Expanded content lines.
+            if expanded && total_lines > 1 {
+                let max_expanded = 50;
+                for line in event.content.lines().skip(1).take(max_expanded) {
+                    let text = truncate_str(line, content_width.saturating_sub(4));
+                    rows.push(DisplayRow {
+                        formatted: format!("      {}{}{}", ansi::DIM, text, ansi::RESET),
+                        event_index: event_idx,
+                        is_expandable: false,
+                    });
+                }
+                if total_lines - 1 > max_expanded {
+                    rows.push(DisplayRow {
+                        formatted: format!(
+                            "      {}... {} more lines{}",
+                            ansi::DIM,
+                            total_lines - 1 - max_expanded,
+                            ansi::RESET
+                        ),
+                        event_index: event_idx,
+                        is_expandable: false,
+                    });
+                }
+            }
+
+            // Blank separator.
+            rows.push(DisplayRow {
+                formatted: String::new(),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+
+        EventKind::Progress => {
+            let tool = event.tool_name.as_deref().unwrap_or("?");
+            let msg = truncate_str(&event.content, content_width.saturating_sub(tool.len() + 4));
+            rows.push(DisplayRow {
+                formatted: format!("    {}\u{22ef} {}: {}{}", ansi::DIM, tool, msg, ansi::RESET),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+
+        EventKind::SystemMessage => {
+            let msg = truncate_str(&event.content, content_width.saturating_sub(4));
+            rows.push(DisplayRow {
+                formatted: format!("  {}\u{25c6} {}{}", ansi::DIM, msg, ansi::RESET),
+                event_index: event_idx,
+                is_expandable: false,
+            });
+        }
+    }
+
+    rows
+}
+
+/// Extract a meaningful summary from tool input JSON.
+fn extract_tool_summary(tool: &str, input_json: &str, max_width: usize) -> String {
+    let value: Value = match serde_json::from_str(input_json) {
+        Ok(v) => v,
+        Err(_) => return truncate_str(input_json, max_width),
+    };
+
+    match tool {
+        "Bash" => value
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, max_width))
+            .unwrap_or_default(),
+        "Read" | "Write" | "Edit" => value
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(shorten_path)
+            .unwrap_or_default(),
+        "Glob" | "Grep" => value
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, max_width))
+            .unwrap_or_default(),
+        "Agent" => value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, max_width))
+            .unwrap_or_default(),
+        _ => {
+            if let Some(obj) = value.as_object() {
+                for (_k, v) in obj.iter() {
+                    if let Some(s) = v.as_str()
+                        && !s.is_empty()
+                    {
+                        return truncate_str(s, max_width);
+                    }
+                }
+            }
+            String::new()
+        }
+    }
+}
+
+/// Return ANSI color for a tool name.
+fn tool_ansi_color(tool: &str) -> &'static str {
+    match tool {
+        "Bash" => ansi::YELLOW,
+        "Read" | "Write" | "Edit" | "Glob" | "Grep" => ansi::CYAN,
+        "Agent" => ansi::BLUE,
+        _ => ansi::CYAN,
+    }
+}
+
+/// Shorten a file path for display (keep last 2-3 components).
+fn shorten_path(path: &str) -> String {
+    let p = Path::new(path);
+    let components: Vec<_> = p.components().collect();
+    if components.len() <= 3 {
+        path.to_string()
+    } else {
+        let tail: PathBuf = components[components.len() - 3..].iter().collect();
+        format!("\u{2026}/{}", tail.display())
+    }
+}
+
+/// Extract HH:MM:SS from an ISO 8601 timestamp.
+fn format_time(ts: &str) -> String {
+    if ts.len() >= 19 {
+        ts[11..19].to_string()
+    } else {
+        ts.to_string()
+    }
+}
+
+// ── Legacy format helpers ─────────────────────────────────────────────
 
 /// ANSI escape codes for structured rendering.
 mod ansi {
@@ -590,7 +1567,333 @@ mod tests {
         state.poll_file();
         let content = state.formatted_content();
         assert!(content.contains("x"));
-        // Two rows means two trailing newlines at least.
+        // Should contain header + rows + footer.
         assert!(content.matches('\n').count() >= 2);
+    }
+
+    // ── Structured parsing tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_nested_user_message() {
+        let events = parse_jsonl_event(
+            r#"{"type":"user","message":{"role":"user","content":"Hello world"},"timestamp":"2026-04-02T00:13:52.232Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::UserMessage);
+        assert_eq!(events[0].content, "Hello world");
+    }
+
+    #[test]
+    fn parse_nested_assistant_text() {
+        let events = parse_jsonl_event(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll help you."}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::AssistantText);
+        assert_eq!(events[0].content, "I'll help you.");
+    }
+
+    #[test]
+    fn parse_nested_tool_use_in_assistant() {
+        let events = parse_jsonl_event(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"toolu_01ABC","input":{"command":"ls -la"}}]},"timestamp":"2026-04-02T00:14:01.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::ToolUse);
+        assert_eq!(events[0].tool_name.as_deref(), Some("Bash"));
+        assert_eq!(events[0].tool_use_id.as_deref(), Some("toolu_01ABC"));
+        assert!(events[0].content.contains("ls -la"));
+    }
+
+    #[test]
+    fn parse_nested_tool_result_in_user() {
+        let events = parse_jsonl_event(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":"file.rs\nCargo.toml"}]},"timestamp":"2026-04-02T00:14:02.500Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::ToolResult);
+        assert_eq!(events[0].tool_use_id.as_deref(), Some("toolu_01ABC"));
+        assert_eq!(events[0].content, "file.rs\nCargo.toml");
+    }
+
+    #[test]
+    fn parse_nested_thinking_in_assistant() {
+        let events = parse_jsonl_event(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me analyze..."}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::Thinking);
+        assert_eq!(events[0].content, "Let me analyze...");
+    }
+
+    #[test]
+    fn parse_nested_mixed_assistant_content() {
+        let events = parse_jsonl_event(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check."},{"type":"tool_use","name":"Grep","id":"toolu_02DEF","input":{"pattern":"TODO"}}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, EventKind::AssistantText);
+        assert_eq!(events[1].kind, EventKind::ToolUse);
+        assert_eq!(events[1].tool_name.as_deref(), Some("Grep"));
+    }
+
+    #[test]
+    fn parse_nested_tool_result_error() {
+        let events = parse_jsonl_event(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ERR","content":"command not found","is_error":true}]},"timestamp":"2026-04-02T00:14:05.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_error);
+    }
+
+    #[test]
+    fn parse_legacy_flat_tool_use() {
+        let events = parse_jsonl_event(
+            r#"{"type":"tool_use","tool":"Bash","tool_use_id":"tu_01","input":{"command":"ls"},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::ToolUse);
+        assert_eq!(events[0].tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn parse_legacy_flat_tool_result() {
+        let events = parse_jsonl_event(
+            r#"{"type":"tool_result","tool":"Bash","tool_use_id":"tu_01","output":"ok","timestamp":"2026-04-02T00:14:02.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::ToolResult);
+        assert_eq!(events[0].content, "ok");
+    }
+
+    #[test]
+    fn parse_system_message() {
+        let events = parse_jsonl_event(
+            r#"{"type":"system","content":"Session started","timestamp":"2026-04-02T00:10:00.000Z"}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::SystemMessage);
+    }
+
+    #[test]
+    fn parse_unknown_type_empty() {
+        let events = parse_jsonl_event(r#"{"type":"unknown_future_type","data":"something"}"#);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_permission_mode_empty() {
+        let events = parse_jsonl_event(
+            r#"{"type":"permission-mode","permissionMode":"default","sessionId":"abc"}"#,
+        );
+        // No content field -> empty.
+        assert!(events.is_empty());
+    }
+
+    // ── Keyboard interaction tests ────────────────────────────────────
+
+    #[test]
+    fn handle_input_scroll_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let mut content = String::new();
+        for i in 0..30 {
+            content.push_str(&format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"line {i}\"}}]}}}}\n"
+            ));
+        }
+        std::fs::write(&path, &content).unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.visible_rows = 10;
+        state.following = false;
+        state.poll_file();
+
+        let initial_scroll = state.scroll;
+        assert!(state.handle_input(b"j")); // scroll down
+        assert_eq!(state.scroll, initial_scroll + 1);
+    }
+
+    #[test]
+    fn handle_input_scroll_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let mut content = String::new();
+        for i in 0..30 {
+            content.push_str(&format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"line {i}\"}}]}}}}\n"
+            ));
+        }
+        std::fs::write(&path, &content).unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.visible_rows = 10;
+        state.following = false;
+        state.poll_file();
+        state.scroll = 5;
+
+        assert!(state.handle_input(b"k")); // scroll up
+        assert_eq!(state.scroll, 4);
+    }
+
+    #[test]
+    fn handle_input_toggle_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        std::fs::write(&path, "{\"type\":\"system\",\"content\":\"test\"}\n").unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.poll_file();
+        assert!(state.following);
+        assert!(state.handle_input(b"f"));
+        assert!(!state.following);
+        assert!(state.handle_input(b"f"));
+        assert!(state.following);
+    }
+
+    #[test]
+    fn handle_input_unknown_key_not_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        std::fs::write(&path, "{\"x\":1}\n").unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.poll_file();
+        assert!(!state.handle_input(b"z")); // unknown key
+    }
+
+    #[test]
+    fn expand_collapse_tool_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        // Write a tool_result with multi-line content.
+        let line = r#"{"type":"tool_result","tool":"Bash","tool_use_id":"tu_01","output":"line1\nline2\nline3\nline4\nline5","timestamp":"2026-04-02T00:14:02.500Z"}"#;
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.visible_rows = 20;
+        state.following = false;
+        state.poll_file();
+
+        // Should have an expandable row (tool_result with >1 lines).
+        let expandable_count = state.display.iter().filter(|r| r.is_expandable).count();
+        assert!(expandable_count > 0, "should have expandable rows");
+
+        let lines_before = state.display.len();
+
+        // Toggle expand.
+        state.handle_input(b"\r");
+        let lines_after = state.display.len();
+
+        // After expanding, there should be more display lines.
+        assert!(
+            lines_after != lines_before,
+            "expand should change line count: before={lines_before}, after={lines_after}"
+        );
+    }
+
+    #[test]
+    fn toggle_all_expansion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let mut content = String::new();
+        for _ in 0..3 {
+            content.push_str(
+                r#"{"type":"tool_result","tool":"Bash","tool_use_id":"tu_01","output":"line1\nline2\nline3","timestamp":"2026-04-02T00:14:02.000Z"}"#,
+            );
+            content.push('\n');
+        }
+        std::fs::write(&path, &content).unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.visible_rows = 40;
+        state.poll_file();
+
+        assert!(!state.all_expanded);
+        state.handle_input(b"e");
+        assert!(state.all_expanded);
+        state.handle_input(b"e");
+        assert!(!state.all_expanded);
+    }
+
+    #[test]
+    fn render_event_tool_use_summary() {
+        let event = StructuredEvent {
+            kind: EventKind::ToolUse,
+            timestamp: "2026-04-02T00:14:01.000Z".to_string(),
+            content: r#"{"command":"ls -la"}"#.to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_use_id: Some("tu_01".to_string()),
+            is_error: false,
+        };
+        let rows = render_event(&event, 80, false, 0);
+        assert!(!rows.is_empty());
+        let combined: String = rows.iter().map(|r| r.formatted.clone()).collect();
+        assert!(combined.contains("Bash"), "should show tool name");
+        assert!(combined.contains("ls -la"), "should show command summary");
+    }
+
+    #[test]
+    fn render_event_tool_result_ok() {
+        let event = StructuredEvent {
+            kind: EventKind::ToolResult,
+            timestamp: String::new(),
+            content: "file.rs\nCargo.toml".to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_use_id: None,
+            is_error: false,
+        };
+        let rows = render_event(&event, 80, false, 0);
+        let combined: String = rows.iter().map(|r| r.formatted.clone()).collect();
+        assert!(combined.contains("\u{2713}"), "should show check mark");
+    }
+
+    #[test]
+    fn render_event_tool_result_error() {
+        let event = StructuredEvent {
+            kind: EventKind::ToolResult,
+            timestamp: String::new(),
+            content: "command not found".to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_use_id: None,
+            is_error: true,
+        };
+        let rows = render_event(&event, 80, false, 0);
+        let combined: String = rows.iter().map(|r| r.formatted.clone()).collect();
+        assert!(combined.contains("\u{2717}"), "should show cross mark");
+    }
+
+    #[test]
+    fn extract_tool_summary_bash() {
+        let summary = extract_tool_summary("Bash", r#"{"command":"cargo build"}"#, 40);
+        assert_eq!(summary, "cargo build");
+    }
+
+    #[test]
+    fn extract_tool_summary_read() {
+        let summary = extract_tool_summary(
+            "Read",
+            r#"{"file_path":"/home/user/project/src/main.rs"}"#,
+            60,
+        );
+        assert!(summary.contains("main.rs"));
+    }
+
+    #[test]
+    fn extract_tool_summary_grep() {
+        let summary = extract_tool_summary("Grep", r#"{"pattern":"fn main"}"#, 40);
+        assert_eq!(summary, "fn main");
+    }
+
+    #[test]
+    fn shorten_path_long() {
+        let short = shorten_path("/home/user/projects/therminal/crates/app/src/main.rs");
+        assert!(short.starts_with('\u{2026}'));
+        assert!(short.contains("main.rs"));
+    }
+
+    #[test]
+    fn shorten_path_short() {
+        assert_eq!(shorten_path("src/main.rs"), "src/main.rs");
     }
 }

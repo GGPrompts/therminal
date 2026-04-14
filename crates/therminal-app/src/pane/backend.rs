@@ -162,8 +162,11 @@ impl PaneBackend for PaneBackendKind {
                 // WebView input handling is a stub for now.
                 Ok(())
             }
-            PaneBackendKind::JsonlTail { .. } => {
-                // Read-only pane — input is silently discarded.
+            PaneBackendKind::JsonlTail { state, .. } => {
+                // Route keystrokes to the interactive viewer (tn-bjvl).
+                if let Ok(mut s) = state.lock() {
+                    s.handle_input(data);
+                }
                 Ok(())
             }
             PaneBackendKind::RemotePty { input_tx, .. } => {
@@ -205,6 +208,7 @@ impl PaneBackend for PaneBackendKind {
             PaneBackendKind::JsonlTail { state, .. } => {
                 if let Ok(mut s) = state.lock() {
                     s.cols = cols.max(20);
+                    s.visible_rows = rows.max(3);
                     s.reformat_all();
                 }
             }
