@@ -7,8 +7,12 @@
 //!
 //! On Windows native builds with WSL panes, a separate WSL probe
 //! (`wsl.exe -e sh -c 'cat /proc/loadavg /proc/meminfo'`) runs at a
-//! slower cadence to fetch Linux-side metrics. The probe is cached and
-//! only fires when `show_wsl` is enabled. On Linux builds the local
+//! slower cadence than the host poll to fetch Linux-side metrics.
+//! The cadence is controlled by `[status_bar.system_metrics] wsl_poll_interval_ms`
+//! (default 10 s). Between WSL probes the poller reuses the last cached
+//! WSL values so the status bar continues to display stale-but-valid
+//! data without spawning a new subprocess every tick.
+//! The probe is gated on `show_wsl`. On Linux builds the local
 //! sysinfo data *is* the WSL data, so no extra probe is needed.
 
 use std::sync::{Arc, Mutex};
@@ -104,16 +108,22 @@ pub type SharedMetrics = Arc<Mutex<SystemMetricsSnapshot>>;
 /// each frame (the lock is held only briefly during the copy).
 ///
 /// `poll_interval` controls how often the host metrics are sampled.
+/// `wsl_poll_interval` controls how often the WSL subprocess probe fires
+/// (should be much larger than `poll_interval` to avoid subprocess overhead).
 /// `show_wsl` enables the WSL probe on Windows builds (auto-detected
 /// from the environment when set to `None`).
-pub fn spawn_metrics_poller(poll_interval: Duration, show_wsl: bool) -> SharedMetrics {
+pub fn spawn_metrics_poller(
+    poll_interval: Duration,
+    wsl_poll_interval: Duration,
+    show_wsl: bool,
+) -> SharedMetrics {
     let shared: SharedMetrics = Arc::new(Mutex::new(SystemMetricsSnapshot::default()));
     let writer = Arc::clone(&shared);
 
     std::thread::Builder::new()
         .name("system-metrics-poller".into())
         .spawn(move || {
-            poller_loop(writer, poll_interval, show_wsl);
+            poller_loop(writer, poll_interval, wsl_poll_interval, show_wsl);
         })
         .expect("failed to spawn system-metrics-poller thread");
 
@@ -121,7 +131,12 @@ pub fn spawn_metrics_poller(poll_interval: Duration, show_wsl: bool) -> SharedMe
 }
 
 /// The actual polling loop that runs on the background thread.
-fn poller_loop(shared: SharedMetrics, interval: Duration, show_wsl: bool) {
+fn poller_loop(
+    shared: SharedMetrics,
+    interval: Duration,
+    wsl_interval: Duration,
+    show_wsl: bool,
+) {
     let mut sys = System::new();
 
     // sysinfo needs two refresh_cpu_all calls separated by a small
@@ -130,6 +145,14 @@ fn poller_loop(shared: SharedMetrics, interval: Duration, show_wsl: bool) {
     // here so the first real poll returns real data.
     sys.refresh_cpu_all();
     std::thread::sleep(Duration::from_millis(200));
+
+    // WSL probe cadence tracking. We start with `wsl_last_probe` far enough
+    // in the past that the first tick fires the probe immediately.
+    let mut wsl_last_probe = Instant::now()
+        .checked_sub(wsl_interval)
+        .unwrap_or_else(Instant::now);
+    let mut cached_wsl_load: Option<f32> = None;
+    let mut cached_wsl_mem_used: Option<u64> = None;
 
     loop {
         // Refresh host CPU + memory.
@@ -140,18 +163,21 @@ fn poller_loop(shared: SharedMetrics, interval: Duration, show_wsl: bool) {
         let mem_used = sys.used_memory();
 
         // WSL probe (Windows-only, gated on show_wsl).
-        let (wsl_load, wsl_mem_used, _wsl_mem_total) = if show_wsl {
-            probe_wsl_metrics()
-        } else {
-            (None, None, None)
-        };
+        // Only run the subprocess when enough time has elapsed; otherwise
+        // reuse the previously cached values to avoid subprocess startup overhead.
+        if show_wsl && wsl_last_probe.elapsed() >= wsl_interval {
+            let (wsl_load, wsl_mem, _wsl_total) = probe_wsl_metrics();
+            cached_wsl_load = wsl_load;
+            cached_wsl_mem_used = wsl_mem;
+            wsl_last_probe = Instant::now();
+        }
 
         // Update the shared snapshot.
         if let Ok(mut snap) = shared.lock() {
             snap.host_cpu_percent = cpu_percent;
             snap.host_mem_used = mem_used;
-            snap.wsl_load_avg = wsl_load;
-            snap.wsl_mem_used = wsl_mem_used;
+            snap.wsl_load_avg = cached_wsl_load;
+            snap.wsl_mem_used = cached_wsl_mem_used;
             snap.last_updated = Some(Instant::now());
         }
 

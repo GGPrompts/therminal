@@ -1647,6 +1647,13 @@ pub struct SystemMetricsConfig {
     /// `/proc/loadavg` and `/proc/meminfo` from the default distro.
     /// Default: auto-detect (enabled on Windows when WSL is present).
     pub show_wsl: Option<bool>,
+    /// How often to run the WSL subprocess probe, in milliseconds.
+    ///
+    /// The WSL probe spawns `wsl.exe -e sh -c '...'` which has a
+    /// non-trivial startup cost (50–200 ms). Load average and memory
+    /// stats change slowly, so probing far less often than the host
+    /// poll is fine. Default: 10000 (10 seconds).
+    pub wsl_poll_interval_ms: u64,
 }
 
 impl Default for SystemMetricsConfig {
@@ -1655,6 +1662,7 @@ impl Default for SystemMetricsConfig {
             enabled: true,
             poll_interval_ms: 2000,
             show_wsl: None, // auto-detect
+            wsl_poll_interval_ms: 10_000,
         }
     }
 }

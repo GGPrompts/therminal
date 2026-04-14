@@ -202,8 +202,10 @@ impl App {
                 .show_wsl
                 .unwrap_or_else(crate::system_metrics::auto_detect_wsl);
             let interval = std::time::Duration::from_millis(mc.poll_interval_ms.max(500));
+            let wsl_interval =
+                std::time::Duration::from_millis(mc.wsl_poll_interval_ms.max(1000));
             Some(crate::system_metrics::spawn_metrics_poller(
-                interval, show_wsl,
+                interval, wsl_interval, show_wsl,
             ))
         } else {
             None
