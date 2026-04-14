@@ -49,6 +49,10 @@ use super::PaneListener;
 /// Maximum number of parsed rows retained in the ring buffer.
 const DEFAULT_MAX_ROWS: usize = 1000;
 
+/// Maximum structured events retained. Prevents unbounded memory
+/// growth on long-running subagent tails (tn-kyr3).
+const MAX_EVENTS: usize = 2000;
+
 /// Default max lines shown for collapsed assistant text.
 const COLLAPSED_ASSISTANT_LINES: usize = 4;
 
@@ -289,6 +293,21 @@ impl JsonlTailState {
             self.scroll_to_bottom();
         }
 
+        // Enforce event cap (tn-kyr3): evict oldest events to prevent
+        // unbounded memory growth on long-running tails.
+        if self.events.len() > MAX_EVENTS {
+            let excess = self.events.len() - MAX_EVENTS;
+            self.events.drain(0..excess);
+            // Rebase expanded_events indices to match the shifted vec.
+            self.expanded_events = self
+                .expanded_events
+                .iter()
+                .filter_map(|&idx| idx.checked_sub(excess))
+                .collect();
+            // Rebuild display rows with correct indices.
+            self.reformat_all();
+        }
+
         if new_rows > 0 {
             debug!(
                 path = %self.path.display(),
@@ -341,21 +360,38 @@ impl JsonlTailState {
             out.push('\n');
         }
 
-        // Footer with keybinding hints.
-        let footer = format!(
-            "{}\u{2191}\u{2193}{}:scroll  {}Enter{}:expand  {}e{}:expand-all  {}f{}:follow  {}G{}:bottom{}",
-            ansi::CYAN,
-            ansi::DIM,
-            ansi::CYAN,
-            ansi::DIM,
-            ansi::CYAN,
-            ansi::DIM,
-            ansi::CYAN,
-            ansi::DIM,
-            ansi::CYAN,
-            ansi::DIM,
-            ansi::RESET
-        );
+        // Footer with keybinding hints (compact at narrow widths).
+        let footer = if self.cols < 50 {
+            format!(
+                "{}\u{2191}\u{2193}{} {}Ent{} {}e{} {}f{} {}G{}{}",
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::RESET
+            )
+        } else {
+            format!(
+                "{}\u{2191}\u{2193}{}:scroll  {}Enter{}:expand  {}e{}:all  {}f{}:follow  {}G{}:bottom{}",
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::CYAN,
+                ansi::DIM,
+                ansi::RESET
+            )
+        };
         out.push_str(&footer);
         out.push('\n');
 
@@ -844,6 +880,11 @@ fn extract_content_string(value: &Option<Value>) -> String {
 // ── Structured event rendering ────────────────────────────────────────
 
 /// Render a structured event into display rows.
+///
+/// Layout adapts to available width: at narrow widths (< 50 cols) the
+/// renderer uses compact indentation and drops timestamps to maximize
+/// content visibility. Content lines are word-wrapped instead of
+/// truncated so the viewer remains readable in auto-tiled swarm panes.
 fn render_event(
     event: &StructuredEvent,
     cols: usize,
@@ -851,46 +892,88 @@ fn render_event(
     event_idx: usize,
 ) -> Vec<DisplayRow> {
     let mut rows = Vec::new();
-    let content_width = cols.saturating_sub(6);
+    let compact = cols < 50;
+    // Prefix overhead: "  ┃ " = 4 chars normal, " ┃" = 2 chars compact.
+    let prefix_cost = if compact { 2 } else { 4 };
+    let content_width = cols.saturating_sub(prefix_cost + 1);
 
-    match event.kind {
-        EventKind::UserMessage => {
-            // Header line.
-            let ts = format_time(&event.timestamp);
+    /// Push wrapped content lines with a colored prefix.
+    fn push_wrapped(
+        rows: &mut Vec<DisplayRow>,
+        text: &str,
+        width: usize,
+        prefix: &str,
+        color: &str,
+        event_idx: usize,
+    ) {
+        for wrapped in wrap_text(text, width) {
             rows.push(DisplayRow {
-                formatted: format!(
-                    "  {}\u{2503}{} {}{}USER{:<8}{}  {}{}{}",
-                    ansi::GREEN,
-                    ansi::RESET,
-                    ansi::BOLD,
-                    ansi::GREEN,
-                    "",
-                    ansi::RESET,
-                    ansi::DIM,
-                    ts,
-                    ansi::RESET
-                ),
+                formatted: format!("{}{}{}{}", prefix, color, wrapped, ansi::RESET),
                 event_index: event_idx,
                 is_expandable: false,
             });
+        }
+    }
 
-            let max_lines = if expanded { 100 } else { COLLAPSED_USER_LINES };
-            for line in event.content.lines().take(max_lines) {
-                let text = truncate_str(line, content_width);
+    match event.kind {
+        EventKind::UserMessage => {
+            // Header line: compact drops timestamp.
+            if compact {
                 rows.push(DisplayRow {
-                    formatted: format!("  {}\u{2503}{} {}", ansi::GREEN, ansi::RESET, text),
+                    formatted: format!(" {}{}USER{}", ansi::BOLD, ansi::GREEN, ansi::RESET),
                     event_index: event_idx,
                     is_expandable: false,
                 });
+            } else {
+                let ts = format_time(&event.timestamp);
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "  {}\u{2503}{} {}{}USER{}  {}{}{}",
+                        ansi::GREEN,
+                        ansi::RESET,
+                        ansi::BOLD,
+                        ansi::GREEN,
+                        ansi::RESET,
+                        ansi::DIM,
+                        ts,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
+
+            let prefix = if compact {
+                format!(" {}\u{2503}{} ", ansi::GREEN, ansi::RESET)
+            } else {
+                format!("  {}\u{2503}{} ", ansi::GREEN, ansi::RESET)
+            };
+            let max_lines = if expanded { 100 } else { COLLAPSED_USER_LINES };
+            let mut line_count = 0;
+            for line in event.content.lines() {
+                if line_count >= max_lines {
+                    break;
+                }
+                let wrapped = wrap_text(line, content_width);
+                for w in &wrapped {
+                    if line_count >= max_lines {
+                        break;
+                    }
+                    rows.push(DisplayRow {
+                        formatted: format!("{}{}", prefix, w),
+                        event_index: event_idx,
+                        is_expandable: false,
+                    });
+                    line_count += 1;
+                }
             }
             let total = event.content.lines().count();
             if total > max_lines {
                 let remaining = total - max_lines;
                 rows.push(DisplayRow {
                     formatted: format!(
-                        "  {}\u{2503}{} {}\u{25b8} +{} more lines{}",
-                        ansi::GREEN,
-                        ansi::RESET,
+                        "{}{}\u{25b8} +{} more{}",
+                        prefix,
                         ansi::CYAN,
                         remaining,
                         ansi::RESET
@@ -900,45 +983,52 @@ fn render_event(
                 });
             } else if expanded && total > COLLAPSED_USER_LINES {
                 rows.push(DisplayRow {
-                    formatted: format!(
-                        "  {}\u{2503}{} {}\u{25be} collapse{}",
-                        ansi::GREEN,
-                        ansi::RESET,
-                        ansi::CYAN,
-                        ansi::RESET
-                    ),
+                    formatted: format!("{}{}\u{25be} collapse{}", prefix, ansi::CYAN, ansi::RESET),
                     event_index: event_idx,
                     is_expandable: true,
                 });
             }
-            // Blank separator.
-            rows.push(DisplayRow {
-                formatted: String::new(),
-                event_index: event_idx,
-                is_expandable: false,
-            });
+            if !compact {
+                rows.push(DisplayRow {
+                    formatted: String::new(),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
         }
 
         EventKind::AssistantText => {
+            let indent = if compact { " " } else { "  " };
             let max_lines = if expanded {
                 200
             } else {
                 COLLAPSED_ASSISTANT_LINES
             };
-            for line in event.content.lines().take(max_lines) {
-                let text = truncate_str(line, content_width);
-                rows.push(DisplayRow {
-                    formatted: format!("    {}{}{}", ansi::MAGENTA, text, ansi::RESET),
-                    event_index: event_idx,
-                    is_expandable: false,
-                });
+            let mut line_count = 0;
+            for line in event.content.lines() {
+                if line_count >= max_lines {
+                    break;
+                }
+                let wrapped = wrap_text(line, content_width);
+                for w in &wrapped {
+                    if line_count >= max_lines {
+                        break;
+                    }
+                    rows.push(DisplayRow {
+                        formatted: format!("{}{}{}{}", indent, ansi::MAGENTA, w, ansi::RESET),
+                        event_index: event_idx,
+                        is_expandable: false,
+                    });
+                    line_count += 1;
+                }
             }
             let total = event.content.lines().count();
             if total > max_lines {
                 let remaining = total - max_lines;
                 rows.push(DisplayRow {
                     formatted: format!(
-                        "    {}\u{25b8} +{} more lines{}",
+                        "{}{}\u{25b8} +{} more{}",
+                        indent,
                         ansi::CYAN,
                         remaining,
                         ansi::RESET
@@ -948,113 +1038,194 @@ fn render_event(
                 });
             } else if expanded && total > COLLAPSED_ASSISTANT_LINES {
                 rows.push(DisplayRow {
-                    formatted: format!("    {}\u{25be} collapse{}", ansi::CYAN, ansi::RESET),
+                    formatted: format!("{}{}\u{25be} collapse{}", indent, ansi::CYAN, ansi::RESET),
                     event_index: event_idx,
                     is_expandable: true,
                 });
             }
-            // Blank separator.
-            rows.push(DisplayRow {
-                formatted: String::new(),
-                event_index: event_idx,
-                is_expandable: false,
-            });
+            if !compact {
+                rows.push(DisplayRow {
+                    formatted: String::new(),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
         }
 
         EventKind::Thinking => {
-            let preview = truncate_str(
-                event.content.lines().next().unwrap_or(""),
-                content_width.saturating_sub(14),
-            );
-            rows.push(DisplayRow {
-                formatted: format!(
-                    "  {}{}\u{25b8} Thinking{}  {}{}{}",
-                    ansi::DIM,
-                    ansi::BLUE,
-                    ansi::RESET,
-                    ansi::DIM,
-                    preview,
-                    ansi::RESET
-                ),
-                event_index: event_idx,
-                is_expandable: false,
-            });
+            let indent = if compact { " " } else { "  " };
+            let label_cost = if compact { 5 } else { 12 }; // "▸ Th…" vs "▸ Thinking  "
+            let preview_width = content_width.saturating_sub(label_cost);
+            if compact {
+                let preview =
+                    truncate_str(event.content.lines().next().unwrap_or(""), preview_width);
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "{}{}{}\u{25b8}Th{} {}{}{}",
+                        indent,
+                        ansi::DIM,
+                        ansi::BLUE,
+                        ansi::RESET,
+                        ansi::DIM,
+                        preview,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            } else {
+                let preview =
+                    truncate_str(event.content.lines().next().unwrap_or(""), preview_width);
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "{}{}{}\u{25b8} Thinking{}  {}{}{}",
+                        indent,
+                        ansi::DIM,
+                        ansi::BLUE,
+                        ansi::RESET,
+                        ansi::DIM,
+                        preview,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
         }
 
         EventKind::ToolUse => {
+            let indent = if compact { " " } else { "  " };
             let tool = event.tool_name.as_deref().unwrap_or("?");
-            let summary = extract_tool_summary(
-                tool,
-                &event.content,
-                content_width.saturating_sub(tool.len() + 6),
-            );
             let tool_color = tool_ansi_color(tool);
-            rows.push(DisplayRow {
-                formatted: format!(
-                    "  {}{}\u{25b8} {}{}{}  {}{}{}",
-                    ansi::BOLD,
-                    tool_color,
-                    tool,
-                    ansi::RESET,
-                    "",
+            // "▸ Tool " costs indent + 2 + tool.len() + 1
+            let summary_width = content_width.saturating_sub(tool.len() + 3);
+            let summary = extract_tool_summary(tool, &event.content, summary_width);
+
+            if compact && summary.is_empty() {
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "{}{}{}\u{25b8} {}{}",
+                        indent,
+                        ansi::BOLD,
+                        tool_color,
+                        tool,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            } else if compact {
+                // Tool on first line, summary wrapped below.
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "{}{}{}\u{25b8} {}{}",
+                        indent,
+                        ansi::BOLD,
+                        tool_color,
+                        tool,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+                push_wrapped(
+                    &mut rows,
+                    &summary,
+                    content_width,
+                    &format!("{} ", indent),
                     ansi::DIM,
-                    summary,
-                    ansi::RESET
-                ),
-                event_index: event_idx,
-                is_expandable: false,
-            });
+                    event_idx,
+                );
+            } else {
+                rows.push(DisplayRow {
+                    formatted: format!(
+                        "{}{}{}\u{25b8} {}{} {}{}{}",
+                        indent,
+                        ansi::BOLD,
+                        tool_color,
+                        tool,
+                        ansi::RESET,
+                        ansi::DIM,
+                        summary,
+                        ansi::RESET
+                    ),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
         }
 
         EventKind::ToolResult => {
+            let indent = if compact { " " } else { "  " };
+            let sub_indent = if compact { "  " } else { "    " };
             let (icon, color) = if event.is_error {
-                ("\u{2717}", ansi::RED) // ✗
+                ("\u{2717}", ansi::RED)
             } else {
-                ("\u{2713}", ansi::GREEN) // ✓
+                ("\u{2713}", ansi::GREEN)
             };
 
-            let preview = truncate_str(
-                event.content.lines().next().unwrap_or(""),
-                content_width.saturating_sub(6),
-            );
             let total_lines = event.content.lines().count();
-            let line_info = if total_lines > 1 {
-                format!(" +{} lines", total_lines - 1)
-            } else {
-                String::new()
-            };
+            let preview_width = content_width.saturating_sub(3); // "✓ " = 2 chars + space
+            let first_line = event.content.lines().next().unwrap_or("");
 
-            rows.push(DisplayRow {
-                formatted: format!(
-                    "    {}{} {}{}{}{}{}{}",
-                    color,
-                    icon,
-                    ansi::RESET,
-                    ansi::DIM,
-                    preview,
-                    line_info,
-                    ansi::RESET,
-                    ""
-                ),
-                event_index: event_idx,
-                is_expandable: total_lines > 1,
-            });
-
-            // Expanded content lines.
-            if expanded && total_lines > 1 {
-                let max_expanded = 50;
-                for line in event.content.lines().skip(1).take(max_expanded) {
-                    let text = truncate_str(line, content_width.saturating_sub(4));
+            // First line: icon + preview, wrapped.
+            let first_wrapped = wrap_text(first_line, preview_width);
+            for (i, w) in first_wrapped.iter().enumerate() {
+                if i == 0 {
+                    let line_info = if total_lines > 1 && !expanded {
+                        format!(" {}+{}{}", ansi::DIM, total_lines - 1, ansi::RESET)
+                    } else {
+                        String::new()
+                    };
                     rows.push(DisplayRow {
-                        formatted: format!("      {}{}{}", ansi::DIM, text, ansi::RESET),
+                        formatted: format!(
+                            "{}{}{} {}{}{}{}",
+                            indent,
+                            color,
+                            icon,
+                            ansi::RESET,
+                            ansi::DIM,
+                            w,
+                            ansi::RESET
+                        ),
+                        event_index: event_idx,
+                        is_expandable: total_lines > 1,
+                    });
+                    if !line_info.is_empty() {
+                        // Append line count hint to the last formatted row.
+                        let last = rows.last_mut().unwrap();
+                        last.formatted.push_str(&line_info);
+                    }
+                } else {
+                    rows.push(DisplayRow {
+                        formatted: format!("{}  {}{}{}", indent, ansi::DIM, w, ansi::RESET),
                         event_index: event_idx,
                         is_expandable: false,
                     });
                 }
+            }
+
+            // Expanded content lines.
+            if expanded && total_lines > 1 {
+                let max_expanded = 50;
+                let expanded_width = content_width.saturating_sub(sub_indent.len());
+                for (count, line) in event.content.lines().skip(1).enumerate() {
+                    if count >= max_expanded {
+                        break;
+                    }
+                    for w in wrap_text(line, expanded_width) {
+                        rows.push(DisplayRow {
+                            formatted: format!("{}{}{}{}", sub_indent, ansi::DIM, w, ansi::RESET),
+                            event_index: event_idx,
+                            is_expandable: false,
+                        });
+                    }
+                }
                 if total_lines - 1 > max_expanded {
                     rows.push(DisplayRow {
                         formatted: format!(
-                            "      {}... {} more lines{}",
+                            "{}{}... {} more{}",
+                            sub_indent,
                             ansi::DIM,
                             total_lines - 1 - max_expanded,
                             ansi::RESET
@@ -1065,28 +1236,39 @@ fn render_event(
                 }
             }
 
-            // Blank separator.
-            rows.push(DisplayRow {
-                formatted: String::new(),
-                event_index: event_idx,
-                is_expandable: false,
-            });
+            if !compact {
+                rows.push(DisplayRow {
+                    formatted: String::new(),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
+            }
         }
 
         EventKind::Progress => {
+            let indent = if compact { " " } else { "  " };
             let tool = event.tool_name.as_deref().unwrap_or("?");
-            let msg = truncate_str(&event.content, content_width.saturating_sub(tool.len() + 4));
+            let msg_width = content_width.saturating_sub(tool.len() + 4);
+            let msg = truncate_str(&event.content, msg_width);
             rows.push(DisplayRow {
-                formatted: format!("    {}\u{22ef} {}: {}{}", ansi::DIM, tool, msg, ansi::RESET),
+                formatted: format!(
+                    "{}{}\u{22ef} {}: {}{}",
+                    indent,
+                    ansi::DIM,
+                    tool,
+                    msg,
+                    ansi::RESET
+                ),
                 event_index: event_idx,
                 is_expandable: false,
             });
         }
 
         EventKind::SystemMessage => {
-            let msg = truncate_str(&event.content, content_width.saturating_sub(4));
+            let indent = if compact { " " } else { "  " };
+            let msg = truncate_str(&event.content, content_width.saturating_sub(2));
             rows.push(DisplayRow {
-                formatted: format!("  {}\u{25c6} {}{}", ansi::DIM, msg, ansi::RESET),
+                formatted: format!("{}{}\u{25c6} {}{}", indent, ansi::DIM, msg, ansi::RESET),
                 event_index: event_idx,
                 is_expandable: false,
             });
@@ -1366,6 +1548,47 @@ fn truncate_str(s: &str, max: usize) -> String {
         let truncated: String = cleaned.chars().take(max.saturating_sub(1)).collect();
         format!("{}\u{2026}", truncated)
     }
+}
+
+/// Wrap a plain text string into lines of at most `width` visible characters.
+/// Tries to break at word boundaries when possible.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let cleaned: String = s.chars().map(|c| if c == '\t' { ' ' } else { c }).collect();
+    if cleaned.chars().count() <= width {
+        return vec![cleaned];
+    }
+
+    let mut lines = Vec::new();
+    let mut remaining = cleaned.as_str();
+    while !remaining.is_empty() {
+        let char_count = remaining.chars().count();
+        if char_count <= width {
+            lines.push(remaining.to_string());
+            break;
+        }
+        // Find the last space within `width` chars to break at.
+        let byte_at_width: usize = remaining
+            .char_indices()
+            .nth(width)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+        let candidate = &remaining[..byte_at_width];
+        if let Some(space_pos) = candidate.rfind(' ') {
+            // Don't break if the space is too far back (< 60% of width).
+            if space_pos > byte_at_width / 3 {
+                lines.push(remaining[..space_pos].to_string());
+                remaining = remaining[space_pos..].trim_start();
+                continue;
+            }
+        }
+        // Hard break at width.
+        lines.push(candidate.to_string());
+        remaining = &remaining[byte_at_width..];
+    }
+    lines
 }
 
 /// Truncate a string that may contain ANSI escapes to `max` visible chars.
@@ -1947,5 +2170,113 @@ mod tests {
     #[test]
     fn shorten_path_short() {
         assert_eq!(shorten_path("src/main.rs"), "src/main.rs");
+    }
+
+    // ── wrap_text tests ──────────────────────────────────────────────
+
+    #[test]
+    fn wrap_text_short_line() {
+        assert_eq!(wrap_text("hello", 20), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_text_exact_width() {
+        assert_eq!(wrap_text("12345", 5), vec!["12345"]);
+    }
+
+    #[test]
+    fn wrap_text_word_break() {
+        let lines = wrap_text("hello world foo bar", 12);
+        assert!(lines.len() >= 2);
+        // First line should break at a word boundary.
+        assert!(lines[0].len() <= 12);
+    }
+
+    #[test]
+    fn wrap_text_hard_break() {
+        let lines = wrap_text("abcdefghijklmnopqrstuvwxyz", 10);
+        assert!(lines.len() >= 3);
+        assert_eq!(lines[0].len(), 10);
+    }
+
+    #[test]
+    fn wrap_text_zero_width() {
+        assert_eq!(wrap_text("hello", 0), vec![""]);
+    }
+
+    // ── Event cap eviction test (tn-kyr3) ────────────────────────────
+
+    #[test]
+    fn event_cap_evicts_old_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        // Write more events than MAX_EVENTS.
+        let count = MAX_EVENTS + 500;
+        let mut content = String::new();
+        for i in 0..count {
+            content.push_str(&format!(
+                "{{\"type\":\"system\",\"content\":\"event {i}\"}}\n"
+            ));
+        }
+        std::fs::write(&path, &content).unwrap();
+
+        let mut state = JsonlTailState::new(path, 80);
+        state.poll_file();
+
+        // events should be capped at MAX_EVENTS.
+        assert!(
+            state.events.len() <= MAX_EVENTS,
+            "events.len()={} should be <= {}",
+            state.events.len(),
+            MAX_EVENTS,
+        );
+        // display should also be bounded (1 display row per SystemMessage event).
+        assert!(state.display.len() <= MAX_EVENTS);
+    }
+
+    // ── Compact rendering test ───────────────────────────────────────
+
+    #[test]
+    fn render_event_compact_at_narrow_width() {
+        let event = StructuredEvent {
+            kind: EventKind::UserMessage,
+            timestamp: "2026-04-14T12:00:00Z".to_string(),
+            content: "Hello from the user".to_string(),
+            tool_name: None,
+            tool_use_id: None,
+            is_error: false,
+        };
+        // Narrow (compact mode).
+        let rows_narrow = render_event(&event, 40, false, 0);
+        // Wide (normal mode).
+        let rows_wide = render_event(&event, 100, false, 0);
+
+        // Compact mode should NOT have a blank separator row.
+        let last_narrow = &rows_narrow.last().unwrap().formatted;
+        assert!(
+            !last_narrow.is_empty(),
+            "compact should not end with blank separator"
+        );
+
+        // Normal mode should have a blank separator row.
+        let last_wide = &rows_wide.last().unwrap().formatted;
+        assert!(
+            last_wide.is_empty(),
+            "normal should end with blank separator"
+        );
+
+        // Compact header should NOT contain timestamp.
+        let header_narrow = &rows_narrow[0].formatted;
+        assert!(
+            !header_narrow.contains("12:00:00"),
+            "compact should omit timestamp"
+        );
+
+        // Normal header should contain timestamp.
+        let header_wide = &rows_wide[0].formatted;
+        assert!(
+            header_wide.contains("12:00:00"),
+            "normal should show timestamp"
+        );
     }
 }

@@ -130,6 +130,10 @@ impl App {
                 warn!("Focused pane {focused} not found in layout");
             }
         }
+        // Clean up swarm_panes so a future spawn for the same agent_id
+        // isn't silently blocked (tn-ihur).
+        self.swarm_panes.retain(|_, pid| *pid != focused);
+
         self.publish_workspace_state();
     }
 
@@ -238,6 +242,10 @@ impl App {
                 );
             }
         }
+        // Clean up swarm_panes so a future spawn for the same agent_id
+        // isn't silently blocked (tn-ihur).
+        self.swarm_panes.retain(|_, pid| *pid != target_id);
+
         self.publish_workspace_state();
     }
 
