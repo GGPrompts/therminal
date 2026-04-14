@@ -70,31 +70,19 @@ impl AutoTileDebouncer {
         // Drain all available events.
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                AgentEvent::Registered {
-                    pane_id,
-                    agent_type,
-                    name,
-                } => {
+                AgentEvent::Registered { pane_id, .. } => {
                     // If there's already a pending reclaim for this pane, cancel it
                     // (agent respawned quickly).
                     if self.pending.contains_key(&pane_id) {
                         self.pending.remove(&pane_id);
                     }
 
-                    // Only auto-tile if this pane doesn't already have an auto-tiled child.
-                    if !self.auto_tiled_panes.contains_key(&pane_id) {
-                        self.pending.insert(
-                            pane_id,
-                            PendingEvent {
-                                action: AutoTileAction::Split {
-                                    parent_pane_id: pane_id,
-                                    agent_name: name,
-                                    agent_type,
-                                },
-                                queued_at: now,
-                            },
-                        );
-                    }
+                    // NOTE: We no longer auto-split on process-detected agent
+                    // registration.  Subagent splits are handled by the
+                    // hook-driven SwarmDebouncer (tn-s8w3), which correctly
+                    // distinguishes subagents from top-level sessions.  The old
+                    // process-detection path cannot tell them apart and would
+                    // incorrectly split for `claude` typed at a prompt.
                 }
                 AgentEvent::Unregistered { pane_id, .. } => {
                     // If there's a pending split for this pane, cancel it (spawned and
@@ -258,7 +246,10 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
-    fn spawn_debounced() {
+    fn registered_does_not_auto_split() {
+        // Since tn-s8w3, process-detected agent registration no longer
+        // triggers auto-tile splits. Subagent splits are handled by the
+        // hook-driven SwarmDebouncer instead.
         let (tx, rx) = mpsc::channel();
         let mut debouncer = AutoTileDebouncer::new(rx, 50);
 
@@ -269,28 +260,22 @@ mod tests {
         })
         .unwrap();
 
-        // First poll drains the event and queues it with a timestamp.
         let actions = debouncer.poll();
         assert!(actions.is_empty());
-        assert!(debouncer.has_pending());
+        assert!(!debouncer.has_pending());
 
-        // After waiting past the debounce interval, the action is ready.
         std::thread::sleep(Duration::from_millis(60));
         let actions = debouncer.poll();
-        assert_eq!(actions.len(), 1);
-        assert!(matches!(
-            actions[0],
-            AutoTileAction::Split {
-                parent_pane_id: 1,
-                ..
-            }
-        ));
+        assert!(
+            actions.is_empty(),
+            "Registered should not produce Split actions"
+        );
     }
 
     #[test]
-    fn spawn_then_exit_within_debounce_cancels() {
+    fn registered_then_unregistered_no_reclaim_without_prior_auto_tile() {
         let (tx, rx) = mpsc::channel();
-        let mut debouncer = AutoTileDebouncer::new(rx, 200);
+        let mut debouncer = AutoTileDebouncer::new(rx, 50);
 
         tx.send(AgentEvent::Registered {
             pane_id: 1,
@@ -304,9 +289,9 @@ mod tests {
         })
         .unwrap();
 
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(60));
         let actions = debouncer.poll();
-        // Both events should have cancelled each other.
+        // No split was queued, so no reclaim should fire either.
         assert!(actions.is_empty());
     }
 
