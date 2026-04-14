@@ -173,6 +173,8 @@ pub(crate) struct SettingsRenderValues {
     pub ui_text_scale_index: usize,
     // Font section (tn-0zfo)
     pub font_family_index: Option<usize>,
+    /// Subset of FONT_FAMILY_OPTIONS that are actually installed on the system.
+    pub available_font_families: Vec<String>,
 }
 
 pub(super) fn editor_chain_label(index: usize) -> &'static str {
@@ -247,11 +249,24 @@ impl SettingsOverlayState {
         };
         let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
 
-        let options: Vec<String> = FONT_FAMILY_OPTIONS
+        // Show only fonts that are actually installed on the system.
+        // Fall back to the full static list if the availability check
+        // returned empty (e.g. font database not yet initialised).
+        let options: Vec<String> = if values.available_font_families.is_empty() {
+            FONT_FAMILY_OPTIONS.iter().map(|s| (*s).to_string()).collect()
+        } else {
+            values.available_font_families.clone()
+        };
+        // Find the current font in the filtered list (indices differ
+        // from FONT_FAMILY_OPTIONS when unavailable fonts are removed).
+        let current_family = values
+            .font_family_index
+            .map(|i| FONT_FAMILY_OPTIONS[i])
+            .unwrap_or("");
+        let selected = options
             .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let selected = values.font_family_index.unwrap_or(0);
+            .position(|o| o.eq_ignore_ascii_case(current_family))
+            .unwrap_or(0);
         let mut controls = vec![SettingsControl::with_type(
             "Font family",
             ControlBinding::FontFamily,

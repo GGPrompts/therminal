@@ -141,6 +141,17 @@ impl App {
                 self.config.accessibility.ui_text_scale,
             ),
             font_family_index: settings_overlay::font_family_index(&self.config.font.family),
+            available_font_families: self
+                .grid_renderer
+                .as_ref()
+                .map(|r| {
+                    settings_overlay::FONT_FAMILY_OPTIONS
+                        .iter()
+                        .filter(|name| r.is_font_available(name))
+                        .map(|s| (*s).to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -294,13 +305,12 @@ impl App {
                 self.relayout_and_redraw();
             }
             // -- Font mutations (tn-0zfo) --
-            SettingsCommand::SetFontFamily(idx) => {
-                let family = settings_overlay::FONT_FAMILY_OPTIONS
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(settings_overlay::FONT_FAMILY_OPTIONS[0]);
-                self.config.font.family = family.to_string();
-                self.config.font.ui_font_family = family.to_string();
+            SettingsCommand::SetFontFamily(ref family) => {
+                if family.is_empty() {
+                    return;
+                }
+                self.config.font.family = family.clone();
+                self.config.font.ui_font_family = family.clone();
                 // Trigger font reload: build a new grid_renderer FontConfig
                 // and call update_font, mirroring the apply_config hot-reload
                 // path in window/mod.rs.
@@ -311,11 +321,11 @@ impl App {
                 ) {
                     let scale = window.scale_factor() as f32;
                     let mut new_font_config = crate::grid_renderer::FontConfig::new(
-                        family.to_string(),
+                        family.clone(),
                         self.config.font.size * scale,
                     );
                     new_font_config.fallback_families = self.config.font.extra_fallbacks.clone();
-                    new_font_config.ui_font_family = family.to_string();
+                    new_font_config.ui_font_family = family.clone();
                     new_font_config.line_height =
                         self.config.font.size * self.config.font.line_height_scale * scale;
                     renderer.update_font(

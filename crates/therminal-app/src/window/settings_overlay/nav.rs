@@ -91,13 +91,13 @@ impl SettingsOverlayState {
                         Some(control.binding.command())
                     }
                     ControlType::Select {
-                        expanded, selected, ..
+                        expanded, selected, options,
                     } => {
                         if *expanded {
                             // Confirm selection and collapse.
                             *expanded = false;
                             let sel = *selected;
-                            Some(Self::select_command_inline(&control.binding, sel))
+                            Some(Self::select_command_inline(&control.binding, sel, options))
                         } else {
                             // Expand the dropdown for arrow key cycling.
                             *expanded = true;
@@ -168,13 +168,13 @@ impl SettingsOverlayState {
                 Some(control.binding.command())
             }
             ControlType::Select {
-                expanded, selected, ..
+                expanded, selected, options,
             } => {
                 if *expanded {
                     // Confirm selection and collapse.
                     *expanded = false;
                     let sel = *selected;
-                    Some(Self::select_command_inline(&control.binding, sel))
+                    Some(Self::select_command_inline(&control.binding, sel, options))
                 } else {
                     // Expand the dropdown for arrow key cycling.
                     *expanded = true;
@@ -504,12 +504,24 @@ impl SettingsOverlayState {
     }
 
     /// Produce a [`SettingsCommand`] for a `Select` control, embedding the
-    /// current `selected` index into bindings that need it.
-    fn select_command_inline(binding: &ControlBinding, selected: usize) -> SettingsCommand {
+    /// current `selected` index into bindings that need it. `options` is the
+    /// select control's option list — needed for FontFamily which carries the
+    /// font name as a `String` rather than an index into a static array.
+    fn select_command_inline(
+        binding: &ControlBinding,
+        selected: usize,
+        options: &[String],
+    ) -> SettingsCommand {
         match binding {
             ControlBinding::NewPaneCwd => SettingsCommand::SetNewPaneCwd(selected),
             ControlBinding::UiTextScale => SettingsCommand::SetUiTextScale(selected),
-            ControlBinding::FontFamily => SettingsCommand::SetFontFamily(selected),
+            ControlBinding::FontFamily => {
+                let name = options
+                    .get(selected)
+                    .cloned()
+                    .unwrap_or_default();
+                SettingsCommand::SetFontFamily(name)
+            }
             _ => binding.command(),
         }
     }
