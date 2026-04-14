@@ -620,6 +620,14 @@ pub enum DaemonEvent {
         /// OS PID of the agent process. `None` when unregistered or
         /// when the PID is not available.
         agent_pid: Option<u32>,
+        /// Claude session UUID from the `PaneCapacityCache` (tn-sl9k).
+        ///
+        /// On Windows+WSL the agent PID is a Windows PID while the
+        /// state files contain Linux PIDs, so PID-based metadata
+        /// lookup fails. Carrying the session_id lets the GUI look
+        /// up Claude chrome metadata by session_id as a fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     /// tn-s8w3: a Claude Code subagent started on a pane (hook-driven).
     ///

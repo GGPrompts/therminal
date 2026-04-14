@@ -353,7 +353,21 @@ fn render_single_pane(
         let reg = agent_registry.lock().unwrap_or_else(|e| e.into_inner());
         reg.get(pane.id).and_then(|entry| entry.pid)
     };
-    let claude_meta = agent_pid.and_then(|pid| claude_cwd.chrome_meta_for_pid(pid));
+    let claude_meta = agent_pid
+        .and_then(|pid| claude_cwd.chrome_meta_for_pid(pid))
+        // tn-sl9k: fallback to session-based lookup when PID path fails.
+        // On Windows+WSL the agent PID is a Windows PID while the state
+        // files contain Linux PIDs, so chrome_meta_for_pid never matches.
+        // The daemon populates session_id on AgentChanged from its capacity
+        // cache; the forwarder stores it in PaneStatus.claude_session_id.
+        .or_else(|| {
+            let sid = pane
+                .status
+                .lock()
+                .ok()
+                .and_then(|s| s.claude_session_id.clone());
+            sid.and_then(|s| claude_cwd.chrome_meta_for_session(&s))
+        });
     let claude_agent_cwd: Option<std::path::PathBuf> =
         claude_meta.as_ref().and_then(|meta| meta.cwd.clone());
     let claude_header_title: Option<String> =

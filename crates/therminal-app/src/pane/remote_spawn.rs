@@ -636,10 +636,15 @@ pub(crate) fn build_remote_pane_state(
                     ref agent_name,
                     ref agent_type,
                     agent_pid,
+                    ref session_id,
                 }) if pane_id == remote_pane_id => {
                     // Update PaneStatus.agent_name (drives the status bar).
+                    // tn-sl9k: also store the session_id so the render path
+                    // can fall back to session-based Claude metadata lookup
+                    // when the PID path fails (Windows+WSL PID mismatch).
                     if let Ok(mut s) = status_for_forwarder.lock() {
                         s.agent_name = agent_name.clone();
+                        s.claude_session_id = session_id.clone();
                     }
                     // Update the GUI's local AgentRegistry (drives the
                     // pane header agent badge and Claude metadata lookup).

@@ -216,6 +216,27 @@ impl ClaudeCwdTracker {
         })
     }
 
+    /// Shared chrome metadata lookup by session UUID (tn-sl9k).
+    ///
+    /// On Windows+WSL the agent PID in `DaemonEvent::AgentChanged` is a
+    /// Windows PID while the state files contain Linux PIDs, so the
+    /// PID-based `chrome_meta_for_pid` lookup never matches. This method
+    /// provides a direct session_id-based fallback: the daemon populates
+    /// `session_id` on `AgentChanged` from its `PaneCapacityCache`, the
+    /// forwarder stores it in `PaneStatus.claude_session_id`, and the
+    /// render path calls this method when the PID path returns `None`.
+    pub fn chrome_meta_for_session(&self, session_id: &str) -> Option<ClaudeChromeMeta> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let meta = g.by_session.get(session_id)?;
+        Some(ClaudeChromeMeta {
+            session_title: meta.session_title.clone(),
+            cwd: meta.cwd.clone(),
+            status: meta.status,
+            current_tool: meta.current_tool.clone(),
+            subagent_count: meta.subagent_count,
+        })
+    }
+
     /// Test-only pid -> cwd lookup retained for the existing tracker
     /// regression tests. Production chrome should use `chrome_meta_for_pid`
     /// so all surfaces share the same source object.
@@ -418,5 +439,52 @@ mod tests {
         let meta = t.chrome_meta_for_pid(4242).expect("expected metadata");
         assert_eq!(meta.status, ClaudeStatus::Streaming);
         assert_eq!(meta.subagent_count, 2);
+    }
+
+    // ── tn-sl9k: session-based fallback tests ────────────────────────
+
+    #[test]
+    fn chrome_meta_for_session_returns_metadata() {
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state_with_title(
+            "sid-a",
+            Some(4242),
+            Some("/home/u/repo"),
+            Some("fix login bug"),
+        )]);
+        // Session-based lookup bypasses the PID entirely.
+        let meta = t
+            .chrome_meta_for_session("sid-a")
+            .expect("expected metadata via session_id");
+        assert_eq!(meta.session_title.as_deref(), Some("fix login bug"));
+        assert_eq!(meta.cwd, Some(PathBuf::from("/home/u/repo")));
+    }
+
+    #[test]
+    fn chrome_meta_for_session_returns_none_for_unknown_session() {
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state("sid-a", Some(4242), Some("/home/u/repo"))]);
+        assert!(t.chrome_meta_for_session("sid-nonexistent").is_none());
+    }
+
+    #[test]
+    fn session_fallback_works_when_pid_mismatches() {
+        // Simulates Windows+WSL: state file has Linux PID 1234, but the
+        // AgentRegistry has Windows PID 56789. PID-based lookup fails,
+        // session-based lookup succeeds.
+        let t = ClaudeCwdTracker::new();
+        t.replace_from(&[mk_state_with_title(
+            "sid-wsl",
+            Some(1234), // Linux PID in state file
+            Some("/home/u/project"),
+            Some("WSL session"),
+        )]);
+        // Windows PID doesn't match any state file entry.
+        assert!(t.chrome_meta_for_pid(56789).is_none());
+        // But session-based lookup works.
+        let meta = t
+            .chrome_meta_for_session("sid-wsl")
+            .expect("session-based lookup should succeed");
+        assert_eq!(meta.session_title.as_deref(), Some("WSL session"));
     }
 }

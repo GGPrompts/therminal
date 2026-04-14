@@ -348,11 +348,19 @@ pub(crate) fn apply_scan_results(
                 );
                 claimed_pids.insert(agent.pid);
                 // tn-alpb: notify GUI so remote pane headers update.
+                // tn-sl9k: include session_id from the capacity cache so
+                // the GUI can look up Claude metadata by session_id when
+                // PID-based lookup fails (Windows+WSL PID mismatch).
+                let session_id = mgr
+                    .pane_capacity(pane_id)
+                    .map(|e| e.session_id)
+                    .filter(|s| !s.is_empty());
                 mgr.broadcast_event(therminal_protocol::daemon::DaemonEvent::AgentChanged {
                     pane_id,
                     agent_name: Some(agent.name.clone()),
                     agent_type: Some(agent_type_str(agent.agent_type)),
                     agent_pid: Some(agent.pid),
+                    session_id,
                 });
             }
             (Some(agent), Some(existing)) => {
@@ -377,11 +385,17 @@ pub(crate) fn apply_scan_results(
                         Some(agent.pid),
                     );
                     // tn-alpb: notify GUI of the change.
+                    // tn-sl9k: include session_id for PID-mismatch fallback.
+                    let session_id = mgr
+                        .pane_capacity(pane_id)
+                        .map(|e| e.session_id)
+                        .filter(|s| !s.is_empty());
                     mgr.broadcast_event(therminal_protocol::daemon::DaemonEvent::AgentChanged {
                         pane_id,
                         agent_name: Some(agent.name.clone()),
                         agent_type: Some(agent_type_str(agent.agent_type)),
                         agent_pid: Some(agent.pid),
+                        session_id,
                     });
                 }
             }
@@ -405,6 +419,7 @@ pub(crate) fn apply_scan_results(
                         agent_name: None,
                         agent_type: None,
                         agent_pid: None,
+                        session_id: None,
                     });
                 }
             }

@@ -55,6 +55,12 @@ pub struct PaneStatus {
     pub git_state: Option<GitState>,
     /// Opaque key/value tags from the daemon (tn-bbvf).
     pub tags: HashMap<String, String>,
+    /// Claude session UUID from the daemon's capacity cache (tn-sl9k).
+    /// Populated by the forwarder when `DaemonEvent::AgentChanged` arrives
+    /// with a `session_id`. Used as a fallback lookup key in the render
+    /// path when PID-based `chrome_meta_for_pid` fails (Windows+WSL PID
+    /// mismatch).
+    pub claude_session_id: Option<String>,
 }
 
 // ── Per-pane state ──────────────────────────────────────────────────────

@@ -192,8 +192,15 @@ impl App {
                         .unwrap_or_else(|e| e.into_inner());
                     reg.get(pane.id).and_then(|entry| entry.pid)
                 };
-                let claude_meta =
-                    agent_pid.and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid));
+                let claude_meta = agent_pid
+                    .and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid))
+                    // tn-sl9k: session-based fallback for Windows+WSL PID mismatch.
+                    .or_else(|| {
+                        status
+                            .claude_session_id
+                            .as_deref()
+                            .and_then(|s| self.claude_cwd.chrome_meta_for_session(s))
+                    });
                 let dims = if let Some(term) = pane.backend.term() {
                     let term_guard = term.lock();
                     let cols = alacritty_terminal::grid::Dimensions::columns(&*term_guard);
@@ -308,8 +315,16 @@ impl App {
                             .unwrap_or_else(|e| e.into_inner());
                         reg.get(pane.id).and_then(|entry| entry.pid)
                     };
-                    let meta =
-                        agent_pid.and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid))?;
+                    let meta = agent_pid
+                        .and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid))
+                        // tn-sl9k: session-based fallback for Windows+WSL PID mismatch.
+                        .or_else(|| {
+                            pane.status
+                                .lock()
+                                .ok()
+                                .and_then(|s| s.claude_session_id.clone())
+                                .and_then(|s| self.claude_cwd.chrome_meta_for_session(&s))
+                        })?;
                     let title = meta.session_title?;
                     Some((ws_id, title))
                 })
@@ -658,6 +673,14 @@ impl App {
                     };
                     agent_pid
                         .and_then(|pid| self.claude_cwd.chrome_meta_for_pid(pid))
+                        // tn-sl9k: session-based fallback for Windows+WSL PID mismatch.
+                        .or_else(|| {
+                            pane.status
+                                .lock()
+                                .ok()
+                                .and_then(|s| s.claude_session_id.clone())
+                                .and_then(|s| self.claude_cwd.chrome_meta_for_session(&s))
+                        })
                         .map(|meta| delegate_state_from_claude(meta.status))
                         .unwrap_or(chrome::DelegateState::Idle)
                 };
