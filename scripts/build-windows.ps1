@@ -24,7 +24,11 @@ $repoRoot = if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $localBuildDir = Join-Path $env:USERPROFILE "therminal-build"
 if ($repoRoot -match '^\\\\') {
     Write-Host "=== UNC source detected, syncing to $localBuildDir ==="
-    & robocopy $repoRoot $localBuildDir /MIR /XD target .git /XF "*.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
+    # /MIR mirrors the directory tree; /FFT uses 2-second timestamp granularity
+    # to tolerate cross-filesystem jitter between WSL (ext4) and NTFS — without
+    # this, robocopy may re-copy unchanged files whose mtimes differ by < 2s,
+    # which invalidates cargo fingerprints and triggers full recompilation.
+    & robocopy $repoRoot $localBuildDir /MIR /FFT /XD target .git /XF "*.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
     # robocopy exit codes 0-7 are success/informational
     if ($LASTEXITCODE -gt 7) {
         throw "robocopy failed with exit code $LASTEXITCODE"
@@ -33,17 +37,6 @@ if ($repoRoot -match '^\\\\') {
     # but we need Cargo.lock for reproducible builds)
     $cargoLock = Join-Path $repoRoot "Cargo.lock"
     & robocopy (Split-Path $cargoLock) $localBuildDir "Cargo.lock" /NFL /NDL /NJH /NJS /NS /NC /NP
-    # Invalidate stale cargo fingerprints for workspace crates so incremental
-    # compilation picks up all mirrored source changes.  The target/ dir is
-    # excluded from robocopy (/XD target) so old fingerprints can survive
-    # across syncs and confuse rustc into skipping changed crates.
-    $fingerprintDir = Join-Path $localBuildDir "target"
-    foreach ($profile in @("release", "debug")) {
-        $fpDir = Join-Path $fingerprintDir "$profile\.fingerprint"
-        if (Test-Path $fpDir) {
-            Get-ChildItem -Directory $fpDir -Filter "therminal-*" | Remove-Item -Recurse -Force
-        }
-    }
     $repoRoot = $localBuildDir
     Write-Host "=== building from $repoRoot ==="
 }

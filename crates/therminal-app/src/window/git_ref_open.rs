@@ -436,7 +436,10 @@ mod tests {
                 let s = String::from_utf8(bytes).unwrap();
                 assert!(s.starts_with("cd '/repo' && clear && "));
                 assert!(s.contains("'lazygit' '--filter' 'abc1234'"));
-                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
+                assert!(
+                    !s.contains("exec"),
+                    "must not use exec — shell must survive Ctrl+C"
+                );
                 assert!(s.ends_with('\n'));
             }
             other => panic!("expected SpawnTool, got {other:?}"),
@@ -451,7 +454,10 @@ mod tests {
                 assert_eq!(cmd_display, "gitlogue -c deadbeef");
                 let s = String::from_utf8(bytes).unwrap();
                 assert!(s.contains("'gitlogue' '-c' 'deadbeef'"));
-                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
+                assert!(
+                    !s.contains("exec"),
+                    "must not use exec — shell must survive Ctrl+C"
+                );
             }
             other => panic!("expected SpawnTool, got {other:?}"),
         }
@@ -465,7 +471,10 @@ mod tests {
                 assert_eq!(cmd_display, "tig show feedface");
                 let s = String::from_utf8(bytes).unwrap();
                 assert!(s.contains("'tig' 'show' 'feedface'"));
-                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
+                assert!(
+                    !s.contains("exec"),
+                    "must not use exec — shell must survive Ctrl+C"
+                );
             }
             other => panic!("expected SpawnTool, got {other:?}"),
         }
@@ -488,7 +497,10 @@ mod tests {
                 assert_eq!(missing_binary, "lazygit");
                 let s = String::from_utf8(bytes).unwrap();
                 assert!(s.contains("git show 'abc1234'"));
-                assert!(!s.contains("exec"), "must not use exec — shell must survive Ctrl+C");
+                assert!(
+                    !s.contains("exec"),
+                    "must not use exec — shell must survive Ctrl+C"
+                );
                 assert!(s.starts_with("cd '/r' && clear && "));
             }
             other => panic!("expected FallbackGitShow, got {other:?}"),
