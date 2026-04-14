@@ -277,8 +277,12 @@ fn classify_wsl_process(comm: &str, args: &str) -> Option<AgentType> {
         return None;
     }
 
-    // Claude Code: Node.js process with "claude" in the command line.
+    // Claude Code: Node.js process with "claude" in the command line,
+    // OR native binary named "claude" / "claude-*" (post-2025 Rust build).
     if comm_lower.contains("node") && args_lower.contains("claude") {
+        return Some(AgentType::Claude);
+    }
+    if comm_lower == "claude" || comm_lower.starts_with("claude-") {
         return Some(AgentType::Claude);
     }
     // Codex: process named exactly "codex" or "codex-…".
@@ -320,8 +324,12 @@ fn classify_process(process: &Process) -> Option<AgentType> {
         return None;
     }
 
-    // Claude Code: Node.js process with "claude" in the command line.
+    // Claude Code: Node.js process with "claude" in the command line,
+    // OR native binary named "claude" / "claude-*" (post-2025 Rust build).
     if name.contains("node") && cmd_joined.contains("claude") {
+        return Some(AgentType::Claude);
+    }
+    if name == "claude" || name.starts_with("claude-") {
         return Some(AgentType::Claude);
     }
 
@@ -581,6 +589,11 @@ mod tests {
             classify_wsl_process("node", "node /opt/claude/cli.js"),
             Some(AgentType::Claude)
         );
+        // Native Claude binary (post-2025).
+        assert_eq!(
+            classify_wsl_process("claude", "claude --resume"),
+            Some(AgentType::Claude)
+        );
         assert_eq!(
             classify_wsl_process("codex", "codex --resume"),
             Some(AgentType::Codex)
@@ -644,6 +657,16 @@ mod tests {
                 label: "Claude Code: node18 variant",
                 stdout: "  555    1 node18 /home/u/.nvm/versions/node/v18/bin/node /usr/local/bin/claude\n",
                 expected: vec![(AgentType::Claude, 555, "node18")],
+            },
+            Case {
+                label: "Claude Code: native binary",
+                stdout: "  7777  7770 claude claude --resume\n",
+                expected: vec![(AgentType::Claude, 7777, "claude")],
+            },
+            Case {
+                label: "Claude Code: native binary with subcommand path",
+                stdout: "  8888  1 claude /home/u/.claude/local/claude\n",
+                expected: vec![(AgentType::Claude, 8888, "claude")],
             },
             // --- Codex process tree ---
             Case {
@@ -845,6 +868,24 @@ mod tests {
                 args: "node /usr/lib/something-else.js",
                 expected: None,
             },
+            Case {
+                label: "Claude: native binary (exact)",
+                comm: "claude",
+                args: "claude --resume",
+                expected: Some(AgentType::Claude),
+            },
+            Case {
+                label: "Claude: native binary (prefixed)",
+                comm: "claude-desktop",
+                args: "claude-desktop",
+                expected: Some(AgentType::Claude),
+            },
+            Case {
+                label: "Claude: native binary case-insensitive",
+                comm: "CLAUDE",
+                args: "CLAUDE",
+                expected: Some(AgentType::Claude),
+            },
             // Codex variants
             Case {
                 label: "Codex: exact match",
@@ -936,9 +977,15 @@ mod tests {
                 expected: None,
             },
             Case {
-                label: "Claude mcp serve is not an agent",
+                label: "Claude mcp serve is not an agent (node)",
                 comm: "node",
                 args: "node /usr/bin/claude serve",
+                expected: None,
+            },
+            Case {
+                label: "Claude native binary in serve mode is not an agent",
+                comm: "claude",
+                args: "claude mcp serve",
                 expected: None,
             },
             Case {

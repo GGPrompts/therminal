@@ -173,11 +173,16 @@ pub async fn tick_once(
         triples.iter().map(|(pid, _, _)| *pid).collect();
     detectors.retain(|pane_id, _| live_pane_ids.contains(pane_id));
 
-    // Lazily create detectors for new panes that have a known shell PID
-    // (or, on Windows native, are WSL panes that don't need a shell PID
-    // because the WSL probe ignores the host process tree). Run scans
-    // outside the SessionManager lock — sysinfo and `wsl.exe ps` can
-    // both be slow.
+    // ── WSL scan coalescing (tn-alpb) ────────────────────────────────
+    // `scan_wsl` runs `wsl.exe -d <distro> -e ps -eo …` which returns
+    // ALL processes in the distro, not just the pane's subtree. Running
+    // it once per pane is both redundant (N identical wsl.exe calls per
+    // tick) and wrong (every pane sees the same agents → all get
+    // registered). Fix: run the WSL scan ONCE per distro and share the
+    // result across all WSL panes in that distro.
+    let mut wsl_scan_cache: HashMap<String, Vec<therminal_terminal::process_detector::DetectedAgent>> =
+        HashMap::new();
+
     let mut results: Vec<(
         PaneId,
         Vec<therminal_terminal::process_detector::DetectedAgent>,
@@ -223,8 +228,19 @@ pub async fn tick_once(
                 "process_detector_task: initialising detector for pane"
             );
         }
-        let agents = detector.scan();
-        results.push((pane_id, agents));
+
+        // For WSL panes: reuse cached scan results from the first pane
+        // in this distro instead of spawning another `wsl.exe` process.
+        if let Some(ref distro) = wsl_distro {
+            let agents = wsl_scan_cache
+                .entry(distro.clone())
+                .or_insert_with(|| detector.scan())
+                .clone();
+            results.push((pane_id, agents));
+        } else {
+            let agents = detector.scan();
+            results.push((pane_id, agents));
+        }
     }
 
     if results.is_empty() {
@@ -250,6 +266,18 @@ pub async fn tick_once(
 ///    vanished pane that would linger until the next 3s tick.
 /// 2. Register / re-register / unregister based on the `(scan_result,
 ///    existing_entry)` pair.
+///
+/// ## WSL deduplication (tn-alpb)
+///
+/// The WSL probe (`scan_wsl`) returns ALL agent processes visible in the
+/// distro, not just those in a specific pane's process subtree. When
+/// multiple WSL panes share the same distro, they all report the same
+/// agents. To prevent every pane from being flagged, we track which
+/// agent PIDs have already been claimed: if pane A already owns agent
+/// PID 12345 (either from a prior tick or earlier in this batch), pane B
+/// skips it. The first pane that already has the agent "wins"; otherwise
+/// the first in scan order claims it. This is a best-effort heuristic
+/// until proper per-pane WSL process-tree scoping is implemented.
 pub(crate) fn apply_scan_results(
     mgr: &mut SessionManager,
     results: Vec<(
@@ -257,6 +285,16 @@ pub(crate) fn apply_scan_results(
         Vec<therminal_terminal::process_detector::DetectedAgent>,
     )>,
 ) {
+    // tn-alpb: collect agent PIDs already registered on OTHER panes so
+    // the WSL global scan doesn't stamp every pane with the same agent.
+    let mut claimed_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Seed with PIDs already in the registry from prior ticks.
+    for entry in mgr.agent_registry().agents() {
+        if let Some(pid) = entry.pid {
+            claimed_pids.insert(pid);
+        }
+    }
+
     for (pane_id, agents) in results {
         // tn-l78s: a pane may have been closed in the window between the
         // snapshot and re-acquisition of the lock. Skip any pane that is
@@ -269,6 +307,18 @@ pub(crate) fn apply_scan_results(
         let registry_entry = mgr.agent_registry().get(pane_id).cloned();
         match (agents.first(), registry_entry) {
             (Some(agent), None) => {
+                // tn-alpb: WSL dedup — skip if this agent PID is already
+                // claimed by another pane (the WSL probe sees all agents
+                // globally, not per-pane).
+                if claimed_pids.contains(&agent.pid) {
+                    debug!(
+                        pane_id,
+                        agent = %agent.name,
+                        pid = agent.pid,
+                        "skipping agent already claimed by another pane"
+                    );
+                    continue;
+                }
                 debug!(
                     pane_id,
                     agent = %agent.name,
@@ -281,6 +331,7 @@ pub(crate) fn apply_scan_results(
                     agent.agent_type,
                     Some(agent.pid),
                 );
+                claimed_pids.insert(agent.pid);
                 // tn-alpb: notify GUI so remote pane headers update.
                 mgr.broadcast_event(therminal_protocol::daemon::DaemonEvent::AgentChanged {
                     pane_id,
@@ -290,6 +341,10 @@ pub(crate) fn apply_scan_results(
                 });
             }
             (Some(agent), Some(existing)) => {
+                // This pane already owns an agent — that's fine, just
+                // check for type/pid changes. Mark PID as claimed so
+                // no other pane steals it.
+                claimed_pids.insert(agent.pid);
                 // Re-register if the agent type or pid changed (e.g.
                 // user killed claude and started codex in the same pane).
                 if existing.agent_type != agent.agent_type || existing.pid != Some(agent.pid) {
