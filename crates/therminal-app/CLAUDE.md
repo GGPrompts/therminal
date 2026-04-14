@@ -38,7 +38,11 @@ src/
 │   │       └── text.rs   # Text rendering
 │   ├── trust_escalation_overlay.rs # Trust tier escalation dialog
 │   ├── toast.rs         # Toast notification overlay
-│   ├── event_handler.rs # winit event handler dispatch
+│   ├── event_handler/
+│   │   ├── mod.rs       # Top-level event routing: handle_keyboard_input_event, handle_keybinding, mouse/window handlers, rename
+│   │   ├── scroll.rs    # scroll_focused_pane, focused_pane_is_scrolled_back (tn-5dpv)
+│   │   ├── settings.rs  # apply_settings_command, SettingsCommand dispatch, overlay open/close, trust escalation
+│   │   └── pty_input.rs # handle_key_input: winit key → PTY byte encoding
 │   ├── init.rs          # Window initialization
 │   ├── render_driver.rs # Render orchestration, widget overlay drawing
 │   ├── render_tests.rs  # Render driver tests
