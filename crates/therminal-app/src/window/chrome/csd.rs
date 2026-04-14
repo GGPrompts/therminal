@@ -334,11 +334,12 @@ fn shape_csd_icons(
     close_icon_color: GlyphColor,
     renderer: &mut GridRenderer,
 ) {
-    // CSD button icons (≡ ─ □ ✕) must use the grid/monospace font, not
-    // ui_font_family — many display and Nerd Fonts lack these glyphs.
-    let family = renderer.font_config.effective_family().to_string();
-    let attrs =
-        |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Name(&family)).color(c) };
+    // CSD button icons (≡ ─ □ ✕) use the generic Monospace family so
+    // cosmic-text resolves to any available system monospace font. This
+    // decouples the icons from font.family — if the user picks a font
+    // that lacks box-drawing or mathematical operator glyphs, the CSD
+    // buttons still render correctly.
+    let attrs = |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Monospace).color(c) };
 
     ensure_shaped(
         icons.settings_slot,

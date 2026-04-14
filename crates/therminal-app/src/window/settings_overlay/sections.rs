@@ -117,10 +117,13 @@ pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.
 /// Predefined font family options for the unified font selector (tn-0zfo).
 ///
 /// The first entry is a sentinel for the platform default (empty string in
-/// config). Remaining entries are popular monospace families likely to be
-/// installed on developer machines.
+/// config). Nerd Font variants are listed first (icon support for CSD
+/// buttons, powerline, etc.), followed by their plain counterparts and
+/// other popular monospace families.
 pub(crate) const FONT_FAMILY_OPTIONS: &[&str] = &[
     "JetBrainsMono Nerd Font Mono",
+    "FiraCode Nerd Font",
+    "CaskaydiaCove Nerd Font",
     "JetBrains Mono",
     "Fira Code",
     "Cascadia Code",

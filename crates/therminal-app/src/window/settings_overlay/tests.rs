@@ -815,14 +815,15 @@ fn font_family_select_produces_command() {
 #[test]
 fn font_family_index_finds_known_families() {
     assert_eq!(font_family_index("JetBrainsMono Nerd Font Mono"), Some(0));
-    assert_eq!(font_family_index("Fira Code"), Some(2));
-    assert_eq!(font_family_index("Iosevka"), Some(4));
+    assert_eq!(font_family_index("FiraCode Nerd Font"), Some(1));
+    assert_eq!(font_family_index("Fira Code"), Some(4));
+    assert_eq!(font_family_index("Iosevka"), Some(6));
 }
 
 #[test]
 fn font_family_index_is_case_insensitive() {
-    assert_eq!(font_family_index("fira code"), Some(2));
-    assert_eq!(font_family_index("JETBRAINS MONO"), Some(1));
+    assert_eq!(font_family_index("fira code"), Some(4));
+    assert_eq!(font_family_index("JETBRAINS MONO"), Some(3));
 }
 
 #[test]
