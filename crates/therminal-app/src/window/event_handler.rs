@@ -11,6 +11,7 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 
+use alacritty_terminal::grid::Scroll;
 use therminal_core::config::{ConfigEditSession, KeyAction, config_path};
 use therminal_terminal::input::{self, KeyCode, Modifiers as InputModifiers};
 
@@ -426,6 +427,19 @@ impl App {
                 info!(focus_mode = self.focus_mode, "focus mode toggled");
                 self.relayout_and_redraw();
             }
+            // tn-5dpv: scrollback navigation
+            KeyAction::ScrollPageUp => {
+                self.scroll_focused_pane(Scroll::PageUp);
+            }
+            KeyAction::ScrollPageDown => {
+                self.scroll_focused_pane(Scroll::PageDown);
+            }
+            KeyAction::ScrollTop => {
+                self.scroll_focused_pane(Scroll::Top);
+            }
+            KeyAction::ScrollBottom => {
+                self.scroll_focused_pane(Scroll::Bottom);
+            }
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
@@ -438,7 +452,17 @@ impl App {
     }
 
     /// Handle a keyboard event: encode it and write to the focused pane's PTY.
+    ///
+    /// tn-5dpv: when the viewport is scrolled back (`display_offset > 0`),
+    /// any regular keystroke that would be forwarded to the PTY also
+    /// snaps the viewport to the live bottom, matching the behavior of
+    /// Alacritty, Kitty, and other modern terminals.
     pub(super) fn handle_key_input(&mut self, key_event: &KeyEvent) {
+        // tn-5dpv: snap to bottom on any PTY-bound keystroke while scrolled back.
+        if self.focused_pane_is_scrolled_back() {
+            self.scroll_focused_pane(Scroll::Bottom);
+        }
+
         let focused = match self.workspaces.as_ref().and_then(|wm| wm.focused_pane()) {
             Some(id) => id,
             None => return,
@@ -504,6 +528,57 @@ impl App {
         {
             warn!("Failed to write to pane {} PTY: {e}", pane.id);
         }
+    }
+
+    /// tn-5dpv: scroll the focused pane's viewport by the given `Scroll` command.
+    /// No-op if the focused pane has no terminal backend.
+    fn scroll_focused_pane(&mut self, scroll: Scroll) {
+        let term = {
+            let focused = match self.workspaces.as_ref().and_then(|wm| wm.focused_pane()) {
+                Some(id) => id,
+                None => return,
+            };
+            let layout = match self.get_layout() {
+                Some(l) => l,
+                None => return,
+            };
+            let pane = match layout.find_pane(focused) {
+                Some(p) => p,
+                None => return,
+            };
+            match pane.backend.term() {
+                Some(t) => std::sync::Arc::clone(t),
+                None => return,
+            }
+        };
+        let mut term_guard = term.lock();
+        term_guard.scroll_display(scroll);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// tn-5dpv: check if the focused pane is currently scrolled back
+    /// (display_offset > 0). Returns false if there is no focused terminal pane.
+    fn focused_pane_is_scrolled_back(&self) -> bool {
+        let focused = match self.workspaces.as_ref().and_then(|wm| wm.focused_pane()) {
+            Some(id) => id,
+            None => return false,
+        };
+        let layout = match self.get_layout() {
+            Some(l) => l,
+            None => return false,
+        };
+        let pane = match layout.find_pane(focused) {
+            Some(p) => p,
+            None => return false,
+        };
+        let term = match pane.backend.term() {
+            Some(t) => t,
+            None => return false,
+        };
+        let term_guard = term.lock();
+        term_guard.grid().display_offset() > 0
     }
 
     /// Open a context menu at the given pixel position, or pass through to

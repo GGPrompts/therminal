@@ -80,6 +80,14 @@ pub enum KeyAction {
     /// Toggle "focus mode" — hide/show all chrome (pane headers, status
     /// bar, tab bar) for maximum terminal space (tn-t2yd.2).
     FocusMode,
+    /// Scroll the viewport one page up (into scrollback history).
+    ScrollPageUp,
+    /// Scroll the viewport one page down (toward the live bottom).
+    ScrollPageDown,
+    /// Scroll the viewport to the very top of scrollback history.
+    ScrollTop,
+    /// Scroll the viewport to the live bottom (display_offset = 0).
+    ScrollBottom,
     // ── Hotspot actions (used by action palette, not keybindable) ────────
     /// Copy a hotspot text to the clipboard.
     HotspotCopy(String),
@@ -146,6 +154,10 @@ impl KeyAction {
             KeyAction::JumpErrorNext => "Jump to next error",
             KeyAction::ToggleAgentTimeline => "Toggle agent timeline",
             KeyAction::FocusMode => "Toggle focus mode (hide all chrome)",
+            KeyAction::ScrollPageUp => "Scroll page up",
+            KeyAction::ScrollPageDown => "Scroll page down",
+            KeyAction::ScrollTop => "Scroll to top of history",
+            KeyAction::ScrollBottom => "Scroll to bottom (live)",
             KeyAction::HotspotCopy(_) => "Copy to clipboard",
             KeyAction::HotspotOpenInEditor(_) => "Open in editor",
             KeyAction::HotspotOpenExternal(_) => "Open externally",
@@ -183,7 +195,11 @@ impl KeyAction {
             KeyAction::JumpRegionPrev
             | KeyAction::JumpRegionNext
             | KeyAction::JumpErrorPrev
-            | KeyAction::JumpErrorNext => "Navigation",
+            | KeyAction::JumpErrorNext
+            | KeyAction::ScrollPageUp
+            | KeyAction::ScrollPageDown
+            | KeyAction::ScrollTop
+            | KeyAction::ScrollBottom => "Navigation",
             KeyAction::ToggleAgentTimeline => "Widgets",
             KeyAction::FontSizeUp | KeyAction::FontSizeDown | KeyAction::FontSizeReset => "Font",
             KeyAction::Copy
@@ -447,6 +463,23 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+alt+pagedown".to_string(),
                     action: KeyAction::JumpErrorNext,
+                },
+                // Scrollback navigation (tn-5dpv)
+                Keybinding {
+                    key: "shift+pageup".to_string(),
+                    action: KeyAction::ScrollPageUp,
+                },
+                Keybinding {
+                    key: "shift+pagedown".to_string(),
+                    action: KeyAction::ScrollPageDown,
+                },
+                Keybinding {
+                    key: "shift+home".to_string(),
+                    action: KeyAction::ScrollTop,
+                },
+                Keybinding {
+                    key: "shift+end".to_string(),
+                    action: KeyAction::ScrollBottom,
                 },
             ],
         }
