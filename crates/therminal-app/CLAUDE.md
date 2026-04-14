@@ -227,3 +227,13 @@ The enum also provides `resize_to_viewport()` which computes grid dimensions fro
 - **Reclaim** — when an agent exits, queue removal of the auto-created pane.
 
 If an agent spawns and exits within the debounce window, the two events cancel each other out and no layout change occurs. Debounced actions are forwarded as `UserEvent` variants to the winit event loop so pane operations happen on the main thread.
+
+### Hook-driven subagent auto-tile (tn-s8w3)
+
+`SwarmDebouncer` (`pane/auto_tile.rs`) applies the same debounce pattern to `SwarmWatcherEvent`s. It receives events from two sources:
+
+1. **Hook path** (primary): The per-pane forwarder in `remote_spawn.rs` subscribes to `DaemonEvent::SubagentStarted` / `SubagentStopped`. When the daemon resolves a `subagent_start` hook signal to a pane, the forwarder converts it to `SwarmWatcherEvent::SpawnSubagent` / `ReclaimSubagent` and sends it through `App.swarm_debouncer_tx`. The `swarm_wake` callback sends `UserEvent::SwarmWatcherTick` to poll the debouncer on the main thread.
+
+2. **File scanner** (fallback): The `SwarmWatcher` thread (`pane/swarm_watcher.rs`) polls `~/.claude/projects/*/*/subagents/agent-*.jsonl` every 500ms and detects new/stale subagent files. Events are bridged to the debouncer via the watcher bridge thread.
+
+Dedup is naturally handled: `spawn_subagent_pane()` checks `swarm_panes.contains_key(&agent_id)` before creating a pane, so the faster hook path wins and the file scanner's later discovery is a no-op.

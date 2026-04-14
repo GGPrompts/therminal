@@ -175,6 +175,35 @@ Claude Code hook scripts call the `therminal` CLI from within WSL, which deliver
 
 **Graceful degradation**: On Linux/WSL-hosted daemons, both paths run simultaneously. The JSONL tailer remains authoritative for historical data and capacity metrics; hook events provide lower-latency lifecycle signals. On Windows native (where JSONL files are unreachable), hook-push becomes the only source of observability.
 
+## Hook-driven auto-tile (tn-s8w3)
+
+When a `subagent_start` or `subagent_stop` hook signal arrives via `IpcRequest::PushAgentEvent`, the daemon resolves the parent Claude session to a `PaneId` via the `PaneCapacityCache` (session_id lookup) and broadcasts a `DaemonEvent::SubagentStarted` / `SubagentStopped`. The GUI's per-pane forwarder subscribes to these event kinds and pushes `SwarmWatcherEvent::SpawnSubagent` / `ReclaimSubagent` into the `SwarmDebouncer` channel, bypassing the file-scanning `SwarmWatcher`.
+
+**Data flow**:
+
+```
+Hook script (Claude Code)
+    │  therminal agent-event push --event subagent_start
+    ▼
+IpcRequest::PushAgentEvent { signal }
+    │  daemon server.rs: dispatch_ipc
+    ▼
+HookPushSink::inject() → TaggedAgentEvent broadcast
+    +
+resolve_subagent_daemon_event() → DaemonEvent::SubagentStarted
+    │  event_tx.send()
+    ▼
+GUI forwarder (remote_spawn.rs) receives SubagentStarted
+    │  pane_id == remote_pane_id guard
+    ▼
+swarm_debouncer_tx.send(SwarmWatcherEvent::SpawnSubagent)
+    │  swarm_wake callback → UserEvent::SwarmWatcherTick
+    ▼
+SwarmDebouncer.poll() → App.spawn_subagent_pane()
+```
+
+The file-scanning `SwarmWatcher` remains as a fallback for environments without hooks installed. Dedup is naturally handled: `spawn_subagent_pane()` checks `swarm_panes.contains_key(&agent_id)` and skips duplicates, so the hook-driven path (which arrives first) creates the pane, and the file scanner's later discovery is a no-op.
+
 ## `claude-events` dev binary
 
 `src/bin/claude-events.rs` is a minimal raw JSON-RPC client that connects to the daemon's MCP socket, performs a handshake, subscribes to `therminal://claude/events`, and prints styled lines per event. Flags: `--filter top|sub|all`, `--session <sid>`, `--verbose`, `--no-color`, `--json`. Run via:

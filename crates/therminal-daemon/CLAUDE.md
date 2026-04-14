@@ -47,7 +47,7 @@ The daemon exposes a multiplexed IPC protocol over Unix domain sockets with leng
 
 **Responses** (`IpcResponse`): `Pong`, `ShutdownAck`, `Subscribed`, `Unsubscribed`, `Sessions`, `SessionInfo`, `SessionCreated`, `SessionDestroyed`, `State`, `Error`.
 
-**Events** (`DaemonEvent`): `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`. Clients subscribe via `Subscribe { filter: Vec<EventKind> }` -- empty filter = all events.
+**Events** (`DaemonEvent`): `StateChanged`, `SessionCreated`, `SessionDestroyed`, `PaneOutput`, `PaneExited`, `PaneResized`, `AgentChanged`, `SubagentStarted`, `SubagentStopped`. Clients subscribe via `Subscribe { filter: Vec<EventKind> }` -- empty filter = all events. `SubagentStarted`/`SubagentStopped` (tn-s8w3) are emitted when hook-push `subagent_start`/`subagent_stop` signals arrive and the parent session can be resolved to a pane via the `PaneCapacityCache`.
 
 **Client API** (`DaemonClient`): Persistent connection with `connect()`, `send_request()`, `ping()`, `shutdown()`, `subscribe_events()`, `recv_event()`. Uses internal reader/writer tasks for full-duplex communication.
 
