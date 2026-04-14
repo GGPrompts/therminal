@@ -55,6 +55,9 @@ pub(super) struct DaemonPtyHandler {
     /// built without a pattern engine installed on the session manager
     /// (e.g. unit tests).
     pub(super) pattern_dispatch: Option<crate::pattern_dispatch::PatternDispatcher>,
+    /// WSL-side shell PID shared with the Pane struct (tn-ttie). Updated
+    /// from OSC 7337 events in `process_bytes`.
+    pub(super) wsl_shell_pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl PtyReaderHandler for DaemonPtyHandler {
@@ -93,6 +96,12 @@ impl PtyReaderHandler for DaemonPtyHandler {
                 && let Ok(mut cwd) = self.cwd.lock()
             {
                 *cwd = path.clone();
+            }
+            // tn-ttie: capture WSL-side shell PID from OSC 7337.
+            if let InterceptedEvent::WslShellPid(pid) = &event
+                && let Ok(mut slot) = self.wsl_shell_pid.lock()
+            {
+                *slot = Some(*pid);
             }
             // Route OSC 133/633 marks into the pattern dispatcher so
             // `prompt_boundary`-scoped patterns run against the command

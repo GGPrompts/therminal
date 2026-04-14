@@ -49,6 +49,10 @@ pub struct ProcessDetector {
     /// the host sysinfo walker cannot see across the WSL boundary
     /// (tn-966s). `None` keeps the existing native scan path.
     wsl_distro: Option<String>,
+    /// WSL-side shell PID captured via OSC 7337 (tn-ttie). When set,
+    /// `scan_wsl` BFS-walks from this PID instead of scanning the entire
+    /// distro. `None` falls back to the global `parse_wsl_ps` path.
+    wsl_shell_pid: Option<u32>,
 }
 
 impl ProcessDetector {
@@ -61,6 +65,7 @@ impl ProcessDetector {
             scan_interval: DEFAULT_SCAN_INTERVAL,
             last_scan: None,
             wsl_distro: None,
+            wsl_shell_pid: None,
         }
     }
 
@@ -85,6 +90,13 @@ impl ProcessDetector {
     /// Update the shell PID (e.g., after a PTY respawn).
     pub fn set_shell_pid(&mut self, pid: u32) {
         self.shell_pid = Some(pid);
+    }
+
+    /// Set the WSL-side shell PID for per-pane subtree scoping (tn-ttie).
+    /// When set, `scan_wsl` will BFS-walk from this PID instead of
+    /// scanning the entire distro.
+    pub fn set_wsl_shell_pid(&mut self, pid: u32) {
+        self.wsl_shell_pid = Some(pid);
     }
 
     /// Perform a scan only if the interval has elapsed since the last scan.
@@ -139,21 +151,27 @@ impl ProcessDetector {
         agents
     }
 
-    /// Shell out to `wsl.exe -d <distro> -e ps -eo pid=,ppid=,comm=,args=`
-    /// and classify the resulting Linux processes. Returns the list of
-    /// detected agents inside the WSL distro.
+    /// Classify WSL processes from pre-fetched `ps` stdout (tn-ttie).
     ///
-    /// Slower than the sysinfo path (typically 50–200 ms) so the daemon's
-    /// `process_detector_task` keeps the standard 3 s scan interval. The
-    /// command is invoked the same way on every platform that supports it
-    /// — on non-Windows builds the `wsl.exe` lookup will fail and the
-    /// function returns an empty list.
-    fn scan_wsl(&mut self, distro: &str) -> Vec<DetectedAgent> {
+    /// The daemon's `tick_once` caches the raw stdout across panes in
+    /// the same distro to avoid redundant `wsl.exe` subprocess calls.
+    /// Each pane then calls this method with the shared stdout and gets
+    /// results scoped to its own subtree (or global if no root PID is
+    /// set).
+    pub fn classify_wsl_stdout(&self, stdout: &str) -> Vec<DetectedAgent> {
+        if let Some(root_pid) = self.wsl_shell_pid {
+            parse_wsl_ps_tree(stdout, root_pid)
+        } else {
+            parse_wsl_ps(stdout)
+        }
+    }
+
+    /// Shell out to `wsl.exe -d <distro> -e ps -eo pid=,ppid=,comm=,args=`
+    /// and return the raw stdout as a String, or `None` on failure.
+    /// Used internally by `scan_wsl` and exposed for the daemon's
+    /// stdout-caching path (tn-ttie).
+    pub fn fetch_wsl_ps_stdout(distro: &str) -> Option<String> {
         use std::process::Command;
-        // -eo with `=` suffix suppresses headers and produces a stable
-        // column layout: <pid> <ppid> <comm> <args...>. The args column
-        // can contain spaces — we split off the first three fields and
-        // treat the rest as the command line.
         let output = match Command::new("wsl.exe")
             .args(["-d", distro, "-e", "ps", "-eo", "pid=,ppid=,comm=,args="])
             .output()
@@ -165,7 +183,7 @@ impl ProcessDetector {
                     error = %e,
                     "process_detector: wsl.exe ps failed (probe disabled this tick)"
                 );
-                return Vec::new();
+                return None;
             }
         };
         if !output.status.success() {
@@ -175,13 +193,26 @@ impl ProcessDetector {
                 stderr = %String::from_utf8_lossy(&output.stderr).trim(),
                 "process_detector: wsl.exe ps non-zero exit"
             );
-            return Vec::new();
+            return None;
         }
-        // wsl.exe writes UTF-8 on -e mode (no UTF-16 BOM); but be defensive
-        // and strip embedded NULs in case a custom shell wrapper inserts them.
         let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
-        let stdout = String::from_utf8_lossy(&cleaned);
-        parse_wsl_ps(&stdout)
+        Some(String::from_utf8_lossy(&cleaned).into_owned())
+    }
+
+    /// Shell out to `wsl.exe -d <distro> -e ps -eo pid=,ppid=,comm=,args=`
+    /// and classify the resulting Linux processes. Returns the list of
+    /// detected agents inside the WSL distro.
+    ///
+    /// Slower than the sysinfo path (typically 50–200 ms) so the daemon's
+    /// `process_detector_task` keeps the standard 3 s scan interval. The
+    /// command is invoked the same way on every platform that supports it
+    /// — on non-Windows builds the `wsl.exe` lookup will fail and the
+    /// function returns an empty list.
+    fn scan_wsl(&mut self, distro: &str) -> Vec<DetectedAgent> {
+        match Self::fetch_wsl_ps_stdout(distro) {
+            Some(stdout) => self.classify_wsl_stdout(&stdout),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -236,6 +267,84 @@ fn parse_wsl_ps(stdout: &str) -> Vec<DetectedAgent> {
         }
     }
     out
+}
+
+/// Parse the output of `ps -eo pid=,ppid=,comm=,args=` and return agents
+/// that are descendants of `root_pid` (BFS tree-walk). This is the
+/// per-pane scoped variant of [`parse_wsl_ps`] used when the WSL-side
+/// shell PID is known from OSC 7337 (tn-ttie).
+///
+/// 1. Parses all rows into a HashMap keyed by pid → (ppid, comm, args).
+/// 2. Builds a children map: HashMap<pid, Vec<child_pid>>.
+/// 3. BFS-walks from `root_pid` through the children map.
+/// 4. Classifies each visited process with `classify_wsl_process`.
+///
+/// Returns an empty list if `root_pid` is not found in the process table.
+pub fn parse_wsl_ps_tree(stdout: &str, root_pid: u32) -> Vec<DetectedAgent> {
+    use std::collections::{HashMap, VecDeque};
+
+    // Step 1: Parse all rows into a flat map.
+    let mut procs: HashMap<u32, (u32, String, String)> = HashMap::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        let Some(pid_s) = tokens.next() else {
+            continue;
+        };
+        let Some(ppid_s) = tokens.next() else {
+            continue;
+        };
+        let Some(comm) = tokens.next() else {
+            continue;
+        };
+        let pid: u32 = match pid_s.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let ppid: u32 = match ppid_s.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let args = remainder_after_token(trimmed, comm).to_string();
+        procs.insert(pid, (ppid, comm.to_string(), args));
+    }
+
+    // Step 2: Build a children map.
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&pid, &(ppid, _, _)) in &procs {
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    // Step 3: BFS from root_pid.
+    let mut agents = Vec::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    // Start with the children of root_pid (not root_pid itself, which
+    // is the shell — we want agents running under it).
+    if let Some(kids) = children.get(&root_pid) {
+        queue.extend(kids);
+    }
+
+    while let Some(pid) = queue.pop_front() {
+        if let Some((_, comm, args)) = procs.get(&pid) {
+            if let Some(agent_type) = classify_wsl_process(comm, args) {
+                agents.push(DetectedAgent {
+                    agent_type,
+                    pid,
+                    name: comm.clone(),
+                });
+            }
+            // Continue walking children even if this node is an agent
+            // (agents can spawn sub-processes that are also agents).
+            if let Some(kids) = children.get(&pid) {
+                queue.extend(kids);
+            }
+        }
+    }
+
+    agents
 }
 
 /// Find `token` in `line` and return everything after it, with leading
@@ -1015,5 +1124,216 @@ mod tests {
                 c.label, c.comm, c.args
             );
         }
+    }
+
+    // ── parse_wsl_ps_tree (tn-ttie) ─────────────────────────────────────
+
+    /// Table-driven tests for `parse_wsl_ps_tree`: per-pane subtree scoping
+    /// that BFS-walks from a given root PID.
+    #[test]
+    fn parse_wsl_ps_tree_table_driven() {
+        struct Case {
+            label: &'static str,
+            stdout: &'static str,
+            root_pid: u32,
+            expected: Vec<(AgentType, u32, &'static str)>,
+        }
+        let cases = [
+            // Single shell with claude child → finds claude.
+            Case {
+                label: "single shell with claude child",
+                stdout: concat!(
+                    "  1     0 systemd /sbin/init\n",
+                    "  100   1 bash -bash\n",
+                    "  200 100 node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n",
+                ),
+                root_pid: 100,
+                expected: vec![(AgentType::Claude, 200, "node")],
+            },
+            // Two shells, only one has claude → only that subtree returns claude.
+            Case {
+                label: "two shells, only shell B has claude",
+                stdout: concat!(
+                    "  1     0 systemd /sbin/init\n",
+                    "  100   1 bash -bash\n",
+                    "  101   1 bash -bash\n",
+                    "  200 100 vim foo.rs\n",
+                    "  300 101 node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n",
+                ),
+                root_pid: 100,
+                expected: vec![], // shell 100 has no claude, only vim
+            },
+            Case {
+                label: "two shells, shell B has claude, query B",
+                stdout: concat!(
+                    "  1     0 systemd /sbin/init\n",
+                    "  100   1 bash -bash\n",
+                    "  101   1 bash -bash\n",
+                    "  200 100 vim foo.rs\n",
+                    "  300 101 node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n",
+                ),
+                root_pid: 101,
+                expected: vec![(AgentType::Claude, 300, "node")],
+            },
+            // Agent nested 3 levels deep → still found via BFS.
+            Case {
+                label: "agent nested 3 levels deep",
+                stdout: concat!(
+                    "  100   1 bash -bash\n",
+                    "  200 100 tmux tmux\n",
+                    "  300 200 bash bash\n",
+                    "  400 300 codex codex --resume\n",
+                ),
+                root_pid: 100,
+                expected: vec![(AgentType::Codex, 400, "codex")],
+            },
+            // Empty tree → returns empty.
+            Case {
+                label: "empty stdout",
+                stdout: "",
+                root_pid: 100,
+                expected: vec![],
+            },
+            // Nonexistent root PID → returns empty.
+            Case {
+                label: "nonexistent root PID",
+                stdout: concat!(
+                    "  100   1 bash -bash\n",
+                    "  200 100 node /usr/lib/claude-code/cli.js\n",
+                ),
+                root_pid: 999,
+                expected: vec![],
+            },
+            // Multiple agents in subtree → finds all of them.
+            Case {
+                label: "multiple agents in subtree",
+                stdout: concat!(
+                    "  100   1 bash -bash\n",
+                    "  200 100 node /usr/lib/claude-code/cli.js\n",
+                    "  300 100 codex codex --resume\n",
+                ),
+                root_pid: 100,
+                expected: vec![
+                    (AgentType::Claude, 200, "node"),
+                    (AgentType::Codex, 300, "codex"),
+                ],
+            },
+            // Root PID is the agent itself → agent is not returned
+            // (we start from children of root, not root itself).
+            Case {
+                label: "root PID is the agent itself",
+                stdout: concat!(
+                    "  100   1 bash -bash\n",
+                    "  200 100 node /usr/lib/claude-code/cli.js\n",
+                ),
+                root_pid: 200,
+                expected: vec![],
+            },
+            // Server-mode process excluded even in subtree.
+            Case {
+                label: "server-mode claude skipped in subtree",
+                stdout: concat!(
+                    "  100   1 bash -bash\n",
+                    "  200 100 node node /usr/bin/claude serve\n",
+                ),
+                root_pid: 100,
+                expected: vec![],
+            },
+        ];
+
+        for (i, c) in cases.iter().enumerate() {
+            let mut agents = parse_wsl_ps_tree(c.stdout, c.root_pid);
+            // Sort by PID for stable comparison (BFS order depends on
+            // HashMap iteration order which is non-deterministic).
+            agents.sort_by_key(|a| a.pid);
+            let mut expected: Vec<_> = c.expected.clone();
+            expected.sort_by_key(|&(_, pid, _)| pid);
+
+            assert_eq!(
+                agents.len(),
+                expected.len(),
+                "case {i} ({}) expected {} agents, got {}: {:?}",
+                c.label,
+                expected.len(),
+                agents.len(),
+                agents
+            );
+            for (j, (exp_type, exp_pid, exp_name)) in expected.iter().enumerate() {
+                assert_eq!(
+                    agents[j].agent_type, *exp_type,
+                    "case {i}.{j} ({}) agent_type mismatch",
+                    c.label
+                );
+                assert_eq!(
+                    agents[j].pid, *exp_pid,
+                    "case {i}.{j} ({}) pid mismatch",
+                    c.label
+                );
+                assert_eq!(
+                    agents[j].name, *exp_name,
+                    "case {i}.{j} ({}) name mismatch",
+                    c.label
+                );
+            }
+        }
+    }
+
+    /// Regression: global `parse_wsl_ps` still works unchanged after the
+    /// tree-walking addition (tn-ttie).
+    #[test]
+    fn parse_wsl_ps_global_still_works_after_tree_walk_addition() {
+        let stdout = concat!(
+            "  1     0 systemd /sbin/init\n",
+            "  100   1 bash -bash\n",
+            "  200 100 node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n",
+            "  300 100 codex codex --resume\n",
+        );
+        let agents = parse_wsl_ps(stdout);
+        assert_eq!(agents.len(), 2);
+        // Global scan finds ALL agents regardless of tree structure.
+        let types: Vec<_> = agents.iter().map(|a| a.agent_type).collect();
+        assert!(types.contains(&AgentType::Claude));
+        assert!(types.contains(&AgentType::Codex));
+    }
+
+    /// `set_wsl_shell_pid` updates the detector's field.
+    #[test]
+    fn set_wsl_shell_pid_updates() {
+        let mut detector = ProcessDetector::new(None);
+        assert!(detector.wsl_shell_pid.is_none());
+        detector.set_wsl_shell_pid(42);
+        assert_eq!(detector.wsl_shell_pid, Some(42));
+    }
+
+    /// `classify_wsl_stdout` routes to tree-walk when wsl_shell_pid is set,
+    /// and to global scan when it is not.
+    #[test]
+    fn classify_wsl_stdout_routes_correctly() {
+        let stdout = concat!(
+            "  100   1 bash -bash\n",
+            "  101   1 bash -bash\n",
+            "  200 100 node /usr/lib/claude-code/cli.js\n",
+            "  300 101 codex codex --resume\n",
+        );
+        // Without wsl_shell_pid: global scan finds both agents.
+        let detector = ProcessDetector::new(None).with_wsl_distro("Ubuntu");
+        let agents = detector.classify_wsl_stdout(stdout);
+        assert_eq!(agents.len(), 2);
+
+        // With wsl_shell_pid=100: only claude in shell 100's subtree.
+        let mut detector = ProcessDetector::new(None).with_wsl_distro("Ubuntu");
+        detector.set_wsl_shell_pid(100);
+        let agents = detector.classify_wsl_stdout(stdout);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_type, AgentType::Claude);
+        assert_eq!(agents[0].pid, 200);
+
+        // With wsl_shell_pid=101: only codex in shell 101's subtree.
+        let mut detector = ProcessDetector::new(None).with_wsl_distro("Ubuntu");
+        detector.set_wsl_shell_pid(101);
+        let agents = detector.classify_wsl_stdout(stdout);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_type, AgentType::Codex);
+        assert_eq!(agents[0].pid, 300);
     }
 }

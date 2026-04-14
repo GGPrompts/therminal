@@ -138,6 +138,12 @@ impl Pane {
         self.shell_pid
     }
 
+    /// WSL-side shell PID captured via OSC 7337 (tn-ttie). Returns the
+    /// PID if the pane's shell integration has fired; `None` otherwise.
+    pub fn wsl_shell_pid(&self) -> Option<u32> {
+        self.wsl_shell_pid.lock().ok().and_then(|v| *v)
+    }
+
     /// Snapshot of the pane's opaque key/value tags (tn-bbvf).
     pub fn tags(&self) -> HashMap<String, String> {
         self.tags.clone()

@@ -519,20 +519,27 @@ impl SessionManager {
         out
     }
 
-    /// Richer snapshot of `(pane_id, shell_pid, shell_command)` triples
-    /// for every live pane. Used by the daemon's process-detector
+    /// Richer snapshot of `(pane_id, shell_pid, shell_command, wsl_shell_pid)`
+    /// tuples for every live pane. Used by the daemon's process-detector
     /// ticker to decide whether the pane is a WSL shell on Windows
     /// native and should be scanned via the WSL probe instead of the
     /// host sysinfo walker (tn-966s). The `shell_command` is the raw
     /// command from `SpawnOptions.shell` (e.g. `"wsl.exe"`,
     /// `"/bin/bash"`, `"pwsh.exe"`); empty string means "user's
-    /// default login shell".
-    pub fn pane_detector_specs(&self) -> Vec<(PaneId, Option<u32>, String)> {
+    /// default login shell". `wsl_shell_pid` is the WSL-side PID
+    /// captured via OSC 7337 (tn-ttie); `None` until the shell
+    /// integration script fires.
+    pub fn pane_detector_specs(&self) -> Vec<(PaneId, Option<u32>, String, Option<u32>)> {
         let mut out = Vec::new();
         for session in self.sessions.values() {
             for window in &session.windows {
                 for pane in &window.panes {
-                    out.push((pane.id, pane.shell_pid(), pane.shell().to_string()));
+                    out.push((
+                        pane.id,
+                        pane.shell_pid(),
+                        pane.shell().to_string(),
+                        pane.wsl_shell_pid(),
+                    ));
                 }
             }
         }

@@ -159,36 +159,37 @@ pub async fn tick_once(
     session_mgr: &Arc<Mutex<SessionManager>>,
     detectors: &mut HashMap<PaneId, ProcessDetector>,
 ) {
-    // Snapshot pane → (shell_pid, shell_command) triples under the mutex,
-    // then drop it. The shell command is needed to recognise WSL panes
-    // on Windows native (tn-966s) so we can route them through the WSL
-    // probe path instead of the blind host sysinfo walker.
-    let triples = {
+    // Snapshot pane → (shell_pid, shell_command, wsl_shell_pid) tuples
+    // under the mutex, then drop it. The shell command is needed to
+    // recognise WSL panes on Windows native (tn-966s) so we can route
+    // them through the WSL probe path instead of the blind host sysinfo
+    // walker. The wsl_shell_pid (tn-ttie) scopes the WSL probe to the
+    // pane's subtree when available.
+    let specs = {
         let mgr = session_mgr.lock().await;
         mgr.pane_detector_specs()
     };
 
     // Reconcile the detector cache against the live pane set.
     let live_pane_ids: std::collections::HashSet<PaneId> =
-        triples.iter().map(|(pid, _, _)| *pid).collect();
+        specs.iter().map(|(pid, _, _, _)| *pid).collect();
     detectors.retain(|pane_id, _| live_pane_ids.contains(pane_id));
 
-    // ── WSL scan coalescing (tn-alpb) ────────────────────────────────
-    // `scan_wsl` runs `wsl.exe -d <distro> -e ps -eo …` which returns
-    // ALL processes in the distro, not just the pane's subtree. Running
-    // it once per pane is both redundant (N identical wsl.exe calls per
-    // tick) and wrong (every pane sees the same agents → all get
-    // registered). Fix: run the WSL scan ONCE per distro and share the
-    // result across all WSL panes in that distro.
-    let mut wsl_scan_cache: HashMap<String, Vec<therminal_terminal::process_detector::DetectedAgent>> =
-        HashMap::new();
+    // ── WSL scan coalescing (tn-alpb + tn-ttie) ─────────────────────
+    // `wsl.exe -d <distro> -e ps -eo …` returns ALL processes in the
+    // distro. Running it once per pane is redundant (N identical wsl.exe
+    // calls per tick). Fix: fetch the raw stdout ONCE per distro and
+    // share it across all WSL panes. Each pane then classifies its own
+    // subtree (if it has a wsl_shell_pid) or falls back to the global
+    // scan + dedup path (tn-alpb).
+    let mut wsl_stdout_cache: HashMap<String, Option<String>> = HashMap::new();
 
     let mut results: Vec<(
         PaneId,
         Vec<therminal_terminal::process_detector::DetectedAgent>,
     )> = Vec::new();
 
-    for (pane_id, shell_pid_opt, shell_command) in triples {
+    for (pane_id, shell_pid_opt, shell_command, wsl_shell_pid) in specs {
         let wsl_distro = wsl_distro_for_shell(&shell_command);
         if shell_pid_opt.is_none() && wsl_distro.is_none() {
             // Handoff-restored panes don't carry a shell PID; skip
@@ -206,6 +207,16 @@ pub async fn tick_once(
             }
             d
         });
+
+        // tn-ttie: propagate the WSL-side shell PID (from OSC 7337)
+        // into the detector so scan_wsl can BFS-walk from the pane's
+        // root instead of scanning the entire distro. The PID may
+        // arrive after the first tick (the shell integration script
+        // fires after the shell starts), so we update it every tick.
+        if let Some(pid) = wsl_shell_pid {
+            detector.set_wsl_shell_pid(pid);
+        }
+
         // tn-x1h9: log the detector-mode decision exactly once per pane
         // (the first tick where we see it). Without this, silent failure
         // modes like "Pane.shell is empty so WSL probe never activates"
@@ -224,18 +235,22 @@ pub async fn tick_once(
                 shell_command = %shell_command,
                 shell_pid = ?shell_pid_opt,
                 wsl_distro = ?wsl_distro,
+                wsl_shell_pid = ?wsl_shell_pid,
                 is_windows = cfg!(windows),
                 "process_detector_task: initialising detector for pane"
             );
         }
 
-        // For WSL panes: reuse cached scan results from the first pane
-        // in this distro instead of spawning another `wsl.exe` process.
+        // For WSL panes: fetch stdout once per distro, then let each
+        // detector classify its own view (subtree or global).
         if let Some(ref distro) = wsl_distro {
-            let agents = wsl_scan_cache
+            let stdout_opt = wsl_stdout_cache
                 .entry(distro.clone())
-                .or_insert_with(|| detector.scan())
-                .clone();
+                .or_insert_with(|| ProcessDetector::fetch_wsl_ps_stdout(distro));
+            let agents = match stdout_opt {
+                Some(stdout) => detector.classify_wsl_stdout(stdout),
+                None => Vec::new(),
+            };
             results.push((pane_id, agents));
         } else {
             let agents = detector.scan();

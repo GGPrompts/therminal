@@ -149,6 +149,9 @@ impl RegionIndex {
             InterceptedEvent::DesktopNotification(_) => {
                 // Desktop notifications don't map to semantic regions.
             }
+            InterceptedEvent::WslShellPid(_) => {
+                // WSL shell PID is used by the process detector, not regions.
+            }
         }
     }
 

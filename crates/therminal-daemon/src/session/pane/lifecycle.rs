@@ -61,6 +61,12 @@ pub struct Pane {
     /// is not transmitted with the SCM_RIGHTS FD payload) and on backends
     /// where portable-pty does not surface a process id.
     pub(super) shell_pid: Option<u32>,
+    /// WSL-side shell PID captured via OSC 7337 (tn-ttie). Shared with
+    /// the reader thread's `DaemonPtyHandler` so the value can be set
+    /// from the PTY stream and read by `pane_detector_specs()` on the
+    /// daemon's process-detector tick. `None` until the shell integration
+    /// script fires.
+    pub(super) wsl_shell_pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl Pane {
@@ -106,6 +112,8 @@ impl Pane {
             },
         })));
 
+        let wsl_shell_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+
         let pattern_dispatch = pattern_ctx.build_dispatcher(id);
         let handler = DaemonPtyHandler {
             event_tx,
@@ -117,6 +125,7 @@ impl Pane {
             cwd: Arc::clone(&cwd),
             inference: Arc::clone(&inference),
             pattern_dispatch,
+            wsl_shell_pid: Arc::clone(&wsl_shell_pid),
         };
 
         let mut core = PtyPaneCore::spawn(
@@ -167,6 +176,7 @@ impl Pane {
             event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),
             tags: HashMap::new(),
             shell_pid,
+            wsl_shell_pid,
         })
     }
 
@@ -212,6 +222,8 @@ impl Pane {
             working_dir: None,
         })));
 
+        let wsl_shell_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+
         let pattern_dispatch = pattern_ctx.build_dispatcher(pane_id);
         let handler = DaemonPtyHandler {
             event_tx: event_tx.clone(),
@@ -223,6 +235,7 @@ impl Pane {
             cwd: Arc::clone(&cwd),
             inference: Arc::clone(&inference),
             pattern_dispatch,
+            wsl_shell_pid: Arc::clone(&wsl_shell_pid),
         };
 
         // Create headless Term.
@@ -282,6 +295,7 @@ impl Pane {
             // daemon will not run process-tree detection on this pane
             // until the next session restart. tn-pehl follow-up.
             shell_pid: None,
+            wsl_shell_pid,
         })
     }
 }

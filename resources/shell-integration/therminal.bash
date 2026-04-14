@@ -8,6 +8,12 @@ if [[ -n "${__THERMINAL_SHELL_INTEGRATION:-}" ]]; then
 fi
 __THERMINAL_SHELL_INTEGRATION=1
 
+# Emit WSL-side shell PID so the daemon can scope agent detection to this
+# pane's process subtree instead of scanning the entire distro (tn-ttie).
+# OSC 7337 carries the PID as a plain decimal string; the daemon captures it
+# via TherminalInterceptor and stores it on the Pane for tree-walking.
+printf '\033]7337;%s\007' "$$"
+
 # -- OSC helpers ---------------------------------------------------------------
 
 __therminal_osc() {

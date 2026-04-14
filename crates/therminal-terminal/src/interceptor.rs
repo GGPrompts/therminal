@@ -14,6 +14,7 @@
 //! | OSC 7     | Standard            | Current working directory      |
 //! | OSC 9     | ConEmu/mintty       | Desktop notifications          |
 //! | OSC 1337  | iTerm2              | Various (used by some agents)  |
+//! | OSC 7337  | Therminal           | WSL-side shell PID (tn-ttie)   |
 //! | OSC 7777  | Therminal           | Cooperative agent self-report   |
 //!
 //! Any other OSC code is consulted against the shared
@@ -45,6 +46,13 @@ pub enum InterceptedEvent {
     Iterm2 { key: String, value: String },
     /// A desktop notification was requested via OSC 9.
     DesktopNotification(String),
+    /// The WSL-side shell reported its PID via OSC 7337 (tn-ttie).
+    ///
+    /// Emitted once at shell startup by the therminal bash rcfile running
+    /// inside WSL. The daemon captures this to scope the WSL process
+    /// detector probe to the pane's subtree instead of scanning the entire
+    /// distro.
+    WslShellPid(u32),
     /// A cooperative agent self-reported its state via OSC 7777.
     ///
     /// See [`TherminalInterceptor::handle_osc_7777`] for the full protocol spec.
@@ -78,6 +86,8 @@ pub struct InterceptorConfig {
     pub osc_9: bool,
     /// Intercept OSC 7777 (cooperative agent self-reporting).
     pub osc_7777: bool,
+    /// Intercept OSC 7337 (WSL-side shell PID reporting).
+    pub osc_7337: bool,
 }
 
 impl Default for InterceptorConfig {
@@ -89,6 +99,7 @@ impl Default for InterceptorConfig {
             osc_9: true,
             osc_1337: true,
             osc_7777: true,
+            osc_7337: true,
         }
     }
 }
@@ -505,6 +516,46 @@ impl TherminalInterceptor {
         // Consume: no other handler knows about OSC 7777.
         true
     }
+
+    /// Handle OSC 7337 (WSL-side shell PID). Returns `true` to consume.
+    ///
+    /// # OSC 7337 — WSL Shell PID Reporting (tn-ttie)
+    ///
+    /// Emitted once at shell startup by the therminal bash rcfile inside WSL:
+    ///
+    /// ```text
+    /// ESC ] 7337 ; <pid> BEL
+    /// ```
+    ///
+    /// Where `<pid>` is the decimal PID of the WSL-side shell process (`$$`).
+    /// The daemon stores this on the `Pane` and passes it to
+    /// `ProcessDetector` so the WSL probe can BFS-walk from this root
+    /// instead of scanning every process in the distro.
+    fn handle_osc_7337(&mut self, params: &[&[u8]]) -> bool {
+        // params[0] is "7337", params[1] is the PID string.
+        if params.len() < 2 {
+            return false;
+        }
+
+        let pid_str = match std::str::from_utf8(params[1]) {
+            Ok(s) => s.trim(),
+            Err(_) => return false,
+        };
+
+        let pid: u32 = match pid_str.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                debug!("OSC 7337: invalid PID {:?}", pid_str);
+                return true; // consume but don't emit
+            }
+        };
+
+        debug!("OSC 7337 (WSL shell PID): {}", pid);
+        self.emit(InterceptedEvent::WslShellPid(pid));
+
+        // Consume: no other handler knows about OSC 7337.
+        true
+    }
 }
 
 impl alacritty_terminal::vte::SequenceInterceptor for TherminalInterceptor {
@@ -524,6 +575,7 @@ impl alacritty_terminal::vte::SequenceInterceptor for TherminalInterceptor {
             b"9" if self.config.osc_9 => Some(self.handle_osc_9(params)),
             b"1337" if self.config.osc_1337 => Some(self.handle_osc_1337(params)),
             b"7777" if self.config.osc_7777 => Some(self.handle_osc_7777(params)),
+            b"7337" if self.config.osc_7337 => Some(self.handle_osc_7337(params)),
             _ => None,
         };
 
@@ -713,6 +765,7 @@ mod tests {
             osc_9: false,
             osc_1337: false,
             osc_7777: false,
+            osc_7337: false,
         };
         let (mut interceptor, _rx) = TherminalInterceptor::new(config);
         let params: &[&[u8]] = &[b"633", b"A"];
@@ -1221,5 +1274,91 @@ mod tests {
         );
         assert!(!consumed);
         assert!(rx.try_recv().is_err());
+    }
+
+    // -- OSC 7337 tests (tn-ttie) -------------------------------------------------
+
+    #[test]
+    fn intercept_osc_7337_valid_pid() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"7337", b"12345"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            InterceptedEvent::WslShellPid(pid) => {
+                assert_eq!(pid, 12345);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn intercept_osc_7337_invalid_pid_consumed_but_no_event() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"7337", b"not-a-number"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        // Consumed even on bad PID (we own the code).
+        assert!(consumed);
+        // But no event emitted.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn intercept_osc_7337_missing_param_not_consumed() {
+        let (mut interceptor, _rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"7337"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(!consumed);
+    }
+
+    #[test]
+    fn intercept_osc_7337_whitespace_trimmed() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"7337", b"  42  "];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            InterceptedEvent::WslShellPid(pid) => {
+                assert_eq!(pid, 42);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_7337_disabled_config_skips() {
+        let config = InterceptorConfig {
+            osc_7337: false,
+            ..InterceptorConfig::default()
+        };
+        let (mut interceptor, _rx) = TherminalInterceptor::new(config);
+        let params: &[&[u8]] = &[b"7337", b"12345"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        // When disabled, falls through to registry → not consumed.
+        assert!(!consumed);
     }
 }

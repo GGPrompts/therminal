@@ -38,6 +38,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
+            osc_7337: true,
         };
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
@@ -190,6 +191,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
+            osc_7337: true,
         };
         let renderer = self.grid_renderer.as_ref()?;
         let (cols, rows) = crate::pane::grid_size_for_rect(viewport, renderer);
@@ -273,6 +275,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
+            osc_7337: true,
         };
         let dc = Arc::clone(self.daemon_client.as_ref()?);
         let handle = self.daemon_runtime.as_ref()?.clone();
