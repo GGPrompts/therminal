@@ -427,7 +427,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
-            osc_7337: true,
+            osc_7337: self.config.terminal.osc_7337,
         };
         let proxy = self.event_proxy.clone();
 
@@ -733,7 +733,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
-            osc_7337: true,
+            osc_7337: self.config.terminal.osc_7337,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
         let spawn_options = self.build_spawn_options();

@@ -54,7 +54,10 @@ fn test_render_values() -> SettingsRenderValues {
         reduced_motion: false,
         ui_text_scale_index: 1,
         font_family_index: Some(0),
-        available_font_families: FONT_FAMILY_OPTIONS.iter().map(|s| (*s).to_string()).collect(),
+        available_font_families: FONT_FAMILY_OPTIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
     }
 }
 
@@ -811,7 +814,9 @@ fn font_family_select_produces_command() {
     let cmd = state.enter();
     assert_eq!(
         cmd,
-        Some(SettingsCommand::SetFontFamily(FONT_FAMILY_OPTIONS[1].to_string()))
+        Some(SettingsCommand::SetFontFamily(
+            FONT_FAMILY_OPTIONS[1].to_string()
+        ))
     );
     assert!(!state.is_select_expanded());
 }
@@ -865,6 +870,8 @@ fn font_select_expanded_state_survives_sync() {
     let cmd = state.enter();
     assert_eq!(
         cmd,
-        Some(SettingsCommand::SetFontFamily(FONT_FAMILY_OPTIONS[1].to_string()))
+        Some(SettingsCommand::SetFontFamily(
+            FONT_FAMILY_OPTIONS[1].to_string()
+        ))
     );
 }

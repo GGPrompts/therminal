@@ -1045,6 +1045,8 @@ pub struct TerminalConfig {
     pub osc_1337: bool,
     /// Intercept OSC 7777 sequences (cooperative agent self-reporting).
     pub osc_7777: bool,
+    /// Intercept OSC 7337 sequences (shell PID reporting).
+    pub osc_7337: bool,
 }
 
 impl Default for TerminalConfig {
@@ -1056,6 +1058,7 @@ impl Default for TerminalConfig {
             osc_9: true,
             osc_1337: true,
             osc_7777: true,
+            osc_7337: true,
         }
     }
 }

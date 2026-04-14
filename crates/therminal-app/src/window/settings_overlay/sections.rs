@@ -253,7 +253,10 @@ impl SettingsOverlayState {
         // Fall back to the full static list if the availability check
         // returned empty (e.g. font database not yet initialised).
         let options: Vec<String> = if values.available_font_families.is_empty() {
-            FONT_FAMILY_OPTIONS.iter().map(|s| (*s).to_string()).collect()
+            FONT_FAMILY_OPTIONS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
         } else {
             values.available_font_families.clone()
         };

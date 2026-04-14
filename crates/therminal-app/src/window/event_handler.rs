@@ -506,6 +506,9 @@ impl App {
     /// Alacritty, Kitty, and other modern terminals.
     pub(super) fn handle_key_input(&mut self, key_event: &KeyEvent) {
         // tn-5dpv: snap to bottom on any PTY-bound keystroke while scrolled back.
+        // TODO: [code-review] This fires before key_code is resolved, so modifier-only
+        // presses (Shift, Ctrl, Alt alone) trigger a scroll snap — consider moving this
+        // block after the `let key_code = match key_code { ... }` guard below (85%)
         if self.focused_pane_is_scrolled_back() {
             self.scroll_focused_pane(Scroll::Bottom);
         }

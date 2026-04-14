@@ -120,7 +120,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
-            osc_7337: true,
+            osc_7337: self.config.terminal.osc_7337,
         };
         let dc_for_closure = match self.daemon_client.as_ref() {
             Some(c) => Arc::clone(c),

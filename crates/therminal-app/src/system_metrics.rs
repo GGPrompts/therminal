@@ -23,14 +23,10 @@ pub struct SystemMetricsSnapshot {
     pub host_cpu_percent: f32,
     /// Host used memory in bytes.
     pub host_mem_used: u64,
-    /// Host total memory in bytes.
-    pub host_mem_total: u64,
     /// WSL-side load average (1-minute), if available.
     pub wsl_load_avg: Option<f32>,
     /// WSL-side used memory in bytes, if available.
     pub wsl_mem_used: Option<u64>,
-    /// WSL-side total memory in bytes, if available.
-    pub wsl_mem_total: Option<u64>,
     /// Timestamp of the last successful poll.
     pub last_updated: Option<Instant>,
 }
@@ -142,10 +138,9 @@ fn poller_loop(shared: SharedMetrics, interval: Duration, show_wsl: bool) {
 
         let cpu_percent = sys.global_cpu_usage();
         let mem_used = sys.used_memory();
-        let mem_total = sys.total_memory();
 
         // WSL probe (Windows-only, gated on show_wsl).
-        let (wsl_load, wsl_mem_used, wsl_mem_total) = if show_wsl {
+        let (wsl_load, wsl_mem_used, _wsl_mem_total) = if show_wsl {
             probe_wsl_metrics()
         } else {
             (None, None, None)
@@ -155,10 +150,8 @@ fn poller_loop(shared: SharedMetrics, interval: Duration, show_wsl: bool) {
         if let Ok(mut snap) = shared.lock() {
             snap.host_cpu_percent = cpu_percent;
             snap.host_mem_used = mem_used;
-            snap.host_mem_total = mem_total;
             snap.wsl_load_avg = wsl_load;
             snap.wsl_mem_used = wsl_mem_used;
-            snap.wsl_mem_total = wsl_mem_total;
             snap.last_updated = Some(Instant::now());
         }
 
@@ -306,10 +299,8 @@ mod tests {
         let snap = SystemMetricsSnapshot {
             host_cpu_percent: 38.0,
             host_mem_used: (7.4 * 1024.0 * 1024.0 * 1024.0) as u64,
-            host_mem_total: 16 * 1024 * 1024 * 1024,
             wsl_load_avg: None,
             wsl_mem_used: None,
-            wsl_mem_total: None,
             last_updated: Some(Instant::now()),
         };
         assert_eq!(snap.format_status_bar(false), "38% 7.4G");
@@ -320,10 +311,8 @@ mod tests {
         let snap = SystemMetricsSnapshot {
             host_cpu_percent: 38.0,
             host_mem_used: (7.4 * 1024.0 * 1024.0 * 1024.0) as u64,
-            host_mem_total: 16 * 1024 * 1024 * 1024,
             wsl_load_avg: None,
             wsl_mem_used: None,
-            wsl_mem_total: None,
             last_updated: Some(Instant::now()),
         };
         assert_eq!(snap.format_status_bar(true), "Win 38% 7.4G");
@@ -334,10 +323,8 @@ mod tests {
         let snap = SystemMetricsSnapshot {
             host_cpu_percent: 38.0,
             host_mem_used: (7.4 * 1024.0 * 1024.0 * 1024.0) as u64,
-            host_mem_total: 16 * 1024 * 1024 * 1024,
             wsl_load_avg: Some(0.83),
             wsl_mem_used: Some((2.1 * 1024.0 * 1024.0 * 1024.0) as u64),
-            wsl_mem_total: Some(8 * 1024 * 1024 * 1024),
             last_updated: Some(Instant::now()),
         };
         assert_eq!(snap.format_status_bar(true), "Win 38% 7.4G | WSL 0.8 2.1G");

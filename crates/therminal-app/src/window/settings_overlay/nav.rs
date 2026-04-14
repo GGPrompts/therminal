@@ -91,7 +91,9 @@ impl SettingsOverlayState {
                         Some(control.binding.command())
                     }
                     ControlType::Select {
-                        expanded, selected, options,
+                        expanded,
+                        selected,
+                        options,
                     } => {
                         if *expanded {
                             // Confirm selection and collapse.
@@ -168,7 +170,9 @@ impl SettingsOverlayState {
                 Some(control.binding.command())
             }
             ControlType::Select {
-                expanded, selected, options,
+                expanded,
+                selected,
+                options,
             } => {
                 if *expanded {
                     // Confirm selection and collapse.
@@ -516,10 +520,7 @@ impl SettingsOverlayState {
             ControlBinding::NewPaneCwd => SettingsCommand::SetNewPaneCwd(selected),
             ControlBinding::UiTextScale => SettingsCommand::SetUiTextScale(selected),
             ControlBinding::FontFamily => {
-                let name = options
-                    .get(selected)
-                    .cloned()
-                    .unwrap_or_default();
+                let name = options.get(selected).cloned().unwrap_or_default();
                 SettingsCommand::SetFontFamily(name)
             }
             _ => binding.command(),

@@ -280,6 +280,8 @@ fn parse_wsl_ps(stdout: &str) -> Vec<DetectedAgent> {
 /// 4. Classifies each visited process with `classify_wsl_process`.
 ///
 /// Returns an empty list if `root_pid` is not found in the process table.
+// TODO: [code-review] This function is only called within this file — consider making
+// it `fn` (private) instead of `pub fn` (88%)
 pub fn parse_wsl_ps_tree(stdout: &str, root_pid: u32) -> Vec<DetectedAgent> {
     use std::collections::{HashMap, VecDeque};
 
@@ -327,6 +329,8 @@ pub fn parse_wsl_ps_tree(stdout: &str, root_pid: u32) -> Vec<DetectedAgent> {
         queue.extend(kids);
     }
 
+    // TODO: [code-review] Consider adding a HashSet<u32> visited set to prevent
+    // theoretical infinite loops on malformed ps output where pid==ppid (82%)
     while let Some(pid) = queue.pop_front() {
         if let Some((_, comm, args)) = procs.get(&pid) {
             if let Some(agent_type) = classify_wsl_process(comm, args) {

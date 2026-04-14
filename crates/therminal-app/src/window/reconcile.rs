@@ -60,7 +60,7 @@ impl App {
             osc_9: self.config.terminal.osc_9,
             osc_1337: self.config.terminal.osc_1337,
             osc_7777: self.config.terminal.osc_7777,
-            osc_7337: true,
+            osc_7337: self.config.terminal.osc_7337,
         };
         let daemon_socket = client.socket_path().to_path_buf();
 

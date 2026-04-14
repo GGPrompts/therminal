@@ -977,10 +977,11 @@ impl GridRenderer {
 
     /// Check whether a font family name exists in the system font database.
     pub fn is_font_available(&self, family: &str) -> bool {
-        self.font_system
-            .db()
-            .faces()
-            .any(|f| f.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
+        self.font_system.db().faces().any(|f| {
+            f.families
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(family))
+        })
     }
 
     /// Remove the cached state for a specific pane (e.g. when a pane is closed).
