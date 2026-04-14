@@ -111,6 +111,22 @@ pub(crate) fn is_tui_editor(cmd: &str) -> bool {
     TUI_EDITORS.contains(&basename)
 }
 
+/// Whether a TUI editor supports `+line` syntax for jumping to a line.
+/// Editors like tfe are file explorers that take a path argument but
+/// don't understand `+N`. Emitting `+1` as an argument causes them to
+/// try to open a file literally named `+1`.
+pub(crate) fn supports_plus_line(cmd: &str) -> bool {
+    // Editors that do NOT support +line
+    const NO_PLUS_LINE: &[&str] = &["tfe", "yazi", "ranger", "nnn", "lf", "broot", "mc"];
+
+    let head = cmd.split_whitespace().next().unwrap_or("");
+    let basename = std::path::Path::new(head)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(head);
+    !NO_PLUS_LINE.contains(&basename)
+}
+
 /// Resolve an entry from the editor fallback chain to a concrete command.
 ///
 /// Each entry is either a literal command (e.g. `"nvim"`) or an env-var

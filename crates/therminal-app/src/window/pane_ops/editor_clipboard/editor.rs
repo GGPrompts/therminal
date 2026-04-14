@@ -217,10 +217,19 @@ impl App {
         }
         cmd.push_str("clear && exec ");
         cmd.push_str(&editor_cmd);
+        // Only emit +line for editors that support it. For env-var
+        // expansions (${EDITOR:-...}) we can't know at build time,
+        // so assume they do. For literal entries, check the list.
+        let emit_plus_line = chain
+            .first()
+            .map(|e| e.starts_with('$') || super::planner::supports_plus_line(e))
+            .unwrap_or(true);
+        if emit_plus_line {
+            cmd.push_str(" +");
+            cmd.push_str(line);
+        }
         cmd.push(' ');
         cmd.push_str(path);
-        cmd.push_str(" +");
-        cmd.push_str(line);
         cmd.push('\n');
 
         tracing::info!(path = %path, line = %line, "open_in_wsl_pane_editor: spawning editor in new WSL pane");
@@ -265,16 +274,19 @@ impl App {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
 
-        // Build a shell one-liner: cd to dir, clear, launch editor with +line.
-        // The editor string may contain args (e.g. "emacs -nw"), so we
-        // interpolate it directly rather than quoting it.
+        // Build a shell one-liner: cd to dir, clear, launch editor.
+        // Only emit `+line` for editors that support it (vim-family,
+        // micro, nano, etc.). File explorers like tfe interpret `+1`
+        // as a literal filename.
         let mut cmd = String::new();
         cmd.push_str("cd ");
         cmd.push_str(&shell_quote(&dir));
         cmd.push_str(" && clear && ");
         cmd.push_str(editor);
-        cmd.push_str(" +");
-        cmd.push_str(line);
+        if super::planner::supports_plus_line(editor) {
+            cmd.push_str(" +");
+            cmd.push_str(line);
+        }
         cmd.push(' ');
         cmd.push_str(&shell_quote(path));
         cmd.push('\n');
