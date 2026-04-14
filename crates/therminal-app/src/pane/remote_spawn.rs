@@ -79,6 +79,11 @@ pub fn spawn_remote_pane(
     // discovered an empty-workspace daemon session that would otherwise be
     // orphaned.
     reuse_session_id: Option<therminal_protocol::SessionId>,
+    // tn-alpb: shared agent registry so daemon-side AgentChanged events
+    // populate the GUI's local registry for pane header rendering.
+    agent_registry: Option<
+        Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
+    >,
 ) -> Result<
     (
         PaneState,
@@ -257,6 +262,7 @@ pub fn spawn_remote_pane(
         daemon_socket,
         callbacks,
         None,
+        agent_registry,
     )?;
 
     // tn-l3hk: total spawn wall time (includes CreateSession + GetWorkspaces +
@@ -294,6 +300,9 @@ pub(crate) fn build_remote_pane_state(
     daemon_socket: std::path::PathBuf,
     callbacks: PaneCallbacks,
     initial_cwd: Option<String>,
+    agent_registry: Option<
+        Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
+    >,
 ) -> Result<PaneState, anyhow::Error> {
     // ── 2. Build the local Term that the renderer reads from ──────────
     let term_config = TermConfig {
@@ -372,6 +381,11 @@ pub(crate) fn build_remote_pane_state(
     let shutdown_for_forwarder = Arc::clone(&shutdown);
     let term_for_forwarder = Arc::clone(&term);
     let forwarder_socket = daemon_socket.clone();
+    // tn-alpb: share status + agent registry with forwarder so
+    // AgentChanged events update the GUI's local state.
+    let status_for_forwarder = Arc::clone(&status);
+    let registry_for_forwarder = agent_registry;
+    let local_id_for_forwarder = local_id;
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
     let forwarder_handle = tokio_handle.spawn(async move {
         // F5 (tn-97j6): wrap connect+subscribe in a timeout so a daemon
@@ -424,6 +438,7 @@ pub(crate) fn build_remote_pane_state(
                 EventKind::PaneOutput,
                 EventKind::PaneExited,
                 EventKind::PaneResized,
+                EventKind::AgentChanged,
             ]),
         )
         .await
@@ -598,6 +613,50 @@ pub(crate) fn build_remote_pane_state(
                     ..
                 }) if pane_id == remote_pane_id => {
                     apply_remote_resize(&term_for_forwarder, cols as usize, rows as usize);
+                }
+                // tn-alpb: sync daemon-side agent detection to the GUI's
+                // local PaneStatus and AgentRegistry so pane headers and
+                // the status bar show agent info for remote (daemon-mode)
+                // panes.
+                Some(DaemonEvent::AgentChanged {
+                    pane_id,
+                    ref agent_name,
+                    ref agent_type,
+                    agent_pid,
+                }) if pane_id == remote_pane_id => {
+                    // Update PaneStatus.agent_name (drives the status bar).
+                    if let Ok(mut s) = status_for_forwarder.lock() {
+                        s.agent_name = agent_name.clone();
+                    }
+                    // Update the GUI's local AgentRegistry (drives the
+                    // pane header agent badge and Claude metadata lookup).
+                    // Use the LOCAL pane ID — the render loop looks up
+                    // `reg.get(pane.id)` where `pane.id` is the local ID,
+                    // not the daemon's remote ID.
+                    if let Some(ref reg) = registry_for_forwarder
+                        && let Ok(mut r) = reg.lock()
+                    {
+                        if let Some(name) = agent_name {
+                            let at = match agent_type.as_deref() {
+                                Some("claude") => {
+                                    therminal_terminal::state_inference::AgentType::Claude
+                                }
+                                Some("codex") => {
+                                    therminal_terminal::state_inference::AgentType::Codex
+                                }
+                                Some("copilot") => {
+                                    therminal_terminal::state_inference::AgentType::Copilot
+                                }
+                                Some("aider") => {
+                                    therminal_terminal::state_inference::AgentType::Aider
+                                }
+                                _ => therminal_terminal::state_inference::AgentType::Claude,
+                            };
+                            r.register(local_id_for_forwarder, name.clone(), at, agent_pid);
+                        } else {
+                            r.unregister(local_id_for_forwarder);
+                        }
+                    }
                 }
                 None => break,
                 _ => {}

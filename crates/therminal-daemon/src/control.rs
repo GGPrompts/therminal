@@ -389,6 +389,14 @@ pub fn format_notification(event: &DaemonEvent) -> String {
         } => {
             format!("%trust-escalation {escalation_id} {agent_name} {tool_name}\n")
         }
+        DaemonEvent::AgentChanged {
+            pane_id,
+            agent_name,
+            ..
+        } => {
+            let name = agent_name.as_deref().unwrap_or("none");
+            format!("%agent-changed {pane_id} {name}\n")
+        }
     }
 }
 

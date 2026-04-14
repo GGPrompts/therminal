@@ -71,6 +71,7 @@ impl App {
             socket,
             callbacks,
             None,
+            Some(Arc::clone(&self.agent_registry)),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -213,6 +214,7 @@ impl App {
             socket,
             callbacks,
             None,
+            Some(Arc::clone(&self.agent_registry)),
         ) {
             Ok(state) => state,
             Err(e) => {
@@ -289,6 +291,7 @@ impl App {
             socket,
             callbacks,
             None,
+            Some(Arc::clone(&self.agent_registry)),
         ) {
             Ok((state, session_id, daemon_pane_id)) => {
                 self.pane_id_map.insert(local_id, daemon_pane_id);

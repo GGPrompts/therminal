@@ -602,6 +602,25 @@ pub enum DaemonEvent {
         current_tier: String,
         required_tier: String,
     },
+    /// Agent detected or unregistered on a pane (tn-alpb).
+    ///
+    /// Broadcast by the daemon's `process_detector_task` when an agent
+    /// is first detected on a pane, changes type/pid, or disappears.
+    /// The GUI subscribes to this event to populate its local
+    /// `AgentRegistry` and `PaneStatus.agent_name` for remote panes
+    /// so pane headers and status bar show agent info in daemon mode.
+    AgentChanged {
+        pane_id: PaneId,
+        /// `Some(name)` when an agent is detected; `None` when the
+        /// agent exited and was unregistered.
+        agent_name: Option<String>,
+        /// Agent type string (e.g. "claude", "codex"). `None` when
+        /// unregistered.
+        agent_type: Option<String>,
+        /// OS PID of the agent process. `None` when unregistered or
+        /// when the PID is not available.
+        agent_pid: Option<u32>,
+    },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -619,6 +638,8 @@ pub enum EventKind {
     PaneResized,
     /// tn-b99: trust escalation prompt pending.
     TrustEscalation,
+    /// tn-alpb: agent detected or unregistered on a pane.
+    AgentChanged,
 }
 
 impl DaemonEvent {
@@ -633,6 +654,7 @@ impl DaemonEvent {
             DaemonEvent::PaneExited { .. } => EventKind::PaneExited,
             DaemonEvent::PaneResized { .. } => EventKind::PaneResized,
             DaemonEvent::TrustEscalation { .. } => EventKind::TrustEscalation,
+            DaemonEvent::AgentChanged { .. } => EventKind::AgentChanged,
         }
     }
 }

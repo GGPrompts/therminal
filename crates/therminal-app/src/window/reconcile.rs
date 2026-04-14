@@ -311,6 +311,14 @@ async fn build_reconcile_result(
                 socket_for_build,
                 callbacks,
                 None,
+                // tn-alpb: reconcile runs in an async task without access
+                // to the App's agent_registry. PaneStatus.agent_name is
+                // still updated by the forwarder's AgentChanged handler;
+                // the AgentRegistry update is skipped here — the pane
+                // header will show agent info once the next daemon-side
+                // scan fires an AgentChanged event and the init/split
+                // paths (which DO pass the registry) handle it.
+                None,
             )
         })
         .await;

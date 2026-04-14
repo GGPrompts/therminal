@@ -92,6 +92,17 @@ pub(crate) fn shell_command_is_wsl(shell_command: &str) -> bool {
     basename == "wsl.exe" || basename == "wsl"
 }
 
+/// Convert `AgentType` to the snake_case string used in the protocol.
+fn agent_type_str(t: therminal_terminal::state_inference::AgentType) -> String {
+    use therminal_terminal::state_inference::AgentType;
+    match t {
+        AgentType::Claude => "claude".to_string(),
+        AgentType::Codex => "codex".to_string(),
+        AgentType::Copilot => "copilot".to_string(),
+        AgentType::Aider => "aider".to_string(),
+    }
+}
+
 /// Default scan cadence for the process-detector ticker. Matches the
 /// GUI's per-pane default in `AppPtyHandler` (3 seconds).
 const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(3);
@@ -270,6 +281,13 @@ pub(crate) fn apply_scan_results(
                     agent.agent_type,
                     Some(agent.pid),
                 );
+                // tn-alpb: notify GUI so remote pane headers update.
+                mgr.broadcast_event(therminal_protocol::daemon::DaemonEvent::AgentChanged {
+                    pane_id,
+                    agent_name: Some(agent.name.clone()),
+                    agent_type: Some(agent_type_str(agent.agent_type)),
+                    agent_pid: Some(agent.pid),
+                });
             }
             (Some(agent), Some(existing)) => {
                 // Re-register if the agent type or pid changed (e.g.
@@ -288,6 +306,13 @@ pub(crate) fn apply_scan_results(
                         agent.agent_type,
                         Some(agent.pid),
                     );
+                    // tn-alpb: notify GUI of the change.
+                    mgr.broadcast_event(therminal_protocol::daemon::DaemonEvent::AgentChanged {
+                        pane_id,
+                        agent_name: Some(agent.name.clone()),
+                        agent_type: Some(agent_type_str(agent.agent_type)),
+                        agent_pid: Some(agent.pid),
+                    });
                 }
             }
             (None, Some(existing)) => {
@@ -304,6 +329,13 @@ pub(crate) fn apply_scan_results(
                         "unregistering vanished agent (daemon-side detector)"
                     );
                     mgr.unregister_agent(pane_id);
+                    // tn-alpb: notify GUI so the badge clears.
+                    mgr.broadcast_event(therminal_protocol::daemon::DaemonEvent::AgentChanged {
+                        pane_id,
+                        agent_name: None,
+                        agent_type: None,
+                        agent_pid: None,
+                    });
                 }
             }
             (None, None) => {}

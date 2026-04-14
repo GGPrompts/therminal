@@ -169,6 +169,7 @@ impl App {
                 socket_for_closure,
                 callbacks,
                 inherited_cwd.clone(),
+                Some(Arc::clone(&self.agent_registry)),
             ) {
                 Ok(state) => Some(state),
                 Err(e) => {

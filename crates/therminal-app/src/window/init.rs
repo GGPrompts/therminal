@@ -647,6 +647,7 @@ impl App {
                 deferred.daemon_socket,
                 deferred.callbacks,
                 deferred.reuse_session_id,
+                Some(Arc::clone(&self.agent_registry)),
             ) {
                 Ok((pane, daemon_session_id, daemon_pane_id)) => {
                     let pane_id = pane.id;
@@ -896,6 +897,7 @@ impl App {
         let dc_for_leaf = Arc::clone(&daemon_client);
         let socket_for_leaf = daemon_socket.clone();
         let handle_for_leaf = tokio_handle.clone();
+        let registry_for_leaf = Arc::clone(&self.agent_registry);
         let mut id_pairs: Vec<(crate::pane::PaneId, therminal_protocol::PaneId)> = Vec::new();
         let (cols, rows) = crate::pane::grid_size_for_rect(full_rect, renderer);
         let cols = cols.max(2);
@@ -944,6 +946,7 @@ impl App {
                         socket_for_leaf.clone(),
                         callbacks,
                         None,
+                        Some(Arc::clone(&registry_for_leaf)),
                     ) {
                         Ok(state) => {
                             id_pairs.push((local_id, daemon_pane_id));
