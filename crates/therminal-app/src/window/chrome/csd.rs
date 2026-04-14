@@ -217,15 +217,21 @@ struct CsdButtonIcons {
 
 impl CsdButtonIcons {
     const fn new() -> Self {
-        // Settings icon: we originally used ⚙ (U+2699 gear) but it's a
-        // symbol codepoint that most monospace fonts don't ship and
-        // glyphon's fallback chain doesn't reliably pick up a system
-        // symbol font (Segoe UI Symbol, Noto Sans Symbols, Apple Symbols)
-        // without explicit wiring. Use ≡ (U+2261, identical-to / triple
-        // bar) instead — it's in the Mathematical Operators block, ships
-        // with every serious mono font, and visually reads as "menu /
-        // settings" (the same shape Android/Material uses for the
-        // hamburger menu).
+        // CSD button glyphs chosen for maximum font coverage:
+        //
+        // - Settings ≡ (U+2261, Mathematical Operators) — visually reads
+        //   as "menu / hamburger", the same icon shape Material uses.
+        // - Minimize ─ (U+2500, Box Drawing) — horizontal line.
+        // - Maximize □ (U+25A1, Geometric Shapes) — hollow square.
+        // - Close × (U+00D7, Latin-1 Supplement, MULTIPLICATION SIGN) —
+        //   present in virtually every font including minimal monospace
+        //   faces.  The previous glyph ✕ (U+2715, Dingbats) was missing
+        //   from many monospace fonts and rendered as "?".
+        //
+        // All four glyphs are rendered with `Family::SansSerif` (see
+        // `shape_csd_icons`) so cosmic-text resolves to the system
+        // sans-serif font (Noto Sans / DejaVu Sans / Segoe UI / SF Pro)
+        // which covers all four codepoints reliably across platforms.
         Self {
             settings_slot: "csd_settings",
             settings_label: "\u{2261}",
@@ -234,7 +240,7 @@ impl CsdButtonIcons {
             max_slot: "csd_max",
             max_label: "\u{25A1}",
             close_slot: "csd_close",
-            close_label: "\u{2715}",
+            close_label: "\u{00D7}",
         }
     }
 }
@@ -334,12 +340,15 @@ fn shape_csd_icons(
     close_icon_color: GlyphColor,
     renderer: &mut GridRenderer,
 ) {
-    // CSD button icons (≡ ─ □ ✕) use the generic Monospace family so
-    // cosmic-text resolves to any available system monospace font. This
-    // decouples the icons from font.family — if the user picks a font
-    // that lacks box-drawing or mathematical operator glyphs, the CSD
-    // buttons still render correctly.
-    let attrs = |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Monospace).color(c) };
+    // CSD button icons (≡ ─ □ ×) use `Family::SansSerif` so cosmic-text
+    // resolves to the system sans-serif font (Noto Sans, DejaVu Sans,
+    // Segoe UI, SF Pro) which has broad Unicode coverage including
+    // Mathematical Operators, Box Drawing, and Geometric Shapes blocks.
+    // This decouples icons from both the user's grid font AND the
+    // generic `Family::Monospace` alias (which `build_font_system`
+    // remaps to the user's configured family — a font that may lack
+    // these glyphs).
+    let attrs = |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::SansSerif).color(c) };
 
     ensure_shaped(
         icons.settings_slot,
