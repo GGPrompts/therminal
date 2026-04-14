@@ -344,7 +344,7 @@ impl JsonlTailState {
         let event_count = self.events.len();
         let follow_indicator = if self.following { " [follow]" } else { "" };
         out.push_str(&format!(
-            "{}{} events{}{}\n",
+            "{}{} events{}{}\r\n",
             ansi::DIM,
             event_count,
             follow_indicator,
@@ -357,7 +357,7 @@ impl JsonlTailState {
         let end = (start + self.visible_rows.saturating_sub(2)).min(total);
         for row in &self.display[start..end] {
             out.push_str(&row.formatted);
-            out.push('\n');
+            out.push_str("\r\n");
         }
 
         // Footer with keybinding hints (compact at narrow widths).
@@ -393,7 +393,7 @@ impl JsonlTailState {
             )
         };
         out.push_str(&footer);
-        out.push('\n');
+        out.push_str("\r\n");
 
         out
     }

@@ -42,6 +42,7 @@ use clap::Args;
 pub mod format;
 pub mod runtime;
 
+pub mod agent_event;
 pub mod agents;
 pub mod events;
 pub mod layout;

@@ -92,6 +92,9 @@ enum Command {
     /// Semantic queries (commands, hotspots).
     #[command(subcommand)]
     Semantic(cli::semantic::SemanticCmd),
+    /// Push agent lifecycle events to the daemon (hook-push path).
+    #[command(name = "agent-event", subcommand)]
+    AgentEvent(cli::agent_event::AgentEventCmd),
 }
 
 fn main() -> Result<()> {
@@ -141,6 +144,9 @@ fn main() -> Result<()> {
             Command::Events(c) => cli::runtime::with_runtime(|ctx| cli::events::run(ctx, c)),
             Command::Layout(c) => cli::runtime::with_runtime(|ctx| cli::layout::run(ctx, c)),
             Command::Semantic(c) => cli::runtime::with_runtime(|ctx| cli::semantic::run(ctx, c)),
+            Command::AgentEvent(c) => {
+                cli::runtime::with_runtime(|ctx| cli::agent_event::run(ctx, c))
+            }
         };
     }
 
