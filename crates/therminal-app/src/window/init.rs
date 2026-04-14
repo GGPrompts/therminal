@@ -259,6 +259,7 @@ impl App {
             initial_pane_pending: false,
             focus_mode: false,
             focus_mode_hint_visible: false,
+            minimized: false,
             deferred_remote_spawn: None,
             scrollback_compact_countdown: 0,
         }

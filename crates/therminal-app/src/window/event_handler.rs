@@ -682,30 +682,45 @@ impl App {
             height = new_size.height,
             pane_pending = self.initial_pane_pending,
             has_panes = self.workspaces.is_some(),
+            minimized = self.minimized,
             "handle_resized"
         );
         if new_size.width == 0 || new_size.height == 0 {
+            // tn-rl6i: on Windows, minimizing sends Resized(0, 0).
+            self.minimized = true;
             return;
         }
+
+        // tn-rl6i: restoring from minimized state — force a full relayout
+        // so the grid renders at the correct dimensions. Without this, the
+        // terminal shows garbled single-syllable text wrapping at wrong
+        // column widths until the user manually resizes.
+        let was_minimized = self.minimized;
+        self.minimized = false;
+
         let now = Instant::now();
         let elapsed_ok = self
             .last_resize_at
             .map(|t| now.duration_since(t).as_millis() > 16)
             .unwrap_or(true);
-        if elapsed_ok {
+        if elapsed_ok || was_minimized {
             self.last_resize_at = Some(now);
             self.pending_resize = None;
             self.resize(new_size);
-            // tn-ou30: do NOT spawn the deferred pane from handle_resized.
-            // On Windows the OS can fire multiple resize events in rapid
-            // succession before settling on the final size (e.g. maximized
-            // → actual default). Spawning on the first resize would create
-            // the PTY at the wrong dimensions, then the subsequent shrink
-            // pushes content into scrollback. The spawn happens instead in
-            // handle_redraw_requested, which runs after the event batch is
-            // drained and gpu.config reflects the settled size.
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
+            if was_minimized {
+                self.relayout_and_redraw();
+            } else {
+                // tn-ou30: do NOT spawn the deferred pane from handle_resized.
+                // On Windows the OS can fire multiple resize events in rapid
+                // succession before settling on the final size (e.g. maximized
+                // → actual default). Spawning on the first resize would create
+                // the PTY at the wrong dimensions, then the subsequent shrink
+                // pushes content into scrollback. The spawn happens instead in
+                // handle_redraw_requested, which runs after the event batch is
+                // drained and gpu.config reflects the settled size.
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
             }
         } else {
             self.pending_resize = Some(new_size);

@@ -493,6 +493,12 @@ pub struct App {
     /// edge, `false` otherwise.
     pub(crate) focus_mode_hint_visible: bool,
 
+    /// tn-rl6i: tracks whether the window is currently minimized. On Windows,
+    /// minimizing sends a Resized(0, 0) event. When restoring, the subsequent
+    /// non-zero Resized event must trigger a full relayout so the grid renders
+    /// at the correct dimensions.
+    pub(crate) minimized: bool,
+
     /// Stashed state for a deferred remote fresh-spawn. `None` when the
     /// deferred spawn is local-mode or when no spawn is pending.
     pub(crate) deferred_remote_spawn: Option<DeferredRemoteSpawn>,
@@ -1363,6 +1369,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_input_event(event_loop, state, button);
+            }
+            WindowEvent::Occluded(false) => {
+                // tn-rl6i: belt-and-suspenders for restore from minimize.
+                // Some compositors fire Occluded(false) without a
+                // corresponding Resized event on un-minimize. Force a
+                // relayout so the grid dimensions are correct.
+                if self.minimized {
+                    info!("window un-occluded while minimized, forcing relayout");
+                    self.minimized = false;
+                    self.relayout_and_redraw();
+                }
             }
             WindowEvent::KeyboardInput {
                 event:
