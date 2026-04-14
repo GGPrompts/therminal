@@ -334,7 +334,9 @@ fn shape_csd_icons(
     close_icon_color: GlyphColor,
     renderer: &mut GridRenderer,
 ) {
-    let family = renderer.font_config.chrome_font_family().to_string();
+    // CSD button icons (≡ ─ □ ✕) must use the grid/monospace font, not
+    // ui_font_family — many display and Nerd Fonts lack these glyphs.
+    let family = renderer.font_config.effective_family().to_string();
     let attrs =
         |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::Name(&family)).color(c) };
 
