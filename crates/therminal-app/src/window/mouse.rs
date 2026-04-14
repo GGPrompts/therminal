@@ -513,9 +513,13 @@ impl App {
         // tn-sfn9: skip CSD hover highlights in focus mode (the bar is hidden).
         if self.config.general.use_csd && !self.focus_mode {
             let bar_h = crate::pane::effective_tab_bar_height_csd(1, true, false);
-            if (py as f32) < bar_h {
+            let in_header = (py as f32) < bar_h;
+            if in_header || self.cursor_was_in_csd_header {
+                // Redraw when entering, moving within, or leaving the header
+                // so hover highlights are updated and cleared promptly.
                 self.request_redraw();
             }
+            self.cursor_was_in_csd_header = in_header;
         }
 
         // ── tn-sfn9: focus mode hover-reveal hint ───────────────────────

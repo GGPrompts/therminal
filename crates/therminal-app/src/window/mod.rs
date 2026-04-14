@@ -287,6 +287,10 @@ pub struct App {
     /// Current cursor position in physical pixels.
     cursor_position: Option<(f64, f64)>,
 
+    /// Whether the cursor was in the CSD header area on the last motion event.
+    /// Used to trigger a redraw when the mouse exits the header, clearing hover.
+    cursor_was_in_csd_header: bool,
+
     /// Whether the left mouse button is currently held.
     mouse_left_held: bool,
 

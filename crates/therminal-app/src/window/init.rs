@@ -233,6 +233,7 @@ impl App {
             pending_resize: None,
             last_resize_at: None,
             cursor_position: None,
+            cursor_was_in_csd_header: false,
             mouse_left_held: false,
             mouse_drag_pane: None,
             selection_in_progress: false,
