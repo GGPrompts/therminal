@@ -131,12 +131,7 @@ pub fn spawn_metrics_poller(
 }
 
 /// The actual polling loop that runs on the background thread.
-fn poller_loop(
-    shared: SharedMetrics,
-    interval: Duration,
-    wsl_interval: Duration,
-    show_wsl: bool,
-) {
+fn poller_loop(shared: SharedMetrics, interval: Duration, wsl_interval: Duration, show_wsl: bool) {
     let mut sys = System::new();
 
     // sysinfo needs two refresh_cpu_all calls separated by a small

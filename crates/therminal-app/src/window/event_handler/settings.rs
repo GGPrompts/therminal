@@ -1,7 +1,7 @@
 //! Settings overlay commands and configuration mutation helpers.
 
-use tracing::{info, warn};
 use therminal_core::config::{ConfigEditSession, config_path};
+use tracing::{info, warn};
 
 use super::super::settings_overlay::{self, SettingsCommand};
 use super::super::{App, OverlayMode};
@@ -42,14 +42,16 @@ impl App {
         current_tier: String,
         required_tier: String,
     ) {
-        self.trust_escalation = Some(super::super::trust_escalation_overlay::TrustEscalationState {
-            escalation_id,
-            agent_name,
-            tool_name,
-            current_tier,
-            required_tier,
-            approve_focused: true,
-        });
+        self.trust_escalation = Some(
+            super::super::trust_escalation_overlay::TrustEscalationState {
+                escalation_id,
+                agent_name,
+                tool_name,
+                current_tier,
+                required_tier,
+                approve_focused: true,
+            },
+        );
         self.overlay_mode = Some(OverlayMode::TrustEscalation);
         self.active_menu = None;
         if let Some(w) = self.window.as_ref() {
