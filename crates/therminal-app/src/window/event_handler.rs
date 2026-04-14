@@ -140,6 +140,7 @@ impl App {
             ui_text_scale_index: settings_overlay::ui_text_scale_index(
                 self.config.accessibility.ui_text_scale,
             ),
+            font_family_index: settings_overlay::font_family_index(&self.config.font.family),
         }
     }
 
@@ -290,6 +291,43 @@ impl App {
                     renderer.set_ui_text_scale(scale);
                 }
                 self.show_toast(format!("UI text scale: {:.0}%", scale * 100.0));
+                self.relayout_and_redraw();
+            }
+            // -- Font mutations (tn-0zfo) --
+            SettingsCommand::SetFontFamily(idx) => {
+                let family = settings_overlay::FONT_FAMILY_OPTIONS
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(settings_overlay::FONT_FAMILY_OPTIONS[0]);
+                self.config.font.family = family.to_string();
+                self.config.font.ui_font_family = family.to_string();
+                // Trigger font reload: build a new grid_renderer FontConfig
+                // and call update_font, mirroring the apply_config hot-reload
+                // path in window/mod.rs.
+                if let (Some(renderer), Some(gpu), Some(window)) = (
+                    self.grid_renderer.as_mut(),
+                    self.gpu.as_ref(),
+                    self.window.as_ref(),
+                ) {
+                    let scale = window.scale_factor() as f32;
+                    let mut new_font_config = crate::grid_renderer::FontConfig::new(
+                        family.to_string(),
+                        self.config.font.size * scale,
+                    );
+                    new_font_config.fallback_families =
+                        self.config.font.extra_fallbacks.clone();
+                    new_font_config.ui_font_family = family.to_string();
+                    new_font_config.line_height =
+                        self.config.font.size * self.config.font.line_height_scale * scale;
+                    renderer.update_font(
+                        new_font_config,
+                        &gpu.device,
+                        &gpu.queue,
+                        gpu.config.width,
+                        gpu.config.height,
+                    );
+                }
+                self.show_toast(format!("font family: {family}"));
                 self.relayout_and_redraw();
             }
         }

@@ -114,6 +114,24 @@ fn restore_control_states(controls: &mut [SettingsControl], snapshots: &[Control
 /// Predefined UI text scale options (select control values).
 pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 
+/// Predefined font family options for the unified font selector (tn-0zfo).
+///
+/// The first entry is a sentinel for the platform default (empty string in
+/// config). Remaining entries are popular monospace families likely to be
+/// installed on developer machines.
+pub(crate) const FONT_FAMILY_OPTIONS: &[&str] = &[
+    "JetBrainsMono Nerd Font Mono",
+    "JetBrains Mono",
+    "Fira Code",
+    "Cascadia Code",
+    "Iosevka",
+    "Source Code Pro",
+    "Hack",
+    "Inconsolata",
+    "IBM Plex Mono",
+    "Ubuntu Mono",
+];
+
 /// Find the index in [`UI_TEXT_SCALE_OPTIONS`] closest to the given scale.
 pub(crate) fn ui_text_scale_index(scale: f32) -> usize {
     UI_TEXT_SCALE_OPTIONS
@@ -129,6 +147,14 @@ pub(crate) fn ui_text_scale_index(scale: f32) -> usize {
         .unwrap_or(1) // default to 1.0 (index 1)
 }
 
+/// Find the index in [`FONT_FAMILY_OPTIONS`] matching the given family name.
+/// Returns `None` when the family is not in the predefined list (custom value).
+pub(crate) fn font_family_index(family: &str) -> Option<usize> {
+    FONT_FAMILY_OPTIONS
+        .iter()
+        .position(|&opt| opt.eq_ignore_ascii_case(family))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsRenderValues {
     pub editor_chain: Vec<String>,
@@ -142,6 +168,8 @@ pub(crate) struct SettingsRenderValues {
     pub high_contrast: bool,
     pub reduced_motion: bool,
     pub ui_text_scale_index: usize,
+    // Font section (tn-0zfo)
+    pub font_family_index: Option<usize>,
 }
 
 pub(super) fn editor_chain_label(index: usize) -> &'static str {
@@ -203,9 +231,37 @@ impl SettingsOverlayState {
                 }
             }
         }
+        self.rebuild_font_section(values);
         self.rebuild_hotspots_section(values);
         self.rebuild_shell_section(values);
         self.rebuild_accessibility_section(values);
+    }
+
+    fn rebuild_font_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "font") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
+        let options: Vec<String> = FONT_FAMILY_OPTIONS.iter().map(|s| (*s).to_string()).collect();
+        let selected = values.font_family_index.unwrap_or(0);
+        let mut controls = vec![SettingsControl::with_type(
+            "Font family",
+            ControlBinding::FontFamily,
+            ControlType::select(options, selected),
+        )];
+        restore_control_states(&mut controls, &prev_states);
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
     }
 
     fn rebuild_hotspots_section(&mut self, values: &SettingsRenderValues) {
@@ -349,6 +405,7 @@ impl SettingsOverlayState {
         // tn-t2yd.2: Layout section (show pane headers / show status bar)
         // was removed — those toggles are replaced by the runtime F11
         // focus mode keybinding (`KeyAction::FocusMode`).
+        self.register_section(SettingsSection::new("font", "Font", vec![]));
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
         self.register_section(SettingsSection::new(

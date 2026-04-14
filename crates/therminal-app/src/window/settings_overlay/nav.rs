@@ -509,6 +509,7 @@ impl SettingsOverlayState {
         match binding {
             ControlBinding::NewPaneCwd => SettingsCommand::SetNewPaneCwd(selected),
             ControlBinding::UiTextScale => SettingsCommand::SetUiTextScale(selected),
+            ControlBinding::FontFamily => SettingsCommand::SetFontFamily(selected),
             _ => binding.command(),
         }
     }

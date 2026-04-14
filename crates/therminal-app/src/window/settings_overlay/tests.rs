@@ -1,6 +1,6 @@
 //! Unit tests for the settings overlay model + theme palettes.
 
-use super::sections::{SettingsRenderValues, ui_text_scale_index};
+use super::sections::{FONT_FAMILY_OPTIONS, SettingsRenderValues, font_family_index, ui_text_scale_index};
 use super::state::SettingsOverlayState;
 use super::theme::apply_theme_preset;
 use super::types::{
@@ -51,6 +51,7 @@ fn test_render_values() -> SettingsRenderValues {
         high_contrast: false,
         reduced_motion: false,
         ui_text_scale_index: 1,
+        font_family_index: Some(0),
     }
 }
 
@@ -468,7 +469,8 @@ fn hotspots_section_rebuilds_from_config() {
 fn editor_chain_enter_enters_edit_mode() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 1: shell=0, hotspots=1).
+    // Navigate to "hotspots" section (index 2: font=0, shell=1, hotspots=2).
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     // First Enter enters edit mode (returns None).
@@ -481,6 +483,7 @@ fn editor_chain_enter_enters_edit_mode() {
 fn editor_chain_enter_confirms_edit() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     // Enter edit mode.
@@ -501,6 +504,7 @@ fn editor_chain_enter_confirms_edit() {
 fn editor_chain_escape_cancels_edit() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     state.enter(); // enter edit mode
@@ -525,6 +529,7 @@ fn editor_chain_delete_removes_entry() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
     state.arrow_down();
+    state.arrow_down();
     state.tab(false);
     // Delete on non-editing ListRow should produce remove command.
     let cmd = state.delete();
@@ -535,6 +540,7 @@ fn editor_chain_delete_removes_entry() {
 fn add_editor_button_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     // The "Add editor" button is after the 3 editor chain entries (index 3).
@@ -548,7 +554,8 @@ fn add_editor_button_produces_command() {
 fn folder_pane_command_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 1: shell=0, hotspots=1).
+    // Navigate to "hotspots" section (index 2: font=0, shell=1, hotspots=2).
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     // Folder pane command is now at index 4 (3 editors + 1 "Add editor" button).
@@ -595,7 +602,8 @@ fn shell_section_rebuilds_from_config() {
 fn shell_default_shell_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "shell" section is now at index 0 (tn-t2yd.2 removed the layout section).
+    // "shell" section is at index 1 (font=0, shell=1).
+    state.arrow_down();
     state.tab(false);
     // Enter to start editing the "Default shell" text input.
     assert_eq!(state.enter(), None);
@@ -608,7 +616,8 @@ fn shell_default_shell_text_edit_produces_command() {
 fn shell_new_pane_cwd_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "shell" section is at index 0, "New pane cwd" is control index 2.
+    // "shell" section is at index 1 (font=0, shell=1), "New pane cwd" is control index 2.
+    state.arrow_down();
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
@@ -657,9 +666,9 @@ fn accessibility_section_rebuilds_from_config() {
 fn accessibility_high_contrast_toggle_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 3: shell=0, hotspots=1,
-    // themes=2, accessibility=3).
-    for _ in 0..3 {
+    // Navigate to "accessibility" section (index 4: font=0, shell=1,
+    // hotspots=2, themes=3, accessibility=4).
+    for _ in 0..4 {
         state.arrow_down();
     }
     state.tab(false);
@@ -670,8 +679,8 @@ fn accessibility_high_contrast_toggle_produces_command() {
 fn accessibility_ui_text_scale_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section, control index 2 (UI text scale).
-    for _ in 0..3 {
+    // Navigate to "accessibility" section (index 4), control index 2 (UI text scale).
+    for _ in 0..4 {
         state.arrow_down();
     }
     state.tab(false);
@@ -708,7 +717,8 @@ fn ui_text_scale_index_finds_closest_match() {
 fn select_expanded_state_survives_sync_toggle_values() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 0), "New pane cwd" Select (control 2).
+    // Navigate to "shell" section (index 1: font=0, shell=1), "New pane cwd" Select (control 2).
+    state.arrow_down();
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
@@ -733,7 +743,8 @@ fn select_expanded_state_survives_sync_toggle_values() {
 fn text_editing_state_survives_sync_toggle_values() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 0), "Default shell" TextInput (control 0).
+    // Navigate to "shell" section (index 1: font=0, shell=1), "Default shell" TextInput (control 0).
+    state.arrow_down();
     state.tab(false);
     // Enter to start editing.
     assert_eq!(state.enter(), None);
@@ -759,4 +770,91 @@ fn active_theme_indicator_tracks_applied_preset() {
     assert_eq!(state.active_theme(), Some(ThemePreset::Paper));
     state.set_active_theme(ThemePreset::HemisuDark);
     assert_eq!(state.active_theme(), Some(ThemePreset::HemisuDark));
+}
+
+// -- Font section tests (tn-0zfo) --
+
+#[test]
+fn font_section_is_registered() {
+    let state = SettingsOverlayState::new();
+    assert!(state.sections().iter().any(|s| s.id == "font"));
+}
+
+#[test]
+fn font_section_rebuilds_from_config() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    let font = state.sections().iter().find(|s| s.id == "font").unwrap();
+    assert_eq!(font.controls.len(), 1);
+    assert_eq!(font.controls[0].label, "Font family");
+    assert!(matches!(
+        font.controls[0].control_type,
+        ControlType::Select { .. }
+    ));
+}
+
+#[test]
+fn font_family_select_produces_command() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    // "font" section is at index 0.
+    state.tab(false);
+    // First Enter expands the select (returns None).
+    assert_eq!(state.enter(), None);
+    assert!(state.is_select_expanded());
+    // Cycle to next option.
+    state.arrow_down();
+    // Second Enter confirms and returns the command.
+    let cmd = state.enter();
+    assert_eq!(cmd, Some(SettingsCommand::SetFontFamily(1)));
+    assert!(!state.is_select_expanded());
+}
+
+#[test]
+fn font_family_index_finds_known_families() {
+    assert_eq!(font_family_index("JetBrainsMono Nerd Font Mono"), Some(0));
+    assert_eq!(font_family_index("Fira Code"), Some(2));
+    assert_eq!(font_family_index("Iosevka"), Some(4));
+}
+
+#[test]
+fn font_family_index_is_case_insensitive() {
+    assert_eq!(font_family_index("fira code"), Some(2));
+    assert_eq!(font_family_index("JETBRAINS MONO"), Some(1));
+}
+
+#[test]
+fn font_family_index_returns_none_for_unknown() {
+    assert_eq!(font_family_index("Comic Sans MS"), None);
+    assert_eq!(font_family_index(""), None);
+}
+
+#[test]
+fn font_family_options_has_expected_entries() {
+    assert!(FONT_FAMILY_OPTIONS.len() >= 5);
+    assert!(FONT_FAMILY_OPTIONS.contains(&"JetBrainsMono Nerd Font Mono"));
+    assert!(FONT_FAMILY_OPTIONS.contains(&"Fira Code"));
+    assert!(FONT_FAMILY_OPTIONS.contains(&"Cascadia Code"));
+}
+
+#[test]
+fn font_select_expanded_state_survives_sync() {
+    let mut state = SettingsOverlayState::new();
+    state.sync_toggle_values(&test_render_values());
+    // "font" section is at index 0.
+    state.tab(false);
+    // Expand the select.
+    assert_eq!(state.enter(), None);
+    assert!(state.is_select_expanded());
+    // Cycle to next option.
+    state.arrow_down();
+    // sync_toggle_values fires — expanded + selected state must survive.
+    state.sync_toggle_values(&test_render_values());
+    assert!(
+        state.is_select_expanded(),
+        "Font family Select should remain expanded after sync_toggle_values"
+    );
+    // Confirm — should produce the cycled index, not the original.
+    let cmd = state.enter();
+    assert!(matches!(cmd, Some(SettingsCommand::SetFontFamily(1))));
 }

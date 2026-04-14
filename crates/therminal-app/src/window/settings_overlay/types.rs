@@ -55,6 +55,8 @@ pub(crate) enum ControlBinding {
     ToggleHighContrast,
     ToggleReducedMotion,
     UiTextScale,
+    // Font controls (tn-0zfo)
+    FontFamily,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +83,8 @@ pub(crate) enum SettingsCommand {
     ToggleHighContrast,
     ToggleReducedMotion,
     SetUiTextScale(usize),
+    // Font mutations (tn-0zfo)
+    SetFontFamily(usize),
 }
 
 impl ControlBinding {
@@ -98,6 +102,7 @@ impl ControlBinding {
             Self::ToggleHighContrast => SettingsCommand::ToggleHighContrast,
             Self::ToggleReducedMotion => SettingsCommand::ToggleReducedMotion,
             Self::UiTextScale => SettingsCommand::SetUiTextScale(0),
+            Self::FontFamily => SettingsCommand::SetFontFamily(0),
         }
     }
 
