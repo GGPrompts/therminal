@@ -99,12 +99,13 @@ impl App {
             crate::pane::effective_header_height(layout.pane_count() + 1, !self.focus_mode);
 
         let new_id = layout.split_pane(target_pane_id, direction, |viewport| {
-            let (cols, _rows) = crate::pane::state::grid_size_for_rect_with_header(
+            let (cols, rows) = crate::pane::state::grid_size_for_rect_with_header(
                 viewport,
                 renderer,
                 post_split_header_h,
             );
             let cols = cols.max(20);
+            let rows = rows.max(3);
 
             let wake = {
                 let proxy = proxy.clone();
@@ -114,8 +115,9 @@ impl App {
                 })
             };
 
-            match jsonl_tail::spawn_jsonl_watcher(jsonl_path_for_closure.clone(), cols, wake) {
-                Ok((state, watcher)) => {
+            match jsonl_tail::spawn_jsonl_watcher(jsonl_path_for_closure.clone(), cols, rows, wake)
+            {
+                Ok((state, term, watcher)) => {
                     let id = crate::pane::spawn::next_pane_id();
                     Some(PaneState {
                         id,
@@ -125,6 +127,7 @@ impl App {
                         backend: PaneBackendKind::JsonlTail {
                             path: jsonl_path_for_closure,
                             state,
+                            term,
                             watcher,
                         },
                     })

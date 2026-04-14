@@ -36,10 +36,15 @@ use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::Term;
+use alacritty_terminal::vte::ansi as vte_ansi;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, warn};
+
+use super::PaneListener;
 
 /// Maximum number of parsed rows retained in the ring buffer.
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -530,6 +535,22 @@ impl JsonlTailState {
             self.scroll = pos;
             self.following = false;
         }
+    }
+
+    /// Write the current `formatted_content()` into a shadow `Term` so the
+    /// GPU renderer can draw it. Clears the term grid first (cursor home +
+    /// erase display), then writes the ANSI-formatted content line by line.
+    pub fn refresh_shadow_term(&self, term: &Arc<FairMutex<Term<PaneListener>>>) {
+        let content = self.formatted_content();
+        let mut processor = vte_ansi::Processor::<vte_ansi::StdSyncHandler>::new();
+        let mut guard = term.lock();
+
+        // Clear the grid: cursor to home + erase entire display.
+        let clear = b"\x1b[H\x1b[2J";
+        processor.advance(&mut *guard, clear);
+
+        // Write the formatted content.
+        processor.advance(&mut *guard, content.as_bytes());
     }
 }
 
@@ -1375,27 +1396,56 @@ fn truncate_visible(s: &str, max: usize) -> String {
 
 // ── Watcher lifecycle ──────────────────────────────────────────────────
 
-/// Spawn a `notify` file watcher and return the shared state handle.
+/// Spawn a `notify` file watcher and return the shared state handle plus
+/// a shadow `Term` for GPU rendering (tn-pes1).
 ///
 /// The watcher monitors the parent directory (because the file may not
 /// exist yet or may be recreated). On each relevant event, it triggers
-/// a poll of the file via the shared state.
+/// a poll of the file via the shared state, then refreshes the shadow
+/// term so the renderer picks up the new content.
 ///
 /// `wake` is called after new rows are appended so the GUI can
 /// request a redraw.
+#[allow(clippy::type_complexity)]
 pub fn spawn_jsonl_watcher(
     path: PathBuf,
     cols: usize,
+    rows: usize,
     wake: Box<dyn Fn() + Send + 'static>,
-) -> Result<(Arc<Mutex<JsonlTailState>>, JsonlTailWatcher), anyhow::Error> {
-    let state = Arc::new(Mutex::new(JsonlTailState::new(path.clone(), cols)));
+) -> Result<
+    (
+        Arc<Mutex<JsonlTailState>>,
+        Arc<FairMutex<Term<PaneListener>>>,
+        JsonlTailWatcher,
+    ),
+    anyhow::Error,
+> {
+    let mut init_state = JsonlTailState::new(path.clone(), cols);
+    init_state.visible_rows = rows.max(3);
+    let state = Arc::new(Mutex::new(init_state));
+
+    // tn-pes1: create the shadow Term with zero scrollback — the JSONL
+    // viewer manages its own scroll offset and re-paints the grid on every
+    // state change.
+    let term_config = alacritty_terminal::term::Config {
+        scrolling_history: 0,
+        ..Default::default()
+    };
+    let term_size = therminal_terminal::pty_runtime::TermSize {
+        columns: cols.max(20),
+        screen_lines: rows.max(3),
+    };
+    let listener = PaneListener::new();
+    let term = Arc::new(FairMutex::new(Term::new(term_config, &term_size, listener)));
 
     // Do an initial poll to pick up any existing content.
     if let Ok(mut s) = state.lock() {
         s.poll_file();
+        s.refresh_shadow_term(&term);
     }
 
     let state_for_watcher = Arc::clone(&state);
+    let term_for_watcher = Arc::clone(&term);
     let watch_path = path.clone();
 
     let mut watcher =
@@ -1410,6 +1460,8 @@ pub fn spawn_jsonl_watcher(
                             if dominated || event.paths.is_empty() {
                                 if let Ok(mut s) = state_for_watcher.lock() {
                                     s.poll_file();
+                                    // tn-pes1: repaint the shadow term with new content.
+                                    s.refresh_shadow_term(&term_for_watcher);
                                 }
                                 wake();
                             }
@@ -1427,7 +1479,7 @@ pub fn spawn_jsonl_watcher(
     let watch_dir = path.parent().unwrap_or(Path::new("."));
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
 
-    Ok((state, JsonlTailWatcher { _watcher: watcher }))
+    Ok((state, term, JsonlTailWatcher { _watcher: watcher }))
 }
 
 /// RAII guard holding the `notify` watcher alive. Drop to stop watching.

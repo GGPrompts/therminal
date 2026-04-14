@@ -116,11 +116,19 @@ pub enum PaneBackendKind {
     /// Replaces the old `tail -F` shell pane approach for subagent
     /// observation. The `notify` file watcher detects appended lines
     /// and renders them with format-aware color coding.
+    ///
+    /// A shadow `Term` is maintained so the GPU render path can draw
+    /// the structured JSONL content identically to a PTY-backed pane
+    /// (tn-pes1). `refresh_shadow_term()` on `JsonlTailState` clears
+    /// the grid and writes `formatted_content()` after every state
+    /// change (new lines, scroll, expand/collapse).
     JsonlTail {
         /// Path to the JSONL file being tailed.
         path: PathBuf,
         /// Shared state with the file watcher (rows, offset, formatting).
         state: Arc<Mutex<JsonlTailState>>,
+        /// Shadow term fed from `formatted_content()` for GPU rendering.
+        term: Arc<FairMutex<Term<PaneListener>>>,
         /// RAII guard — dropping this stops the file watcher.
         #[allow(dead_code)]
         watcher: JsonlTailWatcher,
@@ -162,10 +170,12 @@ impl PaneBackend for PaneBackendKind {
                 // WebView input handling is a stub for now.
                 Ok(())
             }
-            PaneBackendKind::JsonlTail { state, .. } => {
+            PaneBackendKind::JsonlTail { state, term, .. } => {
                 // Route keystrokes to the interactive viewer (tn-bjvl).
                 if let Ok(mut s) = state.lock() {
                     s.handle_input(data);
+                    // tn-pes1: repaint the shadow term after navigation.
+                    s.refresh_shadow_term(term);
                 }
                 Ok(())
             }
@@ -205,11 +215,22 @@ impl PaneBackend for PaneBackendKind {
             PaneBackendKind::WebView { .. } => {
                 // WebView resize is a stub for now.
             }
-            PaneBackendKind::JsonlTail { state, .. } => {
+            PaneBackendKind::JsonlTail { state, term, .. } => {
+                // Resize the shadow term first.
+                {
+                    let mut term_guard = term.lock();
+                    let size = PaneTermSize {
+                        columns: cols,
+                        screen_lines: rows,
+                    };
+                    term_guard.resize(size);
+                }
                 if let Ok(mut s) = state.lock() {
                     s.cols = cols.max(20);
                     s.visible_rows = rows.max(3);
                     s.reformat_all();
+                    // tn-pes1: repaint shadow term with reformatted content.
+                    s.refresh_shadow_term(term);
                 }
             }
             PaneBackendKind::RemotePty {
@@ -309,14 +330,14 @@ impl PaneBackend for PaneBackendKind {
 }
 
 impl PaneBackendKind {
-    /// Returns the terminal term if this is a Terminal or RemotePty backend,
-    /// `None` for WebView and JsonlTail.
+    /// Returns the terminal term for backends that support GPU rendering.
+    /// `None` only for WebView (which has no term).
     pub fn term(&self) -> Option<&Arc<FairMutex<Term<PaneListener>>>> {
         match self {
-            PaneBackendKind::Terminal { term, .. } | PaneBackendKind::RemotePty { term, .. } => {
-                Some(term)
-            }
-            PaneBackendKind::WebView { .. } | PaneBackendKind::JsonlTail { .. } => None,
+            PaneBackendKind::Terminal { term, .. }
+            | PaneBackendKind::RemotePty { term, .. }
+            | PaneBackendKind::JsonlTail { term, .. } => Some(term),
+            PaneBackendKind::WebView { .. } => None,
         }
     }
 
