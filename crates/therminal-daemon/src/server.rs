@@ -963,7 +963,16 @@ async fn dispatch_ipc(
                 match serde_json::from_value::<therminal_harness_claude::HookSignal>(signal.clone())
                 {
                     Ok(hook_signal) => {
+                        // tn-s8w3: after injecting the signal into the harness
+                        // broadcast channel, emit SubagentStarted/SubagentStopped
+                        // DaemonEvents so the GUI's swarm debouncer can react
+                        // without relying on JSONL file scanning.
+                        let maybe_subagent_event =
+                            resolve_subagent_daemon_event(&hook_signal, session_mgr).await;
                         sink.inject(hook_signal);
+                        if let Some(evt) = maybe_subagent_event {
+                            let _ = event_tx.send(evt);
+                        }
                         IpcResponse::AgentEventPushed
                     }
                     Err(e) => IpcResponse::Error {
@@ -1202,6 +1211,96 @@ async fn batch_layout_ops(
     drop(mgr);
 
     IpcResponse::BatchResult { results }
+}
+
+// ── Hook-push → DaemonEvent bridge (tn-s8w3) ─────────────────────────────
+
+/// Inspect a [`HookSignal`](therminal_harness_claude::HookSignal) and, when it
+/// is a `subagent_start` or `subagent_stop` event, resolve the parent Claude
+/// session to a `PaneId` via the `PaneCapacityCache` and construct a
+/// `DaemonEvent::SubagentStarted` / `SubagentStopped`.
+///
+/// Returns `None` for non-subagent signals or when the parent session cannot
+/// be resolved to a pane (e.g. hooks arrived before the state poller has
+/// populated the capacity cache — the JSONL file scanner remains as fallback).
+async fn resolve_subagent_daemon_event(
+    signal: &therminal_harness_claude::HookSignal,
+    session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
+) -> Option<DaemonEvent> {
+    match signal.event.as_str() {
+        "subagent_start" => {
+            let parent_session_id = signal.parent_session_id.as_ref()?;
+            let agent_id = signal.agent_id.clone().unwrap_or_default();
+
+            // Resolve parent session → pane via the capacity cache.
+            let pane_id = {
+                let mgr = session_mgr.lock().await;
+                mgr.pane_capacity_cache()
+                    .find_pane_by_session_id(parent_session_id)
+            };
+
+            let pane_id = match pane_id {
+                Some(pid) => pid,
+                None => {
+                    debug!(
+                        parent_session_id,
+                        agent_id,
+                        "tn-s8w3: cannot resolve parent session to pane for SubagentStarted"
+                    );
+                    return None;
+                }
+            };
+
+            // Construct the JSONL path if we can find the project directory.
+            // Layout: ~/.claude/projects/{hash}/{parent_sid}/subagents/agent-{id}.jsonl
+            // We don't know the project hash here, but we can attempt to find
+            // it by scanning the capacity cache's working_dir or by searching
+            // the filesystem. For now, leave jsonl_path as None — the GUI's
+            // swarm pane handler constructs the tail command from the agent_id
+            // and discovers the path at spawn time if needed.
+            let jsonl_path = None;
+
+            info!(
+                pane_id,
+                agent_id, parent_session_id, "tn-s8w3: emitting SubagentStarted from hook signal"
+            );
+            Some(DaemonEvent::SubagentStarted {
+                pane_id,
+                agent_id,
+                parent_session_id: parent_session_id.clone(),
+                jsonl_path,
+            })
+        }
+        "subagent_stop" => {
+            let parent_session_id = signal.parent_session_id.as_ref()?;
+            let agent_id = signal.agent_id.clone().unwrap_or_default();
+
+            let pane_id = {
+                let mgr = session_mgr.lock().await;
+                mgr.pane_capacity_cache()
+                    .find_pane_by_session_id(parent_session_id)
+            };
+
+            let pane_id = match pane_id {
+                Some(pid) => pid,
+                None => {
+                    debug!(
+                        parent_session_id,
+                        agent_id,
+                        "tn-s8w3: cannot resolve parent session to pane for SubagentStopped"
+                    );
+                    return None;
+                }
+            };
+
+            info!(
+                pane_id,
+                agent_id, parent_session_id, "tn-s8w3: emitting SubagentStopped from hook signal"
+            );
+            Some(DaemonEvent::SubagentStopped { pane_id, agent_id })
+        }
+        _ => None,
+    }
 }
 
 // ── Backward compatibility alias ──────────────────────────────────────────

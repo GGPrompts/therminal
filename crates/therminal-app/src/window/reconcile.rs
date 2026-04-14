@@ -320,6 +320,8 @@ async fn build_reconcile_result(
                 // scan fires an AgentChanged event and the init/split
                 // paths (which DO pass the registry) handle it.
                 None,
+                None, // tn-s8w3: swarm_tx not available in reconcile context
+                None, // swarm_wake
             )
         })
         .await;

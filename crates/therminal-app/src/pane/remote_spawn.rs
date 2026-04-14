@@ -263,6 +263,8 @@ pub fn spawn_remote_pane(
         callbacks,
         None,
         agent_registry,
+        None, // swarm_tx: initial spawn doesn't need hook-driven subagent forwarding yet
+        None, // swarm_wake
     )?;
 
     // tn-l3hk: total spawn wall time (includes CreateSession + GetWorkspaces +
@@ -303,6 +305,12 @@ pub(crate) fn build_remote_pane_state(
     agent_registry: Option<
         Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
     >,
+    // tn-s8w3: optional sender for hook-driven subagent events. When set,
+    // the forwarder pushes SubagentStarted/SubagentStopped events from the
+    // daemon into the swarm debouncer channel and calls the wake callback
+    // to trigger a debouncer poll on the main thread.
+    swarm_tx: Option<std::sync::mpsc::Sender<crate::pane::swarm_watcher::SwarmWatcherEvent>>,
+    swarm_wake: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> Result<PaneState, anyhow::Error> {
     // ── 2. Build the local Term that the renderer reads from ──────────
     let term_config = TermConfig {
@@ -386,6 +394,9 @@ pub(crate) fn build_remote_pane_state(
     let status_for_forwarder = Arc::clone(&status);
     let registry_for_forwarder = agent_registry;
     let local_id_for_forwarder = local_id;
+    // tn-s8w3: move swarm channel sender into the forwarder task.
+    let swarm_tx_for_forwarder = swarm_tx;
+    let swarm_wake_for_forwarder = swarm_wake;
     REMOTE_PTY_LIVE_TASKS.fetch_add(1, Ordering::Release);
     let forwarder_handle = tokio_handle.spawn(async move {
         // F5 (tn-97j6): wrap connect+subscribe in a timeout so a daemon
@@ -439,6 +450,8 @@ pub(crate) fn build_remote_pane_state(
                 EventKind::PaneExited,
                 EventKind::PaneResized,
                 EventKind::AgentChanged,
+                EventKind::SubagentStarted,
+                EventKind::SubagentStopped,
             ]),
         )
         .await
@@ -655,6 +668,51 @@ pub(crate) fn build_remote_pane_state(
                             r.register(local_id_for_forwarder, name.clone(), at, agent_pid);
                         } else {
                             r.unregister(local_id_for_forwarder);
+                        }
+                    }
+                }
+                // tn-s8w3: hook-driven subagent lifecycle events. Forward
+                // them into the swarm debouncer channel so auto-tile reacts
+                // without waiting for the JSONL file scanner.
+                Some(DaemonEvent::SubagentStarted {
+                    pane_id,
+                    ref agent_id,
+                    ref jsonl_path,
+                    ..
+                }) if pane_id == remote_pane_id => {
+                    if let Some(ref tx) = swarm_tx_for_forwarder {
+                        let path = jsonl_path
+                            .as_deref()
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| {
+                                std::path::PathBuf::from(format!(
+                                    "/tmp/hook-subagent-{}.jsonl",
+                                    agent_id
+                                ))
+                            });
+                        let event = crate::pane::swarm_watcher::SwarmWatcherEvent::SpawnSubagent {
+                            agent_id: agent_id.clone(),
+                            jsonl_path: path,
+                        };
+                        let _ = tx.send(event);
+                        // Wake the event loop so it polls the debouncer.
+                        if let Some(ref wake) = swarm_wake_for_forwarder {
+                            wake();
+                        }
+                    }
+                }
+                Some(DaemonEvent::SubagentStopped {
+                    pane_id,
+                    ref agent_id,
+                }) if pane_id == remote_pane_id => {
+                    if let Some(ref tx) = swarm_tx_for_forwarder {
+                        let event =
+                            crate::pane::swarm_watcher::SwarmWatcherEvent::ReclaimSubagent {
+                                agent_id: agent_id.clone(),
+                            };
+                        let _ = tx.send(event);
+                        if let Some(ref wake) = swarm_wake_for_forwarder {
+                            wake();
                         }
                     }
                 }

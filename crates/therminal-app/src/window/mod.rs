@@ -116,7 +116,7 @@ use keybindings::{BindingLookup, build_binding_map};
 
 /// Events sent from background threads to the winit event loop.
 #[derive(Debug)]
-enum UserEvent {
+pub(crate) enum UserEvent {
     /// New bytes are available from a pane's PTY; request a redraw.
     PtyOutput,
     /// A pane's PTY has closed (shell exited); remove the pane.
@@ -168,7 +168,7 @@ pub enum NotificationSource {
 /// Contains the daemon's authoritative workspace state and newly-built
 /// `PaneState` objects for daemon panes the GUI didn't know about.
 /// Delivered to the main thread via `UserEvent::DaemonReconcilePanesReady`.
-struct ReconcileResult {
+pub(crate) struct ReconcileResult {
     /// Workspace topology from the daemon (authoritative).
     workspaces: Vec<therminal_protocol::daemon::WorkspaceInfo>,
     /// Which workspace the daemon considers active.
@@ -382,6 +382,12 @@ pub struct App {
     /// within the debounce window cancels both, so subagents that finish
     /// quickly don't briefly flash a pane onto the screen.
     pub(crate) swarm_debouncer: Option<crate::pane::auto_tile::SwarmDebouncer>,
+
+    /// Sender into the swarm debouncer channel (tn-s8w3). Cloned into each
+    /// remote pane forwarder so hook-driven `SubagentStarted`/`SubagentStopped`
+    /// daemon events can feed the debouncer without file scanning.
+    pub(crate) swarm_debouncer_tx:
+        Option<std::sync::mpsc::Sender<crate::pane::swarm_watcher::SwarmWatcherEvent>>,
 
     /// Shared list of live pane root PIDs, read by the swarm watcher thread
     /// when `general.swarm_watch_scope = "current"` to restrict subagents to
@@ -878,6 +884,20 @@ impl App {
                     new_tc.position,
                 );
                 info!("agent timeline config updated via hot-reload");
+            }
+            // Wire the `enabled` config field to runtime visibility on
+            // hot-reload. The keybinding toggle works independently, but
+            // when the user edits `enabled` in the TOML we respect it.
+            if new_tc.enabled != old_tc.enabled {
+                self.agent_timeline.visible = new_tc.enabled;
+                if !new_tc.enabled {
+                    self.widget_manager
+                        .remove(crate::widgets::TIMELINE_WIDGET_ID);
+                }
+                info!(
+                    enabled = new_tc.enabled,
+                    "agent timeline enabled changed via hot-reload"
+                );
             }
         }
 

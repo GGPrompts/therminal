@@ -68,6 +68,20 @@ impl PaneCapacityCache {
         self.inner.lock().ok()?.get(&pane_id).cloned()
     }
 
+    /// Find the pane ID associated with a Claude session ID.
+    ///
+    /// Used by the hook-push path (tn-s8w3) to resolve which pane a
+    /// subagent's parent session is running in. Returns `None` if no
+    /// entry matches.
+    pub fn find_pane_by_session_id(&self, session_id: &str) -> Option<PaneId> {
+        self.inner
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(_, e)| e.session_id == session_id)
+            .map(|(&pid, _)| pid)
+    }
+
     pub fn remove_by_session_id(&self, session_id: &str) {
         if let Ok(mut g) = self.inner.lock() {
             g.retain(|_, e| e.session_id != session_id);

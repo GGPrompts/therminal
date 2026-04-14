@@ -621,6 +621,21 @@ pub enum DaemonEvent {
         /// when the PID is not available.
         agent_pid: Option<u32>,
     },
+    /// tn-s8w3: a Claude Code subagent started on a pane (hook-driven).
+    ///
+    /// Broadcast by the daemon when a `subagent_start` hook signal arrives
+    /// via `IpcRequest::PushAgentEvent`. The GUI subscribes to this event
+    /// to feed the `SwarmDebouncer` and auto-tile a pane for the subagent
+    /// without relying on JSONL file scanning.
+    SubagentStarted {
+        pane_id: PaneId,
+        agent_id: String,
+        parent_session_id: String,
+        /// Resolved JSONL path for the subagent transcript, if available.
+        jsonl_path: Option<String>,
+    },
+    /// tn-s8w3: a Claude Code subagent stopped on a pane (hook-driven).
+    SubagentStopped { pane_id: PaneId, agent_id: String },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -640,6 +655,10 @@ pub enum EventKind {
     TrustEscalation,
     /// tn-alpb: agent detected or unregistered on a pane.
     AgentChanged,
+    /// tn-s8w3: subagent started (hook-driven auto-tile signal).
+    SubagentStarted,
+    /// tn-s8w3: subagent stopped (hook-driven auto-tile signal).
+    SubagentStopped,
 }
 
 impl DaemonEvent {
@@ -655,6 +674,8 @@ impl DaemonEvent {
             DaemonEvent::PaneResized { .. } => EventKind::PaneResized,
             DaemonEvent::TrustEscalation { .. } => EventKind::TrustEscalation,
             DaemonEvent::AgentChanged { .. } => EventKind::AgentChanged,
+            DaemonEvent::SubagentStarted { .. } => EventKind::SubagentStarted,
+            DaemonEvent::SubagentStopped { .. } => EventKind::SubagentStopped,
         }
     }
 }

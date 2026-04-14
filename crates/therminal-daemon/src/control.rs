@@ -397,6 +397,14 @@ pub fn format_notification(event: &DaemonEvent) -> String {
             let name = agent_name.as_deref().unwrap_or("none");
             format!("%agent-changed {pane_id} {name}\n")
         }
+        DaemonEvent::SubagentStarted {
+            pane_id, agent_id, ..
+        } => {
+            format!("%subagent-started {pane_id} {agent_id}\n")
+        }
+        DaemonEvent::SubagentStopped { pane_id, agent_id } => {
+            format!("%subagent-stopped {pane_id} {agent_id}\n")
+        }
     }
 }
 

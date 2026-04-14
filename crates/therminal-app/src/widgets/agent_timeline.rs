@@ -234,7 +234,6 @@ impl AgentTimelineSource {
     }
 
     /// Number of entries currently in the buffer.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

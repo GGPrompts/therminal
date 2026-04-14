@@ -131,13 +131,17 @@ impl App {
         } else {
             None
         };
-        let swarm_debouncer = if config.general.auto_tile {
+        let (swarm_debouncer, swarm_debouncer_tx) = if config.general.auto_tile {
             let raw_rx = crate::pane::swarm_watcher::spawn(
                 config.general.swarm_watch_scope,
                 swarm_pane_pids.clone(),
             );
             let (deb_tx, deb_rx) =
                 std::sync::mpsc::channel::<crate::pane::swarm_watcher::SwarmWatcherEvent>();
+            // tn-s8w3: keep a clone of the sender so remote pane forwarders
+            // can push hook-driven SubagentStarted/SubagentStopped events
+            // into the debouncer without file scanning.
+            let deb_tx_for_forwarders = deb_tx.clone();
             let proxy = event_proxy.clone();
             thread::Builder::new()
                 .name("swarm-watcher-bridge".into())
@@ -156,9 +160,12 @@ impl App {
                     }
                 })
                 .expect("failed to spawn swarm watcher bridge");
-            Some(SwarmDebouncer::new(deb_rx, 1500))
+            (
+                Some(SwarmDebouncer::new(deb_rx, 1500)),
+                Some(deb_tx_for_forwarders),
+            )
         } else {
-            None
+            (None, None)
         };
 
         let pattern_engine = if config.patterns.enabled {
@@ -255,6 +262,7 @@ impl App {
             last_close_action: None,
             auto_tile_debouncer,
             swarm_debouncer,
+            swarm_debouncer_tx,
             swarm_pane_pids,
             swarm_panes: std::collections::HashMap::new(),
             visual_bell_start: None,
@@ -964,6 +972,8 @@ impl App {
                         callbacks,
                         None,
                         Some(Arc::clone(&registry_for_leaf)),
+                        None, // tn-s8w3: swarm_tx wired after App construction
+                        None, // swarm_wake
                     ) {
                         Ok(state) => {
                             id_pairs.push((local_id, daemon_pane_id));

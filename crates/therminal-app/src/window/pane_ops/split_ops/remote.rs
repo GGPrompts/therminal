@@ -139,11 +139,16 @@ impl App {
             Some(r) => r,
             None => return,
         };
+        let callbacks = make_pane_callbacks(&proxy, local_id);
+        // Hoist borrows of `self` before the mutable `layout` borrow to avoid
+        // borrow conflicts with `layout.split_pane` which holds &mut self.
+        let agent_registry_for_closure = Arc::clone(&self.agent_registry);
+        let swarm_tx_for_closure = self.swarm_debouncer_tx.clone();
+        let swarm_wake_for_closure = self.swarm_wake_callback();
         let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
             Some(l) => l,
             None => return,
         };
-        let callbacks = make_pane_callbacks(&proxy, local_id);
         // tn-ou30: compute post-split header height so the local Term starts
         // at the correct size, avoiding a shrink→scrollback row on relayout.
         let post_split_header_h =
@@ -170,7 +175,9 @@ impl App {
                 socket_for_closure,
                 callbacks,
                 inherited_cwd.clone(),
-                Some(Arc::clone(&self.agent_registry)),
+                Some(agent_registry_for_closure),
+                swarm_tx_for_closure,
+                swarm_wake_for_closure,
             ) {
                 Ok(state) => Some(state),
                 Err(e) => {

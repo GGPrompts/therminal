@@ -940,6 +940,13 @@ impl App {
                         gpu.config.height,
                         widget,
                     );
+                    tracing::debug!(
+                        entries = self.agent_timeline.len(),
+                        x = tl_x,
+                        y = tl_y,
+                        width = bar_width,
+                        "timeline_rasterized"
+                    );
                 }
             }
         }

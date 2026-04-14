@@ -73,6 +73,8 @@ impl App {
             callbacks,
             None,
             Some(Arc::clone(&self.agent_registry)),
+            self.swarm_debouncer_tx.clone(),
+            self.swarm_wake_callback(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -217,6 +219,8 @@ impl App {
             callbacks,
             None,
             Some(Arc::clone(&self.agent_registry)),
+            self.swarm_debouncer_tx.clone(),
+            self.swarm_wake_callback(),
         ) {
             Ok(state) => state,
             Err(e) => {

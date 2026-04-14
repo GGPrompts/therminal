@@ -85,6 +85,17 @@ struct Tracked {
 fn default_state_dir(name: &str) -> PathBuf {
     #[cfg(windows)]
     {
+        // When the GUI runs as a Windows native process but the shell is WSL,
+        // Claude Code writes state files inside WSL's /tmp/, not the Windows
+        // %TEMP%. Resolve through the \\wsl.localhost\<distro>\tmp UNC path
+        // so the watcher can find them.
+        if let Some(distro) = crate::window::wsl_paths::detect_default_distro() {
+            if let Some(p) =
+                therminal_harness_claude::wsl_paths::linux_to_unc(&distro, &format!("/tmp/{name}"))
+            {
+                return p;
+            }
+        }
         std::env::temp_dir().join(name)
     }
 
@@ -95,7 +106,26 @@ fn default_state_dir(name: &str) -> PathBuf {
 }
 
 /// Resolve the Claude projects directory.
+///
+/// On Windows native with WSL, Claude Code's `.claude/projects/` lives inside
+/// the WSL filesystem. We probe for the WSL distro and home directory and
+/// return a `\\wsl.localhost\<distro>\home\<user>\.claude\projects` UNC path
+/// that Windows can traverse. Falls back to the Windows home if WSL detection
+/// fails.
 fn claude_projects_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(distro) = crate::window::wsl_paths::detect_default_distro() {
+            if let Some(home) = crate::window::wsl_paths::detect_wsl_home() {
+                if let Some(p) = therminal_harness_claude::wsl_paths::linux_to_unc(
+                    &distro,
+                    &format!("{home}/.claude/projects"),
+                ) {
+                    return p;
+                }
+            }
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".claude")
@@ -360,6 +390,27 @@ pub fn spawn(
                     if tracked.contains_key(&agent_id) {
                         continue;
                     }
+
+                    // Freshness gate: skip files whose mtime is older than
+                    // STALENESS_TIMEOUT. This prevents a flood of pane
+                    // creation on startup when old subagent JSONLs from
+                    // previous sessions litter the projects directory.
+                    let mtime = std::fs::metadata(&jsonl_path)
+                        .and_then(|m| m.modified())
+                        .ok();
+                    let is_stale = mtime
+                        .and_then(|m| m.elapsed().ok())
+                        .map(|age| age >= STALENESS_TIMEOUT)
+                        .unwrap_or(true);
+                    if is_stale {
+                        debug!(
+                            agent = %agent_id,
+                            jsonl = %jsonl_path.display(),
+                            "swarm watcher: skipping stale subagent file"
+                        );
+                        continue;
+                    }
+
                     if scope == SwarmWatchScope::Current {
                         let owned = owned_cache.get(&pids);
                         if !subagent_in_scope(scope, owned, &jsonl_path) {

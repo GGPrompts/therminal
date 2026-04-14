@@ -37,6 +37,18 @@ impl App {
             && self.daemon_runtime.is_some()
     }
 
+    /// Build a wake callback for the swarm debouncer (tn-s8w3). The callback
+    /// sends a `SwarmWatcherTick` user event to wake the main event loop so
+    /// it polls the debouncer after a hook-driven subagent event arrives.
+    /// Returns `None` when auto-tile is disabled (no debouncer).
+    pub(crate) fn swarm_wake_callback(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        self.swarm_debouncer_tx.as_ref()?;
+        let proxy = self.event_proxy.clone();
+        Some(Arc::new(move || {
+            let _ = proxy.send_event(super::UserEvent::SwarmWatcherTick);
+        }))
+    }
+
     /// Drive a daemon RPC from the winit event-loop thread using the
     /// stored runtime handle. Wraps the request in `DAEMON_OP_TIMEOUT` so
     /// a hung daemon can't freeze the UI. Returns the decoded response
