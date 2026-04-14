@@ -333,6 +333,31 @@ async fn start_daemon(
                             &state,
                             mgr.agent_registry(),
                         );
+                        // tn-ixfy: fallback when PID matching fails (common on
+                        // Windows+WSL where the state file PID from hook scripts
+                        // diverges from the process detector's WSL-probe PID).
+                        // Match by working_dir against panes with a Claude agent.
+                        let pane_id = pane_id.or_else(|| {
+                            let wd = state.working_dir.as_deref().filter(|s| !s.is_empty())?;
+                            for entry in mgr.agent_registry().agents() {
+                                if matches!(
+                                    entry.agent_type,
+                                    therminal_terminal::state_inference::AgentType::Claude
+                                ) {
+                                    if let Some(cwd) = mgr.pane_cwd(entry.pane_id) {
+                                        if cwd == wd {
+                                            tracing::debug!(
+                                                pane_id = entry.pane_id,
+                                                working_dir = wd,
+                                                "pane_capacity: PID miss, matched by cwd"
+                                            );
+                                            return Some(entry.pane_id);
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        });
                         drop(mgr);
                         if let Some(pid) = pane_id {
                             cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));

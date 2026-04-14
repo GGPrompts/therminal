@@ -289,7 +289,7 @@ fn session_event_to_agent_event(se: &session_log::SessionEvent) -> Option<AgentE
 ///
 /// Claude Code stores session transcripts at:
 /// `~/.claude/projects/{project-hash}/{session-uuid}.jsonl`
-fn resolve_session_jsonl(session_id: &str) -> Option<PathBuf> {
+pub fn resolve_session_jsonl(session_id: &str) -> Option<PathBuf> {
     if !is_valid_session_id(session_id) {
         return None;
     }

@@ -373,7 +373,32 @@ fn render_single_pane(
     let claude_header_title: Option<String> =
         claude_meta.as_ref().and_then(|meta| meta.header_title());
     // tn-5fgz: Claude agent state badge for the pane header.
-    let claude_badge: Option<String> = claude_meta.as_ref().map(|meta| meta.header_badge());
+    // Primary source: ClaudeChromeMeta (rich state from state poller).
+    // Fallback: agent registry name + status (works when the state poller
+    // can't match sessions, e.g. Windows-native daemon + WSL shell).
+    let claude_badge: Option<String> = claude_meta
+        .as_ref()
+        .map(|meta| meta.header_badge())
+        .or_else(|| {
+            let reg = agent_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = reg.get(pane.id)?;
+            let name = pane
+                .status
+                .lock()
+                .ok()
+                .and_then(|s| s.agent_name.clone())
+                .unwrap_or_else(|| "agent".to_string());
+            let label = match &entry.status {
+                therminal_terminal::agent_registry::AgentStatus::Active => "active",
+                therminal_terminal::agent_registry::AgentStatus::Idle => "idle",
+                therminal_terminal::agent_registry::AgentStatus::Processing => "processing",
+                therminal_terminal::agent_registry::AgentStatus::Streaming => "streaming",
+                therminal_terminal::agent_registry::AgentStatus::Thinking => "thinking",
+                therminal_terminal::agent_registry::AgentStatus::ToolUse { .. } => "tool use",
+                therminal_terminal::agent_registry::AgentStatus::AwaitingInput => "waiting",
+            };
+            Some(format!("{name} \u{00b7} {label}"))
+        });
     let vp = pane.viewport;
     let term = match pane.backend.term() {
         Some(t) => t,

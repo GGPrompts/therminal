@@ -149,12 +149,13 @@ impl App {
         }
     }
 
-    /// Open a horizontal split running `tail -F` on the focused pane's
-    /// agent event log JSONL file.
+    /// Open a structured JSONL tail pane for the focused pane's Claude
+    /// session transcript.
     ///
     /// Triggered by clicking the `[agent: <name>]` indicator in the status
-    /// bar. The new pane is small and narrow (horizontal split) so it acts
-    /// as a side panel without dominating the layout.
+    /// bar. Resolves the Claude session ID to its JSONL transcript file
+    /// under `~/.claude/projects/` and opens a `JsonlTail` pane (same as
+    /// subagent panes) with structured, color-coded rendering.
     pub(crate) fn open_focused_agent_event_log_tail(&mut self) {
         let focused = match self.focused_pane() {
             Some(id) => id,
@@ -164,57 +165,112 @@ impl App {
             }
         };
 
-        // The session_id used for event logs corresponds 1:1 with the pane
-        // id in this single-process app. The daemon uses the same naming
-        // scheme, so this matches if/when the daemon is also writing logs.
-        let session_id = format!("pane-{focused}");
-        let log_path = therminal_runtime::paths::runtime_dir()
-            .join("sessions")
-            .join(format!("{session_id}.events.jsonl"));
-        let log_path_str = log_path.to_string_lossy().into_owned();
+        // Look up the Claude session ID from the pane's status. This is
+        // populated by the daemon's AgentChanged event forwarder.
+        let session_id = self.workspaces.as_ref().and_then(|wm| {
+            let pane = wm.layout().find_pane(focused)?;
+            pane.status
+                .lock()
+                .ok()
+                .and_then(|s| s.claude_session_id.clone())
+        });
 
-        // On Windows+WSL the runtime_dir is a Windows path (C:\Users\...)
-        // but `tail` runs inside WSL bash where it needs /mnt/c/... form.
-        let tail_path = windows_path_to_wsl(&log_path_str).unwrap_or(log_path_str.clone());
+        let jsonl_path = session_id
+            .as_deref()
+            .and_then(therminal_harness_claude::jsonl_tailer::resolve_session_jsonl);
 
-        info!(
-            "Opening agent event log tail pane for pane {} at {}",
-            focused, tail_path
-        );
-
-        // `tail -F` follows file rotation/recreation and tolerates a
-        // non-existent file (it will retry until the file appears).
-        let cmd = format!(
-            "tail -F {}\n",
-            super::super::editor_clipboard::shell_quote(&tail_path),
-        );
-
-        // In daemon mode the split is async — carry the command bytes in the
-        // completion callback so they're written after the PTY is live.
-        if self.is_daemon_mode() {
-            self.split_focused_pane_with(
-                SplitDirection::Horizontal,
-                DaemonSplitOnComplete::WriteBytesAndFocus {
-                    bytes: cmd.into_bytes(),
-                    toast: None,
-                },
-            );
-            return;
-        }
-
-        // Local mode: split is synchronous — write immediately.
-        // Horizontal split keeps the tail pane narrow (top/bottom layout).
-        self.split_focused_pane(SplitDirection::Horizontal);
-
-        let new_pane = match self.focused_pane() {
-            Some(id) if id != focused => id,
-            _ => {
-                warn!("open_focused_agent_event_log_tail: split did not produce a new pane");
+        let jsonl_path = match jsonl_path {
+            Some(p) => p,
+            None => {
+                info!(pane = focused, "no Claude JSONL transcript found for pane");
+                self.show_toast("no Claude session transcript found".to_string());
                 return;
             }
         };
 
-        self.pty_write_to_pane(cmd.as_bytes(), new_pane);
+        info!(
+            "Opening JSONL tail pane for pane {} at {}",
+            focused,
+            jsonl_path.display()
+        );
+
+        // Open a JsonlTail pane (structured, color-coded) using the same
+        // pattern as spawn_subagent_pane. Works in both local and daemon
+        // modes since JsonlTail uses a notify file watcher, not a PTY.
+        let renderer = match self.grid_renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let direction = self
+            .get_layout()
+            .and_then(|l| l.find_pane(focused))
+            .map(|p| LayoutNode::auto_split_direction(p.viewport, SplitDirection::Horizontal))
+            .unwrap_or(SplitDirection::Horizontal);
+
+        let proxy = self.event_proxy.clone();
+        let jsonl_path_for_closure = jsonl_path.clone();
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let post_split_header_h =
+            crate::pane::effective_header_height(layout.pane_count() + 1, !self.focus_mode);
+
+        let new_id = layout.split_pane(focused, direction, |viewport| {
+            let (cols, rows) = crate::pane::state::grid_size_for_rect_with_header(
+                viewport,
+                renderer,
+                post_split_header_h,
+            );
+            let cols = cols.max(20);
+            let rows = rows.max(3);
+
+            let wake = {
+                let proxy = proxy.clone();
+                Box::new(move || {
+                    let _ = proxy.send_event(crate::window::UserEvent::PtyOutput);
+                })
+            };
+
+            match crate::pane::jsonl_tail::spawn_jsonl_watcher(
+                jsonl_path_for_closure.clone(),
+                cols,
+                rows,
+                wake,
+            ) {
+                Ok((state, term, watcher)) => {
+                    let id = crate::pane::spawn::next_pane_id();
+                    Some(crate::pane::state::PaneState {
+                        id,
+                        viewport,
+                        status: std::sync::Arc::new(std::sync::Mutex::new(
+                            crate::pane::state::PaneStatus::default(),
+                        )),
+                        region_index: std::sync::Arc::new(std::sync::Mutex::new(
+                            therminal_terminal::region_index::RegionIndex::new(),
+                        )),
+                        backend: crate::pane::backend::PaneBackendKind::JsonlTail {
+                            path: jsonl_path_for_closure,
+                            state,
+                            term,
+                            watcher,
+                        },
+                    })
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to create JSONL tail watcher");
+                    None
+                }
+            }
+        });
+
+        if new_id.is_some() {
+            self.relayout_and_redraw();
+        } else {
+            self.show_toast("failed to open JSONL tail pane".to_string());
+        }
     }
 
     /// Split a specific pane by ID.
@@ -324,44 +380,5 @@ impl App {
         }
 
         info!("Spawned {n} additional panes via auto-split");
-    }
-}
-
-/// Convert a Windows path (`C:\Users\...`) to WSL `/mnt/c/Users/...` form.
-/// Returns `None` if the path doesn't match the `X:\...` pattern.
-fn windows_path_to_wsl(path: &str) -> Option<String> {
-    if path.len() < 3 {
-        return None;
-    }
-    let (drive, rest) = path.split_at(2);
-    if !drive.ends_with(':') {
-        return None;
-    }
-    let drive_letter = drive.chars().next()?.to_ascii_lowercase();
-    let rest = rest.trim_start_matches(['\\', '/']);
-    let rest = rest.replace('\\', "/");
-    Some(format!("/mnt/{drive_letter}/{rest}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::windows_path_to_wsl;
-
-    #[test]
-    fn converts_windows_path() {
-        assert_eq!(
-            windows_path_to_wsl(
-                r"C:\Users\marci\AppData\Local\therminal\sessions\pane-1.events.jsonl"
-            ),
-            Some(
-                "/mnt/c/Users/marci/AppData/Local/therminal/sessions/pane-1.events.jsonl"
-                    .to_string()
-            ),
-        );
-    }
-
-    #[test]
-    fn returns_none_for_linux_path() {
-        assert_eq!(windows_path_to_wsl("/home/marci/foo"), None);
     }
 }

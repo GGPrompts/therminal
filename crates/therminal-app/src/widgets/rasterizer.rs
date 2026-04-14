@@ -71,6 +71,7 @@ impl PillSpec {
     /// should place the text baseline, given the dot presence. Keeps
     /// text placement logic in the rasterizer module so consumers don't
     /// have to re-derive magic numbers.
+    #[allow(dead_code)]
     pub fn text_origin_px(&self) -> (f32, f32) {
         let dot_space = if self.dot.is_some() {
             // Dot + gap: dot radius is height * 0.2, gap is height * 0.18.

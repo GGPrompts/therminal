@@ -9,5 +9,3 @@
 mod clipboard;
 mod editor;
 mod planner;
-
-pub(super) use planner::shell_quote;

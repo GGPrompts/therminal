@@ -1,19 +1,13 @@
 //! Agent status badge: proof-of-concept widget (tn-npd).
 //!
-//! This is the first consumer of the widget pre-rasterization substrate.
+//! This was the first consumer of the widget pre-rasterization substrate.
 //! It surfaces the focused pane's detected agent + inferred status as a
 //! rounded pill in the top-right of the window.
 //!
-//! The pill background (and its status dot) is pre-rasterized via
-//! `WidgetRasterizer` + cached in `WidgetManager` so it only redraws
-//! when the agent name, status color, or label length actually changes.
-//! The text label itself is drawn on top via the existing glyphon
-//! overlay text renderer — keeping text rendering out of the rasterizer
-//! is a deliberate v1 scope choice so we don't have to pull in a second
-//! font stack just for the PoC.
-//!
-//! **Placement**: hardcoded to the top-right of the window. A real
-//! placement API (anchors, padding, tier overrides) is a follow-up.
+//! The overlay pill has been retired in favor of the pane-header text badge
+//! (which uses agent registry data directly). The module is retained as a
+//! reference for the widget pattern and can be re-enabled if needed.
+#![allow(dead_code)]
 
 use std::hash::{Hash, Hasher};
 
