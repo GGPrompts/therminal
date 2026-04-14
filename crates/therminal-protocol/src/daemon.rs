@@ -636,6 +636,11 @@ pub enum DaemonEvent {
     },
     /// tn-s8w3: a Claude Code subagent stopped on a pane (hook-driven).
     SubagentStopped { pane_id: PaneId, agent_id: String },
+    /// tn-cnfi: toggle the timeline widget visibility in the GUI.
+    ///
+    /// Broadcast by the MCP `terminal.widgets.timeline.toggle` tool.
+    /// The GUI subscribes to this event to show/hide the timeline overlay.
+    ToggleTimeline { visible: bool },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -659,6 +664,8 @@ pub enum EventKind {
     SubagentStarted,
     /// tn-s8w3: subagent stopped (hook-driven auto-tile signal).
     SubagentStopped,
+    /// tn-cnfi: toggle the timeline widget visibility.
+    ToggleTimeline,
 }
 
 impl DaemonEvent {
@@ -676,6 +683,7 @@ impl DaemonEvent {
             DaemonEvent::AgentChanged { .. } => EventKind::AgentChanged,
             DaemonEvent::SubagentStarted { .. } => EventKind::SubagentStarted,
             DaemonEvent::SubagentStopped { .. } => EventKind::SubagentStopped,
+            DaemonEvent::ToggleTimeline { .. } => EventKind::ToggleTimeline,
         }
     }
 }

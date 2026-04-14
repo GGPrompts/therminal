@@ -405,6 +405,9 @@ pub fn format_notification(event: &DaemonEvent) -> String {
         DaemonEvent::SubagentStopped { pane_id, agent_id } => {
             format!("%subagent-stopped {pane_id} {agent_id}\n")
         }
+        DaemonEvent::ToggleTimeline { visible } => {
+            format!("%timeline-toggle {visible}\n")
+        }
     }
 }
 

@@ -218,6 +218,10 @@ impl ServerHandler for TherminalMcpServer {
             }
             "terminal.patterns.stats" => self.handle_patterns_stats().await,
             "terminal.events.stats" => self.handle_events_stats().await,
+            "terminal.widgets.timeline.toggle" => {
+                let params: ToggleTimelineParam = parse_args(args)?;
+                self.handle_toggle_timeline(params).await
+            }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool: {other}"),
                 None,

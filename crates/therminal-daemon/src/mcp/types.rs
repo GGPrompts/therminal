@@ -316,6 +316,21 @@ pub(crate) struct CreateTailResult {
     pub(crate) backend: String,
 }
 
+/// Parameters for `terminal.widgets.timeline.toggle` — show or hide
+/// the timeline widget in the GUI (tn-cnfi).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ToggleTimelineParam {
+    /// Whether the timeline widget should be visible.
+    pub(crate) visible: bool,
+}
+
+/// Result from `terminal.widgets.timeline.toggle`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ToggleTimelineResult {
+    /// The visibility state that was applied.
+    pub(crate) visible: bool,
+}
+
 // ── Tool result types ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -67,9 +67,10 @@ use super::{
     QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
     SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
     SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam, TherminalMcpServer,
-    UntagPaneParam, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
-    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
-    json_content, now_unix_secs, pane_content_hash, render_grid_lines,
+    ToggleTimelineParam, ToggleTimelineResult, UntagPaneParam, WaitForOutputParam,
+    WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
+    build_content_preview, find_first_pane_in_session, find_pane_info, json_content, now_unix_secs,
+    pane_content_hash, render_grid_lines,
 };
 
 impl TherminalMcpServer {
@@ -1571,9 +1572,10 @@ impl TherminalMcpServer {
         Ok(CallToolResult::success(vec![json_content(&stats)?]))
     }
 
-    /// Stub handler for `terminal.panes.create_tail` (tn-14c0).
+    /// Handle `terminal.panes.create_tail` (tn-14c0, tn-cnfi).
     ///
     /// Creates a normal PTY pane with `tail -F <path>` as a startup command.
+    /// The path is shell-quoted to handle spaces and special characters.
     /// Full native `JsonlTail` backend integration will replace this once
     /// the daemon supports the new backend kind over IPC.
     pub(super) async fn handle_create_tail(
@@ -1582,8 +1584,19 @@ impl TherminalMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let path = &params.path;
 
+        // Validate that the path is absolute to prevent surprising behaviour.
+        if !path.starts_with('/') && !path.starts_with("\\\\") {
+            return Err(ErrorData::invalid_params(
+                format!("path must be absolute, got: {path}"),
+                None,
+            ));
+        }
+
+        // Shell-quote the path to handle spaces and special characters.
+        let quoted_path = shell_quote(path);
+
         // Build a startup command that tails the file from the beginning.
-        let startup_cmd = format!("tail --lines=+1 -F {path}");
+        let startup_cmd = format!("tail --lines=+1 -F {quoted_path}");
 
         // Delegate to the existing spawn_pane path with the tail command.
         let spawn_params = SpawnPaneParam {
@@ -1602,9 +1615,8 @@ impl TherminalMcpServer {
         let result = self.handle_spawn_pane(spawn_params).await?;
 
         // If spawn succeeded, re-wrap the response with create_tail metadata.
-        // For now we just pass through the spawn result. When the native
-        // backend lands, this will return CreateTailResult with
-        // backend="jsonl_tail".
+        // When the native backend lands, this will return CreateTailResult
+        // with backend="jsonl_tail".
         if result.is_error.unwrap_or(false) {
             return Ok(result);
         }
@@ -1626,6 +1638,49 @@ impl TherminalMcpServer {
         // Fallback: return the raw spawn result.
         Ok(result)
     }
+
+    /// Handle `terminal.widgets.timeline.toggle` (tn-cnfi).
+    ///
+    /// Broadcasts a `DaemonEvent::ToggleTimeline` so the GUI can show or
+    /// hide the timeline widget. Returns immediately with the requested
+    /// visibility state; the GUI applies it asynchronously.
+    pub(super) async fn handle_toggle_timeline(
+        &self,
+        params: ToggleTimelineParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Some(ref tx) = self.daemon_event_tx {
+            let event = therminal_protocol::DaemonEvent::ToggleTimeline {
+                visible: params.visible,
+            };
+            // Best-effort broadcast; if no GUI is subscribed, the event is
+            // silently dropped.
+            let _ = tx.send(event);
+        }
+
+        let result = ToggleTimelineResult {
+            visible: params.visible,
+        };
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+}
+
+/// Shell-quote a string for safe interpolation into a shell command.
+///
+/// Wraps the value in single quotes and escapes embedded single quotes
+/// with the `'\''` idiom (end current single-quoted region, add an
+/// escaped single quote, re-open single-quoted region).
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 // ── Tool definitions ────────────────────────────────────────────────────
@@ -1786,6 +1841,11 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.patterns.stats",
             "Return match statistics for every loaded semantic pattern pack (tn-yrjd). Output shape matches `docs/pattern-performance-model.md` §6.3: per-pattern match_count/miss_count/avg_match_ms/slow_count/status, per-pack active/disabled/error counts plus load_errors, and global total_loaded/total_active/total_disabled/cap_reached/cap_limit plus pack_load_errors. Read-only (Observer tier).",
             schema_for_type::<EmptyParams>(),
+        ),
+        Tool::new(
+            "terminal.widgets.timeline.toggle",
+            "Show or hide the timeline widget in the GUI. The daemon broadcasts a ToggleTimeline event that the GUI picks up asynchronously. Returns immediately with the requested visibility state. Supervised tier (modifies UI state).",
+            schema_for_type::<ToggleTimelineParam>(),
         ),
     ]
 }
