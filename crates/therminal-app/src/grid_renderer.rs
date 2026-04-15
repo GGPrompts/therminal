@@ -1467,7 +1467,7 @@ impl GridRenderer {
                 }
                 for cell in &row.cells {
                     if let Some((ref kind, ref full_text, is_dir, ref resolved)) = cell.hotspot
-                        && cell.hyperlink.is_none()
+                        && cell.hyperlink.as_ref().is_none_or(|h| h.starts_with("file://"))
                     {
                         self.hotspot_map.insert(
                             (pane_id, cell.row, cell.col),
@@ -1484,15 +1484,16 @@ impl GridRenderer {
         }
 
         // Underline emission: dotted (2px on / 2px off) for every cell
-        // that carries a hotspot but no hyperlink (hyperlinks already
-        // drew a different underline above).
+        // that carries a hotspot but no non-file hyperlink (non-file://
+        // hyperlinks already drew a different underline above; file://
+        // URIs defer to Therminal's richer hotspot features).
         let underline_h = 1.0_f32;
         let dot_on = 2.0_f32;
         let dot_off = 2.0_f32;
         for row in row_cache.iter().flatten() {
             for cell in &row.cells {
                 if let Some((ref kind, _, _, _)) = cell.hotspot
-                    && cell.hyperlink.is_none()
+                    && cell.hyperlink.as_ref().is_none_or(|h| h.starts_with("file://"))
                 {
                     let hotspot_color =
                         crate::color_mapping::hotspot_kind_color(kind, &self.chrome_palette);
