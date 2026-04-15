@@ -472,6 +472,12 @@ fn pid_is_alive(pid: i64) -> bool {
 /// Win32 PIDs.  The `RECENT_UPDATE_GRACE` (120 s) protects live sessions whose
 /// state files are still being updated, and the shortened `SESSION_MAX_AGE`
 /// (5 min) caps worst-case latency for genuinely dead WSL sessions.
+///
+/// **WSL PID handling (tn-1rn6)**: The hook script (`state-tracker.sh`) writes
+/// `pid: 0` when running inside WSL (`$WSL_DISTRO_NAME` is set) so that
+/// `session_is_dead()` skips the PID liveness check entirely and falls through
+/// to the timestamp-based `SESSION_MAX_AGE` path. This function is never called
+/// with a WSL PID.
 #[cfg(windows)]
 fn pid_is_alive(pid: i64) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
@@ -516,12 +522,18 @@ fn session_is_dead(state: &ClaudeSessionState) -> bool {
         }
     }
 
+    // pid == 0 is a sentinel written by the hook script on WSL (tn-1rn6):
+    // Linux PIDs are invisible to Windows OpenProcess(), so the hook omits the
+    // real PID and we fall through to the timestamp-based SESSION_MAX_AGE path.
     if let Some(pid) = state.pid {
-        if pid > 0 && !pid_is_alive(pid) {
-            debug!(session_id = %state.session_id, pid, "session dead: PID not alive");
-            return true;
+        if pid > 0 {
+            if !pid_is_alive(pid) {
+                debug!(session_id = %state.session_id, pid, "session dead: PID not alive");
+                return true;
+            }
+            return false;
         }
-        return false;
+        // pid == 0: sentinel — fall through to timestamp check below.
     }
 
     let Some(last_updated) = state.last_updated.as_deref() else {
@@ -1327,6 +1339,35 @@ mod tests {
             ..ClaudeSessionState::default()
         };
         assert!(!session_is_dead(&state));
+    }
+
+    /// pid=0 is a WSL sentinel (tn-1rn6). It should fall through to the
+    /// timestamp-based path, behaving identically to pid=None.
+    #[test]
+    fn session_with_zero_pid_falls_through_to_timestamp() {
+        // Stale timestamp + pid=0 → dead (timestamp governs).
+        let stale = ClaudeSessionState {
+            session_id: "wsl-stale".into(),
+            agent_type: Some("claude".into()),
+            pid: Some(0),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        assert!(session_is_dead(&stale));
+
+        // Fresh timestamp + pid=0 → alive (grace period).
+        let fresh = ClaudeSessionState {
+            session_id: "wsl-fresh".into(),
+            agent_type: Some("claude".into()),
+            pid: Some(0),
+            last_updated: Some(
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap(),
+            ),
+            ..ClaudeSessionState::default()
+        };
+        assert!(!session_is_dead(&fresh));
     }
 
     // --- End-to-end watcher test -------------------------------------------

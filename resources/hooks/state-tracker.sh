@@ -346,6 +346,17 @@ if [[ -n "$CLAUDE_SESSION_ID" ]]; then
     fi
 fi
 
+# Determine PID to write. On WSL, Linux PIDs are invisible to the Windows-native
+# daemon's OpenProcess() call, so pid_is_alive() always returns false — causing
+# premature session pruning after RECENT_UPDATE_GRACE (120s) instead of allowing
+# SESSION_MAX_AGE (5 min) to govern. Write pid=0 as a sentinel so session_is_dead()
+# falls through to the timestamp-based path. (tn-1rn6)
+if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+    _HOOK_PID=0
+else
+    _HOOK_PID=${PPID:-$$}
+fi
+
 # Build state JSON with jq (safe against special characters in values)
 STATE_JSON=$(jq -n \
     --arg session_id "$SESSION_ID" \
@@ -360,7 +371,7 @@ STATE_JSON=$(jq -n \
     --arg working_dir "$PWD" \
     --arg last_updated "$TIMESTAMP" \
     --arg tmux_pane "$TMUX_PANE" \
-    --argjson pid ${PPID:-$$} \
+    --argjson pid "${_HOOK_PID}" \
     --arg hook_type "$HOOK_TYPE" \
     --argjson details "$DETAILS" \
     '{
