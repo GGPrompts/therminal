@@ -36,11 +36,12 @@
 //! # Pure vs impure
 //!
 //! - [`linux_to_unc`] is a pure path function — no I/O, no env, no probe.
-//!   Fully unit-tested on every platform.
+//!   Fully unit-tested on every platform (delegated to
+//!   [`therminal_runtime::wsl::linux_to_unc`]).
 //! - [`expand_home_to_unc`] is pure (takes the WSL `$HOME` as input).
-//! - [`detect_default_distro`] and [`detect_wsl_home`] shell out to
-//!   `wsl.exe` exactly **once per process** via `OnceLock` caches. They
-//!   are no-ops on non-Windows builds (compile-time `None`).
+//! - [`detect_default_distro`] and [`detect_wsl_home`] delegate to the
+//!   shared statics in `therminal_runtime::wsl` and shell out to `wsl.exe`
+//!   exactly **once per process**. They are no-ops on non-Windows builds.
 //! - [`claude_state_dir_unc`], [`codex_state_dir_unc`],
 //!   [`copilot_state_dir_unc`], [`claude_projects_dir_unc`] are the
 //!   top-level entry points the rest of the crate uses. They return
@@ -56,48 +57,15 @@
 //! signal. This module is the **daemon-side** equivalent: it answers
 //! "where do I point the file watcher and JSONL tailer when the daemon
 //! is on Windows but Claude is in WSL?" and depends on no per-pane
-//! state. The two modules deliberately do not share code so the harness
-//! crate stays free of an `therminal-app` dependency.
+//! state. Both modules share the primitive helpers from
+//! `therminal_runtime::wsl` (tn-9ixz).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Build a UNC path that points at a Linux absolute path inside the
-/// named WSL distribution.
-///
-/// Returns `None` for inputs that aren't a Linux-shaped absolute path,
-/// or when `distro` is empty. Pure — no filesystem, no env probing.
-///
-/// ```rust,ignore
-/// use therminal_harness_claude::wsl_paths::linux_to_unc;
-/// let p = linux_to_unc("Ubuntu", "/tmp/claude-code-state").unwrap();
-/// assert_eq!(p.to_string_lossy(), r"\\wsl.localhost\Ubuntu\tmp\claude-code-state");
-/// ```
-pub fn linux_to_unc(distro: &str, linux_path: &str) -> Option<PathBuf> {
-    if distro.is_empty() {
-        return None;
-    }
-    if linux_path.is_empty() || !linux_path.starts_with('/') {
-        return None;
-    }
-    // Reject leading `//` ambiguities (pseudo-UNC, Cygwin, typo).
-    if linux_path.starts_with("//") {
-        return None;
-    }
-
-    // Strip the leading `/` and flip remaining slashes to backslashes
-    // so the produced PathBuf is a clean Windows-shaped UNC.
-    let body = &linux_path[1..];
-    let body_back = body.replace('/', "\\");
-
-    let mut s = String::with_capacity(body_back.len() + distro.len() + 20);
-    s.push_str(r"\\wsl.localhost\");
-    s.push_str(distro);
-    if !body_back.is_empty() {
-        s.push('\\');
-        s.push_str(&body_back);
-    }
-    Some(PathBuf::from(s))
-}
+// Re-export the shared primitives so call-sites in this crate keep working.
+pub use therminal_runtime::wsl::{
+    detect_default_distro, detect_wsl_home, is_safe_distro_name, is_wsl_unc_path, linux_to_unc,
+};
 
 /// Resolve `~/<rest>` against a Linux `$HOME` and return the
 /// corresponding UNC path inside `distro`. Pure.
@@ -119,151 +87,6 @@ pub fn expand_home_to_unc(distro: &str, home: &str, path: &str) -> Option<PathBu
         path.to_string()
     };
     linux_to_unc(distro, &resolved)
-}
-
-// ── Windows-only: distro + WSL $HOME detection ─────────────────────────────
-
-/// Cached default WSL distribution name.
-///
-/// Populated on first call to [`detect_default_distro`] via
-/// `wsl.exe -l -q`. The outer `Option` distinguishes "not yet probed"
-/// from "probed and absent". On non-Windows builds the cache is unused
-/// and the function returns a compile-time `None`.
-#[cfg(windows)]
-static DEFAULT_DISTRO: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-
-/// Cached Linux `$HOME` from the default WSL distribution.
-///
-/// Populated on first call to [`detect_wsl_home`] via
-/// `wsl.exe -e sh -c 'printf %s "$HOME"'`. `None` if the probe failed.
-#[cfg(windows)]
-static WSL_HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-
-/// Return the name of the user's default WSL distribution, or `None`
-/// if WSL is not installed / not detectable.
-///
-/// Caches the first result for the lifetime of the process. Compile-
-/// time `None` on non-Windows targets.
-pub fn detect_default_distro() -> Option<String> {
-    #[cfg(windows)]
-    {
-        DEFAULT_DISTRO
-            .get_or_init(|| {
-                use std::process::Command;
-                // `wsl.exe -l -q` lists distro names (quiet). The first
-                // line is the default. Output is UTF-16 LE on Windows;
-                // strip embedded NULs before UTF-8 decoding to handle
-                // ASCII-named distros (Ubuntu, Debian, kali-linux,
-                // openSUSE-Tumbleweed) without pulling in a UTF-16
-                // dependency. Non-ASCII distro names are rare in
-                // practice and would round-trip through any
-                // installation-specific charset; we accept the simple
-                // path here and revisit if a real user hits it.
-                let output = Command::new("wsl.exe").args(["-l", "-q"]).output().ok()?;
-                if !output.status.success() {
-                    tracing::debug!(
-                        status = ?output.status,
-                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                        "wsl_paths: `wsl.exe -l -q` failed, no distro detected"
-                    );
-                    return None;
-                }
-                // Strip the UTF-16 LE BOM (0xFF 0xFE) if present before
-                // NUL-stripping. `wsl.exe -l -q` on Windows always
-                // outputs UTF-16 LE with a BOM when captured via pipe;
-                // the BOM bytes survive the NUL filter and end up as
-                // U+FFFD replacement characters after `from_utf8_lossy`,
-                // which causes `is_safe_distro_name` to reject an
-                // otherwise valid distro name like "Ubuntu-24.04".
-                let raw = &output.stdout;
-                let raw = if raw.starts_with(&[0xFF, 0xFE]) {
-                    &raw[2..]
-                } else {
-                    raw
-                };
-                let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
-                let s = String::from_utf8_lossy(&cleaned);
-                let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
-                if first.is_empty() {
-                    None
-                } else if !is_safe_distro_name(first) {
-                    // Defense-in-depth: reject anything outside the
-                    // installer-enforced distro name charset before
-                    // splicing it into a UNC path string. A tampered
-                    // `wsl.exe` or malformed output could otherwise
-                    // return something like `..\..\Windows\System32`
-                    // which would escape the UNC root.
-                    tracing::warn!(
-                        distro = %first,
-                        "wsl_paths: rejecting unsafe distro name from `wsl.exe -l -q`"
-                    );
-                    None
-                } else {
-                    tracing::info!(distro = %first, "wsl_paths: detected default WSL distro");
-                    Some(first.to_string())
-                }
-            })
-            .clone()
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-/// Return `true` when `name` only contains characters allowed in a
-/// WSL distribution name. Real-world WSL distro names are constrained
-/// by the installer to alphanumeric + hyphen + dot + underscore; this
-/// allowlist is a defense-in-depth check against a tampered `wsl.exe`
-/// returning a path-traversal payload that would escape the
-/// `\\wsl.localhost\<distro>\...` UNC root when spliced into
-/// [`linux_to_unc`].
-#[cfg(any(windows, test))]
-fn is_safe_distro_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
-}
-
-/// Return the Linux `$HOME` of the default WSL distribution, or `None`
-/// when we can't detect it.
-///
-/// Cached for the lifetime of the process. Compile-time `None` on
-/// non-Windows targets.
-pub fn detect_wsl_home() -> Option<String> {
-    #[cfg(windows)]
-    {
-        WSL_HOME
-            .get_or_init(|| {
-                use std::process::Command;
-                let output = Command::new("wsl.exe")
-                    .args(["-e", "sh", "-c", r#"printf %s "$HOME""#])
-                    .output()
-                    .ok()?;
-                if !output.status.success() {
-                    tracing::debug!(
-                        status = ?output.status,
-                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                        "wsl_paths: `wsl.exe -e sh -c printf $HOME` failed"
-                    );
-                    return None;
-                }
-                let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
-                let s = String::from_utf8_lossy(&cleaned).trim().to_string();
-                if s.is_empty() || !s.starts_with('/') {
-                    None
-                } else {
-                    tracing::info!(home = %s, "wsl_paths: detected WSL $HOME");
-                    Some(s)
-                }
-            })
-            .clone()
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
 }
 
 // ── Top-level path resolvers ───────────────────────────────────────────────
@@ -304,19 +127,12 @@ pub(crate) fn state_dir_unc(name: &str) -> Option<PathBuf> {
     linux_to_unc(&distro, &linux_path)
 }
 
-/// Return `true` when `path` looks like a UNC path that should be
-/// treated as the WSL virtual filesystem (used by tracing breadcrumbs
-/// and to gate WSL-specific best-effort behavior).
-pub fn is_wsl_unc_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.starts_with(r"\\wsl.localhost\") || s.starts_with(r"\\wsl$\")
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn linux_to_unc_simple_path() {
@@ -388,15 +204,12 @@ mod tests {
 
     #[test]
     fn expand_home_to_unc_already_absolute() {
-        // Non-tilde-prefixed paths flow straight through linux_to_unc.
         let p = expand_home_to_unc("Ubuntu", "/home/marci", "/tmp/foo").unwrap();
         assert_eq!(p.to_string_lossy(), r"\\wsl.localhost\Ubuntu\tmp\foo");
     }
 
     #[test]
     fn expand_home_to_unc_trailing_slash_in_home() {
-        // A `$HOME` like `/home/marci/` should not produce a double slash
-        // when joined with the `~/foo` rest.
         let p = expand_home_to_unc("Ubuntu", "/home/marci/", "~/foo").unwrap();
         assert_eq!(
             p.to_string_lossy(),
@@ -451,12 +264,10 @@ mod tests {
     /// Regression: `wsl.exe -l -q` on Windows outputs UTF-16 LE with a
     /// BOM (0xFF 0xFE). Without stripping the BOM, the NUL-filter leaves
     /// `\xFF\xFE` in the byte stream → `from_utf8_lossy` converts them to
-    /// U+FFFD → `is_safe_distro_name` rejects the distro name → the WSL
-    /// probe never activates → no agent detection on Windows+WSL panes.
+    /// U+FFFD replacement characters → `is_safe_distro_name` rejects an
+    /// otherwise valid distro name like "Ubuntu-24.04".
     #[test]
     fn utf16_le_bom_stripped_before_distro_parse() {
-        // Simulate `wsl.exe -l -q` raw UTF-16 LE output for "Ubuntu-24.04\r\n"
-        // with a BOM prefix.
         let raw: Vec<u8> = {
             let mut v = vec![0xFF, 0xFE]; // BOM
             for ch in "Ubuntu-24.04\r\n".encode_utf16() {
@@ -465,7 +276,6 @@ mod tests {
             }
             v
         };
-        // Replicate the fix: strip BOM, then strip NULs, then parse.
         let raw = if raw.starts_with(&[0xFF, 0xFE]) {
             &raw[2..]
         } else {
@@ -478,8 +288,6 @@ mod tests {
         assert!(is_safe_distro_name(first));
     }
 
-    /// Verify the old (broken) behavior: without BOM stripping, the distro
-    /// name would contain replacement characters and be rejected.
     #[test]
     fn utf16_le_bom_without_stripping_produces_invalid_name() {
         let raw: Vec<u8> = {
@@ -490,11 +298,9 @@ mod tests {
             }
             v
         };
-        // Old behavior: NUL-strip without BOM removal.
         let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
         let s = String::from_utf8_lossy(&cleaned);
         let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap();
-        // The BOM bytes become replacement characters:
         assert!(
             first.starts_with('\u{FFFD}'),
             "expected replacement chars from BOM bytes"
@@ -505,8 +311,6 @@ mod tests {
         );
     }
 
-    // On non-Windows builds the detection helpers must short-circuit so
-    // that the rest of the harness keeps using the regular Linux paths.
     #[cfg(not(windows))]
     #[test]
     fn detection_helpers_are_noops_on_unix() {
@@ -518,10 +322,8 @@ mod tests {
         assert!(claude_projects_dir_unc().is_none());
     }
 
-    // ── Table-driven WSL state path rewriting (tn-cntx) ──────────────────
+    // ── Table-driven WSL state path rewriting ────────────────────────────────
 
-    /// Table-driven: `state_dir_unc` resolves all three state directory
-    /// names through `linux_to_unc` when given a valid distro.
     #[test]
     fn state_dir_unc_table_driven() {
         struct Case {
@@ -567,7 +369,6 @@ mod tests {
             },
         ];
         for (i, c) in cases.iter().enumerate() {
-            // Inline the logic of `state_dir_unc` so we can inject `distro`.
             let linux_path = format!("/tmp/{}", c.state_name);
             let result = linux_to_unc(c.distro, &linux_path);
             assert_eq!(
@@ -580,8 +381,6 @@ mod tests {
         }
     }
 
-    /// Missing distro (empty string) causes all state dir lookups to
-    /// return `None`, exercising the fallback-to-non-WSL-path branch.
     #[test]
     fn state_dir_unc_missing_distro_returns_none() {
         for name in &["claude-code-state", "codex-state", "copilot-state"] {
@@ -593,23 +392,18 @@ mod tests {
         }
     }
 
-    /// Distro names with spaces are rejected by `is_safe_distro_name`,
-    /// which the real detect_default_distro checks. Verify `linux_to_unc`
-    /// still produces a path (it does not check safety — that is the
-    /// caller's job) but `is_safe_distro_name` rejects the name.
     #[test]
     fn distro_with_spaces_rejected_by_safety_check() {
         let distro = "My WSL Distro";
-        // The name itself is unsafe:
         assert!(
             !is_safe_distro_name(distro),
             "distro name with spaces must be rejected"
         );
-        // But linux_to_unc is a pure path builder — it does not safety-check:
+        // linux_to_unc is a pure path builder — it does not safety-check.
         assert!(linux_to_unc(distro, "/tmp/claude-code-state").is_some());
     }
 
-    // ── Table-driven WSL home resolution (tn-cntx) ───────────────────────
+    // ── Table-driven home resolution ─────────────────────────────────────────
 
     #[test]
     fn expand_home_table_driven() {
