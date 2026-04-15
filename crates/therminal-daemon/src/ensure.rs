@@ -436,18 +436,19 @@ async fn start_daemon(
                         }
                         drop(mgr);
                         if let Some(pid) = pane_id {
-                            // tn-nrur: if this pane has fresh marker-sourced
-                            // data (< 30s old), suppress the file-polled
-                            // update. Markers are the primary signal; file
-                            // polling is the fallback for environments that
-                            // don't emit OSC 1341 markers.
+                            let file_entry = crate::pane_capacity::entry_from_state(&state);
                             if cache.is_marker_fresh(pid) {
+                                // tn-b7qq: markers are fresh — merge only
+                                // file-polled fields that markers don't cover
+                                // (context_percent, model, session_title)
+                                // instead of suppressing the entire update.
+                                cache.merge_file_polled_fields(pid, &file_entry);
                                 tracing::trace!(
                                     pane_id = pid,
-                                    "pane_capacity: suppressing file-polled update (marker data is fresh)"
+                                    "pane_capacity: merged file-polled fields into marker-fresh entry"
                                 );
                             } else {
-                                cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
+                                cache.upsert(pid, file_entry);
                             }
                         }
                     }

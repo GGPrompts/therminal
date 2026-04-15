@@ -2,10 +2,18 @@
 //!
 //! Stores the most recent `context_percent`, `model`, and `status` reported
 //! by `ClaudeStatePoller` for each pane that has a detected agent. The cache
-//! is populated by a tokio task in `ensure.rs` that drains the poller's
-//! `ClaudeStateUpdate` stream, resolves each update to a `PaneId` via the
-//! `AgentRegistry`, and writes the entry. Lookups happen via
-//! `SessionManager::pane_capacity()`.
+//! is populated from two sources:
+//!
+//! 1. **OSC 1341 markers** (primary) — `upsert_from_marker()` merges
+//!    marker-supplied fields (`status`, `session_id`, `working_dir`,
+//!    `current_tool`, and optionally `context_percent` / `model`) and stamps
+//!    `marker_seen_at`.
+//! 2. **File poller** (fallback) — when markers are fresh, only file-exclusive
+//!    fields (`context_percent`, `model`, `session_title`) are merged via
+//!    `merge_file_polled_fields()` (tn-b7qq). When markers are stale or absent,
+//!    the full `entry_from_state()` upsert applies.
+//!
+//! Lookups happen via `SessionManager::pane_capacity()`.
 //!
 //! ## Staleness (tn-hxso)
 //!
@@ -47,7 +55,9 @@ pub struct PaneCapacityEntry {
     pub last_seen_at: u64,
     /// Wall-clock timestamp (Unix secs) of the most recent OSC 1341 marker
     /// update. When `> 0` and `now - marker_seen_at < MARKER_FRESH_SECS`,
-    /// file-polled updates are suppressed for this pane (tn-nrur).
+    /// file-polled updates use field-aware merging instead of full upsert:
+    /// marker-sourced fields are preserved, file-exclusive fields
+    /// (`context_percent`, `model`, `session_title`) are merged in (tn-b7qq).
     #[serde(skip_serializing_if = "is_zero")]
     pub marker_seen_at: u64,
 }
@@ -110,7 +120,9 @@ impl PaneCapacityCache {
 
     /// Returns `true` if the pane has marker-sourced data that is still fresh
     /// (i.e., `now - marker_seen_at < MARKER_FRESH_SECS`). When this returns
-    /// `true`, file-polled updates should be suppressed for the pane.
+    /// `true`, full file-polled upserts should be suppressed — use
+    /// `merge_file_polled_fields` instead to fill in fields that markers
+    /// don't cover (tn-b7qq).
     pub fn is_marker_fresh(&self, pane_id: PaneId) -> bool {
         let now = now_secs();
         self.inner
@@ -120,6 +132,41 @@ impl PaneCapacityCache {
             .is_some_and(|e| {
                 e.marker_seen_at > 0 && now.saturating_sub(e.marker_seen_at) < MARKER_FRESH_SECS
             })
+    }
+
+    /// Merge file-polled fields that markers don't reliably cover into an
+    /// existing entry, preserving marker-sourced fields. Called when
+    /// `is_marker_fresh` is true so that `context_percent`, `model`, and
+    /// `session_title` stay current even when the primary signal comes from
+    /// OSC 1341 markers (tn-b7qq).
+    ///
+    /// Fields merged from file-polled state:
+    /// - `context_percent` — only source is the state file
+    /// - `model` — rarely present in markers
+    /// - `session_title` — never present in markers
+    ///
+    /// Fields preserved (marker-sourced, not overwritten):
+    /// - `status`, `session_id`, `working_dir`, `current_tool`
+    /// - `marker_seen_at` (untouched — freshness clock is marker-driven)
+    pub fn merge_file_polled_fields(&self, pane_id: PaneId, file_entry: &PaneCapacityEntry) {
+        let now = now_secs();
+        if let Ok(mut g) = self.inner.lock()
+            && let Some(entry) = g.get_mut(&pane_id)
+        {
+            // Merge fields that markers don't reliably cover.
+            if file_entry.context_percent.is_some() {
+                entry.context_percent = file_entry.context_percent;
+            }
+            if file_entry.model.is_some() {
+                entry.model.clone_from(&file_entry.model);
+            }
+            if file_entry.session_title.is_some() {
+                entry.session_title.clone_from(&file_entry.session_title);
+            }
+            // Refresh last_seen_at so the entry isn't evicted by the
+            // staleness sweep while the file poller is still ticking.
+            entry.last_seen_at = now;
+        }
     }
 
     pub fn get(&self, pane_id: PaneId) -> Option<PaneCapacityEntry> {
@@ -521,5 +568,95 @@ mod tests {
     fn is_marker_fresh_false_for_unknown_pane() {
         let cache = PaneCapacityCache::new();
         assert!(!cache.is_marker_fresh(999));
+    }
+
+    #[test]
+    fn merge_file_polled_fields_fills_gaps_without_overwriting_markers() {
+        let cache = PaneCapacityCache::new();
+        // Simulate a marker update that set status, session_id, cwd, current_tool.
+        let patch = MarkerPatch {
+            session_id: Some("sess-marker".into()),
+            status: Some("processing".into()),
+            current_tool: Some("Edit".into()),
+            cwd: Some("/marker/dir".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch);
+        let before = cache.get(10).unwrap();
+        assert!(before.context_percent.is_none());
+        assert!(before.model.is_none());
+        assert!(before.session_title.is_none());
+
+        // File-polled entry has all fields including the ones markers cover.
+        let file_entry = PaneCapacityEntry {
+            context_percent: Some(42.5),
+            model: Some("claude-opus-4-6".into()),
+            status: Some("idle".into()), // differs from marker
+            session_id: "sess-file".into(), // differs from marker
+            session_title: Some("My Cool Session".into()),
+            current_tool: Some("Bash".into()), // differs from marker
+            working_dir: Some("/file/dir".into()), // differs from marker
+            updated_at: now_secs(),
+            last_seen_at: now_secs(),
+            marker_seen_at: 0,
+        };
+
+        cache.merge_file_polled_fields(10, &file_entry);
+        let after = cache.get(10).unwrap();
+
+        // File-exclusive fields should be merged in.
+        assert_eq!(after.context_percent, Some(42.5));
+        assert_eq!(after.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(after.session_title.as_deref(), Some("My Cool Session"));
+
+        // Marker-sourced fields should be preserved (not overwritten).
+        assert_eq!(after.status.as_deref(), Some("processing"));
+        assert_eq!(after.session_id, "sess-marker");
+        assert_eq!(after.current_tool.as_deref(), Some("Edit"));
+        assert_eq!(after.working_dir.as_deref(), Some("/marker/dir"));
+
+        // marker_seen_at should be untouched.
+        assert_eq!(after.marker_seen_at, before.marker_seen_at);
+    }
+
+    #[test]
+    fn merge_file_polled_fields_noop_for_unknown_pane() {
+        let cache = PaneCapacityCache::new();
+        let file_entry = PaneCapacityEntry {
+            context_percent: Some(50.0),
+            model: Some("test-model".into()),
+            ..Default::default()
+        };
+        // Should not panic or create an entry.
+        cache.merge_file_polled_fields(999, &file_entry);
+        assert!(cache.get(999).is_none());
+    }
+
+    #[test]
+    fn merge_file_polled_fields_skips_none_values() {
+        let cache = PaneCapacityCache::new();
+        // Pre-populate with marker data that includes context_percent.
+        let patch = MarkerPatch {
+            session_id: Some("sess-1".into()),
+            context_percent: Some(30.0),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch);
+
+        // File-polled entry has None for context_percent but Some for model.
+        let file_entry = PaneCapacityEntry {
+            context_percent: None,
+            model: Some("new-model".into()),
+            session_title: None,
+            ..Default::default()
+        };
+
+        cache.merge_file_polled_fields(10, &file_entry);
+        let after = cache.get(10).unwrap();
+
+        // context_percent should be preserved from marker (file had None).
+        assert_eq!(after.context_percent, Some(30.0));
+        // model should be merged from file.
+        assert_eq!(after.model.as_deref(), Some("new-model"));
     }
 }
