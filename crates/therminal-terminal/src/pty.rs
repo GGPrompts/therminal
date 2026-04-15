@@ -442,6 +442,11 @@ pub struct SpawnOptions {
     pub env: std::collections::HashMap<String, String>,
     /// Working directory for the spawned shell. Empty = inherit current directory.
     pub cwd: String,
+    /// When `true`, skip shell-integration injection (rcfile wrappers, ZDOTDIR,
+    /// etc.) and execute the shell/command directly. Used by profile `command`
+    /// mode where the target is unlikely to benefit from shell integration
+    /// (e.g. `docker exec`, `ssh`, `htop`).
+    pub skip_shell_integration: bool,
 }
 
 /// Spawn the user's default shell in a new PTY of the given size.
@@ -473,6 +478,8 @@ pub fn resolve_shell(options: &SpawnOptions) -> String {
 ///
 /// If `options.shell` is non-empty, it is used instead of the user's default shell.
 /// Extra env vars from `options.env` are merged into the PTY environment.
+/// When `options.skip_shell_integration` is `true`, the shell/command is executed
+/// directly without rcfile wrappers, ZDOTDIR redirects, or `--init-command` injection.
 pub fn spawn_shell_with_options(
     cols: u16,
     rows: u16,
@@ -496,14 +503,21 @@ pub fn spawn_shell_with_options(
         options.shell.clone()
     };
     let shell_type = detect_shell_type(&shell);
-    debug!(?shell, ?shell_type, "detected shell for PTY spawn");
+    debug!(?shell, ?shell_type, skip = options.skip_shell_integration, "detected shell for PTY spawn");
 
-    let cwd_for_cmd = if options.cwd.is_empty() {
-        None
+    let mut cmd = if options.skip_shell_integration {
+        // Direct execution: no rcfile wrappers or integration injection.
+        let mut c = CommandBuilder::new(&shell);
+        set_common_env(&mut c);
+        c
     } else {
-        Some(options.cwd.as_str())
+        let cwd_for_cmd = if options.cwd.is_empty() {
+            None
+        } else {
+            Some(options.cwd.as_str())
+        };
+        build_shell_command(&shell, shell_type, cwd_for_cmd)?
     };
-    let mut cmd = build_shell_command(&shell, shell_type, cwd_for_cmd)?;
 
     // Append user-configured shell args after shell-integration args.
     if !options.shell_args.is_empty() {
@@ -753,6 +767,10 @@ mod tests {
         assert!(
             opts.env.is_empty(),
             "default SpawnOptions should have no extra env vars"
+        );
+        assert!(
+            !opts.skip_shell_integration,
+            "default SpawnOptions should not skip shell integration"
         );
     }
 

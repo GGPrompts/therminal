@@ -9,10 +9,12 @@
 
 mod config_text;
 pub mod keybindings;
+pub mod profiles;
 
 // Re-export all public types so that `therminal_core::config::*` paths
 // continue to work unchanged after the split.
 pub use config_text::CONFIG_TEMPLATE_VERSION;
+pub use profiles::{ProfileResolveError, ResolvedProfile};
 pub use keybindings::*;
 
 use std::collections::HashMap;
@@ -1021,10 +1023,9 @@ impl ColorsConfig {
 
 /// A named session profile with optional overrides.
 ///
-/// **Not yet wired.** Profiles are parsed and round-tripped through TOML but
-/// there is no profile-selection UI or CLI flag to activate a profile yet.
-/// Planned for Phase 3 session management. The struct is kept so that users
-/// can start writing profiles in their config file in advance.
+/// Resolved to PTY spawn parameters via [`profiles::resolve_profile`], which
+/// produces a [`ResolvedProfile`] suitable for conversion to
+/// `therminal_terminal::pty::SpawnOptions` at the call site.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProfileConfig {

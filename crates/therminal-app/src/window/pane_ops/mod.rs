@@ -160,6 +160,7 @@ fn split_spawn_options(
         shell_args: base.shell_args.clone(),
         env: base.env.clone(),
         cwd,
+        ..Default::default()
     }
 }
 
@@ -331,6 +332,7 @@ mod tests {
             shell_args: Vec::new(),
             env: Default::default(),
             cwd: "/some/base".to_string(),
+            ..Default::default()
         };
         // When the inner cwd_from_source_pane returns None (covered above),
         // split_spawn_options must clone base.cwd. Here we check the wiring
