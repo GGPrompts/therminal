@@ -21,6 +21,7 @@ pub(crate) mod git_ref_open;
 mod help_overlay;
 mod init;
 mod keybindings;
+mod launcher_overlay;
 mod mouse;
 mod pane_ops;
 mod reconcile;
@@ -203,6 +204,7 @@ pub(crate) enum OverlayMode {
     Help,
     Settings,
     TrustEscalation,
+    Launcher,
 }
 
 // ── Platform-aware home directory ────────────────────────────────────────
@@ -343,6 +345,9 @@ pub struct App {
 
     /// Settings overlay registry + keyboard navigation state.
     settings_overlay: settings_overlay::SettingsOverlayState,
+
+    /// Launcher overlay state (profile tile grid, tn-47ix).
+    launcher_state: launcher_overlay::LauncherState,
 
     /// Pending trust escalation modal state (tn-b99).
     trust_escalation: Option<trust_escalation_overlay::TrustEscalationState>,

@@ -255,6 +255,7 @@ impl App {
             overlay_mode: None,
             help_overlay_scroll_rows: 0,
             settings_overlay: super::settings_overlay::SettingsOverlayState::new(),
+            launcher_state: super::launcher_overlay::LauncherState::default(),
             trust_escalation: None,
             active_menu: None,
             tab_menu_workspace_id: None,

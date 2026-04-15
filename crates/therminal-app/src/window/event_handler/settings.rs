@@ -27,6 +27,20 @@ impl App {
         self.active_menu = None;
     }
 
+    pub(super) fn open_launcher_overlay(&mut self) {
+        self.launcher_state.build_entries(&self.config.profiles);
+        // Sync grid column count with the renderer's layout.
+        let sw = self
+            .gpu
+            .as_ref()
+            .map(|g| g.config.width as f32)
+            .unwrap_or(800.0);
+        self.launcher_state.cols =
+            super::super::launcher_overlay::compute_cols(self.launcher_state.entries.len(), sw);
+        self.overlay_mode = Some(OverlayMode::Launcher);
+        self.active_menu = None;
+    }
+
     pub(super) fn close_overlay(&mut self) {
         self.overlay_mode = None;
         self.help_overlay_scroll_rows = 0;
@@ -90,6 +104,96 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Spawn a new pane with the selected launcher profile.
+    pub(super) fn launch_selected_profile(&mut self) {
+        let entry = match self.launcher_state.selected_entry() {
+            Some(e) => e.clone(),
+            None => {
+                self.close_overlay();
+                return;
+            }
+        };
+        self.close_overlay();
+
+        let profile_name = entry.profile_name;
+        info!(
+            profile = ?profile_name,
+            "launcher: spawning pane"
+        );
+
+        if self.is_daemon_mode() {
+            self.launch_profile_remote(profile_name);
+        } else {
+            // Local mode: use default split (no profile support in local mode).
+            self.split_focused_pane(crate::pane::SplitDirection::Horizontal);
+        }
+    }
+
+    /// Fire a daemon `SplitPane` RPC with the selected profile name.
+    fn launch_profile_remote(&mut self, profile_name: Option<String>) {
+        use std::sync::Arc;
+        use therminal_protocol::daemon::{IpcRequest, IpcResponse};
+
+        let focused = match self.focused_pane() {
+            Some(id) => id,
+            None => return,
+        };
+        let daemon_source = match self.pane_id_map.daemon_for_local(focused) {
+            Some(d) => d,
+            None => {
+                warn!("launcher: no daemon id for focused pane");
+                return;
+            }
+        };
+
+        let inherited_cwd = self
+            .get_layout()
+            .and_then(|layout| super::super::pane_ops::cwd_from_source_pane(layout, focused));
+
+        let Some(client) = self.daemon_client.as_ref() else {
+            return;
+        };
+        let Some(handle) = self.daemon_runtime.as_ref() else {
+            return;
+        };
+        let client = Arc::clone(client);
+        let proxy = self.event_proxy.clone();
+        let cwd_clone = inherited_cwd.clone();
+
+        handle.spawn(async move {
+            let rpc_result = match tokio::time::timeout(
+                super::super::pane_ops::DAEMON_OP_TIMEOUT,
+                client.send_request(IpcRequest::SplitPane {
+                    pane_id: daemon_source,
+                    horizontal: true,
+                    cwd: cwd_clone,
+                    startup_command: None,
+                    ratio: None,
+                    shell: None,
+                    worktree: None,
+                    profile: profile_name,
+                }),
+            )
+            .await
+            {
+                Ok(Ok(IpcResponse::PaneSplit { new_pane_id })) => Ok(new_pane_id),
+                Ok(Ok(IpcResponse::Error { message })) => Err(message),
+                Ok(Ok(other)) => Err(format!("unexpected response: {other:?}")),
+                Ok(Err(e)) => Err(format!("rpc error: {e}")),
+                Err(_) => Err("rpc timed out".to_string()),
+            };
+            let _ = proxy.send_event(super::super::UserEvent::DaemonSplitComplete(
+                crate::window::pane_ops::DaemonSplitResult {
+                    source_local: focused,
+                    direction: crate::pane::SplitDirection::Horizontal,
+                    rpc_result,
+                    inherited_cwd: None,
+                    on_complete: crate::window::pane_ops::DaemonSplitOnComplete::FocusAndRelayout,
+                },
+            ));
+        });
     }
 
     pub(super) fn build_settings_render_values(&self) -> settings_overlay::SettingsRenderValues {

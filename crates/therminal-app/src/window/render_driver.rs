@@ -463,6 +463,26 @@ impl App {
                     );
                 }
             }
+            Some(OverlayMode::Launcher) => {
+                let focus_color = renderer.chrome_palette.focus_border;
+                let mut encoder =
+                    gpu.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("launcher_overlay_encoder"),
+                        });
+                super::launcher_overlay::draw_launcher_overlay(
+                    &self.launcher_state,
+                    renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut encoder,
+                    &view,
+                    gpu.config.width,
+                    gpu.config.height,
+                    focus_color,
+                );
+                gpu.queue.submit(std::iter::once(encoder.finish()));
+            }
             None => {}
         }
 

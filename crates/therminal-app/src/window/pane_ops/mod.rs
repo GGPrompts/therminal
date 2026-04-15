@@ -132,7 +132,10 @@ fn normalize_paste_text(input: &str) -> String {
 /// directory. NOT used for first-pane spawn (no source pane exists) or for
 /// restore-from-saved-layout (the snapshot has its own cwd policy and the
 /// pane state has not been spawned yet).
-fn cwd_from_source_pane(layout: &crate::pane::LayoutNode, source_id: PaneId) -> Option<String> {
+pub(crate) fn cwd_from_source_pane(
+    layout: &crate::pane::LayoutNode,
+    source_id: PaneId,
+) -> Option<String> {
     let pane = layout.find_pane(source_id)?;
     let cwd = pane.status.lock().ok()?.cwd.clone();
     validate_inherited_cwd(cwd)

@@ -80,6 +80,8 @@ pub enum KeyAction {
     /// Toggle "focus mode" — hide/show all chrome (pane headers, status
     /// bar, tab bar) for maximum terminal space (tn-t2yd.2).
     FocusMode,
+    /// Show the launcher overlay (profile tile grid).
+    ShowLauncher,
     /// Scroll the viewport one page up (into scrollback history).
     ScrollPageUp,
     /// Scroll the viewport one page down (toward the live bottom).
@@ -154,6 +156,7 @@ impl KeyAction {
             KeyAction::JumpErrorNext => "Jump to next error",
             KeyAction::ToggleAgentTimeline => "Toggle agent timeline",
             KeyAction::FocusMode => "Toggle focus mode (hide all chrome)",
+            KeyAction::ShowLauncher => "Show launcher (profile selector)",
             KeyAction::ScrollPageUp => "Scroll page up",
             KeyAction::ScrollPageDown => "Scroll page down",
             KeyAction::ScrollTop => "Scroll to top of history",
@@ -206,6 +209,7 @@ impl KeyAction {
             | KeyAction::Paste
             | KeyAction::ShowHelp
             | KeyAction::ShowSettings
+            | KeyAction::ShowLauncher
             | KeyAction::FocusMode => "General",
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
@@ -339,6 +343,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+,".to_string(),
                     action: KeyAction::ShowSettings,
+                },
+                // Launcher overlay (profile selector)
+                Keybinding {
+                    key: "ctrl+shift+l".to_string(),
+                    action: KeyAction::ShowLauncher,
                 },
                 // Batch pane operations
                 Keybinding {

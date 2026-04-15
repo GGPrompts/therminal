@@ -119,6 +119,16 @@ impl App {
                     w.request_redraw();
                 }
             }
+            KeyAction::ShowLauncher => {
+                if self.overlay_mode == Some(OverlayMode::Launcher) {
+                    self.close_overlay();
+                } else {
+                    self.open_launcher_overlay();
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
             KeyAction::CloseAllPanes => {
                 self.close_all_panes();
             }
@@ -560,8 +570,8 @@ impl App {
                 }
                 return;
             }
-            Some(OverlayMode::TrustEscalation) => {
-                // No scrolling for trust escalation modal.
+            Some(OverlayMode::TrustEscalation) | Some(OverlayMode::Launcher) => {
+                // No scrolling for trust escalation or launcher modal.
                 return;
             }
             None => {}
@@ -1180,6 +1190,36 @@ impl App {
                         }
                     }
                     _ => {}
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
+            }
+            Some(OverlayMode::Launcher) => {
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.close_overlay();
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.launcher_state.navigate(0, -1);
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.launcher_state.navigate(0, 1);
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.launcher_state.navigate(-1, 0);
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        self.launcher_state.navigate(1, 0);
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.launch_selected_profile();
+                    }
+                    _ => {
+                        // Any other key closes the launcher.
+                        self.close_overlay();
+                    }
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
