@@ -33,6 +33,7 @@
 //! app crate doesn't need to depend on `therminal-daemon`.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -88,6 +89,18 @@ struct Tracked {
     unchanged_since: Option<Instant>,
     /// Whether we've already emitted a Reclaim for this agent.
     reclaimed: bool,
+}
+
+/// Get the mtime of a file by opening a handle rather than using path-based
+/// `std::fs::metadata()`. On Windows, path-based metadata for UNC paths
+/// (e.g. `\\wsl.localhost\...`) is cached by the SMB redirector for 10+
+/// seconds, returning stale values. Opening the file forces a server
+/// roundtrip and returns the real mtime.
+fn file_mtime_via_handle(path: &Path) -> Option<SystemTime> {
+    fs::File::open(path)
+        .and_then(|f| f.metadata())
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 /// Resolve the Claude projects directory.
@@ -368,9 +381,9 @@ pub fn spawn(
                     // STALENESS_TIMEOUT. This prevents a flood of pane
                     // creation on startup when old subagent JSONLs from
                     // previous sessions litter the projects directory.
-                    let mtime = std::fs::metadata(&jsonl_path)
-                        .and_then(|m| m.modified())
-                        .ok();
+                    // Uses handle-based metadata to bypass SMB caching on
+                    // Windows→WSL2 UNC paths (tn-hprs).
+                    let mtime = file_mtime_via_handle(&jsonl_path);
                     let is_stale = mtime
                         .and_then(|m| m.elapsed().ok())
                         .map(|age| age >= STALENESS_TIMEOUT)
@@ -451,9 +464,9 @@ pub fn spawn(
                         to_remove.push(agent_id.clone());
                         continue;
                     }
-                    let mtime = std::fs::metadata(&t.jsonl_path)
-                        .and_then(|m| m.modified())
-                        .ok();
+                    // Open the file handle to get fresh mtime, bypassing
+                    // Windows SMB metadata caching on UNC paths (tn-hprs).
+                    let mtime = file_mtime_via_handle(&t.jsonl_path);
                     let changed = mtime != t.last_mtime;
                     t.last_mtime = mtime;
                     if changed {
