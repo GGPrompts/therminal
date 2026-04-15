@@ -343,17 +343,15 @@ async fn start_daemon(
                                 if matches!(
                                     entry.agent_type,
                                     therminal_terminal::state_inference::AgentType::Claude
-                                ) {
-                                    if let Some(cwd) = mgr.pane_cwd(entry.pane_id) {
-                                        if cwd == wd {
-                                            tracing::debug!(
-                                                pane_id = entry.pane_id,
-                                                working_dir = wd,
-                                                "pane_capacity: PID miss, matched by cwd"
-                                            );
-                                            return Some(entry.pane_id);
-                                        }
-                                    }
+                                ) && let Some(cwd) = mgr.pane_cwd(entry.pane_id)
+                                    && cwd == wd
+                                {
+                                    tracing::debug!(
+                                        pane_id = entry.pane_id,
+                                        working_dir = wd,
+                                        "pane_capacity: PID miss, matched by cwd"
+                                    );
+                                    return Some(entry.pane_id);
                                 }
                             }
                             None

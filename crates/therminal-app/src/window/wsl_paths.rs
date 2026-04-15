@@ -28,15 +28,20 @@
 //!
 //! - [`translate_linux_to_unc`] is a pure function — no filesystem, no
 //!   environment, no process spawn. Fully unit-tested on Linux.
-//! - [`detect_default_distro`] runs `wsl.exe -l -q` **once** via a
-//!   `std::sync::OnceLock` cache. It is only called on `cfg!(windows)`;
-//!   on Linux/macOS builds it short-circuits to `None` without ever
-//!   touching the process table.
+//! - [`detect_default_distro`] / [`detect_wsl_home`] are re-exported from
+//!   `therminal_runtime::wsl` and share the process-wide `OnceLock` cache
+//!   (tn-9ixz). On Linux/macOS builds they short-circuit to `None` without
+//!   ever touching the process table.
 //! - [`translate_if_wsl_windows`] is the top-level click-handler hook:
 //!   no-op on non-Windows, no-op when the distro can't be detected,
 //!   otherwise it delegates to `translate_linux_to_unc`.
 
 use std::borrow::Cow;
+
+// Re-export the shared detection helpers so the rest of the app module keeps
+// calling `wsl_paths::detect_default_distro()` and `wsl_paths::detect_wsl_home()`
+// without change — both now share the single OnceLock in therminal-runtime.
+pub use therminal_runtime::wsl::{detect_default_distro, detect_wsl_home};
 
 /// Return true when the click handler should route `path` into a new
 /// WSL pane instead of handing it to the Windows host.
@@ -183,107 +188,6 @@ fn split_line_col_suffix(path: &str) -> (&str, &str) {
     (&path[..last_colon], &path[last_colon..])
 }
 
-// ── Windows-only: distro + $HOME detection ─────────────────────────────
-
-/// Cached default WSL distribution name.
-///
-/// Populated on first call to [`detect_default_distro`] via `wsl.exe -l -q`.
-/// `None` once it has been resolved-and-absent (no WSL installed, or the
-/// command failed) so we don't re-probe on every click.
-#[cfg(windows)]
-static DEFAULT_DISTRO: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-
-/// Cached Linux `$HOME` from the default WSL distribution.
-///
-/// Populated on first call to [`detect_wsl_home`] via
-/// `wsl.exe -e sh -c 'printf %s "$HOME"'`. `None` if the probe failed.
-#[cfg(windows)]
-static WSL_HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-
-/// Return the name of the user's default WSL distribution, or `None` if
-/// WSL is not installed / not detectable.
-///
-/// Caches the first result for the lifetime of the process. Only does
-/// anything on `cfg!(windows)` — on Linux/macOS builds this is a
-/// compile-time `None`.
-pub fn detect_default_distro() -> Option<String> {
-    #[cfg(windows)]
-    {
-        DEFAULT_DISTRO
-            .get_or_init(|| {
-                use std::process::Command;
-                // `wsl.exe -l -q` lists distro names (quiet). The first
-                // line is the default. Output is UTF-16 LE on Windows —
-                // the `String::from_utf8_lossy` fallback below handles
-                // the common ASCII case; for non-ASCII distros we'd need
-                // explicit UTF-16 decoding. Distro names are ASCII in
-                // practice (Ubuntu, Debian, kali-linux, openSUSE-Tumbleweed).
-                let output = Command::new("wsl.exe").args(["-l", "-q"]).output().ok()?;
-                if !output.status.success() {
-                    return None;
-                }
-                // `wsl.exe -l -q` outputs UTF-16 LE with a BOM (0xFF 0xFE)
-                // when captured via pipe. Strip the BOM first, then drop
-                // the interleaved NUL bytes to recover the ASCII distro
-                // name as valid UTF-8.
-                let raw = &output.stdout;
-                let raw = if raw.starts_with(&[0xFF, 0xFE]) {
-                    &raw[2..]
-                } else {
-                    raw
-                };
-                let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
-                let s = String::from_utf8_lossy(&cleaned);
-                let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
-                if first.is_empty() {
-                    None
-                } else {
-                    Some(first.to_string())
-                }
-            })
-            .clone()
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-/// Return the Linux `$HOME` of the default WSL distribution, or
-/// `None` if we can't detect it.
-///
-/// Cached for the lifetime of the process. Only runs on Windows.
-/// Used to expand `~` in Linux-shaped paths before handing them to
-/// Windows file managers (which treat `~` as a literal directory).
-pub fn detect_wsl_home() -> Option<String> {
-    #[cfg(windows)]
-    {
-        WSL_HOME
-            .get_or_init(|| {
-                use std::process::Command;
-                let output = Command::new("wsl.exe")
-                    .args(["-e", "sh", "-c", r#"printf %s "$HOME""#])
-                    .output()
-                    .ok()?;
-                if !output.status.success() {
-                    return None;
-                }
-                let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
-                let s = String::from_utf8_lossy(&cleaned).trim().to_string();
-                if s.is_empty() || !s.starts_with('/') {
-                    None
-                } else {
-                    Some(s)
-                }
-            })
-            .clone()
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
 /// Expand a leading `~/` in a Linux-style path using the WSL `$HOME`
 /// (not the Windows host's `$HOME`).
 ///
@@ -325,7 +229,7 @@ pub fn translate_if_wsl_windows(path: &str) -> Cow<'_, str> {
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -403,7 +307,6 @@ mod tests {
 
     #[test]
     fn translation_handles_kali_distro() {
-        // Realistic non-Ubuntu distro name with a dash.
         let out = translate_linux_to_unc("/etc/hosts", "kali-linux");
         assert_eq!(out, r"\\wsl.localhost\kali-linux\etc\hosts");
     }
@@ -428,8 +331,6 @@ mod tests {
 
     #[test]
     fn translate_if_wsl_windows_is_noop_on_linux() {
-        // On a Linux build (where cfg!(windows) is false), the top-
-        // level hook must always return the path unchanged.
         #[cfg(not(windows))]
         {
             assert_eq!(
@@ -438,5 +339,12 @@ mod tests {
             );
             assert_eq!(translate_if_wsl_windows("./relative.rs"), "./relative.rs");
         }
+    }
+
+    // Safety check is now in therminal-runtime — verify it's accessible from here.
+    #[test]
+    fn is_safe_distro_name_via_runtime() {
+        assert!(therminal_runtime::wsl::is_safe_distro_name("Ubuntu-24.04"));
+        assert!(!therminal_runtime::wsl::is_safe_distro_name("../escape"));
     }
 }
