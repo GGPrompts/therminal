@@ -329,35 +329,60 @@ async fn start_daemon(
                 match update {
                     therminal_harness_claude::state::ClaudeStateUpdate::Upserted(state) => {
                         let mgr = session_mgr_for_task.lock().await;
+                        // tn-y2d8: resolve_pane_id_from_state now includes a
+                        // session_id tier (between PID and cwd) that short-circuits
+                        // when the session was previously resolved.
                         let pane_id = crate::pane_capacity::resolve_pane_id_from_state(
                             &state,
                             mgr.agent_registry(),
+                            Some(&cache),
                         );
-                        // tn-ixfy: fallback when PID matching fails (common on
-                        // Windows+WSL where the state file PID from hook scripts
-                        // diverges from the process detector's WSL-probe PID).
-                        // Match by working_dir against panes with a Claude agent.
+                        // tn-ixfy: fallback when PID + session_id matching both
+                        // fail (common on the *first* resolution on Windows+WSL
+                        // where the state file PID from hook scripts diverges from
+                        // the process detector's WSL-probe PID and no prior cache
+                        // entry exists yet). Match by working_dir against panes
+                        // with a Claude agent.
                         let pane_id = pane_id.or_else(|| {
                             let wd = state.working_dir.as_deref().filter(|s| !s.is_empty())?;
                             for entry in mgr.agent_registry().agents() {
                                 if matches!(
                                     entry.agent_type,
                                     therminal_terminal::state_inference::AgentType::Claude
-                                ) {
-                                    if let Some(cwd) = mgr.pane_cwd(entry.pane_id) {
-                                        if cwd == wd {
-                                            tracing::debug!(
-                                                pane_id = entry.pane_id,
-                                                working_dir = wd,
-                                                "pane_capacity: PID miss, matched by cwd"
-                                            );
-                                            return Some(entry.pane_id);
-                                        }
-                                    }
+                                ) && let Some(cwd) = mgr.pane_cwd(entry.pane_id)
+                                    && cwd == wd
+                                {
+                                    tracing::debug!(
+                                        pane_id = entry.pane_id,
+                                        working_dir = wd,
+                                        "pane_capacity: PID+session_id miss, matched by cwd"
+                                    );
+                                    return Some(entry.pane_id);
                                 }
                             }
                             None
                         });
+                        // tn-y2d8: log when all resolution tiers fail so
+                        // operators can diagnose silent state→pane mismatches.
+                        if pane_id.is_none() {
+                            let pane_cwds: Vec<(therminal_protocol::PaneId, String)> = mgr
+                                .agent_registry()
+                                .agents()
+                                .iter()
+                                .filter_map(|e| {
+                                    mgr.pane_cwd(e.pane_id)
+                                        .map(|c| (e.pane_id, c))
+                                })
+                                .collect();
+                            tracing::info!(
+                                session_id = %state.session_id,
+                                pid = ?state.pid,
+                                working_dir = ?state.working_dir,
+                                agent_pane_cwds = ?pane_cwds,
+                                "pane_capacity: all resolution tiers failed \
+                                 (PID, session_id, cwd) — state update dropped"
+                            );
+                        }
                         drop(mgr);
                         if let Some(pid) = pane_id {
                             cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
