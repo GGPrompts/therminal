@@ -29,7 +29,7 @@ use std::sync::Arc;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 
-use therminal_core::config::TrustConfig;
+use therminal_core::config::{ProfileConfig, TrustConfig};
 
 use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
 
@@ -124,6 +124,9 @@ pub struct TherminalMcpServer {
     /// Broadcast sender for TrustEscalation events to the GUI (tn-b99).
     pub(super) daemon_event_tx:
         Option<tokio::sync::broadcast::Sender<therminal_protocol::DaemonEvent>>,
+    /// Named profiles from `[profiles.*]` config, used by `handle_spawn_pane`
+    /// to resolve `profile` param to `SpawnOptions` (tn-ar79).
+    pub(super) profiles: Arc<HashMap<String, ProfileConfig>>,
 }
 
 pub(super) const CLAUDE_EVENT_BUFFER_CAP: usize = 256;
@@ -169,6 +172,7 @@ impl TherminalMcpServer {
             agent_events,
             pattern_engine,
             None,
+            Arc::new(HashMap::new()),
         )
     }
 
@@ -186,6 +190,7 @@ impl TherminalMcpServer {
         agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
         pattern_engine: Option<Arc<PatternEngine>>,
         event_bus: Option<Arc<crate::event_bus::EventBus>>,
+        profiles: Arc<HashMap<String, ProfileConfig>>,
     ) -> Self {
         Self {
             connection_id: next_connection_id(),
@@ -206,6 +211,7 @@ impl TherminalMcpServer {
             session_grants: Arc::new(SessionGrants::new()),
             escalation_responses: Arc::new(std::sync::Mutex::new(HashMap::new())),
             daemon_event_tx: None,
+            profiles,
         }
     }
 

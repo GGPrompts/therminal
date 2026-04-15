@@ -63,6 +63,10 @@ pub enum PaneCmd {
         /// (tn-h7tq).
         #[arg(long)]
         worktree: Option<String>,
+        /// Named profile from `[profiles.*]` in config. Profile takes
+        /// precedence over `--shell` (tn-ar79).
+        #[arg(long)]
+        profile: Option<String>,
         #[command(flatten)]
         out: OutputFlags,
     },
@@ -138,6 +142,7 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             ratio,
             shell,
             worktree,
+            profile,
             out,
         } => create(
             ctx,
@@ -148,6 +153,7 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             ratio,
             shell,
             worktree,
+            profile,
             out,
         ),
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
@@ -210,6 +216,7 @@ fn create(
     ratio: Option<f32>,
     shell: Option<String>,
     worktree: Option<String>,
+    profile: Option<String>,
     out: OutputFlags,
 ) -> Result<()> {
     // Determine the source pane to split from. If `--from` is set we use it
@@ -231,6 +238,7 @@ fn create(
         ratio,
         shell,
         worktree,
+        profile,
     })?;
     let new_pane = match resp {
         IpcResponse::PaneSplit { new_pane_id } => new_pane_id,

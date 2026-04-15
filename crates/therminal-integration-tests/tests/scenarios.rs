@@ -103,6 +103,7 @@ async fn split_pane_appears_in_list_panes() {
             ratio: None,
             shell: None,
             worktree: None,
+            profile: None,
         })
         .await
         .expect("split_pane should succeed");
@@ -534,6 +535,7 @@ async fn split_pane_worktree_creates_and_tags() {
             ratio: None,
             shell: None,
             worktree: Some("feature-x".into()),
+            profile: None,
         })
         .await
         .expect("split with worktree should succeed");
@@ -592,6 +594,7 @@ async fn split_pane_worktree_creates_and_tags() {
             ratio: None,
             shell: None,
             worktree: Some("feature-x".into()),
+            profile: None,
         })
         .await
         .expect("second split with same worktree branch should succeed");

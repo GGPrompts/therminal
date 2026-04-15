@@ -147,6 +147,7 @@ fn parse_split(args: &[String]) -> Result<IpcRequest> {
         ratio,
         shell,
         worktree,
+        profile: None,
     })
 }
 

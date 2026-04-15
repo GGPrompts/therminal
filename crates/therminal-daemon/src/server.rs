@@ -51,6 +51,9 @@ pub struct IpcServer {
     hook_push_sink: Option<Arc<HookPushSink>>,
     /// Shared escalation response map for trust tier prompts (tn-b99).
     escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
+    /// Named profiles from `[profiles.*]` config for profile-based pane
+    /// spawning (tn-ar79).
+    profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
 }
 
 impl IpcServer {
@@ -87,6 +90,7 @@ impl IpcServer {
             session_mgr,
             hook_push_sink: None,
             escalation_responses: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            profiles: Arc::new(std::collections::HashMap::new()),
         })
     }
 
@@ -106,6 +110,15 @@ impl IpcServer {
         self.hook_push_sink = Some(Arc::new(sink));
     }
 
+    /// Set the named profiles from config for profile-based pane spawning
+    /// (tn-ar79).
+    pub fn set_profiles(
+        &mut self,
+        profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
+    ) {
+        self.profiles = profiles;
+    }
+
     /// Get a handle to the shared escalation response map (tn-b99).
     pub fn escalation_responses(&self) -> Arc<crate::mcp::EscalationResponseMap> {
         Arc::clone(&self.escalation_responses)
@@ -121,6 +134,7 @@ impl IpcServer {
         let session_mgr = Arc::clone(&self.session_mgr);
         let hook_push_sink = self.hook_push_sink.clone();
         let escalation_responses = Arc::clone(&self.escalation_responses);
+        let profiles = Arc::clone(&self.profiles);
 
         loop {
             tokio::select! {
@@ -135,8 +149,9 @@ impl IpcServer {
                             let sm = Arc::clone(&session_mgr);
                             let hps = hook_push_sink.clone();
                             let esc = Arc::clone(&escalation_responses);
+                            let prof = Arc::clone(&profiles);
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, lc, bh, ver, etx, sm, hps, esc, conn_id).await {
+                                if let Err(e) = handle_connection(stream, lc, bh, ver, etx, sm, hps, esc, prof, conn_id).await {
                                     debug!(conn_id, error = %e, "connection handler error");
                                 }
                             });
@@ -207,6 +222,7 @@ async fn handle_connection(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: Option<Arc<HookPushSink>>,
     escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
+    profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
     conn_id: u64,
 ) -> Result<()> {
     // Read the first 4 bytes. For binary protocols this is the length prefix.
@@ -267,6 +283,7 @@ async fn handle_connection(
                 session_mgr,
                 hook_push_sink,
                 escalation_responses,
+                profiles,
                 conn_id,
                 ipc_msg,
             )
@@ -290,6 +307,7 @@ async fn handle_ipc_connection(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: Option<Arc<HookPushSink>>,
     escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
+    profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
     conn_id: u64,
     first_msg: IpcMessage,
 ) -> Result<()> {
@@ -307,6 +325,7 @@ async fn handle_ipc_connection(
         &session_mgr,
         &hook_push_sink,
         &escalation_responses,
+        &profiles,
         &mut subscribed_kinds,
         &mut event_rx,
         conn_id,
@@ -326,7 +345,7 @@ async fn handle_ipc_connection(
                             process_ipc_message(
                                 stream, &msg, &lifecycle, &build_hash, &version,
                                 &event_tx, &session_mgr, &hook_push_sink,
-                                &escalation_responses, &mut subscribed_kinds,
+                                &escalation_responses, &profiles, &mut subscribed_kinds,
                                 &mut event_rx, conn_id,
                             ).await?;
                         }
@@ -364,6 +383,7 @@ async fn handle_ipc_connection(
                         &session_mgr,
                         &hook_push_sink,
                         &escalation_responses,
+                        &profiles,
                         &mut subscribed_kinds,
                         &mut event_rx,
                         conn_id,
@@ -391,6 +411,7 @@ async fn process_ipc_message(
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: &Option<Arc<HookPushSink>>,
     escalation_responses: &Arc<crate::mcp::EscalationResponseMap>,
+    profiles: &Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -409,6 +430,7 @@ async fn process_ipc_message(
                 session_mgr,
                 hook_push_sink,
                 escalation_responses,
+                profiles,
                 subscribed_kinds,
                 event_rx,
                 conn_id,
@@ -442,6 +464,7 @@ async fn dispatch_ipc(
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: &Option<Arc<HookPushSink>>,
     escalation_responses: &Arc<crate::mcp::EscalationResponseMap>,
+    profiles: &Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -589,14 +612,52 @@ async fn dispatch_ipc(
             ratio,
             shell,
             worktree,
+            profile,
         } => {
             let mut mgr = session_mgr.lock().await;
+
+            // tn-ar79: resolve profile if set — profile wins over shell/cwd.
+            let (profile_shell, profile_cwd, profile_env, profile_args, profile_skip_si) =
+                if let Some(name) = profile {
+                    let inherit_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
+                    match therminal_core::config::profiles::resolve_profile(
+                        profiles,
+                        name,
+                        &inherit_cwd,
+                    ) {
+                        Ok(resolved) => (
+                            Some(resolved.shell),
+                            Some(resolved.cwd),
+                            resolved.env,
+                            resolved.shell_args,
+                            resolved.skip_shell_integration,
+                        ),
+                        Err(e) => {
+                            return IpcResponse::Error {
+                                message: format!("profile resolve failed: {e}"),
+                            };
+                        }
+                    }
+                } else {
+                    (
+                        None,
+                        None,
+                        std::collections::HashMap::new(),
+                        Vec::new(),
+                        false,
+                    )
+                };
+
             // tn-h7tq: when --worktree is set, resolve it against the
             // source pane's cwd before spawning. The resolution shells
             // out to git and may take a few hundred ms on first use; we
             // hold the manager lock across that call so concurrent
             // splits on the same source pane serialise. Worst-case
             // latency is bounded by the git invocations.
+            let base_cwd = profile_cwd
+                .clone()
+                .or_else(|| cwd.clone())
+                .unwrap_or_default();
             let (effective_cwd, worktree_resolved) = match worktree.as_deref() {
                 Some(branch) => {
                     let source_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
@@ -620,12 +681,16 @@ async fn dispatch_ipc(
                         }
                     }
                 }
-                None => (cwd.clone().unwrap_or_default(), None),
+                None => (base_cwd, None),
             };
+            let effective_shell =
+                profile_shell.unwrap_or_else(|| shell.clone().unwrap_or_default());
             let spawn_options = therminal_terminal::pty::SpawnOptions {
-                shell: shell.clone().unwrap_or_default(),
+                shell: effective_shell,
                 cwd: effective_cwd,
-                ..Default::default()
+                shell_args: profile_args,
+                env: profile_env,
+                skip_shell_integration: profile_skip_si,
             };
             match mgr.split_pane_with_options(
                 *pane_id,
@@ -1034,6 +1099,7 @@ async fn batch_layout_ops(
                 ratio,
                 shell,
                 worktree,
+                profile: _, // Profile resolution not supported in batch layout ops
             } => {
                 // tn-h7tq: same worktree resolution as the non-batch
                 // path; see the dispatch_ipc handler for details.

@@ -281,6 +281,10 @@ pub(crate) struct SpawnPaneParam {
     /// injected after the prompt is ready, inside the worktree). When
     /// `worktree` and `cwd` are both set, `worktree` wins. tn-h7tq.
     pub(crate) worktree: Option<String>,
+    /// Named profile from `[profiles.*]` in config. When set, the daemon
+    /// resolves the profile to shell/cwd/env spawn options. Profile takes
+    /// precedence over `shell`, `command`, and `cwd` fields. tn-ar79.
+    pub(crate) profile: Option<String>,
 }
 
 /// Parameters for `terminal.panes.create_tail` — create a pane that

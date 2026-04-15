@@ -716,10 +716,13 @@ async fn start_daemon(
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = app_config.mcp.clone();
+    let profiles = Arc::new(app_config.profiles.clone());
+    server.set_profiles(Arc::clone(&profiles));
     let mcp_session_mgr = server.session_manager();
     let mcp_shutdown_clone = Arc::clone(&mcp_shutdown);
     let mcp_trust = Arc::clone(&trust_config);
     let mcp_rl = Arc::clone(&rate_limiter);
+    let mcp_profiles = Arc::clone(&profiles);
     tokio::spawn(async move {
         if let Err(e) = mcp::start_mcp_server(
             mcp_config,
@@ -731,6 +734,7 @@ async fn start_daemon(
             pattern_engine_for_mcp,
             event_bus_for_mcp,
             mcp_shutdown_clone,
+            mcp_profiles,
         )
         .await
         {

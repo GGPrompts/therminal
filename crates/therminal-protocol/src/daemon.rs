@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -147,6 +147,12 @@ pub enum IpcRequest {
         /// pane lands in the worktree directory. See tn-h7tq.
         #[serde(default)]
         worktree: Option<String>,
+        /// Named profile from `[profiles.*]` in config. When set, the
+        /// daemon resolves the profile to shell/cwd/env spawn options.
+        /// Profile takes precedence over `shell` and `cwd` fields.
+        /// See tn-ar79.
+        #[serde(default)]
+        profile: Option<String>,
     },
     /// Kill (destroy) a specific pane.
     KillPane { pane_id: PaneId },

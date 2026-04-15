@@ -125,14 +125,39 @@ impl TherminalMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         use therminal_terminal::pty::SpawnOptions;
 
-        // Build spawn options from params.
-        // `shell` sets the PTY shell binary; `command` is the legacy alias.
-        // When both are set, `shell` takes precedence.
-        let shell_override = params.shell.or(params.command).unwrap_or_default();
-        let mut spawn_options = SpawnOptions {
-            shell: shell_override,
-            cwd: params.cwd.unwrap_or_default(),
-            ..Default::default()
+        // tn-ar79: resolve profile if set — profile wins over shell/command/cwd.
+        let mut spawn_options = if let Some(ref profile_name) = params.profile {
+            // Use the source pane's cwd (if available) as inherit_cwd for profile
+            // resolution. We'll refine this later when we know the split_from pane.
+            let inherit_cwd = params.cwd.as_deref().unwrap_or("");
+            match therminal_core::config::profiles::resolve_profile(
+                &self.profiles,
+                profile_name,
+                inherit_cwd,
+            ) {
+                Ok(resolved) => SpawnOptions {
+                    shell: resolved.shell,
+                    shell_args: resolved.shell_args,
+                    env: resolved.env,
+                    cwd: resolved.cwd,
+                    skip_shell_integration: resolved.skip_shell_integration,
+                },
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "profile resolve failed: {e}"
+                    ))]));
+                }
+            }
+        } else {
+            // Build spawn options from params.
+            // `shell` sets the PTY shell binary; `command` is the legacy alias.
+            // When both are set, `shell` takes precedence.
+            let shell_override = params.shell.or(params.command).unwrap_or_default();
+            SpawnOptions {
+                shell: shell_override,
+                cwd: params.cwd.unwrap_or_default(),
+                ..Default::default()
+            }
         };
         let startup_command = params.startup_command.as_deref();
         let worktree_branch = params.worktree.as_deref();
@@ -1609,6 +1634,7 @@ impl TherminalMcpServer {
             ratio: None,
             shell: None,
             worktree: None,
+            profile: None,
         };
 
         // Reuse the spawn pane handler.
@@ -1709,7 +1735,7 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "terminal.panes.create",
-            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command, working directory, and an optional startup command injected after the first prompt. Optional `worktree = \"<branch>\"` resolves the source pane's git repo, finds or creates a worktree for the branch (`git worktree add <repo>/../<repo>-<branch> <branch>`), spawns the new pane there, and auto-tags it with `branch=`, `worktree=`, `repo=`.",
+            "Create a new terminal pane with a PTY. Can split from an existing pane or add to a session. Supports custom shell command, working directory, and an optional startup command injected after the first prompt. Optional `profile = \"<name>\"` resolves a named profile from `[profiles.*]` in config to shell/cwd/env spawn options — profile takes precedence over `shell`, `command`, and `cwd` fields. Optional `worktree = \"<branch>\"` resolves the source pane's git repo, finds or creates a worktree for the branch, spawns the new pane there, and auto-tags it with `branch=`, `worktree=`, `repo=`.",
             schema_for_type::<SpawnPaneParam>(),
         ),
         Tool::new(

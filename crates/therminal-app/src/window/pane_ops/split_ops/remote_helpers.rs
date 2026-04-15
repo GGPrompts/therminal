@@ -157,6 +157,7 @@ impl App {
             ratio: None,
             shell: None,
             worktree: None,
+            profile: None,
         }) {
             Ok(r) => r,
             Err(e) => {

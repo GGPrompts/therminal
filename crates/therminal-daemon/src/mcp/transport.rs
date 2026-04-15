@@ -6,6 +6,7 @@
 //! - **Windows**: named pipe at `\\.\pipe\therminal-mcp` with one instance per
 //!   accepted connection.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use tokio::net::UnixListener;
 use tracing::warn;
 use tracing::{debug, error, info};
 
-use therminal_core::config::TrustConfig;
+use therminal_core::config::{ProfileConfig, TrustConfig};
 
 use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
 
@@ -48,6 +49,7 @@ pub async fn start_mcp_server(
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
+    profiles: Arc<HashMap<String, ProfileConfig>>,
 ) -> Result<()> {
     if !config.enabled {
         info!("MCP server disabled by config");
@@ -68,6 +70,7 @@ pub async fn start_mcp_server(
             pattern_engine,
             event_bus,
             shutdown,
+            profiles,
         )
         .await?;
     }
@@ -84,6 +87,7 @@ pub async fn start_mcp_server(
             pattern_engine,
             event_bus,
             shutdown,
+            profiles,
         )
         .await?;
     }
@@ -106,6 +110,7 @@ fn spawn_mcp_connection<R, W>(
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
+    profiles: Arc<HashMap<String, ProfileConfig>>,
 ) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
@@ -119,6 +124,7 @@ fn spawn_mcp_connection<R, W>(
             agent_events,
             pattern_engine,
             event_bus,
+            profiles,
         );
         match server.serve((reader, writer)).await {
             Ok(running) => {
@@ -146,6 +152,7 @@ async fn start_mcp_server_unix(
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
+    profiles: Arc<HashMap<String, ProfileConfig>>,
 ) -> Result<()> {
     // Clean stale socket
     match std::fs::remove_file(socket_path) {
@@ -210,6 +217,7 @@ async fn start_mcp_server_unix(
                             agent_events.clone(),
                             pattern_engine.clone(),
                             event_bus.clone(),
+                            Arc::clone(&profiles),
                         );
                     }
                     Err(e) => {
@@ -251,6 +259,7 @@ async fn start_mcp_server_windows(
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
+    profiles: Arc<HashMap<String, ProfileConfig>>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -281,6 +290,7 @@ async fn start_mcp_server_windows(
                             agent_events.clone(),
                             pattern_engine.clone(),
                             event_bus.clone(),
+                            Arc::clone(&profiles),
                         );
 
                         // Create a new pipe instance for the next client.
