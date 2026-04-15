@@ -2,6 +2,7 @@
 //! `SwarmDebouncer`, dispatching to `spawn_subagent_pane` /
 //! `reclaim_subagent_pane`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use tracing::{debug, info, warn};
@@ -21,17 +22,14 @@ impl App {
     /// events. Called from `handle_redraw_requested` (parallel to
     /// `poll_auto_tile`) and from the `SwarmWatcherTick` user-event handler.
     pub(crate) fn poll_swarm_watcher(&mut self) {
-        // Refresh the shared pane-pid list for the swarm watcher's
-        // owned-session computation. Cheap (visit each leaf once) and only
-        // populated when the user opted into `swarm_watch_scope = "current"`.
-        if let Some(provider) = self.swarm_pane_pids.clone() {
-            let pids = self
-                .workspaces
-                .as_ref()
-                .map(|w| w.collect_all_root_pids())
-                .unwrap_or_default();
+        // Refresh the shared session-ID set for the swarm watcher's
+        // owned-session computation (tn-twfg). Cheap (visit each leaf once)
+        // and only populated when the user opted into
+        // `swarm_watch_scope = "current"`.
+        if let Some(provider) = self.swarm_pane_session_ids.clone() {
+            let session_ids = self.collect_all_claude_session_ids();
             if let Ok(mut g) = provider.lock() {
-                *g = pids;
+                *g = session_ids;
             }
         }
 
@@ -238,5 +236,16 @@ impl App {
         if let Some(layout) = self.get_layout_mut() {
             layout.compact_layout();
         }
+    }
+
+    /// Collect the Claude session IDs from all panes across all workspaces.
+    ///
+    /// Delegates to `WorkspaceManager::collect_all_claude_session_ids()`.
+    /// Used by the swarm watcher's "current" scope filter (tn-twfg).
+    fn collect_all_claude_session_ids(&self) -> HashSet<String> {
+        self.workspaces
+            .as_ref()
+            .map(|wm| wm.collect_all_claude_session_ids())
+            .unwrap_or_default()
     }
 }

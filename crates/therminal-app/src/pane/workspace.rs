@@ -58,17 +58,20 @@ impl WorkspaceManager {
         }
     }
 
-    /// Collect the PTY root pids of every pane across every workspace.
-    /// Used by the swarm watcher's "current" scope filter to compute the set
-    /// of Claude Code sessions owned by this therminal instance.
-    pub fn collect_all_root_pids(&self) -> Vec<u32> {
-        let mut out = Vec::new();
+    /// Collect the Claude session IDs from every pane across every workspace.
+    ///
+    /// Reads `PaneStatus.claude_session_id` from each leaf pane. Used by the
+    /// swarm watcher's "current" scope filter to determine which subagent
+    /// parent sessions belong to this therminal instance (tn-twfg).
+    pub fn collect_all_claude_session_ids(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
         for ws in &self.workspaces {
             for id in ws.layout.pane_ids() {
                 if let Some(pane) = ws.layout.find_pane(id)
-                    && let Some(pid) = pane.backend.root_pid()
+                    && let Ok(status) = pane.status.lock()
+                    && let Some(ref sid) = status.claude_session_id
                 {
-                    out.push(pid);
+                    out.insert(sid.clone());
                 }
             }
         }

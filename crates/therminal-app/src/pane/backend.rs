@@ -341,28 +341,6 @@ impl PaneBackendKind {
         }
     }
 
-    /// Returns the PTY child process group leader pid for terminal backends.
-    ///
-    /// Unix-only: `process_group_leader` is not implemented on Windows ConPTY.
-    /// On Windows this returns `None`; the swarm watcher "current" scope
-    /// filter will therefore behave as "all" there until we wire up a
-    /// Windows-specific process lookup.
-    pub fn root_pid(&self) -> Option<u32> {
-        #[cfg(unix)]
-        {
-            match self {
-                PaneBackendKind::Terminal { pty_master, .. } => {
-                    pty_master.process_group_leader().map(|p| p as u32)
-                }
-                _ => None,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    }
-
     /// tn-ou30: clear spurious scrollback history that accumulates during
     /// shell startup or snapshot replay. Only clears if every scrollback
     /// row is blank (spaces / NUL) — real scrollback content is preserved.

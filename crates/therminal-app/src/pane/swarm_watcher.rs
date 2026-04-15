@@ -21,10 +21,12 @@
 //!
 //! When [`SwarmWatchScope::Current`] is configured, the watcher only emits
 //! spawn events for subagents whose parent Claude Code session is owned by
-//! THIS therminal instance — i.e. the parent's recorded pid is a descendant of
-//! one of the live pane PIDs supplied via [`PanePidProvider`]. The owned-set
-//! is recomputed at most once per [`OWNED_CACHE_TTL`] to avoid filesystem and
-//! sysinfo walks on every tick.
+//! THIS therminal instance. Ownership is determined by matching the parent
+//! session ID (extracted from the subagent JSONL path) against the set of
+//! Claude session IDs known to be running in this instance's panes, supplied
+//! via [`PaneSessionIdProvider`]. This avoids PID-namespace mismatches that
+//! occur when the GUI runs as a Windows native process but panes execute
+//! inside WSL2 (tn-twfg).
 //!
 //! Filesystem polling (rather than the daemon's `TaggedAgentEvent` broadcast)
 //! is used so the watcher works even when the daemon isn't running, and so the
@@ -36,7 +38,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::Deserialize;
 use therminal_core::config::SwarmWatchScope;
 use tracing::{debug, info, warn};
 
@@ -47,15 +48,11 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// considered done and the pane is reclaimed. Mirrors thermal-desktop.
 pub const STALENESS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Owned-session-set is recomputed at most this often. Keeps the per-tick
-/// cost cheap by avoiding repeated `/tmp/claude-code-state` walks and process
-/// tree refreshes.
-pub const OWNED_CACHE_TTL: Duration = Duration::from_secs(1);
-
-/// Live pane root PIDs supplied by the host application. Wrapping it in an
-/// `Arc<Mutex<Vec<u32>>>` lets the app mutate the list as panes spawn / exit
-/// without coordinating with the watcher thread directly.
-pub type PanePidProvider = Arc<Mutex<Vec<u32>>>;
+/// Claude session IDs known to belong to panes in this therminal instance.
+/// Supplied by the host application and updated each tick from
+/// `PaneStatus.claude_session_id`. The watcher thread reads this set
+/// (under a lock) to determine which subagent parent sessions are "owned".
+pub type PaneSessionIdProvider = Arc<Mutex<HashSet<String>>>;
 
 /// Events emitted by the watcher thread, consumed by the winit event loop.
 ///
@@ -84,29 +81,6 @@ struct Tracked {
     reclaimed: bool,
 }
 
-fn default_state_dir(name: &str) -> PathBuf {
-    #[cfg(windows)]
-    {
-        // When the GUI runs as a Windows native process but the shell is WSL,
-        // Claude Code writes state files inside WSL's /tmp/, not the Windows
-        // %TEMP%. Resolve through the \\wsl.localhost\<distro>\tmp UNC path
-        // so the watcher can find them.
-        if let Some(distro) = crate::window::wsl_paths::detect_default_distro() {
-            if let Some(p) =
-                therminal_harness_claude::wsl_paths::linux_to_unc(&distro, &format!("/tmp/{name}"))
-            {
-                return p;
-            }
-        }
-        std::env::temp_dir().join(name)
-    }
-
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("/tmp").join(name)
-    }
-}
-
 /// Resolve the Claude projects directory.
 ///
 /// On Windows native with WSL, Claude Code's `.claude/projects/` lives inside
@@ -132,12 +106,6 @@ fn claude_projects_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join(".claude")
         .join("projects")
-}
-
-/// Resolve the Claude state directory (host-wide; pid-keyed JSON files live
-/// here, written by Claude Code's hooks).
-fn claude_state_dir() -> PathBuf {
-    default_state_dir("claude-code-state")
 }
 
 /// Extract the parent session id from a subagent JSONL path.
@@ -197,143 +165,21 @@ fn scan_subagent_files() -> Vec<(String, PathBuf)> {
     out
 }
 
-// ── Owned-session-set computation ──────────────────────────────────────
-
-/// Subset of fields we read from `/tmp/claude-code-state/*.json`. Both the
-/// `pid`-keyed top-level files and the per-session files share enough of a
-/// shape to be deserialised with this struct (extra fields are ignored).
-#[derive(Debug, Deserialize)]
-struct ClaudeStateBlob {
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    claude_session_id: Option<String>,
-}
-
-/// Compute the set of process descendants of `roots`, inclusive of the roots
-/// themselves. Uses `sysinfo` for cross-platform process enumeration.
-fn descendants_of(roots: &[u32]) -> HashSet<u32> {
-    let mut out: HashSet<u32> = roots.iter().copied().collect();
-    if roots.is_empty() {
-        return out;
-    }
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    );
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    // child_pid -> parent_pid
-    let mut child_to_parent: HashMap<u32, u32> = HashMap::new();
-    for (pid, proc) in sys.processes() {
-        if let Some(parent) = proc.parent() {
-            child_to_parent.insert(pid.as_u32(), parent.as_u32());
-        }
-    }
-    // Walk every known pid up to a root and tag descendants accordingly.
-    for &pid in child_to_parent.keys() {
-        let mut cur = pid;
-        let mut depth = 0;
-        while depth < 256 {
-            if out.contains(&cur) {
-                out.insert(pid);
-                break;
-            }
-            match child_to_parent.get(&cur) {
-                Some(&p) if p != cur => cur = p,
-                _ => break,
-            }
-            depth += 1;
-        }
-    }
-    out
-}
-
-/// Read `/tmp/claude-code-state/*.json` and collect the set of Claude
-/// Code session ids whose recorded pid is a descendant of one of `pane_pids`.
-///
-/// A session is included if either its `claude_session_id` field (preferred,
-/// matches the JSONL/subagent directory naming) or its `session_id` field
-/// resolves a descendant pid match. The first JSON object in each file is
-/// parsed; non-JSON or non-Claude state files are skipped silently.
-fn collect_owned_sessions(pane_pids: &[u32]) -> HashSet<String> {
-    let mut owned = HashSet::new();
-    if pane_pids.is_empty() {
-        return owned;
-    }
-    let descendants = descendants_of(pane_pids);
-    let dir = claude_state_dir();
-    let iter = match std::fs::read_dir(&dir) {
-        Ok(it) => it,
-        Err(_) => return owned,
-    };
-    for entry in iter.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        // Files may contain multiple concatenated JSON objects on separate
-        // lines. Try the whole file first, then fall back to line-by-line.
-        let mut parsed: Vec<ClaudeStateBlob> = Vec::new();
-        if let Ok(blob) = serde_json::from_str::<ClaudeStateBlob>(text.trim()) {
-            parsed.push(blob);
-        } else {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(blob) = serde_json::from_str::<ClaudeStateBlob>(line) {
-                    parsed.push(blob);
-                }
-            }
-        }
-        for blob in parsed {
-            let Some(pid) = blob.pid else { continue };
-            if !descendants.contains(&pid) {
-                continue;
-            }
-            if let Some(sid) = blob.claude_session_id {
-                owned.insert(sid);
-            }
-            if let Some(sid) = blob.session_id {
-                owned.insert(sid);
-            }
-        }
-    }
-    owned
-}
-
-/// Cache wrapper around [`collect_owned_sessions`] honouring [`OWNED_CACHE_TTL`].
-struct OwnedSessionCache {
-    last_refresh: Option<Instant>,
-    set: HashSet<String>,
-}
-
-impl OwnedSessionCache {
-    fn new() -> Self {
-        Self {
-            last_refresh: None,
-            set: HashSet::new(),
-        }
-    }
-
-    fn get(&mut self, pane_pids: &[u32]) -> &HashSet<String> {
-        let stale = match self.last_refresh {
-            None => true,
-            Some(t) => t.elapsed() >= OWNED_CACHE_TTL,
-        };
-        if stale {
-            self.set = collect_owned_sessions(pane_pids);
-            self.last_refresh = Some(Instant::now());
-        }
-        &self.set
-    }
-}
+// ── Owned-session-set resolution (tn-twfg) ───────────────────────────
+//
+// Prior to tn-twfg this module walked `/tmp/claude-code-state/*.json`,
+// read each file's `pid` field, built a sysinfo process-descendant tree
+// from the pane root PIDs, and matched.  That broke on Windows+WSL
+// because the GUI's host-side PIDs live in a different namespace from the
+// WSL-side PIDs recorded in the state files.
+//
+// The new approach is session-ID-based: the host application supplies a
+// `PaneSessionIdProvider` containing the Claude session IDs that are
+// currently known to be running in this therminal instance's panes
+// (populated from `PaneStatus.claude_session_id`, which the daemon
+// forwarder already resolves cross-namespace).  The watcher simply
+// checks whether a subagent's parent session ID (extracted from the
+// JSONL path) is in that set.
 
 /// Pure scope-filter helper: returns whether a discovered subagent should be
 /// considered "in scope" given the current configuration and an owned set.
@@ -359,12 +205,13 @@ pub(crate) fn subagent_in_scope(
 /// [`POLL_INTERVAL`] and emits events on the channel.
 ///
 /// `scope` controls scope filtering. When set to [`SwarmWatchScope::Current`],
-/// `pane_pids` MUST be supplied — it provides the live set of root pane PIDs
-/// owned by this therminal instance, against which Claude state pids are
-/// matched. With [`SwarmWatchScope::All`] the provider is ignored.
+/// `pane_session_ids` MUST be supplied — it provides the live set of Claude
+/// session IDs running in this therminal instance's panes, against which
+/// subagent parent session IDs are matched (tn-twfg). With
+/// [`SwarmWatchScope::All`] the provider is ignored.
 pub fn spawn(
     scope: SwarmWatchScope,
-    pane_pids: Option<PanePidProvider>,
+    pane_session_ids: Option<PaneSessionIdProvider>,
 ) -> mpsc::Receiver<SwarmWatcherEvent> {
     let (tx, rx) = mpsc::channel();
 
@@ -376,16 +223,31 @@ pub fn spawn(
                 "swarm watcher started — scanning for Claude subagents"
             );
             let mut tracked: HashMap<String, Tracked> = HashMap::new();
-            let mut owned_cache = OwnedSessionCache::new();
 
             loop {
-                // Snapshot pane pids (cheap clone under the lock).
-                let pids: Vec<u32> = match (&scope, pane_pids.as_ref()) {
+                // Snapshot known session IDs (cheap clone under the lock).
+                let owned: HashSet<String> = match (&scope, pane_session_ids.as_ref()) {
                     (SwarmWatchScope::Current, Some(p)) => {
                         p.lock().map(|g| g.clone()).unwrap_or_default()
                     }
-                    _ => Vec::new(),
+                    (SwarmWatchScope::Current, None) => {
+                        // No provider supplied — fall back to scope All
+                        // with a debug log rather than silently filtering
+                        // everything out (tn-twfg fallback).
+                        debug!(
+                            "swarm watcher: Current scope but no session-id provider; \
+                             falling back to All"
+                        );
+                        HashSet::new()
+                    }
+                    _ => HashSet::new(),
                 };
+                let effective_scope =
+                    if scope == SwarmWatchScope::Current && pane_session_ids.is_none() {
+                        SwarmWatchScope::All
+                    } else {
+                        scope
+                    };
 
                 // Discover new files.
                 for (agent_id, jsonl_path) in scan_subagent_files() {
@@ -413,9 +275,17 @@ pub fn spawn(
                         continue;
                     }
 
-                    if scope == SwarmWatchScope::Current {
-                        let owned = owned_cache.get(&pids);
-                        if !subagent_in_scope(scope, owned, &jsonl_path) {
+                    if effective_scope == SwarmWatchScope::Current {
+                        if owned.is_empty() {
+                            // Session IDs not yet available — fall back to
+                            // scope All so we don't silently drop everything.
+                            debug!(
+                                agent = %agent_id,
+                                jsonl = %jsonl_path.display(),
+                                "swarm watcher: no session IDs available yet, \
+                                 admitting subagent (fallback to All)"
+                            );
+                        } else if !subagent_in_scope(effective_scope, &owned, &jsonl_path) {
                             debug!(
                                 agent = %agent_id,
                                 jsonl = %jsonl_path.display(),
@@ -556,34 +426,12 @@ mod tests {
         assert!(!subagent_in_scope(SwarmWatchScope::Current, &owned, &p));
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_claude_state_dir_uses_temp_dir() {
-        assert_eq!(
-            claude_state_dir(),
-            std::env::temp_dir().join("claude-code-state")
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_claude_state_dir_uses_tmp() {
-        assert_eq!(claude_state_dir(), PathBuf::from("/tmp/claude-code-state"));
-    }
-
-    #[test]
-    fn owned_session_cache_refreshes_after_ttl_marker() {
-        // Smoke test: cache constructs cleanly and serves an empty set when
-        // there are no pane pids (the early return path).
-        let mut cache = OwnedSessionCache::new();
-        let pids: Vec<u32> = Vec::new();
-        let set = cache.get(&pids);
-        assert!(set.is_empty());
-    }
-
-    #[test]
-    fn collect_owned_sessions_empty_for_no_pids() {
-        let set = collect_owned_sessions(&[]);
-        assert!(set.is_empty());
+    fn scope_current_with_empty_owned_rejects_all() {
+        // When no session IDs are known, Current scope rejects subagents
+        // (the watcher loop has a separate fallback to All for this case).
+        let owned: HashSet<String> = HashSet::new();
+        let p = PathBuf::from("/home/u/.claude/projects/h/some-sid/subagents/agent-1.jsonl");
+        assert!(!subagent_in_scope(SwarmWatchScope::Current, &owned, &p));
     }
 }
