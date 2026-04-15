@@ -276,11 +276,21 @@ fn resolve_against(agent_cwd: &Path, rel: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    if p.is_absolute() {
+    if is_absolute_any_platform(rel) {
         Some(p.to_path_buf())
     } else {
         Some(agent_cwd.join(p))
     }
+}
+
+/// Platform-independent absolute path check. On Windows, `Path::is_absolute()`
+/// does not recognize Linux paths like `/home/...` as absolute — they get
+/// re-joined against `agent_cwd` and produce garbage. This helper treats a
+/// leading `/` as Linux-absolute (covers the cross-boundary case where agent
+/// paths are always Linux) and falls back to `Path::is_absolute()` for native
+/// Windows paths (`C:\...`, UNC `\\...`).
+fn is_absolute_any_platform(s: &str) -> bool {
+    s.starts_with('/') || Path::new(s).is_absolute()
 }
 
 #[cfg(test)]
@@ -544,5 +554,60 @@ mod tests {
         assert_eq!(hs[0].resolved_text.as_deref(), Some("/w/a.rs"));
         assert_eq!(hs[1].row, 2);
         assert_eq!(hs[1].resolved_text.as_deref(), Some("/w/b.rs"));
+    }
+
+    // --- Platform-independent absolute path detection (tn-cqdf) ---
+    // These tests validate `is_absolute_any_platform` and `resolve_against`
+    // on every platform, including the cross-boundary case where a Windows
+    // daemon resolves Linux-style agent paths.
+
+    #[test]
+    fn is_absolute_linux_home_path() {
+        // A leading `/` is always treated as absolute, even on Windows.
+        assert!(is_absolute_any_platform("/home/user/file.rs"));
+    }
+
+    #[test]
+    fn is_absolute_linux_tmp_path() {
+        assert!(is_absolute_any_platform("/tmp/test.txt"));
+    }
+
+    #[test]
+    fn is_absolute_relative_path_not_absolute() {
+        assert!(!is_absolute_any_platform("src/main.rs"));
+        assert!(!is_absolute_any_platform("./lib.rs"));
+        assert!(!is_absolute_any_platform("file.txt"));
+    }
+
+    #[test]
+    fn resolve_linux_absolute_on_any_platform() {
+        // Linux-absolute paths must pass through unchanged, regardless
+        // of the host platform.
+        assert_eq!(
+            resolve_against(Path::new("/work"), "/home/user/file.rs"),
+            Some(PathBuf::from("/home/user/file.rs"))
+        );
+        assert_eq!(
+            resolve_against(Path::new("/work"), "/tmp/test.txt"),
+            Some(PathBuf::from("/tmp/test.txt"))
+        );
+    }
+
+    #[test]
+    fn resolve_relative_still_joins() {
+        // Relative paths are joined against agent_cwd as before.
+        assert_eq!(
+            resolve_against(Path::new("/home/user/project"), "src/main.rs"),
+            Some(PathBuf::from("/home/user/project/src/main.rs"))
+        );
+    }
+
+    #[test]
+    fn resolve_dot_relative_joins() {
+        // `./lib.rs` is relative and should be joined against agent_cwd.
+        assert_eq!(
+            resolve_against(Path::new("/home/user/project"), "./lib.rs"),
+            Some(PathBuf::from("/home/user/project/./lib.rs"))
+        );
     }
 }
