@@ -112,10 +112,7 @@ mod tests {
     use super::*;
 
     fn make_profiles(pairs: Vec<(&str, ProfileConfig)>) -> HashMap<String, ProfileConfig> {
-        pairs
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v))
-            .collect()
+        pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
     }
 
     #[test]
@@ -141,7 +138,10 @@ mod tests {
         let resolved = resolve_profile(&profiles, "dev", "/home/user").unwrap();
         assert_eq!(resolved.shell, "/usr/bin/fish");
         assert_eq!(resolved.shell_args, vec!["--private"]);
-        assert!(!resolved.skip_shell_integration, "shell mode should inject integration");
+        assert!(
+            !resolved.skip_shell_integration,
+            "shell mode should inject integration"
+        );
         assert_eq!(resolved.cwd, "/home/user");
     }
 
@@ -156,8 +156,14 @@ mod tests {
         )]);
         let resolved = resolve_profile(&profiles, "docker", "/tmp").unwrap();
         assert_eq!(resolved.shell, "docker exec -it mycontainer bash");
-        assert!(resolved.shell_args.is_empty(), "command mode ignores shell_args");
-        assert!(resolved.skip_shell_integration, "command mode should skip integration");
+        assert!(
+            resolved.shell_args.is_empty(),
+            "command mode ignores shell_args"
+        );
+        assert!(
+            resolved.skip_shell_integration,
+            "command mode should skip integration"
+        );
     }
 
     #[test]
@@ -173,7 +179,10 @@ mod tests {
         )]);
         let resolved = resolve_profile(&profiles, "both", "/tmp").unwrap();
         assert_eq!(resolved.shell, "ssh remote", "command should win");
-        assert!(resolved.shell_args.is_empty(), "shell_args cleared in command mode");
+        assert!(
+            resolved.shell_args.is_empty(),
+            "shell_args cleared in command mode"
+        );
         assert!(resolved.skip_shell_integration);
     }
 
@@ -188,7 +197,10 @@ mod tests {
             },
         )]);
         let resolved = resolve_profile(&profiles, "custom", "/tmp").unwrap();
-        assert!(!resolved.skip_shell_integration, "explicit true should override command-mode auto-skip");
+        assert!(
+            !resolved.skip_shell_integration,
+            "explicit true should override command-mode auto-skip"
+        );
     }
 
     #[test]
@@ -202,7 +214,10 @@ mod tests {
             },
         )]);
         let resolved = resolve_profile(&profiles, "raw", "/tmp").unwrap();
-        assert!(resolved.skip_shell_integration, "explicit false should disable integration in shell mode");
+        assert!(
+            resolved.skip_shell_integration,
+            "explicit false should disable integration in shell mode"
+        );
     }
 
     #[test]
@@ -239,8 +254,14 @@ mod tests {
         )]);
         let resolved = resolve_profile(&profiles, "envtest", "/tmp").unwrap();
         assert_eq!(resolved.env.len(), 2);
-        assert_eq!(resolved.env.get("RUST_LOG").map(String::as_str), Some("debug"));
-        assert_eq!(resolved.env.get("MY_VAR").map(String::as_str), Some("hello"));
+        assert_eq!(
+            resolved.env.get("RUST_LOG").map(String::as_str),
+            Some("debug")
+        );
+        assert_eq!(
+            resolved.env.get("MY_VAR").map(String::as_str),
+            Some("hello")
+        );
     }
 
     #[test]

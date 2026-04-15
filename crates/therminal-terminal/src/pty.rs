@@ -503,7 +503,12 @@ pub fn spawn_shell_with_options(
         options.shell.clone()
     };
     let shell_type = detect_shell_type(&shell);
-    debug!(?shell, ?shell_type, skip = options.skip_shell_integration, "detected shell for PTY spawn");
+    debug!(
+        ?shell,
+        ?shell_type,
+        skip = options.skip_shell_integration,
+        "detected shell for PTY spawn"
+    );
 
     let mut cmd = if options.skip_shell_integration {
         // Direct execution: no rcfile wrappers or integration injection.

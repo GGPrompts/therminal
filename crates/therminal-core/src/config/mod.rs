@@ -14,8 +14,8 @@ pub mod profiles;
 // Re-export all public types so that `therminal_core::config::*` paths
 // continue to work unchanged after the split.
 pub use config_text::CONFIG_TEMPLATE_VERSION;
-pub use profiles::{ProfileResolveError, ResolvedProfile};
 pub use keybindings::*;
+pub use profiles::{ProfileResolveError, ResolvedProfile};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
