@@ -6,8 +6,9 @@ Cross-platform path resolution and runtime directory management.
 
 ```
 src/
-├── lib.rs    # Crate root, re-exports paths module
-└── paths.rs  # All path helpers and ensure_* functions
+├── lib.rs    # Crate root, re-exports paths and wsl modules
+├── paths.rs  # All path helpers and ensure_* functions
+└── wsl.rs    # Shared WSL detection helpers (tn-9ixz)
 ```
 
 ## Path Functions
@@ -50,6 +51,20 @@ All functions return absolute `PathBuf` values. The `dirs` crate provides platfo
 - **Windows**: Uses `FOLDERID_RoamingAppData` and `FOLDERID_LocalAppData`. Socket paths return named pipe paths (`\\.\pipe\therminal-*`) instead of filesystem paths.
 - **Headless/no-home**: All standard dir functions fall back to `/tmp/therminal` with a `tracing::warn`.
 
+## WSL Detection (tn-9ixz)
+
+Shared WSL helpers extracted from the harness and app crates. All functions are cached in `OnceLock`s — one probe per process instead of two.
+
+| Function | Purpose |
+|----------|---------|
+| `detect_default_distro()` | Cached `wsl.exe -l -q` output, BOM-stripped, first non-empty line |
+| `detect_wsl_home()` | Cached `wsl.exe -e sh -c 'printf %s "$HOME"'` |
+| `linux_to_unc(distro, path)` | Build `\\wsl.localhost\<distro>\<path>` from components |
+| `is_safe_distro_name(name)` | Allowlist check for known-safe distro names |
+| `is_wsl_unc_path(path)` | Check `\\wsl.localhost\` prefix |
+
+Consumers: `therminal-harness-claude/src/wsl_paths.rs` (state file / JSONL path resolution), `therminal-app/src/window/wsl_paths.rs` (hotspot path translation).
+
 ## Consumers
 
-This crate is consumed by every other crate that needs canonical paths -- `therminal-core` (config file location), `therminal-daemon` (socket binding, session persistence), and `therminal-app` (resource discovery for shell integration).
+This crate is consumed by every other crate that needs canonical paths and WSL detection -- `therminal-core` (config file location), `therminal-daemon` (socket binding, session persistence), `therminal-harness-claude` (WSL path resolution), and `therminal-app` (resource discovery, WSL path translation).

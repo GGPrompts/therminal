@@ -39,7 +39,7 @@ registry):
 
 | Code | Owner | Notes |
 |---|---|---|
-| 1341 | `claude` (`therminal-harness-claude`) | Claude Code state markers — `state=…`, `tool=…`, `session_id=…`. See `crates/therminal-harness-claude/src/markers.rs` for the grammar. Emits `claude.state` events on the harness bus. |
+| 1341 | `claude` (`therminal-harness-claude`) | Claude Code state markers — primary signal for session state (tn-nrur). Keys: `state`, `tool`, `session_id`, `cwd`, `context_percent`, `model`, `subagent_start`, `subagent_stop`. See `crates/therminal-harness-claude/src/markers.rs` for the grammar. Emits `claude.state` and `claude.subagent` events on the harness bus. |
 
 ---
 

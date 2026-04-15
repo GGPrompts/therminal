@@ -69,7 +69,7 @@ src/
 │   │       ├── editor.rs       # open_in_editor, plan_open_in_editor
 │   │       └── planner.rs      # shell_quote, planning helpers
 │   ├── folder_open.rs   # Directory hotspot routing (tn-zqwg)
-│   ├── wsl_paths.rs     # WSL2 path translation helpers
+│   ├── wsl_paths.rs     # WSL2 path translation (delegates to therminal_runtime::wsl)
 │   └── render.rs        # Per-frame rendering, damage tracking
 ├── pane/
 │   ├── mod.rs           # PaneListener, re-exports
@@ -239,6 +239,6 @@ If an agent spawns and exits within the debounce window, the two events cancel e
 
 1. **Hook path** (primary): The per-pane forwarder in `remote_spawn.rs` subscribes to `DaemonEvent::SubagentStarted` / `SubagentStopped`. When the daemon resolves a `subagent_start` hook signal to a pane, the forwarder converts it to `SwarmWatcherEvent::SpawnSubagent` / `ReclaimSubagent` and sends it through `App.swarm_debouncer_tx`. The `swarm_wake` callback sends `UserEvent::SwarmWatcherTick` to poll the debouncer on the main thread.
 
-2. **File scanner** (fallback): The `SwarmWatcher` thread (`pane/swarm_watcher.rs`) polls `~/.claude/projects/*/*/subagents/agent-*.jsonl` every 500ms and detects new/stale subagent files. Events are bridged to the debouncer via the watcher bridge thread.
+2. **File scanner** (fallback): The `SwarmWatcher` thread (`pane/swarm_watcher.rs`) polls `~/.claude/projects/*/*/subagents/agent-*.jsonl` every 500ms and detects new/stale subagent files. Events are bridged to the debouncer via the watcher bridge thread. The `Current` scope filter uses **session-based ownership** (tn-twfg): it checks if a subagent's `parent_session_id` matches the pane's `claude_session_id` (from the capacity cache), rather than PID descendancy. When `session_id` is not yet available, falls back to scope `All` with a debug log.
 
-Dedup is naturally handled: `spawn_subagent_pane()` checks `swarm_panes.contains_key(&agent_id)` before creating a pane, so the faster hook path wins and the file scanner's later discovery is a no-op.
+Dedup is naturally handled: `spawn_subagent_pane()` checks `swarm_panes.contains_key(&agent_id)` before creating a pane, so the faster hook path wins and the file scanner's later discovery is a no-op. Subagent panes without a JSONL path (hook-driven with no transcript file) spawn as regular terminal panes instead of JsonlTail panes (tn-y2yv).

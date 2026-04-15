@@ -202,13 +202,13 @@ Not in scope for this crate:
 
 ## Hook-push input path
 
-The file-polling pipeline (state poller + JSONL tailer) is the primary data source, but it requires the daemon to have filesystem access to `~/.claude/projects/` and `/tmp/claude-code-state/`. When this is not possible — notably when the daemon runs as a Windows native process and Claude Code runs inside WSL2 — the **hook-push path** (`src/hook_push.rs`) inverts the data flow.
+The file-polling pipeline (state poller + JSONL tailer) is a **fallback** data source, used when OSC 1341 markers are unavailable or stale (> 30s). It requires the daemon to have filesystem access to `~/.claude/projects/` and `/tmp/claude-code-state/`. On Windows+WSL, UNC access is best-effort (see tn-ag7d section below). The JSONL tailer remains authoritative for **historical data** (tool call transcripts, thinking content) that markers do not carry.
 
-Claude Code hook scripts call the `therminal` CLI from within WSL, which delivers structured `HookSignal`s to the daemon via `IpcRequest::PushAgentEvent`. The daemon dispatches them to the harness's broadcast channel via `HookPushSink::inject`, producing the same `TaggedAgentEvent`s as the file-polling path.
+The **hook-push path** (`src/hook_push.rs`) provides a complementary signal for subagent lifecycle events. Claude Code hook scripts call the `therminal` CLI from within WSL, which delivers structured `HookSignal`s to the daemon via `IpcRequest::PushAgentEvent`. The daemon dispatches them to the harness's broadcast channel via `HookPushSink::inject`, producing the same `TaggedAgentEvent`s as the file-polling path.
 
 **Wire type**: `HookSignal` is intentionally flat (all fields `Option<String>`) so new hook events can be added without a protocol version bump. Supported events: `session_start`, `session_stop` (`Stop` / `SessionEnd`), `tool_state` (`PreToolUse` / `PostToolUse`), `subagent_start`, `subagent_stop`, `stop_failure`.
 
-**Graceful degradation**: On Linux/WSL-hosted daemons, both paths run simultaneously. The JSONL tailer remains authoritative for historical data and capacity metrics; hook events provide lower-latency lifecycle signals. On Windows native (where JSONL files are unreachable), hook-push becomes the only source of observability.
+**Signal priority** (tn-nrur): OSC 1341 markers are primary for live state. When marker data is fresh, file-polled updates are suppressed. Hook-push provides subagent lifecycle signals. The JSONL tailer remains authoritative for historical data only. On Linux/WSL-hosted daemons, all three paths run simultaneously.
 
 ### UNC filesystem polling (tn-ag7d)
 
