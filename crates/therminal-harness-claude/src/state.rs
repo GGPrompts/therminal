@@ -73,7 +73,16 @@ fn copilot_state_dir() -> PathBuf {
 }
 
 /// Sessions older than this without a live PID are considered dead.
-const SESSION_MAX_AGE: time::Duration = time::Duration::hours(2);
+///
+/// On Windows the value is shortened to 5 minutes because `pid_is_alive`
+/// cannot cheaply probe WSL PIDs (different PID namespace), so timestamp
+/// freshness is the pragmatic fallback.  On Unix, `kill(pid, 0)` works
+/// reliably, and 2 hours gives long-running sessions plenty of headroom.
+const SESSION_MAX_AGE: time::Duration = if cfg!(windows) {
+    time::Duration::minutes(5)
+} else {
+    time::Duration::hours(2)
+};
 
 /// Grace period before a session with a dead PID is considered dead.
 const RECENT_UPDATE_GRACE: time::Duration = time::Duration::seconds(120);
@@ -456,10 +465,41 @@ fn pid_is_alive(pid: i64) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-#[cfg(not(unix))]
+/// On Windows, probe native (Win32) PIDs via `OpenProcess`.  WSL PIDs live in
+/// a separate namespace and cannot be resolved this way — `OpenProcess` will
+/// fail with `ERROR_INVALID_PARAMETER` for them just as it does for truly dead
+/// Win32 PIDs.  The `RECENT_UPDATE_GRACE` (120 s) protects live sessions whose
+/// state files are still being updated, and the shortened `SESSION_MAX_AGE`
+/// (5 min) caps worst-case latency for genuinely dead WSL sessions.
+#[cfg(windows)]
+fn pid_is_alive(pid: i64) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+
+    // SAFETY: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION is a
+    // read-only probe; it returns 0 (null handle) on failure.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle == 0 {
+        // OpenProcess failed.  Check why:
+        //   ERROR_ACCESS_DENIED  → PID exists but we can't open it (alive).
+        //   Anything else        → PID not found on the Win32 side (dead,
+        //                          or a WSL PID invisible from Win32).
+        let err = unsafe { GetLastError() };
+        err == ERROR_ACCESS_DENIED
+    } else {
+        // Successfully opened — the process is alive.
+        unsafe { CloseHandle(handle) };
+        true
+    }
+}
+
+/// Non-Unix, non-Windows fallback — assume alive, rely on timestamp staleness.
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: i64) -> bool {
-    // On non-Unix platforms we can't cheaply probe; assume alive and rely on
-    // timestamp-based staleness.
     true
 }
 
