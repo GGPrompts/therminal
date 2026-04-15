@@ -227,11 +227,32 @@ impl App {
     }
 
     /// Close the pane that was tailing a subagent's JSONL.
+    ///
+    /// Guards against closing the last pane: if reclaiming would leave zero
+    /// panes, spawns a fresh default shell pane first so the user lands on a
+    /// prompt instead of the app exiting (tn-pvvi).
     pub(crate) fn reclaim_subagent_pane(&mut self, agent_id: &str) {
         let Some(pane_id) = self.swarm_panes.remove(agent_id) else {
             debug!(agent = %agent_id, "swarm: reclaim for unknown agent, ignoring");
             return;
         };
+
+        // If this is the last pane, spawn a fresh default pane before closing
+        // so the user always has a shell to land on.
+        let total = self
+            .workspaces
+            .as_ref()
+            .map(|wm| wm.total_pane_count())
+            .unwrap_or(0);
+        if total <= 1 {
+            info!(
+                agent = %agent_id,
+                pane_id,
+                "swarm: spawning fresh pane before reclaiming last pane"
+            );
+            self.split_focused_pane_auto();
+        }
+
         info!(agent = %agent_id, pane_id, "swarm: reclaiming pane after subagent stale");
         self.close_pane_by_id(pane_id);
         if let Some(layout) = self.get_layout_mut() {
