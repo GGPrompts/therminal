@@ -484,7 +484,7 @@ fn pid_is_alive(pid: i64) -> bool {
     // SAFETY: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION is a
     // read-only probe; it returns 0 (null handle) on failure.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle == 0 {
+    if handle.is_null() {
         // OpenProcess failed.  Check why:
         //   ERROR_ACCESS_DENIED  → PID exists but we can't open it (alive).
         //   Anything else        → PID not found on the Win32 side (dead,
