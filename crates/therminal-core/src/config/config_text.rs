@@ -10,7 +10,7 @@ use super::{TherminalConfig, TrustTier};
 /// [`super::check_config_template_status`] to detect when a user's
 /// `therminal.toml` predates the current template — without polluting the
 /// parsed config struct.
-pub const CONFIG_TEMPLATE_VERSION: u32 = 5;
+pub const CONFIG_TEMPLATE_VERSION: u32 = 6;
 
 /// Return the fully-commented default config as a TOML string.
 ///
@@ -240,14 +240,40 @@ pub(super) fn default_config_text() -> String {
     // ── [profiles] ───────────────────────────────────────────────────────
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("# [profiles] — Named session profiles with per-profile overrides.\n");
+    out.push_str("#\n");
+    out.push_str("# Each profile can use either `shell` (+ optional `shell_args`) or\n");
+    out.push_str("# `command` (freeform string). If both are set, `command` wins.\n");
+    out.push_str("# `shell_integration` auto-detects: true for shell, false for command.\n");
+    out.push_str("# `icon` is a Nerd Font glyph for the launcher tile.\n");
+    out.push_str("# `color` is a hex background for the launcher tile (#RRGGBB or #RGB).\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("# [profiles.dev]\n");
     out.push_str("# shell = \"/bin/zsh\"\n");
+    out.push_str("# shell_args = [\"-l\"]\n");
     out.push_str("# working_directory = \"~/dev\"\n");
     out.push_str("# font_size = 14.0\n");
     out.push_str("# scrollback_lines = 50000\n");
+    out.push_str("# icon = \"\\ue62b\"  # Nerd Font: nf-seti-typescript\n");
+    out.push_str("# color = \"#1e3a5f\"\n");
     out.push_str("# [profiles.dev.env]\n");
     out.push_str("# EDITOR = \"nvim\"\n");
+    out.push_str("#\n");
+    out.push_str("# [profiles.docker-app]\n");
+    out.push_str("# command = \"docker exec -it my-app /bin/bash\"\n");
+    out.push_str("# icon = \"\\uf308\"  # Nerd Font: nf-linux-docker\n");
+    out.push_str("# color = \"#0db7ed\"\n");
+    out.push_str("#\n");
+    out.push_str("# [profiles.ssh-prod]\n");
+    out.push_str("# command = \"ssh prod-server\"\n");
+    out.push_str("# icon = \"\\uf489\"  # Nerd Font: nf-oct-terminal\n");
+    out.push_str("# color = \"#d4443e\"\n");
+    out.push_str("#\n");
+    out.push_str("# [profiles.powershell]\n");
+    out.push_str("# shell = \"pwsh\"\n");
+    out.push_str("# shell_args = [\"-NoLogo\"]\n");
+    out.push_str("# shell_integration = true\n");
+    out.push_str("# icon = \"\\uebc7\"  # Nerd Font: nf-cod-terminal_powershell\n");
+    out.push_str("# color = \"#012456\"\n");
     out.push('\n');
 
     // ── [mcp] ────────────────────────────────────────────────────────────

@@ -467,7 +467,7 @@ impl TherminalConfig {
             }
         }
 
-        // Validate profile working directories.
+        // Validate profile working directories and new launcher fields.
         for (name, profile) in &self.profiles {
             if let Some(ref dir) = profile.working_directory
                 && !dir.is_empty()
@@ -487,6 +487,23 @@ impl TherminalConfig {
                         "profile working_directory does not exist"
                     );
                 }
+            }
+            // Warn if both `shell` and `command` are set (command wins).
+            if profile.shell.is_some() && profile.command.is_some() {
+                warn!(
+                    profile = %name,
+                    "profile has both `shell` and `command` set; `command` takes priority"
+                );
+            }
+            // Warn if `color` is present but not a valid hex string.
+            if let Some(ref color) = profile.color
+                && ColorsConfig::parse_hex(color).is_none()
+            {
+                warn!(
+                    profile = %name,
+                    color = %color,
+                    "profile `color` is not a valid hex color (#RRGGBB or #RGB)"
+                );
             }
         }
 
@@ -1013,6 +1030,23 @@ impl ColorsConfig {
 pub struct ProfileConfig {
     /// Shell command override for this profile.
     pub shell: Option<String>,
+    /// Extra arguments passed to the shell binary.
+    ///
+    /// Only meaningful when `shell` is set; ignored when `command` is used.
+    #[serde(default)]
+    pub shell_args: Vec<String>,
+    /// Freeform command alternative to `shell` + `shell_args`.
+    ///
+    /// When set, this string is executed instead of the shell binary.
+    /// If both `shell` and `command` are set, `command` wins and a
+    /// validation warning is emitted.
+    pub command: Option<String>,
+    /// Whether to inject shell-integration scripts for this profile.
+    ///
+    /// `None` = auto: `true` when the profile uses `shell`, `false` when
+    /// it uses `command` (commands like `docker exec` or `ssh` are
+    /// unlikely to benefit from shell integration).
+    pub shell_integration: Option<bool>,
     /// Working directory override.
     pub working_directory: Option<String>,
     /// Extra environment variables for this profile.
@@ -1021,6 +1055,10 @@ pub struct ProfileConfig {
     pub font_size: Option<f32>,
     /// Scrollback lines override.
     pub scrollback_lines: Option<usize>,
+    /// Nerd Font glyph for the launcher overlay tile (e.g. "\u{f489}").
+    pub icon: Option<String>,
+    /// Hex color for the launcher overlay tile background (`#RRGGBB` or `#RGB`).
+    pub color: Option<String>,
 }
 
 // ── Section: Terminal ────────────────────────────────────────────────────
@@ -2965,6 +3003,156 @@ EDITOR = "nvim"
             },
         );
         config.validate_paths(); // should not warn
+    }
+
+    // ── ProfileConfig launcher-field tests (tn-zpxv) ──────────────────────
+
+    #[test]
+    fn profiles_new_fields_deserialize() {
+        let toml_str = r##"
+[profiles.docker]
+command = "docker exec -it my-app /bin/bash"
+icon = "\uf308"
+color = "#0db7ed"
+
+[profiles.dev]
+shell = "/bin/zsh"
+shell_args = ["-l", "--no-rcs"]
+shell_integration = true
+font_size = 14.0
+
+[profiles.ssh]
+command = "ssh prod-server"
+shell_integration = false
+icon = "\uf489"
+color = "#d4443e"
+"##;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.profiles.len(), 3);
+
+        let docker = &config.profiles["docker"];
+        assert_eq!(docker.command.as_deref(), Some("docker exec -it my-app /bin/bash"));
+        assert!(docker.shell.is_none());
+        assert!(docker.shell_args.is_empty());
+        assert!(docker.shell_integration.is_none());
+        assert_eq!(docker.icon.as_deref(), Some("\u{f308}"));
+        assert_eq!(docker.color.as_deref(), Some("#0db7ed"));
+
+        let dev = &config.profiles["dev"];
+        assert_eq!(dev.shell.as_deref(), Some("/bin/zsh"));
+        assert_eq!(dev.shell_args, vec!["-l", "--no-rcs"]);
+        assert_eq!(dev.shell_integration, Some(true));
+        assert!(dev.command.is_none());
+        assert!(dev.icon.is_none());
+        assert!(dev.color.is_none());
+
+        let ssh = &config.profiles["ssh"];
+        assert_eq!(ssh.command.as_deref(), Some("ssh prod-server"));
+        assert_eq!(ssh.shell_integration, Some(false));
+    }
+
+    #[test]
+    fn profiles_new_fields_round_trip() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "docker".to_string(),
+            ProfileConfig {
+                command: Some("docker exec -it app bash".to_string()),
+                icon: Some("\u{f308}".to_string()),
+                color: Some("#0db7ed".to_string()),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert(
+            "pwsh".to_string(),
+            ProfileConfig {
+                shell: Some("pwsh".to_string()),
+                shell_args: vec!["-NoLogo".to_string()],
+                shell_integration: Some(true),
+                ..Default::default()
+            },
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        config.save_to(&path).unwrap();
+        let loaded = TherminalConfig::load_from(&path);
+
+        let docker = &loaded.profiles["docker"];
+        assert_eq!(docker.command.as_deref(), Some("docker exec -it app bash"));
+        assert_eq!(docker.icon.as_deref(), Some("\u{f308}"));
+        assert_eq!(docker.color.as_deref(), Some("#0db7ed"));
+        assert!(docker.shell.is_none());
+        assert!(docker.shell_args.is_empty());
+
+        let pwsh = &loaded.profiles["pwsh"];
+        assert_eq!(pwsh.shell.as_deref(), Some("pwsh"));
+        assert_eq!(pwsh.shell_args, vec!["-NoLogo"]);
+        assert_eq!(pwsh.shell_integration, Some(true));
+    }
+
+    /// validate_paths warns when both shell and command are set.
+    #[test]
+    fn validate_paths_profile_shell_and_command_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "conflict".to_string(),
+            ProfileConfig {
+                shell: Some("/bin/bash".to_string()),
+                command: Some("docker exec -it app bash".to_string()),
+                ..Default::default()
+            },
+        );
+        // Should warn but not panic.
+        config.validate_paths();
+    }
+
+    /// validate_paths warns on invalid hex color.
+    #[test]
+    fn validate_paths_profile_invalid_color_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "bad-color".to_string(),
+            ProfileConfig {
+                color: Some("not-a-color".to_string()),
+                ..Default::default()
+            },
+        );
+        // Should warn but not panic.
+        config.validate_paths();
+    }
+
+    /// validate_paths accepts valid hex colors in profiles.
+    #[test]
+    fn validate_paths_profile_valid_color_ok() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "good-6".to_string(),
+            ProfileConfig {
+                color: Some("#0db7ed".to_string()),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert(
+            "good-3".to_string(),
+            ProfileConfig {
+                color: Some("#abc".to_string()),
+                ..Default::default()
+            },
+        );
+        // Should not warn.
+        config.validate_paths();
+    }
+
+    /// Default ProfileConfig has empty shell_args and None for new fields.
+    #[test]
+    fn profile_config_default_new_fields() {
+        let p = ProfileConfig::default();
+        assert!(p.shell_args.is_empty());
+        assert!(p.command.is_none());
+        assert!(p.shell_integration.is_none());
+        assert!(p.icon.is_none());
+        assert!(p.color.is_none());
     }
 
     // ── Delegate profile tests ────────────────────────────────────────────
