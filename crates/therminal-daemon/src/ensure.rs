@@ -344,13 +344,17 @@ async fn start_daemon(
                         // entry exists yet). Match by working_dir against panes
                         // with a Claude agent.
                         let pane_id = pane_id.or_else(|| {
-                            let wd = state.working_dir.as_deref().filter(|s| !s.is_empty())?;
+                            let wd = state
+                                .working_dir
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.trim_end_matches(['/', '\\']))?;
                             for entry in mgr.agent_registry().agents() {
                                 if matches!(
                                     entry.agent_type,
                                     therminal_terminal::state_inference::AgentType::Claude
                                 ) && let Some(cwd) = mgr.pane_cwd(entry.pane_id)
-                                    && cwd == wd
+                                    && cwd.trim_end_matches(['/', '\\']) == wd
                                 {
                                     tracing::debug!(
                                         pane_id = entry.pane_id,
