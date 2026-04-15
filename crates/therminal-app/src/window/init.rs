@@ -26,7 +26,7 @@ use super::{App, GpuState, NotificationSource, UserEvent, chrome};
 
 impl App {
     pub(super) fn new(event_proxy: EventLoopProxy<UserEvent>) -> Self {
-        let config = super::normalize_platform_config(TherminalConfig::load());
+        let config = TherminalConfig::load();
         info!(
             font_size = config.font.size,
             title = %config.general.title,

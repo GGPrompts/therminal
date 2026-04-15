@@ -6,9 +6,6 @@
 //!
 //! # What lives here
 //!
-//! - [`is_wsl2`] — checks whether the current process is running inside WSL2.
-//! - [`is_wslg_session`] — checks whether the current WSL2 process also has a
-//!   GUI session exposed by WSLg.
 //! - [`detect_default_distro`] — runs `wsl.exe -l -q` **once per process** via
 //!   a `OnceLock` cache and returns the first (default) distribution name.
 //! - [`detect_wsl_home`] — runs `wsl.exe -e sh -c 'printf %s "$HOME"'` **once
@@ -54,38 +51,6 @@ static DEFAULT_DISTRO: std::sync::OnceLock<Option<String>> = std::sync::OnceLock
 static WSL_HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 // ── Public API ─────────────────────────────────────────────────────────────
-
-/// Return `true` when the current process is running inside WSL2.
-///
-/// WSL sets `WSL_DISTRO_NAME` for distro processes. This is pure env probing
-/// and works on any build target.
-pub fn is_wsl2() -> bool {
-    std::env::var_os("WSL_DISTRO_NAME").is_some()
-}
-
-/// Return `true` when the current process is running in a GUI-capable WSLg
-/// session.
-///
-/// WSLg typically exposes at least one GUI transport/display variable to the
-/// Linux guest. We treat any of the common markers as sufficient because
-/// different launch paths may prefer Wayland or X11.
-pub fn is_wslg_session() -> bool {
-    is_wslg_env(
-        is_wsl2(),
-        std::env::var_os("WAYLAND_DISPLAY").is_some(),
-        std::env::var_os("DISPLAY").is_some(),
-        std::env::var_os("WSLGD_NOTIFY_SOCKET").is_some(),
-    )
-}
-
-fn is_wslg_env(
-    is_wsl2: bool,
-    has_wayland_display: bool,
-    has_display: bool,
-    has_wslg_socket: bool,
-) -> bool {
-    is_wsl2 && (has_wayland_display || has_display || has_wslg_socket)
-}
 
 /// Return the name of the user's default WSL distribution, or `None`
 /// if WSL is not installed / not detectable.
@@ -252,33 +217,6 @@ pub fn is_wsl_unc_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── is_wslg_env ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn is_wslg_env_requires_wsl2() {
-        assert!(!is_wslg_env(false, true, true, true));
-    }
-
-    #[test]
-    fn is_wslg_env_accepts_wayland() {
-        assert!(is_wslg_env(true, true, false, false));
-    }
-
-    #[test]
-    fn is_wslg_env_accepts_x11_only_sessions() {
-        assert!(is_wslg_env(true, false, true, false));
-    }
-
-    #[test]
-    fn is_wslg_env_accepts_socket_marker() {
-        assert!(is_wslg_env(true, false, false, true));
-    }
-
-    #[test]
-    fn is_wslg_env_rejects_headless_wsl() {
-        assert!(!is_wslg_env(true, false, false, false));
-    }
 
     // ── linux_to_unc ────────────────────────────────────────────────────────
 
