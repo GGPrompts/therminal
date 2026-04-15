@@ -143,6 +143,10 @@ emit_osc_marker() {
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 HOOK_TYPE="${1:-unknown}"
 
+# Carry forward existing session_title across hook calls (tn-ys0m).
+# Each hook invocation is a fresh process, so read from the state file.
+SESSION_TITLE=$(jq -r '.session_title // ""' "$STATE_FILE" 2>/dev/null || echo "")
+
 if [[ "$HOOK_TYPE" == "pre-tool" ]] || [[ "$HOOK_TYPE" == "post-tool" ]]; then
     echo "$STDIN_DATA" > "$DEBUG_DIR/${HOOK_TYPE}-$(date +%s)-$$.json" 2>/dev/null || true
 fi
@@ -194,6 +198,23 @@ case "$HOOK_TYPE" in
         CURRENT_TOOL=""
         PROMPT=$(echo "$STDIN_DATA" | jq -r '.prompt // "unknown"' 2>/dev/null || echo "unknown")
         DETAILS=$(jq -n --arg prompt "$PROMPT" '{event:"user_prompt_submitted",last_prompt:$prompt}')
+        # Extract session title from the first user prompt (tn-ys0m).
+        # Only set on first prompt — subsequent prompts ("yes", "looks good")
+        # are usually not descriptive. Persist via state file.
+        _EXISTING_TITLE=$(jq -r '.session_title // ""' "$STATE_FILE" 2>/dev/null || echo "")
+        if [[ -z "$_EXISTING_TITLE" ]]; then
+            # Try beads issue ID first (e.g. "tn-xxxx" or "bd-xxxx")
+            _TITLE=$(echo "$PROMPT" | grep -oE '\b[a-z]{2,}-[a-z0-9]{2,}\b' | head -1)
+            # Try slash command (e.g. "/commit", "/review-pr 123")
+            if [[ -z "$_TITLE" ]]; then
+                _TITLE=$(echo "$PROMPT" | grep -oE '^/[a-z-]+(\s+\S+)?' | head -1)
+            fi
+            # Fallback: first ~60 chars trimmed to word boundary
+            if [[ -z "$_TITLE" ]]; then
+                _TITLE=$(echo "$PROMPT" | head -c 60 | sed 's/[[:space:]][^[:space:]]*$//' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+            fi
+            SESSION_TITLE="$_TITLE"
+        fi
         ;;
     pre-tool)
         STATUS="tool_use"
@@ -373,6 +394,7 @@ STATE_JSON=$(jq -n \
     --arg tmux_pane "$TMUX_PANE" \
     --argjson pid "${_HOOK_PID}" \
     --arg hook_type "$HOOK_TYPE" \
+    --arg session_title "$SESSION_TITLE" \
     --argjson details "$DETAILS" \
     '{
         session_id: $session_id,
@@ -391,6 +413,7 @@ STATE_JSON=$(jq -n \
         tmux_pane: $tmux_pane,
         pid: $pid,
         hook_type: $hook_type,
+        session_title: (if $session_title == "" then null else $session_title end),
         details: $details
     }'
 )
