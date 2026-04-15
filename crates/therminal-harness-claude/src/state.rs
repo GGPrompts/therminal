@@ -16,7 +16,8 @@
 //! `DaemonEvent`.
 
 use notify::{
-    Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
+    Config as NotifyConfig, Event, EventKind, RecursiveMode, Result as NotifyResult, Watcher,
+    poll::PollWatcher,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -558,7 +559,7 @@ enum ReadFileOutcome {
 /// also pushed onto a `std::sync::mpsc` channel accessible via
 /// [`ClaudeStatePoller::updates`].
 pub struct ClaudeStatePoller {
-    _watchers: Vec<RecommendedWatcher>,
+    _watchers: Vec<Box<dyn Watcher + Send>>,
     rx: mpsc::Receiver<NotifyResult<Event>>,
     state_dirs: Vec<PathBuf>,
     sessions: HashMap<PathBuf, ClaudeSessionState>,
@@ -594,34 +595,101 @@ impl ClaudeStatePoller {
         }
 
         let (tx, rx) = mpsc::channel();
-        let mut watchers = Vec::new();
+        let mut watchers: Vec<Box<dyn Watcher + Send>> = Vec::new();
         let mut watched_dirs: Vec<PathBuf> = Vec::with_capacity(dirs.len());
 
+        /// Poll interval for the fallback `PollWatcher` when the
+        /// platform-native watcher cannot handle a directory (e.g. UNC
+        /// paths on Windows+WSL).
+        const POLL_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
+
         for dir in &dirs {
-            let tx_clone = tx.clone();
             // tn-966s: failures on individual directories are non-fatal so
             // a missing `\\wsl.localhost\<distro>\tmp\codex-state` doesn't
             // tank the whole poller. The first dir failure used to bubble
             // up via `?` and disable the entire harness pipeline; on
             // Windows native that punished users who only had Claude (and
             // not Codex/Copilot) installed inside WSL.
-            let mut watcher = match notify::recommended_watcher(tx_clone) {
-                Ok(w) => w,
+            //
+            // tn-ag7d: if the recommended (inotify / ReadDirectoryChanges)
+            // watcher fails — common on UNC paths — fall back to
+            // `PollWatcher` with a 5-second interval. If that also fails,
+            // skip the directory entirely: OSC 1341 markers are the primary
+            // signal path now, so file polling is best-effort.
+            let tx_clone = tx.clone();
+            let mut watcher: Box<dyn Watcher + Send> = match notify::recommended_watcher(tx_clone) {
+                Ok(w) => Box::new(w),
                 Err(e) => {
                     warn!(
                         dir = %dir.display(),
                         error = %e,
-                        "claude state poller: watcher init failed for dir, skipping"
+                        "claude state poller: recommended watcher failed, trying PollWatcher fallback"
                     );
-                    continue;
+                    let tx_poll = tx.clone();
+                    let poll_config =
+                        NotifyConfig::default().with_poll_interval(POLL_FALLBACK_INTERVAL);
+                    match PollWatcher::new(tx_poll, poll_config) {
+                        Ok(w) => {
+                            debug!(
+                                dir = %dir.display(),
+                                poll_interval_secs = POLL_FALLBACK_INTERVAL.as_secs(),
+                                "claude state poller: using PollWatcher fallback"
+                            );
+                            Box::new(w)
+                        }
+                        Err(e2) => {
+                            tracing::info!(
+                                dir = %dir.display(),
+                                error = %e2,
+                                "claude state poller: PollWatcher also failed, skipping \
+                                 (OSC 1341 markers are primary)"
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
             if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
+                // tn-ag7d: watch() can also fail on UNC paths even when the
+                // watcher object was created successfully. Same fallback
+                // logic: try PollWatcher, then skip.
                 warn!(
                     dir = %dir.display(),
                     error = %e,
-                    "claude state poller: watch failed for dir, skipping"
+                    "claude state poller: watch failed, trying PollWatcher fallback"
                 );
+                let tx_retry = tx.clone();
+                let poll_config =
+                    NotifyConfig::default().with_poll_interval(POLL_FALLBACK_INTERVAL);
+                match PollWatcher::new(tx_retry, poll_config) {
+                    Ok(mut pw) => match pw.watch(dir, RecursiveMode::NonRecursive) {
+                        Ok(()) => {
+                            debug!(
+                                dir = %dir.display(),
+                                poll_interval_secs = POLL_FALLBACK_INTERVAL.as_secs(),
+                                "claude state poller: using PollWatcher fallback after watch() failure"
+                            );
+                            watchers.push(Box::new(pw));
+                            watched_dirs.push(dir.clone());
+                        }
+                        Err(e2) => {
+                            tracing::info!(
+                                dir = %dir.display(),
+                                error = %e2,
+                                "claude state poller: PollWatcher watch also failed, skipping \
+                                 (OSC 1341 markers are primary)"
+                            );
+                        }
+                    },
+                    Err(e2) => {
+                        tracing::info!(
+                            dir = %dir.display(),
+                            error = %e2,
+                            "claude state poller: PollWatcher creation failed, skipping \
+                             (OSC 1341 markers are primary)"
+                        );
+                    }
+                }
                 continue;
             }
             watchers.push(watcher);
