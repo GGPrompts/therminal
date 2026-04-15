@@ -48,6 +48,15 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// considered done and the pane is reclaimed. Mirrors thermal-desktop.
 pub const STALENESS_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the watcher waits for session IDs to arrive before falling back
+/// to scope `All` when `owned` is empty and scope is `Current` (tn-nybc).
+///
+/// Most session IDs arrive within 1–2 seconds of daemon connection. Using a
+/// 5-second window means we queue any discovered subagents during that window
+/// and replay them once we have IDs to match against (or admit them all after
+/// the grace period expires, matching the original fallback behaviour).
+pub const GRACE_PERIOD: Duration = Duration::from_secs(5);
+
 /// Claude session IDs known to belong to panes in this therminal instance.
 /// Supplied by the host application and updated each tick from
 /// `PaneStatus.claude_session_id`. The watcher thread reads this set
@@ -199,6 +208,29 @@ pub(crate) fn subagent_in_scope(
     }
 }
 
+/// Filter a grace-period queue against the newly-arrived owned session IDs.
+///
+/// Returns the subset of `(agent_id, jsonl_path)` pairs that pass the `Current`
+/// scope filter. When `owned` is empty (grace period expired, not resolved by
+/// ID arrival) all queued entries are returned so the caller can admit them
+/// via the `All` fallback.
+///
+/// Extracted as a pure function so the grace-period replay logic can be unit
+/// tested without running the watcher thread (tn-nybc).
+pub(crate) fn filter_grace_queue(
+    queue: Vec<(String, PathBuf)>,
+    owned: &HashSet<String>,
+) -> Vec<(String, PathBuf)> {
+    if owned.is_empty() {
+        // Grace expired without session IDs — admit everything.
+        return queue;
+    }
+    queue
+        .into_iter()
+        .filter(|(_, path)| subagent_in_scope(SwarmWatchScope::Current, owned, path))
+        .collect()
+}
+
 /// Spawn the watcher thread. Returns a receiver that the event loop polls.
 ///
 /// The thread runs forever (or until the receiver is dropped). It polls every
@@ -224,6 +256,21 @@ pub fn spawn(
             );
             let mut tracked: HashMap<String, Tracked> = HashMap::new();
 
+            // Grace-period state (tn-nybc): when scope is Current and the owned
+            // set is empty at startup, we don't yet know which session IDs
+            // belong to this instance. Instead of immediately falling back to
+            // scope All (which admits cross-instance subagents), we queue
+            // discovered subagents and replay them once the owned set is
+            // populated, or admit them all once GRACE_PERIOD expires.
+            let created_at = Instant::now();
+            // Subagents queued during the grace period: (agent_id, jsonl_path).
+            let mut grace_queue: Vec<(String, PathBuf)> = Vec::new();
+            // Set to true once we've exited the grace window (owned became
+            // non-empty, or the grace period expired). Once true, no more
+            // queuing occurs.
+            let mut grace_resolved = scope != SwarmWatchScope::Current
+                || pane_session_ids.is_none();
+
             loop {
                 // Snapshot known session IDs (cheap clone under the lock).
                 let owned: HashSet<String> = match (&scope, pane_session_ids.as_ref()) {
@@ -248,6 +295,70 @@ pub fn spawn(
                     } else {
                         scope
                     };
+
+                // Resolve the grace period: once owned is non-empty, or the
+                // grace window has elapsed, replay any queued subagents and
+                // stop queuing (tn-nybc).
+                if !grace_resolved {
+                    let owned_arrived = !owned.is_empty();
+                    let grace_expired = created_at.elapsed() >= GRACE_PERIOD;
+
+                    if owned_arrived || grace_expired {
+                        grace_resolved = true;
+                        if !grace_queue.is_empty() {
+                            if owned_arrived {
+                                info!(
+                                    queued = grace_queue.len(),
+                                    "swarm watcher: session IDs arrived, \
+                                     replaying grace-period queue through scope filter"
+                                );
+                            } else {
+                                info!(
+                                    queued = grace_queue.len(),
+                                    "swarm watcher: grace period expired with no session IDs, \
+                                     admitting all queued subagents (fallback to All)"
+                                );
+                            }
+                            let queued = std::mem::take(&mut grace_queue);
+                            for (agent_id, jsonl_path) in
+                                filter_grace_queue(queued, &owned)
+                            {
+                                // Skip if already tracked (possible when the
+                                // hook path raced ahead of the file scanner).
+                                if tracked.contains_key(&agent_id) {
+                                    debug!(
+                                        agent = %agent_id,
+                                        "swarm watcher: grace-queue replay: \
+                                         already tracked, skipping"
+                                    );
+                                    continue;
+                                }
+                                info!(
+                                    agent = %agent_id,
+                                    jsonl = %jsonl_path.display(),
+                                    "swarm watcher: grace-queue replay: admitting subagent"
+                                );
+                                let event = SwarmWatcherEvent::SpawnSubagent {
+                                    agent_id: agent_id.clone(),
+                                    jsonl_path: Some(jsonl_path.clone()),
+                                };
+                                if tx.send(event).is_err() {
+                                    debug!("swarm watcher: receiver dropped, exiting");
+                                    return;
+                                }
+                                tracked.insert(
+                                    agent_id,
+                                    Tracked {
+                                        jsonl_path,
+                                        last_mtime: None,
+                                        unchanged_since: None,
+                                        reclaimed: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Discover new files.
                 for (agent_id, jsonl_path) in scan_subagent_files() {
@@ -276,14 +387,30 @@ pub fn spawn(
                     }
 
                     if effective_scope == SwarmWatchScope::Current {
-                        if owned.is_empty() {
-                            // Session IDs not yet available — fall back to
-                            // scope All so we don't silently drop everything.
+                        if !grace_resolved {
+                            // Still within the grace window — queue instead
+                            // of admitting immediately (tn-nybc).
                             debug!(
                                 agent = %agent_id,
                                 jsonl = %jsonl_path.display(),
-                                "swarm watcher: no session IDs available yet, \
-                                 admitting subagent (fallback to All)"
+                                "swarm watcher: grace period active, \
+                                 queuing subagent until session IDs arrive"
+                            );
+                            // Avoid duplicate queue entries if the scanner
+                            // sees the same file on consecutive polls.
+                            if !grace_queue.iter().any(|(id, _)| id == &agent_id) {
+                                grace_queue.push((agent_id, jsonl_path));
+                            }
+                            continue;
+                        } else if owned.is_empty() {
+                            // Grace resolved via expiry (owned still empty) —
+                            // fall back to All so we don't silently drop
+                            // everything discovered after the grace window.
+                            debug!(
+                                agent = %agent_id,
+                                jsonl = %jsonl_path.display(),
+                                "swarm watcher: no session IDs available, \
+                                 admitting subagent (post-grace fallback to All)"
                             );
                         } else if !subagent_in_scope(effective_scope, &owned, &jsonl_path) {
                             debug!(
@@ -433,5 +560,78 @@ mod tests {
         let owned: HashSet<String> = HashSet::new();
         let p = PathBuf::from("/home/u/.claude/projects/h/some-sid/subagents/agent-1.jsonl");
         assert!(!subagent_in_scope(SwarmWatchScope::Current, &owned, &p));
+    }
+
+    // ── Grace-period queue tests (tn-nybc) ───────────────────────────────
+
+    #[test]
+    fn grace_queue_empty_owned_admits_all() {
+        // When grace expires with no session IDs, all queued entries are returned.
+        let owned: HashSet<String> = HashSet::new();
+        let queue = vec![
+            (
+                "agent-1".to_string(),
+                PathBuf::from(
+                    "/home/u/.claude/projects/h/sid-a/subagents/agent-1.jsonl",
+                ),
+            ),
+            (
+                "agent-2".to_string(),
+                PathBuf::from(
+                    "/home/u/.claude/projects/h/sid-b/subagents/agent-2.jsonl",
+                ),
+            ),
+        ];
+        let result = filter_grace_queue(queue, &owned);
+        assert_eq!(result.len(), 2, "all entries admitted when owned is empty");
+    }
+
+    #[test]
+    fn grace_queue_owned_filters_foreign() {
+        // When owned arrives, only matching entries survive.
+        let mut owned: HashSet<String> = HashSet::new();
+        owned.insert("my-sid".to_string());
+
+        let queue = vec![
+            (
+                "agent-mine".to_string(),
+                PathBuf::from(
+                    "/home/u/.claude/projects/h/my-sid/subagents/agent-mine.jsonl",
+                ),
+            ),
+            (
+                "agent-foreign".to_string(),
+                PathBuf::from(
+                    "/home/u/.claude/projects/h/other-sid/subagents/agent-foreign.jsonl",
+                ),
+            ),
+        ];
+        let result = filter_grace_queue(queue, &owned);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "agent-mine");
+    }
+
+    #[test]
+    fn grace_queue_owned_rejects_unparseable_paths() {
+        let mut owned: HashSet<String> = HashSet::new();
+        owned.insert("my-sid".to_string());
+
+        let queue = vec![(
+            "agent-x".to_string(),
+            PathBuf::from("/short/path.jsonl"),
+        )];
+        let result = filter_grace_queue(queue, &owned);
+        assert!(
+            result.is_empty(),
+            "unparseable path rejected when owned is non-empty"
+        );
+    }
+
+    #[test]
+    fn grace_queue_empty_input_returns_empty() {
+        let mut owned: HashSet<String> = HashSet::new();
+        owned.insert("some-sid".to_string());
+        let result = filter_grace_queue(vec![], &owned);
+        assert!(result.is_empty());
     }
 }
