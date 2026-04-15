@@ -1634,7 +1634,7 @@ pub fn spawn_jsonl_watcher(
     path: PathBuf,
     cols: usize,
     rows: usize,
-    wake: Box<dyn Fn() + Send + 'static>,
+    wake: Box<dyn Fn() + Send + Sync + 'static>,
 ) -> Result<
     (
         Arc<Mutex<JsonlTailState>>,
@@ -1667,9 +1667,14 @@ pub fn spawn_jsonl_watcher(
         s.refresh_shadow_term(&term);
     }
 
+    // Wrap wake in Arc so both the notify watcher and the poll thread
+    // can call it.
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::from(wake);
+
     let state_for_watcher = Arc::clone(&state);
     let term_for_watcher = Arc::clone(&term);
     let watch_path = path.clone();
+    let wake_for_watcher = Arc::clone(&wake);
 
     let mut watcher =
         notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
@@ -1686,7 +1691,7 @@ pub fn spawn_jsonl_watcher(
                                     // tn-pes1: repaint the shadow term with new content.
                                     s.refresh_shadow_term(&term_for_watcher);
                                 }
-                                wake();
+                                wake_for_watcher();
                             }
                         }
                         _ => {}
@@ -1702,12 +1707,72 @@ pub fn spawn_jsonl_watcher(
     let watch_dir = path.parent().unwrap_or(Path::new("."));
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
 
-    Ok((state, term, JsonlTailWatcher { _watcher: watcher }))
+    // ── Polling fallback ──────────────────────────────────────────────
+    // The `notify` watcher may not deliver modify events for all
+    // filesystem types (notably Windows→WSL2 UNC paths). A lightweight
+    // poll thread checks `metadata().len()` every 500ms and triggers a
+    // full poll only when the file has actually grown.
+    let poll_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poll_thread = {
+        let shutdown = Arc::clone(&poll_shutdown);
+        let state_for_poll = Arc::clone(&state);
+        let term_for_poll = Arc::clone(&term);
+        let poll_path = path.clone();
+        let wake_poll = Arc::clone(&wake);
+        std::thread::Builder::new()
+            .name(format!("jsonl-poll-{}", poll_path.display()))
+            .spawn(move || {
+                let mut last_len: u64 = std::fs::metadata(&poll_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                while !shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    let cur_len = match std::fs::metadata(&poll_path) {
+                        Ok(m) => m.len(),
+                        Err(_) => continue,
+                    };
+                    if cur_len != last_len {
+                        last_len = cur_len;
+                        if let Ok(mut s) = state_for_poll.lock() {
+                            s.poll_file();
+                            s.refresh_shadow_term(&term_for_poll);
+                        }
+                        wake_poll();
+                    }
+                }
+            })?
+    };
+
+    Ok((
+        state,
+        term,
+        JsonlTailWatcher {
+            _watcher: watcher,
+            poll_shutdown,
+            _poll_thread: Some(poll_thread),
+        },
+    ))
 }
 
-/// RAII guard holding the `notify` watcher alive. Drop to stop watching.
+/// RAII guard holding the `notify` watcher and poll thread alive.
+/// Drop to stop watching and shut down the poll thread.
 pub struct JsonlTailWatcher {
     _watcher: RecommendedWatcher,
+    /// Signal the poll thread to exit.
+    poll_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Join handle for the poll thread (joined on drop for clean shutdown).
+    _poll_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for JsonlTailWatcher {
+    fn drop(&mut self) {
+        self.poll_shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Don't block on join — the thread will exit within one poll interval.
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
