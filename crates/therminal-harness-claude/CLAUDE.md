@@ -6,7 +6,22 @@ Where the daemon's `AgentRegistry` answers "is a Claude process running in this 
 
 ## Data flow
 
+Three input paths, ordered by priority (tn-nrur):
+
 ```
+                                    ┌─ PRIMARY ─────────────────────────────┐
+                                    │                                       │
+                                    │  PTY stream (OSC 1341 markers)        │
+                                    │  src/markers.rs → TaggedHarnessEvent  │
+                                    │  interceptor stamps pane_id           │
+                                    │       │                               │
+                                    │       ▼                               │
+                                    │  harness-event-drain thread           │
+                                    │  → PaneCapacityCache.upsert_from_marker│
+                                    │  → EventBus publish                   │
+                                    │                                       │
+                                    └───────────────────────────────────────┘
+
 /tmp/claude-code-state/*.json      (written by Claude Code hooks)
           │
           ▼
@@ -36,6 +51,12 @@ ClaudeHarness (src/lib.rs) — thin facade the daemon instantiates
           ▼
 therminal://claude/events  (MCP resource, owned by therminal-daemon)
   subscription-based, per-connection ring buffer, Observer-tier trust
+
+FALLBACK: file-polled state updates (ClaudeStatePoller → PaneCapacityCache)
+are suppressed when marker data is fresh (< 30s). The poller still runs for:
+  - session_title (not carried by markers)
+  - environments without TERM_PROGRAM=therminal
+  - historical data / JSONL tailer seeding
 ```
 
 ## State file format
@@ -144,17 +165,31 @@ Wire format:
 ESC ] 1341 ; key=value [ ; key=value ]* ST
 ```
 
-Recognised keys (v0):
+Recognised keys (v1 -- tn-nrur):
 
-| Key          | Value                                        | Meaning                                |
-|--------------|----------------------------------------------|----------------------------------------|
-| `state`      | `idle` / `processing` / `tool_use` / `awaiting_input` | Claude session status          |
-| `tool`       | string                                       | Tool name (paired with `state=tool_use`) |
-| `session_id` | string                                       | Claude session UUID                    |
+| Key               | Value                                          | Meaning                                 |
+|-------------------|-------------------------------------------------|-----------------------------------------|
+| `state`           | `idle` / `processing` / `tool_use` / `awaiting_input` | Claude session status             |
+| `tool`            | string                                         | Tool name (paired with `state=tool_use`)  |
+| `session_id`      | string                                         | Claude session UUID                     |
+| `cwd`             | string                                         | Working directory                       |
+| `context_percent` | float (0.0 -- 100.0)                           | Context window usage percentage         |
+| `model`           | string                                         | Model name (e.g. `claude-opus-4-6`)  |
+| `subagent_start`  | agent_id string                                | Subagent spawned                        |
+| `subagent_stop`   | agent_id string                                | Subagent stopped                        |
 
-Unknown keys are preserved as-is in an `extra` subobject in the emitted event body for forward-compatibility. The event `kind` is always `claude.state` for v0; future grammar extensions will add additional kinds (`claude.tool_call`, `claude.thinking_started`, …) as Claude Code grows the emitter.
+Unknown keys are preserved as-is in an `extra` subobject in the emitted event body for forward-compatibility. The event `kind` is `claude.state` for state/tool/session_id/cwd/context_percent/model markers, and `claude.subagent` for subagent_start/subagent_stop.
 
-OSC markers are **additive live signal** — the JSONL tailer and state poller remain the authoritative source for historical data and capacity metrics. Markers give sub-millisecond state-change latency without the ~150 ms poller tick.
+### Priority inversion (tn-nrur)
+
+OSC 1341 markers are the **primary signal** for session state. When marker data is fresh (< 30 seconds old), file-polled state updates from `ClaudeStatePoller` are suppressed for that pane. The `PaneCapacityCache` tracks `marker_seen_at` per entry to enforce this staleness check.
+
+**Signal priority** (highest to lowest):
+1. **OSC 1341 markers** (inline with PTY stream) -- sub-millisecond latency, pane_id known from the interceptor, no PID resolution needed.
+2. **Hook-push signals** (`IpcRequest::PushAgentEvent`) -- low-latency lifecycle events via CLI.
+3. **File polling** (`ClaudeStatePoller` + state files) -- ~150 ms cadence, requires PID-to-pane resolution. Used as fallback when no markers have arrived.
+
+The hook script (`resources/hooks/state-tracker.sh`) emits OSC 1341 markers to stdout on every state change when running inside therminal (`TERM_PROGRAM=therminal`). The markers carry `state`, `session_id`, `cwd`, and `tool` fields. Subagent lifecycle events emit `subagent_start`/`subagent_stop` markers.
 
 ## Scope boundary
 

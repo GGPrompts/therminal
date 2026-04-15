@@ -94,6 +94,11 @@ pub struct HarnessEvent {
 /// so a misbehaving handler cannot forge a different source. Downstream
 /// event-bus plumbing will translate this into a `TerminalEvent` with
 /// `source_class = "harness"` and `source_id = owner`.
+///
+/// `pane_id` is `None` when the event originates from the registry dispatch
+/// (the registry has no pane context). The interceptor stamps the pane_id
+/// before forwarding to the drain thread so the daemon can route marker
+/// events into the correct `PaneCapacityCache` entry without PID resolution.
 #[derive(Debug, Clone)]
 pub struct TaggedHarnessEvent {
     /// Stable identifier for the harness crate that produced this event.
@@ -102,6 +107,10 @@ pub struct TaggedHarnessEvent {
     pub source_id: &'static str,
     /// The event returned by the handler.
     pub event: HarnessEvent,
+    /// Pane that produced this event. `None` when emitted by the registry
+    /// dispatch (no pane context); stamped by the interceptor before
+    /// forwarding to the daemon-side drain thread.
+    pub pane_id: Option<u64>,
 }
 
 /// Errors returned by [`OscHandlerRegistry::register`] (and the forwarding
@@ -316,6 +325,7 @@ impl OscHandlerRegistry {
             Ok(Some(event)) => Some(TaggedHarnessEvent {
                 source_id: owner,
                 event,
+                pane_id: None,
             }),
             Ok(None) => {
                 trace!(code, owner, "OSC handler returned None");

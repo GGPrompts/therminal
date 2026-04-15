@@ -97,6 +97,9 @@ impl Pane {
         if let Some(tx) = harness_event_tx {
             interceptor.set_harness_event_sink(tx);
         }
+        // tn-nrur: stamp the pane_id so harness events carry pane context
+        // to the drain thread, enabling direct marker→capacity routing.
+        interceptor.set_pane_id(id);
 
         // Initialize cwd from spawn options; OSC 7 events will update it later.
         let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
@@ -224,6 +227,8 @@ impl Pane {
         if let Some(tx) = harness_event_tx {
             interceptor.set_harness_event_sink(tx);
         }
+        // tn-nrur: stamp the pane_id (see Pane::spawn above).
+        interceptor.set_pane_id(pane_id);
 
         // FD handoff panes don't have spawn options; cwd will be updated by OSC 7.
         let cwd = Arc::new(Mutex::new(String::new()));

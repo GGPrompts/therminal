@@ -28,6 +28,10 @@ use therminal_harness_claude::state::ClaudeSessionState;
 /// Default TTL for stale cache entries (seconds).
 pub const DEFAULT_STALE_TTL_SECS: u64 = 60;
 
+/// Staleness threshold for marker-sourced data (seconds). When marker data
+/// is fresher than this, file-polled updates are suppressed for the pane.
+pub const MARKER_FRESH_SECS: u64 = 30;
+
 /// One pane's most recently observed agent capacity snapshot.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PaneCapacityEntry {
@@ -41,6 +45,15 @@ pub struct PaneCapacityEntry {
     pub updated_at: u64,
     /// Wall-clock timestamp (Unix secs) of the most recent upsert.
     pub last_seen_at: u64,
+    /// Wall-clock timestamp (Unix secs) of the most recent OSC 1341 marker
+    /// update. When `> 0` and `now - marker_seen_at < MARKER_FRESH_SECS`,
+    /// file-polled updates are suppressed for this pane (tn-nrur).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub marker_seen_at: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Thread-safe cache mapping `PaneId -> PaneCapacityEntry`.
@@ -62,6 +75,51 @@ impl PaneCapacityCache {
         if let Ok(mut g) = self.inner.lock() {
             g.insert(pane_id, entry);
         }
+    }
+
+    /// Update the capacity entry from an OSC 1341 marker. Merges non-None
+    /// fields from `patch` into the existing entry (or creates one if absent),
+    /// and stamps `marker_seen_at` to the current wall-clock time.
+    pub fn upsert_from_marker(&self, pane_id: PaneId, patch: MarkerPatch) {
+        let now = now_secs();
+        if let Ok(mut g) = self.inner.lock() {
+            let entry = g.entry(pane_id).or_insert_with(PaneCapacityEntry::default);
+            if let Some(s) = patch.session_id {
+                entry.session_id = s;
+            }
+            if let Some(s) = patch.status {
+                entry.status = Some(s);
+            }
+            if let Some(t) = patch.current_tool {
+                entry.current_tool = Some(t);
+            }
+            if let Some(c) = patch.cwd {
+                entry.working_dir = Some(c);
+            }
+            if let Some(cp) = patch.context_percent {
+                entry.context_percent = Some(cp);
+            }
+            if let Some(m) = patch.model {
+                entry.model = Some(m);
+            }
+            entry.marker_seen_at = now;
+            entry.last_seen_at = now;
+            entry.updated_at = now;
+        }
+    }
+
+    /// Returns `true` if the pane has marker-sourced data that is still fresh
+    /// (i.e., `now - marker_seen_at < MARKER_FRESH_SECS`). When this returns
+    /// `true`, file-polled updates should be suppressed for the pane.
+    pub fn is_marker_fresh(&self, pane_id: PaneId) -> bool {
+        let now = now_secs();
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&pane_id).cloned())
+            .is_some_and(|e| {
+                e.marker_seen_at > 0 && now.saturating_sub(e.marker_seen_at) < MARKER_FRESH_SECS
+            })
     }
 
     pub fn get(&self, pane_id: PaneId) -> Option<PaneCapacityEntry> {
@@ -144,7 +202,8 @@ pub fn resolve_pane_id_from_state(
     None
 }
 
-/// Build a `PaneCapacityEntry` from a poller state.
+/// Build a `PaneCapacityEntry` from a poller state (file-polled path).
+/// `marker_seen_at` is left at 0 (no marker data from file polling).
 pub fn entry_from_state(state: &ClaudeSessionState) -> PaneCapacityEntry {
     let now = now_secs();
     PaneCapacityEntry {
@@ -157,7 +216,21 @@ pub fn entry_from_state(state: &ClaudeSessionState) -> PaneCapacityEntry {
         working_dir: state.working_dir.clone(),
         updated_at: now,
         last_seen_at: now,
+        marker_seen_at: 0,
     }
+}
+
+/// Partial update from an OSC 1341 marker. Only fields present in the
+/// marker are `Some`; the rest are `None` and left untouched in the existing
+/// capacity entry.
+#[derive(Debug, Default)]
+pub struct MarkerPatch {
+    pub session_id: Option<String>,
+    pub status: Option<String>,
+    pub current_tool: Option<String>,
+    pub cwd: Option<String>,
+    pub context_percent: Option<f32>,
+    pub model: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -352,5 +425,101 @@ mod tests {
         };
         // Empty session_id should skip the cache tier entirely.
         assert!(resolve_pane_id_from_state(&state, &registry, Some(&cache)).is_none());
+    }
+
+    #[test]
+    fn upsert_from_marker_creates_entry() {
+        let cache = PaneCapacityCache::new();
+        let patch = MarkerPatch {
+            session_id: Some("sess-42".into()),
+            status: Some("processing".into()),
+            cwd: Some("/home/user".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch);
+        let entry = cache.get(10).expect("entry created");
+        assert_eq!(entry.session_id, "sess-42");
+        assert_eq!(entry.status.as_deref(), Some("processing"));
+        assert_eq!(entry.working_dir.as_deref(), Some("/home/user"));
+        assert!(entry.marker_seen_at > 0);
+    }
+
+    #[test]
+    fn upsert_from_marker_merges_into_existing() {
+        let cache = PaneCapacityCache::new();
+        // Pre-populate with a file-polled entry.
+        cache.upsert(
+            10,
+            PaneCapacityEntry {
+                session_id: "sess-42".into(),
+                model: Some("old-model".into()),
+                session_title: Some("My Session".into()),
+                last_seen_at: now_secs(),
+                ..Default::default()
+            },
+        );
+        // Marker update patches status and model, but not session_title.
+        let patch = MarkerPatch {
+            status: Some("idle".into()),
+            model: Some("claude-opus-4-6".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch);
+        let entry = cache.get(10).expect("entry exists");
+        assert_eq!(entry.status.as_deref(), Some("idle"));
+        assert_eq!(entry.model.as_deref(), Some("claude-opus-4-6"));
+        // session_title preserved from file-polled entry
+        assert_eq!(entry.session_title.as_deref(), Some("My Session"));
+        // session_id preserved (patch had None)
+        assert_eq!(entry.session_id, "sess-42");
+        assert!(entry.marker_seen_at > 0);
+    }
+
+    #[test]
+    fn is_marker_fresh_true_for_recent() {
+        let cache = PaneCapacityCache::new();
+        let patch = MarkerPatch {
+            status: Some("idle".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch);
+        assert!(cache.is_marker_fresh(10));
+    }
+
+    #[test]
+    fn is_marker_fresh_false_for_no_marker() {
+        let cache = PaneCapacityCache::new();
+        // File-polled entry has marker_seen_at = 0
+        cache.upsert(
+            10,
+            PaneCapacityEntry {
+                session_id: "x".into(),
+                last_seen_at: now_secs(),
+                ..Default::default()
+            },
+        );
+        assert!(!cache.is_marker_fresh(10));
+    }
+
+    #[test]
+    fn is_marker_fresh_false_for_stale() {
+        let cache = PaneCapacityCache::new();
+        // Simulate an old marker_seen_at
+        cache.upsert(
+            10,
+            PaneCapacityEntry {
+                session_id: "x".into(),
+                last_seen_at: now_secs(),
+                marker_seen_at: now_secs().saturating_sub(MARKER_FRESH_SECS + 5),
+                ..Default::default()
+            },
+        );
+        assert!(!cache.is_marker_fresh(10));
+    }
+
+    #[test]
+    fn is_marker_fresh_false_for_unknown_pane() {
+        let cache = PaneCapacityCache::new();
+        assert!(!cache.is_marker_fresh(999));
     }
 }

@@ -61,7 +61,10 @@ pub mod wsl_paths;
 pub use agent_events::AgentEvent;
 pub use hook_push::{HookPushSink, HookSignal};
 pub use jsonl_tailer::{ClaudeJsonlRegistry, EventSource, SessionJsonlTailer, TaggedAgentEvent};
-pub use markers::{CLAUDE_OSC_CODE, CLAUDE_OWNER, CLAUDE_STATE_KIND, activate as activate_markers};
+pub use markers::{
+    CLAUDE_OSC_CODE, CLAUDE_OWNER, CLAUDE_STATE_KIND, CLAUDE_SUBAGENT_KIND,
+    activate as activate_markers,
+};
 pub use pipeline::{BROADCAST_CAPACITY, DEFAULT_POLL_INTERVAL, StateUpdateObserver};
 pub use session_log::{SessionEvent, SessionEventType, parse_session_event};
 pub use state::{

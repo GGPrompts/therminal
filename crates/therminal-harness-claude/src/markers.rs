@@ -13,18 +13,20 @@
 //! *cooperative file reads*: they only work if the Claude Code CLI writes
 //! the files, and they introduce a polling delay of ~150 ms.
 //!
-//! OSC markers are additive. When Claude Code starts emitting them inline
-//! with PTY output, the daemon picks them up synchronously on the PTY
-//! reader thread, no poller required. This gives us sub-millisecond
-//! latency for state changes and survives environments where the hook
-//! scripts cannot write to `/tmp` (e.g. read-only sandboxes).
+//! OSC markers are the **primary signal** for session state (tn-nrur).
+//! When Claude Code emits them inline with PTY output, the daemon picks
+//! them up synchronously on the PTY reader thread, no poller required.
+//! This gives sub-millisecond latency for state changes and survives
+//! environments where the hook scripts cannot write to `/tmp` (e.g.
+//! read-only sandboxes, Windows+WSL cross-boundary).
 //!
-//! The JSONL tailer and state poller remain the authoritative source for
-//! historical data and capacity metrics — see `CLAUDE.md` for the full
-//! architecture. OSC markers are **live signal**, not a replacement for
-//! stored state.
+//! The JSONL tailer and state poller remain as **fallback** for
+//! environments that don't emit markers. When marker data is fresh
+//! (< 30 seconds), file-polled updates are suppressed for the pane.
+//! Historical data and capacity metrics from the JSONL tailer are still
+//! useful for fields not carried by markers (e.g. `session_title`).
 //!
-//! # Grammar (v0)
+//! # Grammar (v1 — tn-nrur)
 //!
 //! ```text
 //! ESC ] 1341 ; key=value [ ; key=value ]* ST
@@ -32,19 +34,24 @@
 //!
 //! Recognised keys:
 //!
-//! | Key      | Value               | Meaning                             |
-//! |----------|---------------------|-------------------------------------|
-//! | `state`  | idle / processing / tool_use / awaiting_input | Claude session status |
-//! | `tool`   | string              | Tool name (if `state=tool_use`)     |
-//! | `session_id` | string          | Claude session UUID                 |
+//! | Key               | Value                                          | Meaning                                 |
+//! |-------------------|-------------------------------------------------|-----------------------------------------|
+//! | `state`           | idle / processing / tool_use / awaiting_input  | Claude session status                   |
+//! | `tool`            | string                                         | Tool name (if `state=tool_use`)         |
+//! | `session_id`      | string                                         | Claude session UUID                     |
+//! | `cwd`             | string                                         | Working directory                       |
+//! | `context_percent` | float (0.0 – 100.0)                            | Context window usage percentage         |
+//! | `model`           | string                                         | Model name (e.g. `claude-opus-4-6`)  |
+//! | `subagent_start`  | agent_id string                                | Subagent spawned                        |
+//! | `subagent_stop`   | agent_id string                                | Subagent stopped                        |
 //!
 //! Unknown keys are preserved as-is in the emitted event body (for
 //! forward-compatibility) but do not change the event `kind`.
 //!
-//! The event `kind` is always `claude.state` for v0. Future grammar
-//! extensions may add additional kinds (`claude.tool_call`,
-//! `claude.thinking_started`, …). The `body` carries `{ "state": …,
-//! "tool": …, "session_id": …, "extra": { … } }`.
+//! The event `kind` is `claude.state` for state/tool/session_id/cwd/
+//! context_percent/model markers, and `claude.subagent` for
+//! subagent_start/subagent_stop. The `body` carries the parsed key/value
+//! pairs plus an `extra` object for unrecognised keys.
 //!
 //! # Registration
 //!
@@ -81,9 +88,13 @@ pub const CLAUDE_OWNER: &str = "claude";
 /// Event `kind` string emitted for OSC 1341 state markers.
 ///
 /// Namespaced under `claude.` following the cross-surface vocabulary from
-/// `docs/event-bus-kinds.md`. v0 only emits this single kind; follow-up
-/// grammar extensions will add `claude.tool_call`, `claude.thinking_*`, etc.
+/// `docs/event-bus-kinds.md`. Used for state/tool/session_id/cwd/
+/// context_percent/model markers.
 pub const CLAUDE_STATE_KIND: &str = "claude.state";
+
+/// Event `kind` string emitted for subagent lifecycle markers
+/// (`subagent_start`, `subagent_stop`).
+pub const CLAUDE_SUBAGENT_KIND: &str = "claude.subagent";
 
 /// Claim OSC 1341 on the shared registry and install the Claude marker
 /// handler.
@@ -137,6 +148,11 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
     let mut state: Option<String> = None;
     let mut tool: Option<String> = None;
     let mut session_id: Option<String> = None;
+    let mut cwd: Option<String> = None;
+    let mut context_percent: Option<f32> = None;
+    let mut model: Option<String> = None;
+    let mut subagent_start: Option<String> = None;
+    let mut subagent_stop: Option<String> = None;
     let mut extra: Map<String, Value> = Map::new();
 
     for chunk in &params[1..] {
@@ -156,6 +172,11 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
             "state" => state = Some(value.to_string()),
             "tool" => tool = Some(value.to_string()),
             "session_id" => session_id = Some(value.to_string()),
+            "cwd" => cwd = Some(value.to_string()),
+            "context_percent" => context_percent = value.parse::<f32>().ok(),
+            "model" => model = Some(value.to_string()),
+            "subagent_start" => subagent_start = Some(value.to_string()),
+            "subagent_stop" => subagent_stop = Some(value.to_string()),
             _ => {
                 extra.insert(key.to_string(), Value::String(value.to_string()));
             }
@@ -164,9 +185,25 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
 
     // If the marker carried nothing we recognised and no extras either,
     // there is nothing worth forwarding onto the bus.
-    if state.is_none() && tool.is_none() && session_id.is_none() && extra.is_empty() {
+    if state.is_none()
+        && tool.is_none()
+        && session_id.is_none()
+        && cwd.is_none()
+        && context_percent.is_none()
+        && model.is_none()
+        && subagent_start.is_none()
+        && subagent_stop.is_none()
+        && extra.is_empty()
+    {
         return None;
     }
+
+    // Choose event kind: subagent lifecycle vs state update.
+    let kind = if subagent_start.is_some() || subagent_stop.is_some() {
+        CLAUDE_SUBAGENT_KIND
+    } else {
+        CLAUDE_STATE_KIND
+    };
 
     let mut body = Map::new();
     if let Some(s) = state {
@@ -178,12 +215,33 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
     if let Some(sid) = session_id {
         body.insert("session_id".to_string(), Value::String(sid));
     }
+    if let Some(c) = cwd {
+        body.insert("cwd".to_string(), Value::String(c));
+    }
+    if let Some(cp) = context_percent {
+        body.insert(
+            "context_percent".to_string(),
+            Value::Number(
+                serde_json::Number::from_f64(cp as f64)
+                    .unwrap_or_else(|| serde_json::Number::from_f64(0.0).unwrap()),
+            ),
+        );
+    }
+    if let Some(m) = model {
+        body.insert("model".to_string(), Value::String(m));
+    }
+    if let Some(agent_id) = subagent_start {
+        body.insert("subagent_start".to_string(), Value::String(agent_id));
+    }
+    if let Some(agent_id) = subagent_stop {
+        body.insert("subagent_stop".to_string(), Value::String(agent_id));
+    }
     if !extra.is_empty() {
         body.insert("extra".to_string(), Value::Object(extra));
     }
 
     Some(HarnessEvent {
-        kind: CLAUDE_STATE_KIND.to_string(),
+        kind: kind.to_string(),
         body: Value::Object(body),
     })
 }
@@ -286,5 +344,96 @@ mod tests {
                 "session_id": "abc-123-def",
             })
         );
+    }
+
+    #[test]
+    fn parses_cwd() {
+        let params: &[&[u8]] = &[b"1341", b"cwd=/home/user/project"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_STATE_KIND);
+        assert_eq!(
+            event.body,
+            serde_json::json!({ "cwd": "/home/user/project" })
+        );
+    }
+
+    #[test]
+    fn parses_context_percent() {
+        let params: &[&[u8]] = &[b"1341", b"context_percent=42.5"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_STATE_KIND);
+        assert_eq!(event.body, serde_json::json!({ "context_percent": 42.5 }));
+    }
+
+    #[test]
+    fn invalid_context_percent_skipped() {
+        let params: &[&[u8]] = &[b"1341", b"context_percent=abc", b"state=idle"];
+        let event = parse_osc_1341(params).expect("event");
+        // "abc" is not a valid f32, so context_percent is skipped
+        assert_eq!(event.body, serde_json::json!({ "state": "idle" }));
+    }
+
+    #[test]
+    fn parses_model() {
+        let params: &[&[u8]] = &[b"1341", b"model=claude-opus-4-6"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_STATE_KIND);
+        assert_eq!(
+            event.body,
+            serde_json::json!({ "model": "claude-opus-4-6" })
+        );
+    }
+
+    #[test]
+    fn parses_subagent_start() {
+        let params: &[&[u8]] = &[
+            b"1341",
+            b"subagent_start=agent-abc",
+            b"session_id=parent-123",
+        ];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_SUBAGENT_KIND);
+        assert_eq!(
+            event.body,
+            serde_json::json!({
+                "subagent_start": "agent-abc",
+                "session_id": "parent-123",
+            })
+        );
+    }
+
+    #[test]
+    fn parses_subagent_stop() {
+        let params: &[&[u8]] = &[b"1341", b"subagent_stop=agent-abc"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_SUBAGENT_KIND);
+        assert_eq!(
+            event.body,
+            serde_json::json!({ "subagent_stop": "agent-abc" })
+        );
+    }
+
+    #[test]
+    fn full_state_marker_with_all_keys() {
+        let params: &[&[u8]] = &[
+            b"1341",
+            b"state=processing",
+            b"session_id=sess-42",
+            b"cwd=/home/user",
+            b"context_percent=73.2",
+            b"model=claude-opus-4-6",
+            b"tool=Bash",
+        ];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_STATE_KIND);
+        let body = event.body.as_object().unwrap();
+        assert_eq!(body["state"], "processing");
+        assert_eq!(body["session_id"], "sess-42");
+        assert_eq!(body["cwd"], "/home/user");
+        assert_eq!(body["model"], "claude-opus-4-6");
+        assert_eq!(body["tool"], "Bash");
+        // f32→f64 round-trip: check approximate equality
+        let cp = body["context_percent"].as_f64().unwrap();
+        assert!((cp - 73.2).abs() < 0.1);
     }
 }

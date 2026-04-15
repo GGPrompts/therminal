@@ -252,12 +252,15 @@ async fn start_daemon(
     // will consume harness events without re-touching the pane plumbing.
     let (harness_event_tx, harness_event_rx) =
         std::sync::mpsc::channel::<therminal_terminal::TaggedHarnessEvent>();
-    {
+    // tn-nrur: grab the capacity cache Arc before the drain thread spawn so
+    // marker events can update it directly (no PID resolution needed).
+    let capacity_cache_for_drain = {
         let session_mgr = server.session_manager();
         let mut mgr = session_mgr.lock().await;
         mgr.set_osc_registry(Arc::clone(&osc_registry));
         mgr.set_harness_event_sink(harness_event_tx);
-    }
+        mgr.pane_capacity_cache()
+    };
     // We construct the event bus a few lines below, but the drain thread
     // needs a clone of it. Build a one-element holder via Arc::new and pass
     // it down. To keep the diff localized, the bus is constructed here,
@@ -272,6 +275,13 @@ async fn start_daemon(
     // into the unified event bus (tn-xula): every TaggedHarnessEvent
     // becomes a `TerminalEvent { source_class: harness, source_id: <owner>,
     // kind: <handler-supplied>, body: <handler-supplied> }`.
+    //
+    // tn-nrur: the drain thread now also routes claude.state marker events
+    // into the PaneCapacityCache directly, bypassing PID resolution. When a
+    // marker carries a pane_id (stamped by the interceptor), the cache is
+    // updated with a MarkerPatch. This makes OSC 1341 the primary signal
+    // for session state — file-polled updates are suppressed when marker
+    // data is fresh.
     std::thread::Builder::new()
         .name("harness-event-drain".into())
         .spawn(move || {
@@ -279,13 +289,53 @@ async fn start_daemon(
                 debug!(
                     source_id = tagged.source_id,
                     kind = %tagged.event.kind,
+                    pane_id = ?tagged.pane_id,
                     "harness OSC event received"
                 );
+                // tn-nrur: route claude.state markers into the capacity cache.
+                if tagged.source_id == therminal_harness_claude::CLAUDE_OWNER
+                    && tagged.event.kind == therminal_harness_claude::CLAUDE_STATE_KIND
+                    && let Some(pane_id) = tagged.pane_id
+                {
+                    let body = &tagged.event.body;
+                    let patch = crate::pane_capacity::MarkerPatch {
+                        session_id: body
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        status: body
+                            .get("state")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        current_tool: body
+                            .get("tool")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        cwd: body
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        context_percent: body
+                            .get("context_percent")
+                            .and_then(|v| v.as_f64())
+                            .map(|f| f as f32),
+                        model: body
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    };
+                    capacity_cache_for_drain.upsert_from_marker(pane_id, patch);
+                    debug!(
+                        pane_id,
+                        "pane_capacity: updated from OSC 1341 marker (primary signal)"
+                    );
+                }
+
                 bus_for_drain.publish(therminal_protocol::bus_types::TerminalEvent {
                     source_class: therminal_protocol::bus_types::SourceClass::Harness,
                     source_id: tagged.source_id.to_string(),
                     kind: tagged.event.kind,
-                    pane_id: None,
+                    pane_id: tagged.pane_id,
                     ts_ms: 0,
                     cursor: 0,
                     body: tagged.event.body,
@@ -386,7 +436,19 @@ async fn start_daemon(
                         }
                         drop(mgr);
                         if let Some(pid) = pane_id {
-                            cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
+                            // tn-nrur: if this pane has fresh marker-sourced
+                            // data (< 30s old), suppress the file-polled
+                            // update. Markers are the primary signal; file
+                            // polling is the fallback for environments that
+                            // don't emit OSC 1341 markers.
+                            if cache.is_marker_fresh(pid) {
+                                tracing::trace!(
+                                    pane_id = pid,
+                                    "pane_capacity: suppressing file-polled update (marker data is fresh)"
+                                );
+                            } else {
+                                cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
+                            }
                         }
                     }
                     therminal_harness_claude::state::ClaudeStateUpdate::Removed { path } => {
