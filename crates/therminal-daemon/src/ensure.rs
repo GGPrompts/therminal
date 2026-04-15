@@ -389,13 +389,20 @@ async fn start_daemon(
                             cache.upsert(pid, crate::pane_capacity::entry_from_state(&state));
                         }
                     }
-                    therminal_harness_claude::state::ClaudeStateUpdate::Removed { path: _ } => {
-                        // The poller does not surface session_id on removal, only
-                        // the path. Best-effort: derive session_id from the file
-                        // stem and let the cache drop any matching entry.
-                        // (Path-stem vs session_id is not always 1:1, so this is
-                        // a no-op when they differ — entries also age out via the
-                        // TTL sweep below.)
+                    therminal_harness_claude::state::ClaudeStateUpdate::Removed { path } => {
+                        // Derive session_id from the file stem and evict
+                        // immediately instead of waiting for the 60s TTL.
+                        if let Some(session_id) = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            cache.remove_by_session_id(session_id);
+                            tracing::debug!(
+                                session_id,
+                                "pane_capacity: evicted on state file removal"
+                            );
+                        }
                     }
                 }
 
