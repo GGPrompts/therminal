@@ -591,7 +591,7 @@ mod tests {
         let file_entry = PaneCapacityEntry {
             context_percent: Some(42.5),
             model: Some("claude-opus-4-6".into()),
-            status: Some("idle".into()), // differs from marker
+            status: Some("idle".into()),    // differs from marker
             session_id: "sess-file".into(), // differs from marker
             session_title: Some("My Cool Session".into()),
             current_tool: Some("Bash".into()), // differs from marker

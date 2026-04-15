@@ -268,8 +268,8 @@ pub fn spawn(
             // Set to true once we've exited the grace window (owned became
             // non-empty, or the grace period expired). Once true, no more
             // queuing occurs.
-            let mut grace_resolved = scope != SwarmWatchScope::Current
-                || pane_session_ids.is_none();
+            let mut grace_resolved =
+                scope != SwarmWatchScope::Current || pane_session_ids.is_none();
 
             loop {
                 // Snapshot known session IDs (cheap clone under the lock).
@@ -320,9 +320,7 @@ pub fn spawn(
                                 );
                             }
                             let queued = std::mem::take(&mut grace_queue);
-                            for (agent_id, jsonl_path) in
-                                filter_grace_queue(queued, &owned)
-                            {
+                            for (agent_id, jsonl_path) in filter_grace_queue(queued, &owned) {
                                 // Skip if already tracked (possible when the
                                 // hook path raced ahead of the file scanner).
                                 if tracked.contains_key(&agent_id) {
@@ -571,15 +569,11 @@ mod tests {
         let queue = vec![
             (
                 "agent-1".to_string(),
-                PathBuf::from(
-                    "/home/u/.claude/projects/h/sid-a/subagents/agent-1.jsonl",
-                ),
+                PathBuf::from("/home/u/.claude/projects/h/sid-a/subagents/agent-1.jsonl"),
             ),
             (
                 "agent-2".to_string(),
-                PathBuf::from(
-                    "/home/u/.claude/projects/h/sid-b/subagents/agent-2.jsonl",
-                ),
+                PathBuf::from("/home/u/.claude/projects/h/sid-b/subagents/agent-2.jsonl"),
             ),
         ];
         let result = filter_grace_queue(queue, &owned);
@@ -595,15 +589,11 @@ mod tests {
         let queue = vec![
             (
                 "agent-mine".to_string(),
-                PathBuf::from(
-                    "/home/u/.claude/projects/h/my-sid/subagents/agent-mine.jsonl",
-                ),
+                PathBuf::from("/home/u/.claude/projects/h/my-sid/subagents/agent-mine.jsonl"),
             ),
             (
                 "agent-foreign".to_string(),
-                PathBuf::from(
-                    "/home/u/.claude/projects/h/other-sid/subagents/agent-foreign.jsonl",
-                ),
+                PathBuf::from("/home/u/.claude/projects/h/other-sid/subagents/agent-foreign.jsonl"),
             ),
         ];
         let result = filter_grace_queue(queue, &owned);
@@ -616,10 +606,7 @@ mod tests {
         let mut owned: HashSet<String> = HashSet::new();
         owned.insert("my-sid".to_string());
 
-        let queue = vec![(
-            "agent-x".to_string(),
-            PathBuf::from("/short/path.jsonl"),
-        )];
+        let queue = vec![("agent-x".to_string(), PathBuf::from("/short/path.jsonl"))];
         let result = filter_grace_queue(queue, &owned);
         assert!(
             result.is_empty(),

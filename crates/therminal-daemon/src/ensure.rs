@@ -452,16 +452,19 @@ async fn start_daemon(
                             }
                         }
                     }
-                    therminal_harness_claude::state::ClaudeStateUpdate::Removed { path, session_id } => {
+                    therminal_harness_claude::state::ClaudeStateUpdate::Removed {
+                        path,
+                        session_id,
+                    } => {
                         // Prefer the resolved session_id carried in the event
                         // (the real Claude UUID). Fall back to file_stem() for
                         // events emitted before this field was added or when
                         // the file was removed before it could be parsed.
-                        let evict_key = session_id
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| {
-                                path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty())
+                        let evict_key =
+                            session_id.as_deref().filter(|s| !s.is_empty()).or_else(|| {
+                                path.file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .filter(|s| !s.is_empty())
                             });
                         if let Some(key) = evict_key {
                             cache.remove_by_session_id(key);

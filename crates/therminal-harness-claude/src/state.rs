@@ -536,15 +536,15 @@ fn session_is_dead(state: &ClaudeSessionState) -> bool {
     // pid == 0 is a sentinel written by the hook script on WSL (tn-1rn6):
     // Linux PIDs are invisible to Windows OpenProcess(), so the hook omits the
     // real PID and we fall through to the timestamp-based SESSION_MAX_AGE path.
-    if let Some(pid) = state.pid {
-        if pid > 0 {
-            if !pid_is_alive(pid) {
-                debug!(session_id = %state.session_id, pid, "session dead: PID not alive");
-                return true;
-            }
-            return false;
+    if let Some(pid) = state.pid
+        && pid > 0
+    {
+        if !pid_is_alive(pid) {
+            debug!(session_id = %state.session_id, pid, "session dead: PID not alive");
+            return true;
         }
-        // pid == 0: sentinel — fall through to timestamp check below.
+        return false;
+        // pid == 0: sentinel (tn-1rn6) — fall through to timestamp check below.
     }
 
     let Some(last_updated) = state.last_updated.as_deref() else {
@@ -873,9 +873,10 @@ impl ClaudeStatePoller {
             self.known_bad_files.remove(path);
             if let Some(state) = self.sessions.remove(path) {
                 let session_id = Some(state.session_id.clone());
-                let _ = self
-                    .update_tx
-                    .send(ClaudeStateUpdate::Removed { path: path.clone(), session_id });
+                let _ = self.update_tx.send(ClaudeStateUpdate::Removed {
+                    path: path.clone(),
+                    session_id,
+                });
             }
         }
 
@@ -1017,9 +1018,10 @@ impl ClaudeStatePoller {
             let sid_display = session_id.as_deref().unwrap_or("?");
             debug!(session_id = %sid_display, path = %path.display(), "pruning dead session");
             self.known_bad_files.remove(&path);
-            let _ = self
-                .update_tx
-                .send(ClaudeStateUpdate::Removed { path: path.clone(), session_id });
+            let _ = self.update_tx.send(ClaudeStateUpdate::Removed {
+                path: path.clone(),
+                session_id,
+            });
             if let Err(e) = std::fs::remove_file(&path) {
                 warn!(path = %path.display(), error = %e, "failed to remove dead state file");
             }
