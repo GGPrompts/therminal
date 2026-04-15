@@ -686,18 +686,9 @@ pub(crate) fn build_remote_pane_state(
                     ..
                 }) if pane_id == remote_pane_id => {
                     if let Some(ref tx) = swarm_tx_for_forwarder {
-                        let path = jsonl_path
-                            .as_deref()
-                            .map(std::path::PathBuf::from)
-                            .unwrap_or_else(|| {
-                                std::path::PathBuf::from(format!(
-                                    "/tmp/hook-subagent-{}.jsonl",
-                                    agent_id
-                                ))
-                            });
                         let event = crate::pane::swarm_watcher::SwarmWatcherEvent::SpawnSubagent {
                             agent_id: agent_id.clone(),
-                            jsonl_path: path,
+                            jsonl_path: jsonl_path.as_deref().map(std::path::PathBuf::from),
                         };
                         let _ = tx.send(event);
                         // Wake the event loop so it polls the debouncer.

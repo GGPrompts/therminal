@@ -63,10 +63,12 @@ pub type PanePidProvider = Arc<Mutex<Vec<u32>>>;
 /// this module can be tested without pulling in `winit`.
 #[derive(Debug, Clone)]
 pub enum SwarmWatcherEvent {
-    /// A new subagent JSONL appeared. Open a pane that tails it.
+    /// A new subagent appeared. Open a pane that tails its JSONL, or a
+    /// plain terminal pane when no JSONL path is available (hook-driven
+    /// subagents without file-scanner fallback).
     SpawnSubagent {
         agent_id: String,
-        jsonl_path: PathBuf,
+        jsonl_path: Option<PathBuf>,
     },
     /// The subagent's JSONL has gone stale. Close the pane that tails it.
     ReclaimSubagent { agent_id: String },
@@ -429,7 +431,7 @@ pub fn spawn(
                     );
                     let event = SwarmWatcherEvent::SpawnSubagent {
                         agent_id: agent_id.clone(),
-                        jsonl_path: jsonl_path.clone(),
+                        jsonl_path: Some(jsonl_path.clone()),
                     };
                     if tx.send(event).is_err() {
                         debug!("swarm watcher: receiver dropped, exiting");
