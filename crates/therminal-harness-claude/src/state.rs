@@ -351,7 +351,18 @@ pub enum ClaudeStateUpdate {
     /// to keep the enum compact (`ClaudeSessionState` is ~560 bytes).
     Upserted(Box<ClaudeSessionState>),
     /// A state file was removed (or its session pruned as dead).
-    Removed { path: PathBuf },
+    ///
+    /// `session_id` carries the resolved Claude session UUID (the value of
+    /// `ClaudeSessionState::session_id`, which prefers `claude_session_id`
+    /// over the raw `session_id` field from community state-tracker scripts —
+    /// see tn-r2a3). When present, consumers should prefer this over
+    /// deriving a key from `path.file_stem()`, which may be a workdir hash
+    /// rather than the UUID. `None` only if the session was never successfully
+    /// parsed (e.g. the file was created and removed before the poller saw it).
+    Removed {
+        path: PathBuf,
+        session_id: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -860,10 +871,11 @@ impl ClaudeStatePoller {
             // Clear any warn-once flag — if the file reappears we want a
             // fresh chance to parse and report.
             self.known_bad_files.remove(path);
-            if self.sessions.remove(path).is_some() {
+            if let Some(state) = self.sessions.remove(path) {
+                let session_id = Some(state.session_id.clone());
                 let _ = self
                     .update_tx
-                    .send(ClaudeStateUpdate::Removed { path: path.clone() });
+                    .send(ClaudeStateUpdate::Removed { path: path.clone(), session_id });
             }
         }
 
@@ -998,18 +1010,16 @@ impl ClaudeStatePoller {
             .collect();
 
         for path in dead_paths {
-            let session_id = self
-                .sessions
-                .get(&path)
-                .map(|s| s.session_id.as_str())
-                .unwrap_or("?")
-                .to_string();
-            debug!(session_id = %session_id, path = %path.display(), "pruning dead session");
-            self.sessions.remove(&path);
+            // Remove from sessions map; carry the session_id so consumers
+            // can evict by the real UUID rather than deriving it from
+            // file_stem() (which may be a workdir hash, not the UUID).
+            let session_id = self.sessions.remove(&path).map(|s| s.session_id);
+            let sid_display = session_id.as_deref().unwrap_or("?");
+            debug!(session_id = %sid_display, path = %path.display(), "pruning dead session");
             self.known_bad_files.remove(&path);
             let _ = self
                 .update_tx
-                .send(ClaudeStateUpdate::Removed { path: path.clone() });
+                .send(ClaudeStateUpdate::Removed { path: path.clone(), session_id });
             if let Err(e) = std::fs::remove_file(&path) {
                 warn!(path = %path.display(), error = %e, "failed to remove dead state file");
             }
