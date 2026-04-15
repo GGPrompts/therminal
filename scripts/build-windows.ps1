@@ -149,6 +149,25 @@ if (-not $NoCopy) {
     Copy-Item -Force $exePath $Destination
     Write-Host "Copied to: $Destination"
 
+    # --- Deploy tn.exe alias (copy of therminal.exe) ---
+    # The `tn` short alias saves tokens and keystrokes for agent callers.
+    # A binary copy is the most portable approach — works in CMD, PowerShell,
+    # and any launcher without execution-policy or file-association concerns.
+    $tnDest = Join-Path (Split-Path -Parent $Destination) "tn.exe"
+    Copy-Item -Force $exePath $tnDest
+    Write-Host "Copied alias to: $tnDest"
+
+    # Also copy the thin wrapper scripts for users who prefer them
+    $scriptsDir = Join-Path $repoRoot "scripts"
+    foreach ($wrapper in @("tn.cmd", "tn.ps1")) {
+        $wrapperSrc = Join-Path $scriptsDir $wrapper
+        if (Test-Path $wrapperSrc) {
+            $wrapperDst = Join-Path (Split-Path -Parent $Destination) $wrapper
+            Copy-Item -Force $wrapperSrc $wrapperDst
+            Write-Host "Copied wrapper to: $wrapperDst"
+        }
+    }
+
     # --- Also deploy therminal-daemon.exe alongside therminal.exe ---
     # The MCP stdio bridge (therminal mcp) requires a running daemon to
     # bind the named pipe. The GUI does not embed the daemon, so we ship
