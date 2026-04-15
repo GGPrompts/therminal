@@ -44,11 +44,6 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
-#[cfg(target_os = "linux")]
-use winit::{
-    platform::wayland::EventLoopExtWayland,
-    platform::x11::{EventLoopBuilderExtX11, EventLoopExtX11},
-};
 
 use crate::grid_renderer::{FontConfig, GridRenderer};
 use crate::menu::ContextMenu;
@@ -125,39 +120,6 @@ fn normalize_platform_config(mut config: TherminalConfig) -> TherminalConfig {
         config.general.use_csd = false;
     }
     config
-}
-
-#[cfg(target_os = "linux")]
-fn build_platform_event_loop() -> Result<EventLoop<UserEvent>> {
-    let mut builder = EventLoop::<UserEvent>::with_user_event();
-    if therminal_runtime::wsl::is_wslg_session() {
-        if std::env::var_os("DISPLAY").is_some() {
-            info!("WSLg GUI session detected; forcing X11 backend instead of Wayland");
-            builder.with_x11();
-        } else {
-            warn!(
-                "WSLg GUI session detected but DISPLAY is unset; leaving winit backend auto-select"
-            );
-        }
-    }
-
-    let event_loop = builder.build()?;
-    info!(
-        backend = if event_loop.is_wayland() {
-            "wayland"
-        } else if event_loop.is_x11() {
-            "x11"
-        } else {
-            "unknown"
-        },
-        "window event loop backend selected"
-    );
-    Ok(event_loop)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn build_platform_event_loop() -> Result<EventLoop<UserEvent>> {
-    Ok(EventLoop::<UserEvent>::with_user_event().build()?)
 }
 
 // ── Custom event for waking the event loop from the PTY reader ───────────
@@ -1500,7 +1462,7 @@ pub fn run(
         eprintln!("Backtrace: {:?}", std::backtrace::Backtrace::capture());
     }));
 
-    let event_loop = build_platform_event_loop()?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
