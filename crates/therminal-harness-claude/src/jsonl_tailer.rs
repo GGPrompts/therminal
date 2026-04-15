@@ -300,7 +300,20 @@ pub fn resolve_session_jsonl(session_id: &str) -> Option<PathBuf> {
 
     let filename = format!("{session_id}.jsonl");
 
-    let entries = std::fs::read_dir(&projects_dir).ok()?;
+    // tn-ag7d: directory reads can fail on UNC paths (Windows+WSL). Log at
+    // WARN and return None rather than propagating — OSC 1341 markers are
+    // the primary signal path, so JSONL discovery is best-effort.
+    let entries = match std::fs::read_dir(&projects_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                dir = %projects_dir.display(),
+                error = %e,
+                "JSONL resolve: directory read failed (UNC path?), returning empty"
+            );
+            return None;
+        }
+    };
     for entry in entries.flatten() {
         let project_dir = entry.path();
         if !project_dir.is_dir() {
@@ -553,9 +566,17 @@ impl ClaudeJsonlRegistry {
 
         let mut new_entries: Vec<(String, PathBuf)> = Vec::new();
         for dir in &dirs {
+            // tn-ag7d: UNC directory reads are best-effort; log and skip.
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) => {
+                    warn!(
+                        dir = %dir.display(),
+                        error = %e,
+                        "JSONL discover_subagents: directory read failed (UNC path?), skipping"
+                    );
+                    continue;
+                }
             };
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -611,8 +632,17 @@ impl ClaudeJsonlRegistry {
         }
 
         let projects_dir = home_dir().join(".claude").join("projects");
-        let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-            return Vec::new();
+        // tn-ag7d: UNC directory reads are best-effort; log and return empty.
+        let entries = match std::fs::read_dir(&projects_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    dir = %projects_dir.display(),
+                    error = %e,
+                    "JSONL subagent_dirs: directory read failed (UNC path?), returning empty"
+                );
+                return Vec::new();
+            }
         };
 
         let mut out = Vec::new();

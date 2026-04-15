@@ -175,6 +175,16 @@ Claude Code hook scripts call the `therminal` CLI from within WSL, which deliver
 
 **Graceful degradation**: On Linux/WSL-hosted daemons, both paths run simultaneously. The JSONL tailer remains authoritative for historical data and capacity metrics; hook events provide lower-latency lifecycle signals. On Windows native (where JSONL files are unreachable), hook-push becomes the only source of observability.
 
+### UNC filesystem polling (tn-ag7d)
+
+UNC file polling (`\\wsl.localhost\<distro>\...`) is **best-effort** on Windows+WSL. OSC 1341 markers (tn-nrur) are the primary signal path for live state changes; UNC access is only needed for history/transcript recovery. The crate degrades gracefully at three levels:
+
+1. **State poller watcher fallback** — `ClaudeStatePoller::with_dirs` tries the platform-native `recommended_watcher()` first. If it fails (common on UNC paths), it falls back to `PollWatcher` with a 5-second interval. If `PollWatcher` also fails, the directory is skipped with an INFO log. This means a single unreachable UNC directory does not disable polling for directories that *are* reachable.
+
+2. **JSONL discovery tolerates failures** — `resolve_session_jsonl()`, `discover_subagents()`, and `subagent_dirs_for_parent()` all catch `read_dir` errors, log at WARN, and return empty results. A UNC path that becomes temporarily unreachable does not crash the pipeline or propagate errors; it simply produces no JSONL events until connectivity returns.
+
+3. **Hook-push as backstop** — when all file-based paths are unreachable, the hook-push path (`HookPushSink`) delivers lifecycle events via IPC, providing observability without any filesystem dependency.
+
 ## Hook-driven auto-tile (tn-s8w3)
 
 When a `subagent_start` or `subagent_stop` hook signal arrives via `IpcRequest::PushAgentEvent`, the daemon resolves the parent Claude session to a `PaneId` via the `PaneCapacityCache` (session_id lookup) and broadcasts a `DaemonEvent::SubagentStarted` / `SubagentStopped`. The GUI's per-pane forwarder subscribes to these event kinds and pushes `SwarmWatcherEvent::SpawnSubagent` / `ReclaimSubagent` into the `SwarmDebouncer` channel, bypassing the file-scanning `SwarmWatcher`.
