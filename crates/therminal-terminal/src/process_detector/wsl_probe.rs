@@ -642,6 +642,107 @@ mod tests {
         }
     }
 
+    // ── CRLF and whitespace edge cases ─────────────────────────────────
+
+    #[test]
+    fn parse_wsl_ps_crlf_line_endings() {
+        // wsl.exe output may have CRLF line endings when piped through
+        // Windows-side tools. `str::lines()` handles both \n and \r\n.
+        let stdout = "  12345  12340 node /usr/lib/claude-code/cli.js\r\n  9999  9998 codex codex --resume\r\n";
+        let agents = parse_wsl_ps(stdout);
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].agent_type, AgentType::Claude);
+        assert_eq!(agents[1].agent_type, AgentType::Codex);
+    }
+
+    #[test]
+    fn parse_wsl_ps_tabs_in_output() {
+        // Some ps implementations use tabs instead of spaces.
+        let stdout = "12345\t12340\tnode\t/usr/lib/claude-code/cli.js\n";
+        let agents = parse_wsl_ps(stdout);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_type, AgentType::Claude);
+    }
+
+    #[test]
+    fn parse_wsl_ps_tree_nonexistent_root_returns_empty() {
+        let stdout = concat!(
+            "  100   1 bash -bash\n",
+            "  200 100 node /usr/lib/claude-code/cli.js\n",
+        );
+        let agents = parse_wsl_ps_tree(stdout, 99999);
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn parse_wsl_ps_tree_root_with_no_children() {
+        // Root exists but has no children — returns empty.
+        let stdout = "  100   1 bash -bash\n";
+        let agents = parse_wsl_ps_tree(stdout, 100);
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn parse_wsl_ps_tree_deeply_nested_agent() {
+        // Agent is 4 levels deep: bash → tmux → bash → screen → codex
+        let stdout = concat!(
+            "  100   1 bash -bash\n",
+            "  200 100 tmux tmux\n",
+            "  300 200 bash bash\n",
+            "  400 300 screen screen\n",
+            "  500 400 codex codex --resume\n",
+        );
+        let agents = parse_wsl_ps_tree(stdout, 100);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_type, AgentType::Codex);
+        assert_eq!(agents[0].pid, 500);
+    }
+
+    #[test]
+    fn parse_wsl_ps_tree_crlf_line_endings() {
+        let stdout = "  100   1 bash -bash\r\n  200 100 node /usr/lib/claude-code/cli.js\r\n";
+        let agents = parse_wsl_ps_tree(stdout, 100);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_type, AgentType::Claude);
+    }
+
+    // ── remainder_after_token edge cases ────────────────────────────────
+
+    #[test]
+    fn remainder_after_token_basic() {
+        assert_eq!(remainder_after_token("100 200 bash -bash", "bash"), "-bash");
+    }
+
+    #[test]
+    fn remainder_after_token_no_remainder() {
+        assert_eq!(remainder_after_token("100 200 bash", "bash"), "");
+    }
+
+    #[test]
+    fn remainder_after_token_not_found() {
+        assert_eq!(remainder_after_token("100 200 bash", "node"), "");
+    }
+
+    #[test]
+    fn remainder_after_token_comm_appears_in_pid() {
+        // Token "node" also appears as substring in pid "12node34" — must
+        // find the standalone token, not the substring.
+        let line = "12345 100 node /usr/lib/claude/cli.js";
+        assert_eq!(
+            remainder_after_token(line, "node"),
+            "/usr/lib/claude/cli.js"
+        );
+    }
+
+    #[test]
+    fn remainder_after_token_preserves_internal_spaces() {
+        let line = "100 200 python3 python3 -m aider --model gpt-4 turbo";
+        assert_eq!(
+            remainder_after_token(line, "python3"),
+            "python3 -m aider --model gpt-4 turbo"
+        );
+    }
+
     /// Regression: global `parse_wsl_ps` still works unchanged after the
     /// tree-walking addition (tn-ttie).
     #[test]

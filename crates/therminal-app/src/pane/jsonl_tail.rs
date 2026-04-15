@@ -1722,9 +1722,7 @@ pub fn spawn_jsonl_watcher(
         std::thread::Builder::new()
             .name(format!("jsonl-poll-{}", poll_path.display()))
             .spawn(move || {
-                let mut last_len: u64 = std::fs::metadata(&poll_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let mut last_len: u64 = std::fs::metadata(&poll_path).map(|m| m.len()).unwrap_or(0);
                 while !shutdown.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     if shutdown.load(std::sync::atomic::Ordering::Acquire) {

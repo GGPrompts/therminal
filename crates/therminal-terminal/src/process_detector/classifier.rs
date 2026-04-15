@@ -212,6 +212,67 @@ mod tests {
         ));
     }
 
+    // ── WSL2 interop guard edge cases ───────────────────────────────────
+
+    #[test]
+    fn wsl2_interop_mnt_wsl_also_triggers() {
+        // `/mnt/wsl` is a valid mount point inside WSL (shared memory
+        // mount). It starts with `/mnt/` so the interop guard fires.
+        // This is acceptable: `/init` + `/mnt/wsl/...` is still a
+        // Windows interop process, not a native Linux agent.
+        let cmd = vec!["/init".to_string(), "/mnt/wsl/shared/something".to_string()];
+        assert!(is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn wsl2_interop_long_init_path_matches() {
+        // `ends_with("/init")` matches any path ending in `/init`, not
+        // just the literal `/init`. This is intentional — WSL2 may use
+        // different init paths, and the guard is a heuristic.
+        let cmd = vec![
+            "/usr/sbin/init".to_string(),
+            "/mnt/c/Windows/explorer.exe".to_string(),
+        ];
+        assert!(is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn wsl2_interop_bare_init_without_slash_not_matched() {
+        // "init" without a leading `/` should not match.
+        let cmd = vec!["init".to_string(), "/mnt/c/something.exe".to_string()];
+        assert!(!is_wsl2_interop_process(&cmd));
+    }
+
+    #[test]
+    fn wsl2_interop_three_or_more_args() {
+        // The guard only checks cmd[0] and cmd[1]; extra args are ignored.
+        let cmd = vec![
+            "/init".to_string(),
+            "/mnt/c/Windows/System32/cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo".to_string(),
+            "hello".to_string(),
+        ];
+        assert!(is_wsl2_interop_process(&cmd));
+    }
+
+    // ── Server-mode guard edge cases ─────────────────────────────────────
+
+    #[test]
+    fn is_server_mode_rejects_substring_in_word() {
+        // "serverstatus" contains "serve" but not as a standalone token.
+        assert!(!is_server_mode("codex serverstatus"));
+        // "daemonize" contains "daemon" but not as a standalone token.
+        assert!(!is_server_mode("codex daemonize"));
+    }
+
+    #[test]
+    fn is_server_mode_at_start_of_string() {
+        assert!(is_server_mode("serve"));
+        assert!(is_server_mode("daemon"));
+        assert!(is_server_mode("mcp-server"));
+    }
+
     // ── classify_wsl_process table-driven ─────────────────────────────────
 
     /// Table-driven test for `classify_wsl_process` ensuring parity with

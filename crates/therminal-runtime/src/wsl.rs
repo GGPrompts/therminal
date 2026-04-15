@@ -368,6 +368,310 @@ mod tests {
         );
     }
 
+    // ── linux_to_unc edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn linux_to_unc_trailing_slash() {
+        let p = linux_to_unc("Ubuntu", "/tmp/foo/").unwrap();
+        // Trailing slash becomes trailing backslash in the UNC path.
+        assert_eq!(p.to_string_lossy(), r"\\wsl.localhost\Ubuntu\tmp\foo\");
+    }
+
+    #[test]
+    fn linux_to_unc_dot_dot_passes_through() {
+        // No canonicalization — `..` is preserved as-is. The resulting
+        // UNC path may be odd but is not a security issue because
+        // `is_safe_distro_name` guards the distro component.
+        let p = linux_to_unc("Ubuntu", "/tmp/../etc/passwd").unwrap();
+        assert_eq!(
+            p.to_string_lossy(),
+            r"\\wsl.localhost\Ubuntu\tmp\..\etc\passwd"
+        );
+    }
+
+    #[test]
+    fn linux_to_unc_spaces_in_path() {
+        let p = linux_to_unc("Ubuntu", "/tmp/my dir/file name.txt").unwrap();
+        assert_eq!(
+            p.to_string_lossy(),
+            r"\\wsl.localhost\Ubuntu\tmp\my dir\file name.txt"
+        );
+    }
+
+    #[test]
+    fn linux_to_unc_unicode_in_path() {
+        let p = linux_to_unc("Ubuntu", "/tmp/日本語/ファイル").unwrap();
+        assert_eq!(
+            p.to_string_lossy(),
+            r"\\wsl.localhost\Ubuntu\tmp\日本語\ファイル"
+        );
+    }
+
+    #[test]
+    fn linux_to_unc_single_segment() {
+        let p = linux_to_unc("Ubuntu", "/tmp").unwrap();
+        assert_eq!(p.to_string_lossy(), r"\\wsl.localhost\Ubuntu\tmp");
+    }
+
+    #[test]
+    fn linux_to_unc_consecutive_slashes_in_middle() {
+        // Interior `//` is not rejected (only leading `//` is). The
+        // replacement produces doubled backslashes which is harmless
+        // but not canonical.
+        let p = linux_to_unc("Ubuntu", "/tmp//foo").unwrap();
+        assert_eq!(p.to_string_lossy(), r"\\wsl.localhost\Ubuntu\tmp\\foo");
+    }
+
+    // ── is_safe_distro_name edge cases ──────────────────────────────────────
+
+    #[test]
+    fn is_safe_distro_name_single_char() {
+        assert!(is_safe_distro_name("A"));
+        assert!(is_safe_distro_name("1"));
+        assert!(is_safe_distro_name("-"));
+        assert!(is_safe_distro_name("."));
+        assert!(is_safe_distro_name("_"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_all_numeric() {
+        assert!(is_safe_distro_name("123"));
+        assert!(is_safe_distro_name("0"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_leading_trailing_special_chars() {
+        // Allowed by the charset, even if unlikely in practice.
+        assert!(is_safe_distro_name("-Ubuntu"));
+        assert!(is_safe_distro_name("Ubuntu-"));
+        assert!(is_safe_distro_name(".Debian"));
+        assert!(is_safe_distro_name("Debian."));
+        assert!(is_safe_distro_name("_kali"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_all_punctuation_accepted() {
+        assert!(is_safe_distro_name("---"));
+        assert!(is_safe_distro_name("..."));
+        assert!(is_safe_distro_name("___"));
+        assert!(is_safe_distro_name("-._"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_consecutive_special_chars() {
+        assert!(is_safe_distro_name("Ubuntu--24"));
+        assert!(is_safe_distro_name("Debian_.04"));
+        assert!(is_safe_distro_name("open..SUSE"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_unicode_rejected() {
+        assert!(!is_safe_distro_name("Übuntu"));
+        assert!(!is_safe_distro_name("Ubuntu🐧"));
+        assert!(!is_safe_distro_name("乌班图"));
+    }
+
+    #[test]
+    fn is_safe_distro_name_control_chars_rejected() {
+        assert!(!is_safe_distro_name("Ubuntu\t"));
+        assert!(!is_safe_distro_name("Ubuntu\n"));
+        assert!(!is_safe_distro_name("\x00Ubuntu"));
+        assert!(!is_safe_distro_name("Ubu\x07ntu")); // BEL
+        assert!(!is_safe_distro_name("Ubu\x1Bntu")); // ESC
+    }
+
+    #[test]
+    fn is_safe_distro_name_whitespace_variants_rejected() {
+        assert!(!is_safe_distro_name("Ubuntu ")); // trailing space
+        assert!(!is_safe_distro_name(" Ubuntu")); // leading space
+        assert!(!is_safe_distro_name("U\u{00A0}b")); // non-breaking space
+    }
+
+    // ── is_wsl_unc_path edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn is_wsl_unc_path_case_sensitive() {
+        // `starts_with` on string is case-sensitive. Uppercase WSL
+        // prefix is not recognized — matches real Windows behavior.
+        assert!(!is_wsl_unc_path(Path::new(r"\\WSL.LOCALHOST\Ubuntu\tmp")));
+        assert!(!is_wsl_unc_path(Path::new(r"\\Wsl.Localhost\Ubuntu\tmp")));
+        assert!(!is_wsl_unc_path(Path::new(r"\\WSL$\Ubuntu\tmp")));
+    }
+
+    #[test]
+    fn is_wsl_unc_path_empty_path() {
+        assert!(!is_wsl_unc_path(Path::new("")));
+    }
+
+    #[test]
+    fn is_wsl_unc_path_prefix_only() {
+        assert!(is_wsl_unc_path(Path::new(r"\\wsl.localhost\")));
+        assert!(is_wsl_unc_path(Path::new(r"\\wsl$\")));
+    }
+
+    #[test]
+    fn is_wsl_unc_path_linux_style_not_matched() {
+        assert!(!is_wsl_unc_path(Path::new("/tmp/claude-code-state")));
+        assert!(!is_wsl_unc_path(Path::new("/")));
+    }
+
+    // ── Distro parsing logic (mirrors detect_default_distro internals) ──────
+
+    /// Replicate the parsing logic from `detect_default_distro` so we can
+    /// exercise it without calling `wsl.exe`. This covers BOM stripping,
+    /// NUL filtering, line splitting, trim, and safety checks.
+    fn parse_distro_from_raw(raw: &[u8]) -> Option<String> {
+        let raw = if raw.starts_with(&[0xFF, 0xFE]) {
+            &raw[2..]
+        } else {
+            raw
+        };
+        let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
+        let s = String::from_utf8_lossy(&cleaned);
+        let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
+        if first.is_empty() || !is_safe_distro_name(first) {
+            None
+        } else {
+            Some(first.to_string())
+        }
+    }
+
+    #[test]
+    fn distro_parse_multiple_distros_picks_first() {
+        let raw = b"Ubuntu\nDebian\nkali-linux\n";
+        assert_eq!(parse_distro_from_raw(raw), Some("Ubuntu".to_string()));
+    }
+
+    #[test]
+    fn distro_parse_empty_stdout() {
+        assert_eq!(parse_distro_from_raw(b""), None);
+    }
+
+    #[test]
+    fn distro_parse_whitespace_only() {
+        assert_eq!(parse_distro_from_raw(b"   \n  \n\n"), None);
+    }
+
+    #[test]
+    fn distro_parse_crlf_line_endings() {
+        assert_eq!(
+            parse_distro_from_raw(b"Ubuntu-24.04\r\n"),
+            Some("Ubuntu-24.04".to_string())
+        );
+    }
+
+    #[test]
+    fn distro_parse_no_bom_plain_ascii() {
+        assert_eq!(
+            parse_distro_from_raw(b"Ubuntu\n"),
+            Some("Ubuntu".to_string())
+        );
+    }
+
+    #[test]
+    fn distro_parse_bom_with_multiple_distros() {
+        let mut raw = vec![0xFF, 0xFE];
+        for ch in "Ubuntu-24.04\r\nDebian\r\n".encode_utf16() {
+            raw.push(ch as u8);
+            raw.push((ch >> 8) as u8);
+        }
+        assert_eq!(
+            parse_distro_from_raw(&raw),
+            Some("Ubuntu-24.04".to_string())
+        );
+    }
+
+    #[test]
+    fn distro_parse_leading_blank_lines_skipped() {
+        assert_eq!(
+            parse_distro_from_raw(b"\n\n  \nUbuntu\n"),
+            Some("Ubuntu".to_string())
+        );
+    }
+
+    #[test]
+    fn distro_parse_path_traversal_rejected() {
+        assert_eq!(parse_distro_from_raw(b"../../../etc/passwd\n"), None);
+    }
+
+    #[test]
+    fn distro_parse_spaces_rejected() {
+        assert_eq!(parse_distro_from_raw(b"My Custom Distro\n"), None);
+    }
+
+    // ── Home parsing logic (mirrors detect_wsl_home internals) ──────────────
+
+    /// Replicate the parsing logic from `detect_wsl_home`.
+    fn parse_home_from_raw(stdout: &[u8]) -> Option<String> {
+        let cleaned: Vec<u8> = stdout.iter().copied().filter(|&b| b != 0).collect();
+        let s = String::from_utf8_lossy(&cleaned).trim().to_string();
+        if s.is_empty() || !s.starts_with('/') {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    #[test]
+    fn home_parse_standard_path() {
+        assert_eq!(
+            parse_home_from_raw(b"/home/alice"),
+            Some("/home/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn home_parse_root_path() {
+        assert_eq!(parse_home_from_raw(b"/root"), Some("/root".to_string()));
+    }
+
+    #[test]
+    fn home_parse_empty_stdout() {
+        assert_eq!(parse_home_from_raw(b""), None);
+    }
+
+    #[test]
+    fn home_parse_relative_path_rejected() {
+        assert_eq!(parse_home_from_raw(b"home/alice"), None);
+    }
+
+    #[test]
+    fn home_parse_tilde_rejected() {
+        assert_eq!(parse_home_from_raw(b"~"), None);
+    }
+
+    #[test]
+    fn home_parse_windows_path_rejected() {
+        assert_eq!(parse_home_from_raw(b"C:\\Users\\alice"), None);
+    }
+
+    #[test]
+    fn home_parse_nul_bytes_stripped() {
+        // UTF-16 style output with interleaved NULs.
+        let raw = b"/\x00h\x00o\x00m\x00e\x00/\x00a\x00";
+        assert_eq!(parse_home_from_raw(raw), Some("/home/a".to_string()));
+    }
+
+    #[test]
+    fn home_parse_trailing_whitespace_trimmed() {
+        assert_eq!(
+            parse_home_from_raw(b"/home/alice  \n"),
+            Some("/home/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn home_parse_unicode_username() {
+        assert_eq!(
+            parse_home_from_raw("ユーザー".as_bytes()),
+            None, // does not start with '/'
+        );
+        assert_eq!(
+            parse_home_from_raw("/home/ユーザー".as_bytes()),
+            Some("/home/ユーザー".to_string())
+        );
+    }
+
     // ── Non-Windows short-circuit ────────────────────────────────────────────
 
     #[cfg(not(windows))]

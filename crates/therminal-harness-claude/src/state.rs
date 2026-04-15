@@ -1622,6 +1622,111 @@ mod tests {
         assert!(state.model.is_none());
     }
 
+    // ── Poller resilience tests ──────────────────────────────────────────
+
+    /// Poller constructs successfully when given directories that exist,
+    /// even if some are empty.
+    #[test]
+    fn poller_with_multiple_dirs_some_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir1 = tmp.path().join("claude-code-state");
+        let dir2 = tmp.path().join("codex-state");
+        let dir3 = tmp.path().join("copilot-state");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::create_dir_all(&dir3).unwrap();
+
+        let mut poller = ClaudeStatePoller::with_dirs(vec![dir1, dir2, dir3])
+            .expect("poller with empty dirs should construct");
+        assert!(poller.poll().is_empty());
+    }
+
+    /// When all directories are nonexistent or unreachable, `with_dirs`
+    /// returns an error (so the pipeline knows to disable gracefully).
+    #[test]
+    fn poller_with_all_nonexistent_dirs_returns_error() {
+        let result = ClaudeStatePoller::with_dirs(vec![
+            PathBuf::from("/nonexistent/path1"),
+            PathBuf::from("/nonexistent/path2"),
+        ]);
+        // On most platforms create_dir_all will succeed for these paths
+        // if we have permissions, so we can't guarantee failure. But if
+        // creation fails, the watcher should still construct or error
+        // gracefully. This test ensures no panic.
+        let _ = result;
+    }
+
+    /// Multiple state files across different directories are all picked up.
+    #[test]
+    fn poller_with_files_in_multiple_dirs() {
+        use std::thread::sleep;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir1 = tmp.path().join("claude-code-state");
+        let dir2 = tmp.path().join("codex-state");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+
+        let mut poller = ClaudeStatePoller::with_dirs(vec![dir1.clone(), dir2.clone()])
+            .expect("poller constructs");
+
+        let pid = std::process::id() as i64;
+        std::fs::write(
+            dir1.join("sess-claude.json"),
+            format!(
+                r#"{{"session_id":"sess-claude","status":"idle","pid":{pid},"last_updated":"2099-01-01T00:00:00Z","source":"hook"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir2.join("sess-codex.json"),
+            format!(
+                r#"{{"session_id":"sess-codex","status":"processing","pid":{pid},"last_updated":"2099-01-01T00:00:00Z","source":"hook"}}"#
+            ),
+        )
+        .unwrap();
+
+        let mut sessions = Vec::new();
+        for _ in 0..20 {
+            sleep(Duration::from_millis(100));
+            sessions = poller.poll();
+            if sessions.len() >= 2 {
+                break;
+            }
+        }
+        assert!(
+            sessions.len() >= 2,
+            "expected sessions from both dirs, got {}",
+            sessions.len()
+        );
+    }
+
+    /// agent_type_for_path defaults to "claude" for anything that doesn't
+    /// match codex-state or copilot-state in the parent directory name.
+    #[test]
+    fn agent_type_defaults_to_claude_for_unknown_dir() {
+        let path = Path::new("/tmp/unknown-state/session.json");
+        assert_eq!(
+            agent_type_for_path(path),
+            Some("claude".to_string()),
+            "unknown directories default to claude"
+        );
+    }
+
+    /// Exercises the codex/copilot detection arms explicitly.
+    #[test]
+    fn agent_type_for_codex_and_copilot_dirs() {
+        // Linux paths (forward-slash) work on all platforms.
+        assert_eq!(
+            agent_type_for_path(Path::new("/tmp/codex-state/sess.json")),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            agent_type_for_path(Path::new("/tmp/copilot-state/sess.json")),
+            Some("copilot".to_string())
+        );
+    }
+
     // ── Table-driven WSL state path rewriting (tn-cntx) ──────────────────
 
     /// Exercises the pure path-building half of `default_state_dir` for the

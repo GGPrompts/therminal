@@ -1124,6 +1124,127 @@ mod tests {
         assert_eq!(registry.subagent_count(), 1);
     }
 
+    // ── Subagent discovery resilience ──────────────────────────────────
+
+    /// When the subagent directory does not exist, poll_all still
+    /// completes without error and reports no subagents.
+    #[test]
+    fn registry_tolerates_missing_subagent_dir() {
+        let mut registry = ClaudeJsonlRegistry::new();
+        let _rx = registry.events();
+
+        // Point at a nonexistent subagent directory.
+        let state_path = PathBuf::from("/tmp/claude-code-state/parent-missing-sub.json");
+        let state = ClaudeSessionState {
+            session_id: "parent-missing-sub".into(),
+            parent_session_id: None,
+            ..ClaudeSessionState::default()
+        };
+        registry.apply_update(
+            &ClaudeStateUpdate::Upserted(Box::new(state)),
+            Some(&state_path),
+        );
+        registry.set_subagent_dir_override(
+            "parent-missing-sub",
+            PathBuf::from("/nonexistent/subagents"),
+        );
+
+        // poll_all should not panic or error — just find no subagents.
+        registry.poll_all();
+        assert_eq!(registry.subagent_count(), 0);
+    }
+
+    /// When a subagent JSONL file is empty, the tailer still installs
+    /// and subsequent writes are picked up.
+    #[test]
+    fn registry_handles_empty_subagent_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let sub_path = sub_dir.join("agent-empty123.jsonl");
+        File::create(&sub_path).unwrap(); // empty file
+
+        let mut registry = ClaudeJsonlRegistry::new();
+        let rx = registry.events().expect("events receiver");
+        install_parent_with_subagent_dir(
+            &mut registry,
+            "parent-empty-sub",
+            &sub_dir,
+            Path::new("/tmp/claude-code-state/parent-empty-sub.json"),
+        );
+
+        // First poll: discovers the empty file, installs tailer.
+        registry.poll_all();
+        assert_eq!(registry.subagent_count(), 1);
+
+        // No events from empty file.
+        assert!(rx.try_recv().is_err());
+
+        // Now write a line to the subagent file.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&sub_path)
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"user","content":"late arrival","timestamp":"2026-04-14T00:00:00Z"}}"#
+            )
+            .unwrap();
+        }
+
+        // Second poll: reads the new line.
+        registry.poll_all();
+        let event = rx
+            .try_recv()
+            .expect("should receive event from appended line");
+        assert_eq!(
+            event.event,
+            AgentEvent::UserMessage {
+                content: "late arrival".into()
+            }
+        );
+    }
+
+    /// Registry handles multiple subagent files discovered in a single poll.
+    #[test]
+    fn registry_discovers_multiple_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("subagents");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        for id in &["aaa111", "bbb222", "ccc333"] {
+            let path = sub_dir.join(format!("agent-{id}.jsonl"));
+            let mut f = File::create(&path).unwrap();
+            use std::io::Write;
+            writeln!(
+                f,
+                r#"{{"type":"user","content":"hello from {id}","timestamp":"2026-04-14T00:00:00Z"}}"#
+            )
+            .unwrap();
+        }
+
+        let mut registry = ClaudeJsonlRegistry::new();
+        let rx = registry.events().expect("events receiver");
+        install_parent_with_subagent_dir(
+            &mut registry,
+            "parent-multi",
+            &sub_dir,
+            Path::new("/tmp/claude-code-state/parent-multi.json"),
+        );
+
+        registry.poll_all();
+        assert_eq!(registry.subagent_count(), 3);
+
+        // Drain all events — should be 3 total (one per subagent file).
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
+
     // ── Table-driven session ID validation (tn-cntx) ──────────────────────
 
     /// `is_valid_session_id` is the path-traversal guard that protects

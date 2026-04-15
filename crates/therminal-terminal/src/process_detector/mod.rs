@@ -293,6 +293,53 @@ mod tests {
         assert_eq!(detector.wsl_shell_pid, Some(42));
     }
 
+    /// `scan_wsl` returns an empty vec when `wsl.exe` is missing or fails.
+    /// On CI (Linux), `wsl.exe` does not exist so this exercises the
+    /// graceful-degradation path where `fetch_wsl_ps_stdout` returns None
+    /// and `scan_wsl` returns an empty list instead of panicking.
+    #[test]
+    fn scan_wsl_returns_empty_on_missing_wsl_exe() {
+        let mut detector = ProcessDetector::new(None).with_wsl_distro("NonexistentDistro");
+        let agents = detector.scan();
+        assert!(
+            agents.is_empty(),
+            "scan_wsl should return empty when wsl.exe is unavailable"
+        );
+    }
+
+    /// `scan_if_due` respects the interval even in WSL probe mode.
+    #[test]
+    fn scan_if_due_respects_interval_in_wsl_mode() {
+        let mut detector = ProcessDetector::new(None)
+            .with_wsl_distro("Ubuntu")
+            .with_interval(Duration::from_secs(60));
+
+        // First scan fires.
+        let result = detector.scan_if_due();
+        assert!(result.is_some());
+
+        // Second scan within interval is suppressed.
+        let result = detector.scan_if_due();
+        assert!(result.is_none());
+    }
+
+    /// `fetch_wsl_ps_stdout` returns `None` when `wsl.exe` is not
+    /// available (non-Windows, or Windows without WSL). Callers rely on
+    /// this to distinguish "no agents" from "probe failed".
+    #[test]
+    fn fetch_wsl_ps_stdout_returns_none_on_missing_wsl() {
+        let result = ProcessDetector::fetch_wsl_ps_stdout("Ubuntu");
+        // On non-Windows CI, wsl.exe doesn't exist.
+        // On Windows without the distro, it returns None.
+        // Either way: no panic, returns None.
+        if cfg!(not(windows)) {
+            assert!(
+                result.is_none(),
+                "fetch_wsl_ps_stdout should return None on non-Windows"
+            );
+        }
+    }
+
     /// `classify_wsl_stdout` routes to tree-walk when wsl_shell_pid is set,
     /// and to global scan when it is not.
     #[test]

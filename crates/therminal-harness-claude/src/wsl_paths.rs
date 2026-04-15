@@ -392,6 +392,51 @@ mod tests {
         }
     }
 
+    // ── expand_home_to_unc edge cases ──────────────────────────────────────
+
+    #[test]
+    fn expand_home_to_unc_unicode_in_path() {
+        let p = expand_home_to_unc("Ubuntu", "/home/alice", "~/.config/日本語").unwrap();
+        assert_eq!(
+            p.to_string_lossy(),
+            r"\\wsl.localhost\Ubuntu\home\alice\.config\日本語"
+        );
+    }
+
+    #[test]
+    fn expand_home_to_unc_relative_no_tilde() {
+        // A relative path without tilde is treated as already-absolute
+        // and forwarded to linux_to_unc, which rejects non-absolute paths.
+        assert!(expand_home_to_unc("Ubuntu", "/home/alice", "relative/path").is_none());
+    }
+
+    #[test]
+    fn expand_home_to_unc_tilde_with_double_slash_in_home() {
+        // Home with trailing slash + path with leading slash after tilde
+        // produces a clean result thanks to trim_end_matches('/').
+        let p = expand_home_to_unc("Ubuntu", "/home/alice/", "~/foo").unwrap();
+        assert_eq!(
+            p.to_string_lossy(),
+            r"\\wsl.localhost\Ubuntu\home\alice\foo"
+        );
+    }
+
+    #[test]
+    fn expand_home_to_unc_deeply_nested_tilde() {
+        let p = expand_home_to_unc(
+            "Ubuntu",
+            "/home/alice",
+            "~/.claude/projects/hash123/session.jsonl",
+        )
+        .unwrap();
+        assert_eq!(
+            p.to_string_lossy(),
+            r"\\wsl.localhost\Ubuntu\home\alice\.claude\projects\hash123\session.jsonl"
+        );
+    }
+
+    // ── State UNC edge cases ────────────────────────────────────────────────
+
     #[test]
     fn distro_with_spaces_rejected_by_safety_check() {
         let distro = "My WSL Distro";
