@@ -458,10 +458,14 @@ pub fn spawn(
 
                 // Check staleness for tracked files.
                 let now = Instant::now();
-                let mut to_remove = Vec::new();
                 for (agent_id, t) in tracked.iter_mut() {
                     if t.reclaimed {
-                        to_remove.push(agent_id.clone());
+                        // Keep reclaimed entries in the map permanently so
+                        // the file is never re-discovered after reclaim.
+                        // Without this, the entry is removed, the file still
+                        // exists on disk, and the next scan re-admits it —
+                        // causing a pane-close → pane-open flicker, especially
+                        // on Windows where UNC mtime precision is coarse.
                         continue;
                     }
                     // Open the file handle to get fresh mtime, bypassing
@@ -487,9 +491,6 @@ pub fn spawn(
                         }
                         t.reclaimed = true;
                     }
-                }
-                for id in to_remove {
-                    tracked.remove(&id);
                 }
 
                 thread::sleep(POLL_INTERVAL);

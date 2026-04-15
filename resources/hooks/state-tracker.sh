@@ -42,9 +42,21 @@ _resolve_therminal_bin() {
             echo "$bin"
             return
         fi
+        # 2b. Probe Windows Desktop (common install location for therminal)
+        local win_user
+        win_user=$(wslvar USERPROFILE 2>/dev/null || cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' || true)
+        if [[ -n "$win_user" ]]; then
+            # Convert Windows path to WSL mount: C:\Users\X → /mnt/c/Users/X
+            local wsl_desktop
+            wsl_desktop=$(wslpath "$win_user" 2>/dev/null || echo "/mnt/c/Users/$(basename "$win_user")")/Desktop
+            if [[ -x "$wsl_desktop/therminal.exe" ]]; then
+                echo "$wsl_desktop/therminal.exe"
+                return
+            fi
+        fi
         # No .exe found — emit one-time warning
         if [[ ! -f "$_THERMINAL_WARN_FILE" ]]; then
-            echo "[therminal hook] WARNING: WSL detected but therminal.exe not found on PATH." >&2
+            echo "[therminal hook] WARNING: WSL detected but therminal.exe not found on PATH or Desktop." >&2
             echo "[therminal hook] Set THERMINAL_WINDOWS_BIN to the Windows therminal.exe path." >&2
             touch "$_THERMINAL_WARN_FILE" 2>/dev/null || true
         fi
