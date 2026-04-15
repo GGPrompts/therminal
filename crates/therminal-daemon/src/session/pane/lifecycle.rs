@@ -101,6 +101,10 @@ impl Pane {
         // Initialize cwd from spawn options; OSC 7 events will update it later.
         let cwd = Arc::new(Mutex::new(spawn_options.cwd.clone()));
 
+        // child_pid is wired after PtyPaneCore::spawn below; use 0 as
+        // placeholder — the InferenceConfig is rebuilt with the real PID once
+        // portable-pty returns it. (The field is informational for logging /
+        // state-file naming, not used for agent detection.)
         let inference = Arc::new(Mutex::new(AgentStateInference::new(InferenceConfig {
             session_id: format!("daemon-pane-{id}"),
             child_pid: 0,
@@ -139,6 +143,15 @@ impl Pane {
 
         let term = Arc::clone(core.term());
         let shell_pid = core.child_pid();
+        // tn-y2d8: wire the real shell PID into InferenceConfig so the
+        // state file written by AgentStateInference carries a meaningful
+        // child_pid. Before this fix the field was always 0, which made
+        // PID-based resolution in resolve_pane_id_from_state impossible.
+        if let Some(pid) = shell_pid
+            && let Ok(mut inf) = inference.lock()
+        {
+            inf.update_child_pid(pid);
+        }
         let pty_writer = core.take_writer();
         let pty_master = core.take_pty_master();
 

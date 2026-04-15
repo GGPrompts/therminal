@@ -270,6 +270,14 @@ impl AgentStateInference {
         self.config.child_pid
     }
 
+    /// Update the child PID after the PTY has been spawned. Called by the
+    /// daemon pane lifecycle once `PtyPaneCore::child_pid()` returns a real
+    /// value — the initial `InferenceConfig` is constructed before the PTY
+    /// exists and carries `child_pid: 0` as a placeholder. (tn-y2d8)
+    pub fn update_child_pid(&mut self, pid: u32) {
+        self.config.child_pid = pid;
+    }
+
     /// Working directory from config.
     pub fn working_dir(&self) -> Option<&str> {
         self.config.working_dir.as_deref()

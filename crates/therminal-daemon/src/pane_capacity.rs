@@ -102,11 +102,17 @@ impl PaneCapacityCache {
     }
 }
 
-/// Resolve pane ID from state — PID match only, no heuristic fallback (tn-hxso).
+/// Resolve pane ID from state — tries PID match first, then session_id
+/// lookup in the capacity cache (tn-y2d8). The session_id tier is more
+/// reliable than PID on Windows+WSL where the state file PID (written by
+/// a WSL hook via PPID) and the agent registry PID (from the daemon-side
+/// WSL probe) are from different namespaces and never match.
 pub fn resolve_pane_id_from_state(
     state: &ClaudeSessionState,
     registry: &AgentRegistry,
+    capacity_cache: Option<&PaneCapacityCache>,
 ) -> Option<PaneId> {
+    // Tier 1: PID match against the agent registry.
     if let Some(pid_i64) = state.pid
         && let Ok(pid_u32) = u32::try_from(pid_i64)
     {
@@ -116,6 +122,25 @@ pub fn resolve_pane_id_from_state(
             }
         }
     }
+
+    // Tier 2: session_id match against the capacity cache. The state file
+    // always carries a session_id, and any pane that was previously resolved
+    // (by PID or cwd) already has a cache entry keyed on session_id.  This
+    // covers the common Windows+WSL case where the *first* resolution
+    // succeeded via the cwd fallback and subsequent updates can fast-path
+    // through the session_id match without repeating the cwd scan.
+    if !state.session_id.is_empty()
+        && let Some(cache) = capacity_cache
+        && let Some(pane_id) = cache.find_pane_by_session_id(&state.session_id)
+    {
+        tracing::debug!(
+            pane_id,
+            session_id = %state.session_id,
+            "pane_capacity: PID miss, matched by session_id in cache"
+        );
+        return Some(pane_id);
+    }
+
     None
 }
 
@@ -228,7 +253,7 @@ mod tests {
             agent_type: Some("codex".into()),
             ..Default::default()
         };
-        assert!(resolve_pane_id_from_state(&state, &registry).is_none());
+        assert!(resolve_pane_id_from_state(&state, &registry, None).is_none());
     }
 
     #[test]
@@ -240,7 +265,7 @@ mod tests {
             agent_type: Some("claude".into()),
             ..Default::default()
         };
-        assert!(resolve_pane_id_from_state(&state, &registry).is_none());
+        assert!(resolve_pane_id_from_state(&state, &registry, None).is_none());
     }
 
     #[test]
@@ -252,6 +277,80 @@ mod tests {
             agent_type: Some("claude".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_pane_id_from_state(&state, &registry), Some(42));
+        assert_eq!(
+            resolve_pane_id_from_state(&state, &registry, None),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn resolve_by_session_id_when_pid_misses() {
+        let registry = AgentRegistry::new();
+        let cache = PaneCapacityCache::new();
+        // Simulate a prior successful resolution that populated the cache.
+        cache.upsert(
+            7,
+            PaneCapacityEntry {
+                session_id: "sess-wsl-123".into(),
+                ..Default::default()
+            },
+        );
+        let state = ClaudeSessionState {
+            pid: Some(99999), // PID from WSL hook — won't match any registry entry
+            session_id: "sess-wsl-123".into(),
+            agent_type: Some("claude".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_pane_id_from_state(&state, &registry, Some(&cache)),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn resolve_pid_takes_precedence_over_session_id() {
+        let mut registry = AgentRegistry::new();
+        registry.register(10, "claude".into(), AgentType::Claude, Some(5000));
+        let cache = PaneCapacityCache::new();
+        // Cache points session_id to a different pane.
+        cache.upsert(
+            20,
+            PaneCapacityEntry {
+                session_id: "sess-both".into(),
+                ..Default::default()
+            },
+        );
+        let state = ClaudeSessionState {
+            pid: Some(5000),
+            session_id: "sess-both".into(),
+            agent_type: Some("claude".into()),
+            ..Default::default()
+        };
+        // PID match should win — returns pane 10, not 20.
+        assert_eq!(
+            resolve_pane_id_from_state(&state, &registry, Some(&cache)),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn resolve_empty_session_id_skips_cache_tier() {
+        let registry = AgentRegistry::new();
+        let cache = PaneCapacityCache::new();
+        cache.upsert(
+            3,
+            PaneCapacityEntry {
+                session_id: "".into(),
+                ..Default::default()
+            },
+        );
+        let state = ClaudeSessionState {
+            pid: None,
+            session_id: String::new(),
+            agent_type: Some("claude".into()),
+            ..Default::default()
+        };
+        // Empty session_id should skip the cache tier entirely.
+        assert!(resolve_pane_id_from_state(&state, &registry, Some(&cache)).is_none());
     }
 }
