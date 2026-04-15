@@ -12,6 +12,7 @@ use therminal_core::config::TherminalConfig;
 use therminal_daemon_client::DaemonClient;
 use therminal_protocol::daemon::IpcResponse;
 use tokio::runtime::Runtime;
+use tracing::warn;
 
 use crate::daemon_spawn;
 
@@ -78,9 +79,21 @@ fn connect_with_autospawn(rt: &Runtime) -> Result<Arc<DaemonClient>> {
             })?;
             Ok(client)
         }
-        Err(e) => Err(e.context(format!(
-            "failed to connect to daemon at {}",
-            socket_path.display()
-        ))),
+        Err(e) => {
+            if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+                warn!(
+                    "Running inside WSL but daemon appears to be Windows-native \
+                     — use therminal.exe instead of therminal"
+                );
+                eprintln!(
+                    "therminal: Running inside WSL but daemon appears to be \
+                     Windows-native — use therminal.exe instead of therminal"
+                );
+            }
+            Err(e.context(format!(
+                "failed to connect to daemon at {}",
+                socket_path.display()
+            )))
+        }
     }
 }

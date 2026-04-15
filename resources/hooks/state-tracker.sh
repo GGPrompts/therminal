@@ -17,6 +17,54 @@ DEBUG_DIR="$STATE_DIR/debug"
 SUBAGENT_DIR="$STATE_DIR/subagents"
 mkdir -p "$STATE_DIR" "$DEBUG_DIR" "$SUBAGENT_DIR"
 
+# --- therminal binary resolution ---
+# On WSL, only accept .exe binaries (Windows interop) to avoid silently
+# targeting a Unix socket when a Linux-compiled `therminal` is on PATH.
+# Override: THERMINAL_WINDOWS_BIN (first choice) or THERMINAL_BIN.
+_THERMINAL_HOOK_WARNED=0
+_THERMINAL_WARN_FILE="$STATE_DIR/.therminal-hook-warned"
+
+_resolve_therminal_bin() {
+    # 1. Explicit override
+    if [[ -n "${THERMINAL_WINDOWS_BIN:-}" ]]; then
+        echo "$THERMINAL_WINDOWS_BIN"
+        return
+    fi
+    if [[ -n "${THERMINAL_BIN:-}" ]]; then
+        echo "$THERMINAL_BIN"
+        return
+    fi
+    # 2. WSL: only accept .exe binaries
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        local bin
+        bin=$(command -v therminal.exe 2>/dev/null || true)
+        if [[ -n "$bin" ]]; then
+            echo "$bin"
+            return
+        fi
+        # No .exe found — emit one-time warning
+        if [[ ! -f "$_THERMINAL_WARN_FILE" ]]; then
+            echo "[therminal hook] WARNING: WSL detected but therminal.exe not found on PATH." >&2
+            echo "[therminal hook] Set THERMINAL_WINDOWS_BIN to the Windows therminal.exe path." >&2
+            touch "$_THERMINAL_WARN_FILE" 2>/dev/null || true
+        fi
+        return
+    fi
+    # 3. Non-WSL: standard lookup
+    local bin
+    bin=$(command -v therminal.exe 2>/dev/null || command -v therminal 2>/dev/null || true)
+    if [[ -n "$bin" ]]; then
+        echo "$bin"
+        return
+    fi
+    # Not found — emit one-time warning
+    if [[ ! -f "$_THERMINAL_WARN_FILE" ]]; then
+        echo "[therminal hook] WARNING: therminal binary not found on PATH." >&2
+        echo "[therminal hook] Install therminal or set THERMINAL_BIN." >&2
+        touch "$_THERMINAL_WARN_FILE" 2>/dev/null || true
+    fi
+}
+
 # Get tmux pane ID if running in tmux
 TMUX_PANE="${TMUX_PANE:-none}"
 
@@ -172,8 +220,8 @@ case "$HOOK_TYPE" in
         AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // ""' 2>/dev/null || echo "")
         DETAILS=$(jq -n --arg type "$AGENT_TYPE" --arg count "$SUBAGENT_COUNT" '{event:"subagent_started",agent_type:$type,active_subagents:($count|tonumber)}')
         # Push to therminal daemon for fast auto-tile (fire-and-forget)
-        _tn="${THERMINAL_BIN:-$(command -v therminal.exe 2>/dev/null || command -v therminal 2>/dev/null || echo /mnt/c/Users/marci/Desktop/therminal.exe)}"
-        if [[ -x "$_tn" ]]; then
+        _tn=$(_resolve_therminal_bin)
+        if [[ -n "$_tn" && -x "$_tn" ]]; then
             "$_tn" agent-event push \
                 --event subagent_start \
                 --session-id "${CLAUDE_SESSION_ID:-}" \
@@ -198,8 +246,8 @@ case "$HOOK_TYPE" in
             DETAILS=$(jq -n --arg count "$SUBAGENT_COUNT" '{event:"subagent_stopped",remaining_subagents:($count|tonumber)}')
         fi
         # Push to therminal daemon for fast pane reclaim (fire-and-forget)
-        _tn="${THERMINAL_BIN:-$(command -v therminal.exe 2>/dev/null || command -v therminal 2>/dev/null || echo /mnt/c/Users/marci/Desktop/therminal.exe)}"
-        if [[ -x "$_tn" ]]; then
+        _tn=$(_resolve_therminal_bin)
+        if [[ -n "$_tn" && -x "$_tn" ]]; then
             "$_tn" agent-event push \
                 --event subagent_stop \
                 --session-id "${CLAUDE_SESSION_ID:-}" \
