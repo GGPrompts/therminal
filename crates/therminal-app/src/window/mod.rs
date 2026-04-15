@@ -112,6 +112,16 @@ use therminal_core::geometry::Rect;
 
 use keybindings::{BindingLookup, build_binding_map};
 
+fn normalize_platform_config(mut config: TherminalConfig) -> TherminalConfig {
+    if config.general.use_csd && therminal_runtime::wsl::is_wslg_session() {
+        info!(
+            "WSLg GUI session detected; forcing native window decorations so Windows snap/maximize stays host-managed"
+        );
+        config.general.use_csd = false;
+    }
+    config
+}
+
 // ── Custom event for waking the event loop from the PTY reader ───────────
 
 /// Events sent from background threads to the winit event loop.
@@ -724,7 +734,7 @@ struct SeparatorDrag {
 impl App {
     /// Apply a new configuration.
     fn apply_config(&mut self, new_config: TherminalConfig) {
-        let old_config = std::mem::replace(&mut self.config, new_config);
+        let old_config = std::mem::replace(&mut self.config, normalize_platform_config(new_config));
 
         // ── Keybinding hot-reload ──────────────────────────────────────
         self.binding_map = build_binding_map(&self.config);

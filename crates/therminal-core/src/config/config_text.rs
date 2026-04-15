@@ -51,7 +51,7 @@ pub(super) fn default_config_text() -> String {
          # [keybindings] and KeyAction::FocusMode (tn-t2yd.2).\n",
     );
     out.push_str(&format!(
-        "# use_csd = {}  # client-side decorations (default: true on Linux/Windows)\n",
+        "# use_csd = {}  # client-side decorations (default: true on Linux/Windows, forced off under WSLg)\n",
         d.general.use_csd
     ));
     out.push_str(&format!(

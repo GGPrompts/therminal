@@ -19,11 +19,6 @@ use tracing::{debug, warn};
 /// log noise on WSL2.
 static CLIPBOARD: OnceLock<Option<Mutex<arboard::Clipboard>>> = OnceLock::new();
 
-/// Detect WSL2 via the `WSL_DISTRO_NAME` environment variable.
-fn is_wsl2() -> bool {
-    std::env::var_os("WSL_DISTRO_NAME").is_some()
-}
-
 /// Eagerly initialize the clipboard.
 ///
 /// **Must be called from `main()` before any other threads are spawned**
@@ -52,7 +47,7 @@ fn get_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
             // WSLg ships a Wayland compositor that doesn't implement
             // `wlr-data-control`, which arboard's Wayland backend requires;
             // XWayland works fine, so we prefer it.
-            let wayland_display = if is_wsl2() {
+            let wayland_display = if therminal_runtime::wsl::is_wsl2() {
                 let val = std::env::var_os("WAYLAND_DISPLAY");
                 if val.is_some() {
                     debug!("WSL2 detected: forcing X11 clipboard backend");
@@ -228,7 +223,7 @@ mod tests {
         let had_var = std::env::var_os("WSL_DISTRO_NAME");
         // SAFETY: test-only env var mutation.
         unsafe { std::env::remove_var("WSL_DISTRO_NAME") };
-        assert!(!is_wsl2());
+        assert!(!therminal_runtime::wsl::is_wsl2());
         // Restore if it was set.
         if let Some(val) = had_var {
             unsafe { std::env::set_var("WSL_DISTRO_NAME", val) };
