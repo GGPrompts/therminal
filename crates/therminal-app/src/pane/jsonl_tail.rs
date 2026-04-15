@@ -1710,8 +1710,11 @@ pub fn spawn_jsonl_watcher(
     // ── Polling fallback ──────────────────────────────────────────────
     // The `notify` watcher may not deliver modify events for all
     // filesystem types (notably Windows→WSL2 UNC paths). A lightweight
-    // poll thread checks `metadata().len()` every 500ms and triggers a
-    // full poll only when the file has actually grown.
+    // poll thread calls `poll_file()` every 500ms, which opens the file
+    // handle and reads from the last offset. This bypasses Windows SMB
+    // metadata caching that makes path-based `metadata().len()` stale
+    // on UNC paths for 10+ seconds.  Only triggers a redraw when
+    // `poll_file()` actually consumed new bytes (file_offset advanced).
     let poll_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let poll_thread = {
         let shutdown = Arc::clone(&poll_shutdown);
@@ -1722,22 +1725,26 @@ pub fn spawn_jsonl_watcher(
         std::thread::Builder::new()
             .name(format!("jsonl-poll-{}", poll_path.display()))
             .spawn(move || {
-                let mut last_len: u64 = std::fs::metadata(&poll_path).map(|m| m.len()).unwrap_or(0);
+                let _ = poll_path; // held for thread naming only
                 while !shutdown.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     if shutdown.load(std::sync::atomic::Ordering::Acquire) {
                         break;
                     }
-                    let cur_len = match std::fs::metadata(&poll_path) {
-                        Ok(m) => m.len(),
-                        Err(_) => continue,
-                    };
-                    if cur_len != last_len {
-                        last_len = cur_len;
-                        if let Ok(mut s) = state_for_poll.lock() {
-                            s.poll_file();
+                    let had_new_content = if let Ok(mut s) = state_for_poll.lock() {
+                        let before = s.file_offset;
+                        s.poll_file();
+                        let after = s.file_offset;
+                        if after != before {
                             s.refresh_shadow_term(&term_for_poll);
+                            true
+                        } else {
+                            false
                         }
+                    } else {
+                        false
+                    };
+                    if had_new_content {
                         wake_poll();
                     }
                 }
