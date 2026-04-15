@@ -1467,7 +1467,10 @@ impl GridRenderer {
                 }
                 for cell in &row.cells {
                     if let Some((ref kind, ref full_text, is_dir, ref resolved)) = cell.hotspot
-                        && cell.hyperlink.as_ref().is_none_or(|h| h.starts_with("file://"))
+                        && cell
+                            .hyperlink
+                            .as_ref()
+                            .is_none_or(|h| h.starts_with("file://"))
                     {
                         self.hotspot_map.insert(
                             (pane_id, cell.row, cell.col),
@@ -1493,7 +1496,10 @@ impl GridRenderer {
         for row in row_cache.iter().flatten() {
             for cell in &row.cells {
                 if let Some((ref kind, _, _, _)) = cell.hotspot
-                    && cell.hyperlink.as_ref().is_none_or(|h| h.starts_with("file://"))
+                    && cell
+                        .hyperlink
+                        .as_ref()
+                        .is_none_or(|h| h.starts_with("file://"))
                 {
                     let hotspot_color =
                         crate::color_mapping::hotspot_kind_color(kind, &self.chrome_palette);

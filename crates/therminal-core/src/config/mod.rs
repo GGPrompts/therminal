@@ -3031,7 +3031,10 @@ color = "#d4443e"
         assert_eq!(config.profiles.len(), 3);
 
         let docker = &config.profiles["docker"];
-        assert_eq!(docker.command.as_deref(), Some("docker exec -it my-app /bin/bash"));
+        assert_eq!(
+            docker.command.as_deref(),
+            Some("docker exec -it my-app /bin/bash")
+        );
         assert!(docker.shell.is_none());
         assert!(docker.shell_args.is_empty());
         assert!(docker.shell_integration.is_none());
