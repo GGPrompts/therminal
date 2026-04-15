@@ -116,23 +116,22 @@ pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.
 
 /// Predefined font family options for the unified font selector (tn-0zfo).
 ///
-/// The first entry is a sentinel for the platform default (empty string in
-/// config). Nerd Font variants are listed first (icon support for CSD
-/// buttons, powerline, etc.), followed by their plain counterparts and
-/// other popular monospace families.
+/// Only Mono Nerd Font variants are listed — these are monospaced (required
+/// for a terminal grid) and ship Nerd Font icons (CSD buttons, powerline,
+/// devicons). Plain and non-mono variants are excluded because they render
+/// poorly in the fixed-width cell grid and WSL2 font enumeration surfaces
+/// fewer families, making a curated list essential (tn-a8s9).
 pub(crate) const FONT_FAMILY_OPTIONS: &[&str] = &[
     "JetBrainsMono Nerd Font Mono",
-    "FiraCode Nerd Font",
-    "CaskaydiaCove Nerd Font",
-    "JetBrains Mono",
-    "Fira Code",
-    "Cascadia Code",
-    "Iosevka",
-    "Source Code Pro",
-    "Hack",
-    "Inconsolata",
-    "IBM Plex Mono",
-    "Ubuntu Mono",
+    "FiraCode Nerd Font Mono",
+    "CaskaydiaCove Nerd Font Mono",
+    "Hack Nerd Font Mono",
+    "Inconsolata Nerd Font Mono",
+    "SourceCodePro Nerd Font Mono",
+    "UbuntuMono Nerd Font Mono",
+    "Iosevka Nerd Font Mono",
+    "RobotoMono Nerd Font Mono",
+    "MesloLGS Nerd Font Mono",
 ];
 
 /// Find the index in [`UI_TEXT_SCALE_OPTIONS`] closest to the given scale.

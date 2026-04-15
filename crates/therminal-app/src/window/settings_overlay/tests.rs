@@ -824,15 +824,15 @@ fn font_family_select_produces_command() {
 #[test]
 fn font_family_index_finds_known_families() {
     assert_eq!(font_family_index("JetBrainsMono Nerd Font Mono"), Some(0));
-    assert_eq!(font_family_index("FiraCode Nerd Font"), Some(1));
-    assert_eq!(font_family_index("Fira Code"), Some(4));
-    assert_eq!(font_family_index("Iosevka"), Some(6));
+    assert_eq!(font_family_index("FiraCode Nerd Font Mono"), Some(1));
+    assert_eq!(font_family_index("CaskaydiaCove Nerd Font Mono"), Some(2));
+    assert_eq!(font_family_index("Iosevka Nerd Font Mono"), Some(7));
 }
 
 #[test]
 fn font_family_index_is_case_insensitive() {
-    assert_eq!(font_family_index("fira code"), Some(4));
-    assert_eq!(font_family_index("JETBRAINS MONO"), Some(3));
+    assert_eq!(font_family_index("firacode nerd font mono"), Some(1));
+    assert_eq!(font_family_index("HACK NERD FONT MONO"), Some(3));
 }
 
 #[test]
@@ -845,8 +845,8 @@ fn font_family_index_returns_none_for_unknown() {
 fn font_family_options_has_expected_entries() {
     assert!(FONT_FAMILY_OPTIONS.len() >= 5);
     assert!(FONT_FAMILY_OPTIONS.contains(&"JetBrainsMono Nerd Font Mono"));
-    assert!(FONT_FAMILY_OPTIONS.contains(&"Fira Code"));
-    assert!(FONT_FAMILY_OPTIONS.contains(&"Cascadia Code"));
+    assert!(FONT_FAMILY_OPTIONS.contains(&"FiraCode Nerd Font Mono"));
+    assert!(FONT_FAMILY_OPTIONS.contains(&"CaskaydiaCove Nerd Font Mono"));
 }
 
 #[test]
