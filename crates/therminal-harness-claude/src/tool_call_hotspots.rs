@@ -74,17 +74,15 @@ use crate::state::{ClaudeSessionState, ClaudeStateUpdate};
 /// and by the pipeline's tool-call resolver.
 ///
 /// The index tracks only *live* sessions: [`ClaudeStateUpdate::Removed`]
-/// drops the entry. Subagents are included — they carry their own
-/// `working_dir`, which may differ from the parent's during a worktree hop.
+/// drops the entry immediately when the event carries a `session_id`
+/// (tn-alij). Subagents are included — they carry their own `working_dir`,
+/// which may differ from the parent's during a worktree hop.
 ///
-/// Because [`ClaudeStateUpdate::Removed`] carries only the deleted file
-/// path (not the `session_id` we key on), some eviction paths cannot match
-/// an entry back to its key. To bound the index in the long-running daemon,
-/// callers wired into the pipeline tick should call
-/// [`ClaudeSessionCwdIndex::retain_live`] every poll cycle with the set of
-/// session ids the [`ClaudeStatePoller`](crate::state::ClaudeStatePoller)
-/// just observed; any entry whose id is missing from that set is dropped.
-/// See tn-ossc.
+/// As a belt-and-suspenders backstop, callers wired into the pipeline tick
+/// should also call [`ClaudeSessionCwdIndex::retain_live`] every poll cycle
+/// with the set of session ids the
+/// [`ClaudeStatePoller`](crate::state::ClaudeStatePoller) just observed;
+/// any entry whose id is missing from that set is dropped. See tn-ossc.
 ///
 /// **Why the harness, not core**: core's generic resolver would join
 /// `Update(src/foo.rs)` against the pane's OSC 7 cwd. When the agent hops
@@ -105,23 +103,23 @@ impl ClaudeSessionCwdIndex {
     ///
     /// On `Upserted`, the session's `working_dir` (if any) is stored under
     /// `session_id`. Missing `working_dir` is treated as "no change" rather
-    /// than "clear" — some hook writers omit the field. On `Removed`, all
-    /// sessions whose state file matches the removed path are dropped; for
-    /// simplicity we drop by session_id when the caller has one, otherwise
-    /// the next [`Self::retain_live`] sweep cleanses stale entries.
+    /// than "clear" — some hook writers omit the field. On `Removed`, the
+    /// entry is evicted immediately when the event carries a `session_id`
+    /// (tn-alij); otherwise the per-tick [`Self::retain_live`] sweep handles
+    /// it by comparing against the poller's live snapshot.
     pub fn apply(&self, update: &ClaudeStateUpdate) {
         match update {
             ClaudeStateUpdate::Upserted(state) => self.upsert(state),
-            ClaudeStateUpdate::Removed { .. } => {
-                // `ClaudeStateUpdate::Removed` carries only the deleted state
-                // file path — not the `session_id` we key the index by — so
-                // we cannot evict the entry here without re-deriving the id
-                // from the filename, which would couple the index to hook
-                // path layout. The pipeline calls `forget(session_id)`
-                // explicitly when it knows the id, and the per-tick
-                // [`Self::retain_live`] sweep evicts anything still left
-                // behind by comparing against the poller's live snapshot.
-                // See tn-ossc.
+            ClaudeStateUpdate::Removed { session_id, .. } => {
+                // When the event carries the resolved session_id (tn-alij),
+                // evict immediately. Otherwise fall back to the per-tick
+                // [`Self::retain_live`] sweep which compares against the
+                // poller's live snapshot. The pipeline also calls
+                // `forget(session_id)` explicitly, but direct eviction here
+                // avoids a one-tick lag. See tn-ossc.
+                if let Some(sid) = session_id.as_deref().filter(|s| !s.is_empty()) {
+                    self.forget(sid);
+                }
             }
         }
     }

@@ -460,7 +460,7 @@ impl ClaudeJsonlRegistry {
             ClaudeStateUpdate::Upserted(state) => {
                 self.handle_upsert(state, path_hint);
             }
-            ClaudeStateUpdate::Removed { path } => {
+            ClaudeStateUpdate::Removed { path, .. } => {
                 if let Some(sid) = self.path_to_session.remove(path)
                     && self.tailers.remove(&sid).is_some()
                 {
@@ -994,6 +994,7 @@ mod tests {
         registry.apply_update(
             &ClaudeStateUpdate::Removed {
                 path: state_path.clone(),
+                session_id: Some("sess-rm".into()),
             },
             None,
         );
@@ -1088,6 +1089,7 @@ mod tests {
         registry.apply_update(
             &ClaudeStateUpdate::Removed {
                 path: state_path.clone(),
+                session_id: Some("parent-rm".into()),
             },
             None,
         );
