@@ -74,6 +74,24 @@ decrement_subagent_count() {
     _subagent_lock_release
 }
 
+# ── OSC 1341 marker emission (tn-nrur) ──────────────────────────────────
+# Emit an inline OSC 1341 marker to stdout so therminal's PTY reader can
+# update pane state instantly — no file polling delay. The marker carries
+# key=value pairs separated by semicolons inside an OSC envelope:
+#   ESC ] 1341 ; key=value [ ; key=value ]* ST
+# Only emitted when TERM_PROGRAM=therminal (skip for non-therminal terminals).
+emit_osc_marker() {
+    [[ "${TERM_PROGRAM:-}" == "therminal" ]] || return 0
+    local payload=""
+    local sep=""
+    for kv in "$@"; do
+        payload="${payload}${sep}${kv}"
+        sep=";"
+    done
+    # ESC ] 1341 ; <payload> ST  (ST = ESC \)
+    printf '\033]1341;%s\033\\' "$payload" 2>/dev/null || true
+}
+
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 HOOK_TYPE="${1:-unknown}"
 
@@ -325,5 +343,30 @@ if [[ "$SESSION_ID" =~ ^[a-f0-9]{12}$ ]] && [[ "$TMUX_PANE" != "none" && -n "$TM
     PANE_STATE_FILE="$STATE_DIR/${PANE_ID}.json"
     echo "$STATE_JSON" > "$PANE_STATE_FILE"
 fi
+
+# ── OSC 1341 inline markers (tn-nrur) ──────────────────────────────────
+# Emit markers to stdout so therminal picks up state changes inline with
+# the PTY stream. These are the primary signal; file polling is fallback.
+# Build the marker args array based on what we know.
+_marker_args=()
+[[ -n "$STATUS" ]] && _marker_args+=("state=$STATUS")
+[[ -n "$CLAUDE_SESSION_ID" ]] && _marker_args+=("session_id=$CLAUDE_SESSION_ID")
+[[ -n "$PWD" ]] && _marker_args+=("cwd=$PWD")
+[[ -n "$CURRENT_TOOL" ]] && _marker_args+=("tool=$CURRENT_TOOL")
+
+# Emit state marker (only if we have at least one field).
+if [[ ${#_marker_args[@]} -gt 0 ]]; then
+    emit_osc_marker "${_marker_args[@]}"
+fi
+
+# Emit subagent lifecycle markers.
+case "$HOOK_TYPE" in
+    subagent-start)
+        emit_osc_marker "subagent_start=$AGENT_ID" "session_id=${CLAUDE_SESSION_ID:-}"
+        ;;
+    subagent-stop)
+        emit_osc_marker "subagent_stop=$AGENT_ID" "session_id=${CLAUDE_SESSION_ID:-}"
+        ;;
+esac
 
 exit 0

@@ -134,6 +134,9 @@ pub struct TherminalInterceptor {
     /// `None` by default — the dispatcher drops harness events on the
     /// floor if no sink is installed.
     harness_event_tx: Option<mpsc::Sender<TaggedHarnessEvent>>,
+    /// Pane ID stamped onto every `TaggedHarnessEvent` before forwarding.
+    /// Set via [`Self::set_pane_id`]; `None` by default (tests, standalone).
+    pane_id: Option<u64>,
 }
 
 impl TherminalInterceptor {
@@ -149,6 +152,7 @@ impl TherminalInterceptor {
                 command_tracker: Arc::new(Mutex::new(CommandTracker::new())),
                 osc_registry: Arc::new(OscHandlerRegistry::new()),
                 harness_event_tx: None,
+                pane_id: None,
             },
             rx,
         )
@@ -168,6 +172,7 @@ impl TherminalInterceptor {
                 command_tracker,
                 osc_registry: Arc::new(OscHandlerRegistry::new()),
                 harness_event_tx: None,
+                pane_id: None,
             },
             rx,
         )
@@ -206,6 +211,16 @@ impl TherminalInterceptor {
     /// dispatcher logs at `trace` and drops the event.
     pub fn set_harness_event_sink(&mut self, tx: mpsc::Sender<TaggedHarnessEvent>) {
         self.harness_event_tx = Some(tx);
+    }
+
+    /// Set the pane ID stamped onto every outgoing [`TaggedHarnessEvent`].
+    ///
+    /// Called by the daemon at pane-construction time so marker events
+    /// carry pane context through the shared `mpsc` channel to the drain
+    /// thread. Without this, the drain thread has no way to route marker
+    /// data into the correct `PaneCapacityCache` entry.
+    pub fn set_pane_id(&mut self, pane_id: u64) {
+        self.pane_id = Some(pane_id);
     }
 
     /// Claim an OSC code on this interceptor's shared handler registry.
@@ -263,9 +278,10 @@ impl TherminalInterceptor {
     }
 
     /// Emit a tagged harness event on the optional `harness_event_tx`
-    /// sink. Silent if no sink is installed or the receiver has been
-    /// dropped.
-    fn emit_harness(&self, tagged: TaggedHarnessEvent) {
+    /// sink. Stamps the pane_id before forwarding. Silent if no sink is
+    /// installed or the receiver has been dropped.
+    fn emit_harness(&self, mut tagged: TaggedHarnessEvent) {
+        tagged.pane_id = self.pane_id;
         if let Some(tx) = &self.harness_event_tx
             && tx.send(tagged).is_err()
         {

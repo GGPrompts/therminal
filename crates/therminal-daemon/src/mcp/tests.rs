@@ -1549,6 +1549,7 @@ async fn get_agent_session_detail_returns_all_five_fields() {
                 working_dir: Some("/home/marci/projects/therminal".into()),
                 updated_at: 0,
                 last_seen_at: 0,
+                marker_seen_at: 0,
             },
         );
         pane_id
