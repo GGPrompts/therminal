@@ -369,10 +369,7 @@ async fn start_daemon(
                                 .agent_registry()
                                 .agents()
                                 .iter()
-                                .filter_map(|e| {
-                                    mgr.pane_cwd(e.pane_id)
-                                        .map(|c| (e.pane_id, c))
-                                })
+                                .filter_map(|e| mgr.pane_cwd(e.pane_id).map(|c| (e.pane_id, c)))
                                 .collect();
                             tracing::info!(
                                 session_id = %state.session_id,

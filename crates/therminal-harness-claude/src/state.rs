@@ -473,7 +473,7 @@ fn pid_is_alive(pid: i64) -> bool {
 /// (5 min) caps worst-case latency for genuinely dead WSL sessions.
 #[cfg(windows)]
 fn pid_is_alive(pid: i64) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     let Ok(pid) = u32::try_from(pid) else {
