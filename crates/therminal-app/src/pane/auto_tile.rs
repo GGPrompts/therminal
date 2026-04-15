@@ -300,7 +300,7 @@ mod tests {
     fn spawn_ev(id: &str) -> SwarmWatcherEvent {
         SwarmWatcherEvent::SpawnSubagent {
             agent_id: id.to_string(),
-            jsonl_path: std::path::PathBuf::from(format!("/tmp/agent-{id}.jsonl")),
+            jsonl_path: Some(std::path::PathBuf::from(format!("/tmp/agent-{id}.jsonl"))),
         }
     }
 
