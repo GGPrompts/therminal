@@ -63,14 +63,14 @@ use super::{
     GetWorkspaceLayoutResult, HotspotInfo, LayoutNodeJson, ListAgentsParam, ListAgentsResult,
     ListPanesParam, ListPanesResult, ListWorkspacesParam, ListWorkspacesResult, MIN_PANE_COLS,
     MIN_PANE_ROWS, PaneContentResult, PaneIdParam, PaneInfo, PanePeekResult, PaneSummaryResult,
-    PaneTagsResult, PeekPaneParam, QueryCommandsParam, QueryCommandsResult, QueryEventsParam,
-    QueryEventsResult, QuerySemanticHistoryParam, QuerySemanticHistoryResult, SemanticRegionInfo,
-    SessionCreatedResult, SessionDestroyedResult, SessionIdParam, SessionInfoResult,
-    SessionListResult, SpawnPaneParam, SpawnPaneResult, TagPaneParam, TherminalMcpServer,
-    ToggleTimelineParam, ToggleTimelineResult, UntagPaneParam, WaitForOutputParam,
-    WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam, WriteToPaneResult,
-    build_content_preview, find_first_pane_in_session, find_pane_info, json_content, now_unix_secs,
-    pane_content_hash, render_grid_lines,
+    PaneTagsResult, PeekPaneParam, PinPaneParam, PinResult, QueryCommandsParam,
+    QueryCommandsResult, QueryEventsParam, QueryEventsResult, QuerySemanticHistoryParam,
+    QuerySemanticHistoryResult, SemanticRegionInfo, SessionCreatedResult, SessionDestroyedResult,
+    SessionIdParam, SessionInfoResult, SessionListResult, SpawnPaneParam, SpawnPaneResult,
+    TagPaneParam, TherminalMcpServer, ToggleTimelineParam, ToggleTimelineResult, UnpinPaneParam,
+    UntagPaneParam, WaitForOutputParam, WaitForOutputResult, WorkspaceInfoResult, WriteToPaneParam,
+    WriteToPaneResult, build_content_preview, find_first_pane_in_session, find_pane_info,
+    json_content, now_unix_secs, pane_content_hash, render_grid_lines,
 };
 
 impl TherminalMcpServer {
@@ -476,6 +476,48 @@ impl TherminalMcpServer {
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "untag_pane failed: {e}"
+            ))])),
+        }
+    }
+
+    /// Pin a pane by setting the `pinned=true` tag (tn-n5jk).
+    pub(super) async fn handle_pin_pane(
+        &self,
+        params: PinPaneParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut mgr = self.session_mgr.lock().await;
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("pinned".to_string(), "true".to_string());
+        match mgr.tag_pane(params.pane_id, tags) {
+            Ok(_) => {
+                let result = PinResult {
+                    pane_id: params.pane_id,
+                    pinned: true,
+                };
+                Ok(CallToolResult::success(vec![json_content(&result)?]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "pin_pane failed: {e}"
+            ))])),
+        }
+    }
+
+    /// Unpin a pane by removing the `pinned` tag (tn-n5jk).
+    pub(super) async fn handle_unpin_pane(
+        &self,
+        params: UnpinPaneParam,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut mgr = self.session_mgr.lock().await;
+        match mgr.untag_pane(params.pane_id, Some(vec!["pinned".to_string()])) {
+            Ok(_) => {
+                let result = PinResult {
+                    pane_id: params.pane_id,
+                    pinned: false,
+                };
+                Ok(CallToolResult::success(vec![json_content(&result)?]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "unpin_pane failed: {e}"
             ))])),
         }
     }
@@ -1790,6 +1832,16 @@ pub(super) fn tool_definitions() -> Vec<Tool> {
             "terminal.panes.untag",
             "Remove tags from a pane. If `keys` is omitted, all tags on the pane are cleared; otherwise only the named keys are removed (no-op for keys that aren't set). Returns the remaining tag set.",
             schema_for_type::<UntagPaneParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.pin",
+            "Pin a pane so it stays visible across workspace tab switches. Pinned panes are sticky — they follow the user to whichever workspace is active. Returns the pane's pinned state.",
+            schema_for_type::<PinPaneParam>(),
+        ),
+        Tool::new(
+            "terminal.panes.unpin",
+            "Unpin a previously pinned pane, reverting it to normal workspace-scoped visibility.",
+            schema_for_type::<UnpinPaneParam>(),
         ),
         Tool::new(
             "terminal.panes.get_geometry",

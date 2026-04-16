@@ -140,6 +140,14 @@ impl ServerHandler for TherminalMcpServer {
                 let params: UntagPaneParam = parse_args(args)?;
                 self.handle_untag_pane(params).await
             }
+            "terminal.panes.pin" => {
+                let params: PinPaneParam = parse_args(args)?;
+                self.handle_pin_pane(params).await
+            }
+            "terminal.panes.unpin" => {
+                let params: UnpinPaneParam = parse_args(args)?;
+                self.handle_unpin_pane(params).await
+            }
             "terminal.panes.get_geometry" => {
                 let params: GetPaneGeometryParam = parse_args(args)?;
                 self.handle_get_pane_geometry(params).await

@@ -317,4 +317,53 @@ impl App {
             w.request_redraw();
         }
     }
+
+    /// Toggle pinned state on the focused pane (tn-n5jk).
+    ///
+    /// Pinned panes stay visible during workspace switches. The pinned
+    /// flag is also mirrored as a `pinned=true` tag on the daemon side
+    /// so it persists across restarts.
+    pub(crate) fn toggle_pin_focused_pane(&mut self) {
+        let focused = match self.focused_pane() {
+            Some(id) => id,
+            None => return,
+        };
+
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let pane = match layout.find_pane_mut(focused) {
+            Some(p) => p,
+            None => return,
+        };
+
+        pane.pinned = !pane.pinned;
+        let now_pinned = pane.pinned;
+        info!(pane_id = focused, pinned = now_pinned, "toggled pane pin");
+
+        // Mirror pin state to daemon tags for persistence.
+        if self.is_daemon_mode()
+            && let Some(daemon_id) = self.pane_id_map.daemon_for_local(focused)
+        {
+            if now_pinned {
+                let mut tags = std::collections::HashMap::new();
+                tags.insert("pinned".to_string(), "true".to_string());
+                let _ = self.daemon_rpc_blocking(IpcRequest::TagPane {
+                    pane_id: daemon_id,
+                    tags,
+                });
+            } else {
+                let _ = self.daemon_rpc_blocking(IpcRequest::UntagPane {
+                    pane_id: daemon_id,
+                    keys: Some(vec!["pinned".to_string()]),
+                });
+            }
+        }
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
 }

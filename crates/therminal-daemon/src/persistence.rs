@@ -82,12 +82,15 @@ pub fn snapshot(mgr: &SessionManager) -> PersistedState {
         let mut panes = Vec::new();
         for window in &session.windows {
             for pane in &window.panes {
+                let tags = pane.tags();
+                let pinned = tags.get("pinned").map(|v| v == "true").unwrap_or(false);
                 panes.push(PersistedPane {
                     cwd: pane.cwd(),
                     shell: pane.shell().to_owned(),
                     cols: pane.cols(),
                     rows: pane.rows(),
-                    tags: pane.tags(),
+                    tags,
+                    pinned,
                 });
             }
         }
@@ -185,6 +188,7 @@ mod tests {
                         cols: 120,
                         rows: 40,
                         tags: Default::default(),
+                        pinned: false,
                     },
                     PersistedPane {
                         cwd: "/tmp".into(),
@@ -192,6 +196,7 @@ mod tests {
                         cols: 80,
                         rows: 24,
                         tags: Default::default(),
+                        pinned: false,
                     },
                 ],
                 workspaces: vec![],
@@ -231,6 +236,7 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     tags: Default::default(),
+                    pinned: false,
                 }],
                 workspaces: vec![],
                 active_workspace: 1,
@@ -272,6 +278,7 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     tags: Default::default(),
+                    pinned: false,
                 }],
                 workspaces: vec![],
                 active_workspace: 1,
@@ -309,6 +316,7 @@ mod tests {
                         cols: 80,
                         rows: 24,
                         tags: Default::default(),
+                        pinned: false,
                     },
                     PersistedPane {
                         cwd: "/var".into(),
@@ -316,6 +324,7 @@ mod tests {
                         cols: 120,
                         rows: 40,
                         tags: Default::default(),
+                        pinned: false,
                     },
                 ],
                 workspaces: vec![],

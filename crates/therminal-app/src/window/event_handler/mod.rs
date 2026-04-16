@@ -172,6 +172,10 @@ impl App {
                     w.request_redraw();
                 }
             }
+            KeyAction::TogglePinPane => {
+                // tn-n5jk: toggle the pinned state of the focused pane.
+                self.toggle_pin_focused_pane();
+            }
             KeyAction::FocusMode => {
                 // tn-t2yd.2: toggle runtime focus mode (hide/show all chrome).
                 self.focus_mode = !self.focus_mode;
@@ -264,7 +268,14 @@ impl App {
                 .unwrap_or_default();
             crate::menu::build_selection_menu(text, bindings, (px, py))
         } else {
-            crate::menu::build_pane_menu(pane_id, bindings, (px, py))
+            {
+                let is_pinned = self
+                    .get_layout()
+                    .and_then(|l| l.find_pane(pane_id))
+                    .map(|p| p.pinned)
+                    .unwrap_or(false);
+                crate::menu::build_pane_menu(pane_id, is_pinned, bindings, (px, py))
+            }
         };
 
         // If a hotspot sits under the cursor, prepend hotspot-specific
@@ -354,6 +365,7 @@ impl App {
             KeyAction::HotspotShowGitRef { ref tool, ref hash } => {
                 self.show_git_ref_in_pane(tool, hash);
             }
+            KeyAction::TogglePinPane => self.toggle_pin_focused_pane(),
             KeyAction::NewWorkspace => self.create_new_workspace(),
             KeyAction::RenameWorkspace => {
                 let ws_id = self

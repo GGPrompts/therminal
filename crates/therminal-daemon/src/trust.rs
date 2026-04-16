@@ -69,6 +69,8 @@ pub fn tool_category(tool_name: &str) -> Option<ToolCategory> {
         | "terminal.panes.create_tail"
         | "terminal.panes.tag"
         | "terminal.panes.untag"
+        | "terminal.panes.pin"
+        | "terminal.panes.unpin"
         | "terminal.widgets.timeline.toggle" => Some(ToolCategory::Writer),
         "terminal.sessions.destroy" | "terminal.panes.destroy" => Some(ToolCategory::Admin),
         _ => None,

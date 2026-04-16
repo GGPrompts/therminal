@@ -322,5 +322,6 @@ where
             pty_master,
             scrollback_lines,
         },
+        pinned: false,
     })
 }

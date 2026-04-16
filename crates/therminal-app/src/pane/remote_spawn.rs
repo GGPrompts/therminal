@@ -866,6 +866,7 @@ pub(crate) fn build_remote_pane_state(
                 writer: Some(writer_handle),
             },
         },
+        pinned: false,
     })
 }
 

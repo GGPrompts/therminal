@@ -116,6 +116,10 @@ pub enum PaneCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Pin a pane so it stays visible across workspace switches.
+    Pin { pane_id: u64 },
+    /// Unpin a pane, reverting to normal workspace-scoped visibility.
+    Unpin { pane_id: u64 },
     /// Focus (select) a pane.
     Focus { pane_id: u64 },
     /// Move a pane to a different workspace within the same session.
@@ -166,6 +170,8 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
         } => peek(ctx, pane_id, last, trim, out),
         PaneCmd::Tag { pane_id, kvs } => tag(ctx, pane_id, &kvs),
         PaneCmd::Untag { pane_id, keys, all } => untag(ctx, pane_id, keys, all),
+        PaneCmd::Pin { pane_id } => pin(ctx, pane_id),
+        PaneCmd::Unpin { pane_id } => unpin(ctx, pane_id),
         PaneCmd::Focus { pane_id } => focus(ctx, pane_id),
         PaneCmd::Move { pane_id, workspace } => move_pane(ctx, pane_id, workspace),
         PaneCmd::Swap { a, b } => swap(ctx, a, b),
@@ -429,6 +435,33 @@ fn untag(ctx: &CliCtx, pane_id: u64, keys: Vec<String>, all: bool) -> Result<()>
     match resp {
         IpcResponse::PaneTagged { tags, .. } => {
             println!("{}", tags_compact(&tags));
+            Ok(())
+        }
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn pin(ctx: &CliCtx, pane_id: u64) -> Result<()> {
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("pinned".to_string(), "true".to_string());
+    let resp = ctx.send(IpcRequest::TagPane { pane_id, tags })?;
+    match resp {
+        IpcResponse::PaneTagged { .. } => {
+            println!("pinned");
+            Ok(())
+        }
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn unpin(ctx: &CliCtx, pane_id: u64) -> Result<()> {
+    let resp = ctx.send(IpcRequest::UntagPane {
+        pane_id,
+        keys: Some(vec!["pinned".to_string()]),
+    })?;
+    match resp {
+        IpcResponse::PaneTagged { .. } => {
+            println!("unpinned");
             Ok(())
         }
         other => bail!("unexpected daemon response: {other:?}"),

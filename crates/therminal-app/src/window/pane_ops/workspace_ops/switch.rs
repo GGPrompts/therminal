@@ -57,7 +57,13 @@ impl App {
                 let switched = self
                     .workspaces
                     .as_mut()
-                    .map(|wm| wm.switch_to(n as usize, || None))
+                    .map(|wm| {
+                        let ok = wm.switch_to(n as usize, || None);
+                        if ok {
+                            wm.migrate_pinned_to_active();
+                        }
+                        ok
+                    })
                     .unwrap_or(false);
                 if switched {
                     info!("Switched to workspace {n}");
@@ -82,7 +88,12 @@ impl App {
                     .workspaces
                     .as_mut()
                     .map(|wm| {
-                        wm.switch_to(n as usize, || Some((LayoutNode::Leaf(state), new_pane_id)))
+                        let ok = wm
+                            .switch_to(n as usize, || Some((LayoutNode::Leaf(state), new_pane_id)));
+                        if ok {
+                            wm.migrate_pinned_to_active();
+                        }
+                        ok
                     })
                     .unwrap_or(false);
                 if switched {
@@ -158,6 +169,7 @@ impl App {
         });
 
         if switched {
+            wm.migrate_pinned_to_active();
             info!("Switched to workspace {n}");
             self.relayout_and_redraw();
             self.publish_workspace_state();

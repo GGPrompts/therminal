@@ -128,6 +128,28 @@ pub(crate) struct PaneTagsResult {
     pub(crate) tags: std::collections::HashMap<String, String>,
 }
 
+/// Pin a pane so it stays visible across workspace switches (tn-n5jk).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct PinPaneParam {
+    /// The numeric pane ID to pin.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
+    pub(crate) pane_id: u64,
+}
+
+/// Unpin a pane so it reverts to normal workspace-scoped visibility.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UnpinPaneParam {
+    /// The numeric pane ID to unpin.
+    #[serde(deserialize_with = "deser_compat::u64_flexible")]
+    pub(crate) pane_id: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct PinResult {
+    pub(crate) pane_id: u64,
+    pub(crate) pinned: bool,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ListPanesParam {
     /// Optional session ID to filter panes by. If omitted, returns panes from all sessions.

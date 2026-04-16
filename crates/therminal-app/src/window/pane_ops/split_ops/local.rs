@@ -257,6 +257,7 @@ impl App {
                             term,
                             watcher,
                         },
+                        pinned: false,
                     })
                 }
                 Err(e) => {

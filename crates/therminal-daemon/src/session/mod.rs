@@ -147,6 +147,7 @@ mod tests {
             cols: 80,
             rows: 24,
             tags: tags.clone(),
+            pinned: false,
         };
         let json = serde_json::to_string(&pp).unwrap();
         let parsed: PersistedPane = serde_json::from_str(&json).unwrap();

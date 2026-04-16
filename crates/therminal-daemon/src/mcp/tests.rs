@@ -717,12 +717,12 @@ fn sandboxed_is_minimum_tier_for_resources() {
 
 // ── tool_definitions() surface lock ─────────────────────────────────
 
-/// Lock in the count: exactly 32 tools must be returned. Bumped from
-/// 31 to 32: +1 in tn-cnfi (`terminal.widgets.timeline.toggle`).
+/// Lock in the count: exactly 34 tools must be returned. Bumped from
+/// 32 to 34: +2 in tn-n5jk (`terminal.panes.pin`, `terminal.panes.unpin`).
 #[test]
 fn tool_definitions_returns_32_tools() {
     let tools = tool_definitions();
-    assert_eq!(tools.len(), 32, "expected exactly 32 tool definitions");
+    assert_eq!(tools.len(), 34, "expected exactly 34 tool definitions");
 }
 
 /// Lock in the names so a rename or accidental drop is caught immediately.
@@ -760,6 +760,8 @@ fn tool_definitions_contains_all_expected_names() {
         "terminal.agents.get_cadence",
         "terminal.agents.find_with_capacity",
         "terminal.panes.create_tail",
+        "terminal.panes.pin",
+        "terminal.panes.unpin",
         "terminal.patterns.stats",
         "terminal.events.stats",
         "terminal.widgets.timeline.toggle",

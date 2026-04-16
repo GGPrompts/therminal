@@ -80,6 +80,9 @@ pub enum KeyAction {
     /// Toggle "focus mode" — hide/show all chrome (pane headers, status
     /// bar, tab bar) for maximum terminal space (tn-t2yd.2).
     FocusMode,
+    /// Toggle the pinned state of the focused pane (tn-n5jk). Pinned panes
+    /// stay visible across workspace tab switches.
+    TogglePinPane,
     /// Show the launcher overlay (profile tile grid).
     ShowLauncher,
     /// Scroll the viewport one page up (into scrollback history).
@@ -156,6 +159,7 @@ impl KeyAction {
             KeyAction::JumpErrorNext => "Jump to next error",
             KeyAction::ToggleAgentTimeline => "Toggle agent timeline",
             KeyAction::FocusMode => "Toggle focus mode (hide all chrome)",
+            KeyAction::TogglePinPane => "Toggle pin pane (sticky across workspaces)",
             KeyAction::ShowLauncher => "Show launcher (profile selector)",
             KeyAction::ScrollPageUp => "Scroll page up",
             KeyAction::ScrollPageDown => "Scroll page down",
@@ -194,7 +198,8 @@ impl KeyAction {
             | KeyAction::SwitchWorkspace(_)
             | KeyAction::SendToWorkspace(_)
             | KeyAction::NewWorkspace
-            | KeyAction::RenameWorkspace => "Pane Management",
+            | KeyAction::RenameWorkspace
+            | KeyAction::TogglePinPane => "Pane Management",
             KeyAction::JumpRegionPrev
             | KeyAction::JumpRegionNext
             | KeyAction::JumpErrorPrev
@@ -450,6 +455,11 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+alt+t".to_string(),
                     action: KeyAction::ToggleAgentTimeline,
+                },
+                // Pin/unpin focused pane (tn-n5jk)
+                Keybinding {
+                    key: "ctrl+alt+p".to_string(),
+                    action: KeyAction::TogglePinPane,
                 },
                 // Focus mode: hide all chrome (tn-t2yd.2)
                 Keybinding {

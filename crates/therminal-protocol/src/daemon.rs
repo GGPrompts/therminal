@@ -468,6 +468,9 @@ pub struct PaneSummary {
     pub last_exit_code: Option<i32>,
     pub agent_name: Option<String>,
     pub tags: HashMap<String, String>,
+    /// Whether the pane is pinned (sticky across workspace switches, tn-n5jk).
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Lightweight agent summary returned by `IpcRequest::ListAgents`.
@@ -810,6 +813,10 @@ pub struct PersistedPane {
     /// daemon restarts via session-state persistence.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
+    /// Whether this pane is pinned (sticky across workspace switches).
+    /// Defaults to `false` for legacy data. See tn-n5jk.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Persisted metadata for a session.
@@ -1417,6 +1424,7 @@ mod tests {
             cols: 80,
             rows: 24,
             tags,
+            pinned: false,
         };
         let json = serde_json::to_string(&pane).unwrap();
         let parsed: PersistedPane = serde_json::from_str(&json).unwrap();
@@ -1504,6 +1512,7 @@ mod tests {
                 last_exit_code: Some(0),
                 agent_name: Some("claude".to_string()),
                 tags: tags.clone(),
+                pinned: false,
             },
             PaneSummary {
                 pane_id: 2,
@@ -1514,6 +1523,7 @@ mod tests {
                 last_exit_code: None,
                 agent_name: None,
                 tags: HashMap::new(),
+                pinned: false,
             },
         ];
         let msg = IpcMessage::Response {

@@ -186,10 +186,13 @@ fn format_hotkey(key: &str) -> String {
 /// Build the context menu for a pane (no selection).
 pub(crate) fn build_pane_menu(
     pane_id: PaneId,
+    is_pinned: bool,
     bindings: &[therminal_core::config::Keybinding],
     position: (f32, f32),
 ) -> ContextMenu {
     let hint = |action: &KeyAction| hotkey_for_action(bindings, action);
+
+    let pin_label = if is_pinned { "Unpin pane" } else { "Pin pane" };
 
     ContextMenu {
         sections: vec![
@@ -207,12 +210,20 @@ pub(crate) fn build_pane_menu(
                     enabled: true,
                 },
             ]),
-            MenuSection(vec![MenuItem {
-                label: "Close Pane".into(),
-                hotkey_hint: hint(&KeyAction::ClosePane),
-                action: KeyAction::ClosePane,
-                enabled: true,
-            }]),
+            MenuSection(vec![
+                MenuItem {
+                    label: pin_label.into(),
+                    hotkey_hint: hint(&KeyAction::TogglePinPane),
+                    action: KeyAction::TogglePinPane,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Close Pane".into(),
+                    hotkey_hint: hint(&KeyAction::ClosePane),
+                    action: KeyAction::ClosePane,
+                    enabled: true,
+                },
+            ]),
             MenuSection(vec![
                 MenuItem {
                     label: "Copy".into(),
@@ -913,7 +924,7 @@ mod tests {
     fn merged_hotspot_and_pane_menu_prepends_hotspot_sections() {
         use therminal_terminal::hotspot_detection::HotspotKind;
 
-        let pane_menu = build_pane_menu(3, &[], (0.0, 0.0));
+        let pane_menu = build_pane_menu(3, false, &[], (0.0, 0.0));
         let pane_section_count = pane_menu.sections.len();
         let pane_item_count = pane_menu.item_count();
 
@@ -951,7 +962,7 @@ mod tests {
 
     #[test]
     fn pane_menu_alone_has_no_hotspot_actions() {
-        let menu = build_pane_menu(1, &[], (0.0, 0.0));
+        let menu = build_pane_menu(1, false, &[], (0.0, 0.0));
         assert!(
             !menu
                 .flat_items()
@@ -962,7 +973,7 @@ mod tests {
 
     #[test]
     fn pane_menu_has_copy_pane_id_with_numeric_payload() {
-        let menu = build_pane_menu(7, &[], (0.0, 0.0));
+        let menu = build_pane_menu(7, false, &[], (0.0, 0.0));
         let item = menu
             .flat_items()
             .into_iter()

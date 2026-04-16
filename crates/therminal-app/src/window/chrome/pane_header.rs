@@ -168,6 +168,7 @@ pub(crate) fn draw_pane_header(
     pane: &PaneState,
     is_focused: bool,
     is_zoomed: bool,
+    is_pinned: bool,
     center_title: Option<&str>,
     claude_badge: Option<&str>,
     renderer: &mut GridRenderer,
@@ -204,6 +205,7 @@ pub(crate) fn draw_pane_header(
     );
     let strings = HeaderTextStrings::compute(
         pane.id,
+        is_pinned,
         center_title,
         claude_badge,
         &snapshot.tags,
@@ -460,12 +462,18 @@ struct HeaderTextStrings {
 impl HeaderTextStrings {
     fn compute(
         pane_id: PaneId,
+        is_pinned: bool,
         center_title: Option<&str>,
         claude_badge: Option<&str>,
         tags: &HashMap<String, String>,
         git_state: Option<&crate::git_state::GitState>,
     ) -> Self {
-        let index_text = format!(" {pane_id}");
+        // U+F08D is the Nerd Font "thumb-tack" pin icon.
+        let index_text = if is_pinned {
+            format!(" \u{f08d} {pane_id}")
+        } else {
+            format!(" {pane_id}")
+        };
         let process_text = match center_title {
             Some(title) => title.to_string(),
             None => format!("pane {pane_id}"),

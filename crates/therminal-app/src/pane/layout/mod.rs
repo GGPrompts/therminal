@@ -57,6 +57,7 @@ mod tests {
                 pty_master: pair.master,
                 scrollback_lines: 1000,
             },
+            pinned: false,
         }
     }
 

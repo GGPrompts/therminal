@@ -77,6 +77,10 @@ pub struct PaneState {
     pub region_index: Arc<Mutex<RegionIndex>>,
     /// The backend powering this pane (terminal, webview, etc.).
     pub backend: PaneBackendKind,
+    /// Pinned panes stay visible across workspace switches (tn-n5jk).
+    /// When `true`, the pane is excluded from workspace swap serialization
+    /// and remains in its layout slot during workspace transitions.
+    pub pinned: bool,
 }
 
 impl PaneState {

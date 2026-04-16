@@ -454,6 +454,78 @@ impl WorkspaceManager {
         })
     }
 
+    /// Collect pinned pane IDs across all workspaces.
+    #[allow(dead_code)]
+    pub fn pinned_pane_ids(&self) -> Vec<super::PaneId> {
+        let mut ids = Vec::new();
+        for ws in &self.workspaces {
+            for id in ws.layout.pane_ids() {
+                if let Some(pane) = ws.layout.find_pane(id)
+                    && pane.pinned
+                {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// After a workspace switch, migrate pinned panes from non-active
+    /// workspaces into the active workspace so they remain visible.
+    ///
+    /// Pinned panes are extracted from their source workspace and appended
+    /// to the active workspace's layout via a horizontal split. The source
+    /// workspace's tree is compacted after extraction. If extracting a
+    /// pinned pane leaves the source workspace empty, the source workspace
+    /// is left as Empty (it will be garbage collected by
+    /// `gc_empty_workspaces`).
+    pub fn migrate_pinned_to_active(&mut self) {
+        // Collect (workspace_idx, pane_id) pairs for pinned panes that are
+        // NOT already in the active workspace.
+        let active_idx = self.active_idx;
+        let mut to_migrate: Vec<(usize, super::PaneId)> = Vec::new();
+        for (idx, ws) in self.workspaces.iter().enumerate() {
+            if idx == active_idx {
+                continue;
+            }
+            for id in ws.layout.pane_ids() {
+                if let Some(pane) = ws.layout.find_pane(id)
+                    && pane.pinned
+                {
+                    to_migrate.push((idx, id));
+                }
+            }
+        }
+
+        for (ws_idx, pane_id) in to_migrate {
+            // Extract from source workspace.
+            let extracted = self.workspaces[ws_idx].layout.extract_pane(pane_id);
+            if let Some(pane) = extracted {
+                // Compact the source layout.
+                self.workspaces[ws_idx].layout.compact_layout();
+                // Update source focus if we extracted the focused pane.
+                if self.workspaces[ws_idx].focused_pane == Some(pane_id) {
+                    let ids = self.workspaces[ws_idx].layout.pane_ids();
+                    self.workspaces[ws_idx].focused_pane = ids.first().copied();
+                }
+                // Insert into the active workspace.
+                let target = &mut self.workspaces[self.active_idx].layout;
+                // Try to fill an Empty slot first.
+                if let Some(returned) = target.insert_pane_at_empty(pane) {
+                    // No empty slot. Create a split to add the pinned pane.
+                    let old_layout = std::mem::replace(target, LayoutNode::Empty);
+                    *target = LayoutNode::Split {
+                        direction: super::SplitDirection::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(old_layout),
+                        second: Box::new(LayoutNode::Leaf(returned)),
+                    };
+                    target.rebalance();
+                }
+            }
+        }
+    }
+
     /// Rename the active workspace.
     #[allow(dead_code)]
     pub fn rename_active(&mut self, name: String) {
@@ -623,6 +695,7 @@ mod tests {
                 pty_master: pair.master,
                 scrollback_lines: 1000,
             },
+            pinned: false,
         }
     }
 
@@ -658,6 +731,7 @@ mod tests {
                 pty_master: pair.master,
                 scrollback_lines: 1000,
             },
+            pinned: false,
         })
     }
 

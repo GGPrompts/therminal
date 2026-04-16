@@ -816,6 +816,8 @@ async fn dispatch_ipc(
                             if c.is_empty() { None } else { Some(c) }
                         };
                         let agent_name = mgr.agent_registry().get(pane.id).map(|e| e.name.clone());
+                        let tags = pane.tags();
+                        let pinned = tags.get("pinned").map(|v| v == "true").unwrap_or(false);
                         panes.push(PaneSummary {
                             pane_id: pane.id,
                             session_id: *sid,
@@ -824,7 +826,8 @@ async fn dispatch_ipc(
                             cwd,
                             last_exit_code: pane.last_exit_code(),
                             agent_name,
-                            tags: pane.tags(),
+                            tags,
+                            pinned,
                         });
                     }
                 }
