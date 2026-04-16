@@ -163,6 +163,11 @@ pub(crate) enum UserEvent {
         ratio: Option<f32>,
         session_id: Option<therminal_protocol::SessionId>,
     },
+    /// Pull OS keyboard focus back to the main winit window (tn-shgq).
+    /// Sent on a delay after WebView spawn/close because wry's
+    /// WebView2 asynchronously grabs OS keyboard focus once the page
+    /// finishes loading (seconds later), stranding the user.
+    RestoreMainFocus,
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -1030,6 +1035,34 @@ impl App {
         }
     }
 
+    /// Schedule a burst of `RestoreMainFocus` events across ~10 s (tn-shgq).
+    ///
+    /// Spawned on WebView create/destroy because the wry WebView2 child HWND
+    /// on Windows asynchronously grabs OS keyboard focus when the page
+    /// finishes loading (observed 4-5 s after creation for example.com), and
+    /// its teardown is likewise async. A synchronous `focus_window()` call
+    /// from the main thread loses that race. The fixed schedule below covers
+    /// common cold-start timings without adding a persistent guard that
+    /// would fight legitimate focus changes.
+    ///
+    /// Cheap: one short-lived std::thread per webview action (not per frame),
+    /// and every event just posts a `focus_window()` call on the main thread.
+    pub(crate) fn schedule_webview_focus_retries(proxy: EventLoopProxy<UserEvent>) {
+        std::thread::spawn(move || {
+            // Delays chosen to cover: WebView2 cold-start (~2-5s), page-load
+            // callbacks on slow networks (~5-10s), and tail end of async
+            // HWND teardown after destroy.
+            let delays_ms = [200u64, 800, 2000, 5000, 10000];
+            for d in delays_ms {
+                std::thread::sleep(std::time::Duration::from_millis(d));
+                if proxy.send_event(UserEvent::RestoreMainFocus).is_err() {
+                    // Event loop closed — nothing to do.
+                    break;
+                }
+            }
+        });
+    }
+
     /// Get the focused pane's OSC 7 cwd, if any (tn-vm2j).
     ///
     /// Used by the hotspot click handlers to resolve shell-relative
@@ -1374,6 +1407,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Bell(pane_id) => {
                 self.handle_bell(pane_id);
+            }
+            UserEvent::RestoreMainFocus => {
+                // tn-shgq: wry's WebView2 asynchronously grabs OS keyboard
+                // focus when the page finishes loading (often seconds after
+                // creation). A background retry-burst fires this event on a
+                // schedule so we win the race. No-op if there's no window.
+                if let Some(window) = self.window.as_ref() {
+                    window.focus_window();
+                }
             }
             UserEvent::SwarmWatcherTick => {
                 // New raw events arrived from the swarm watcher bridge.

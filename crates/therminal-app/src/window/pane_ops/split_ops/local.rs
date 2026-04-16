@@ -472,8 +472,13 @@ impl App {
             // — which stays focused in our internal state (tn-2wco) — no
             // longer receives key events through winit. Pull OS focus back
             // to the main window so the user can keep typing into the pane
-            // that spawned the webview.
+            // that spawned the webview. A single synchronous call isn't
+            // enough on Windows: WebView2 re-grabs focus asynchronously
+            // when the page finishes loading (often seconds later), so we
+            // also kick off a retry-burst that reposts `RestoreMainFocus`
+            // events over ~10 s to win the async race.
             window.focus_window();
+            crate::window::App::schedule_webview_focus_retries(self.event_proxy.clone());
         }
 
         info!(pane_id = new_id, url, "created webview pane");

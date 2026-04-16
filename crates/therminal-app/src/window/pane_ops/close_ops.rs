@@ -90,7 +90,14 @@ impl App {
         }
         self.pane_id_map.remove_by_local(focused);
         // tn-s5vj: destroy the platform-native webview if this was a WebView pane.
+        let was_webview = self.webview_manager.contains(focused);
         self.webview_manager.destroy(focused);
+        // tn-shgq: schedule OS-focus retries so the WebView child HWND
+        // teardown doesn't strand keyboard focus on a now-destroyed window
+        // (Windows beeps on every key until focus is reclaimed).
+        if was_webview {
+            crate::window::App::schedule_webview_focus_retries(self.event_proxy.clone());
+        }
 
         // Use remove_pane_any which searches all workspaces and handles cleanup.
         let wm = match self.workspaces.as_mut() {
@@ -163,11 +170,13 @@ impl App {
         // set_focused_pane (which carries the tn-0xuo focus_window hook) is
         // never called, so keyboard focus stays orphaned on the destroyed
         // child HWND and Windows beeps on every key. Restore OS focus to
-        // the main window directly.
-        if was_webview
-            && let Some(window) = self.window.as_ref()
-        {
-            window.focus_window();
+        // the main window directly, and schedule a retry-burst because
+        // the wry HWND teardown on Windows is observably async.
+        if was_webview {
+            if let Some(window) = self.window.as_ref() {
+                window.focus_window();
+            }
+            crate::window::App::schedule_webview_focus_retries(self.event_proxy.clone());
         }
 
         if let Some(last) = self.last_close_action
