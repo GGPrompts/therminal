@@ -10,6 +10,7 @@ members = [
     "crates/therminal-harness-claude",
     "crates/therminal-app",
     "crates/therminal-integration-tests",
+    "crates/therminal-tui",
 ]
 exclude = ["vendor"]
 
