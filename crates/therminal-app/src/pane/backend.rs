@@ -173,9 +173,15 @@ impl PaneBackend for PaneBackendKind {
             PaneBackendKind::JsonlTail { state, term, .. } => {
                 // Route keystrokes to the interactive viewer (tn-bjvl).
                 if let Ok(mut s) = state.lock() {
-                    s.handle_input(data);
-                    // tn-pes1: repaint the shadow term after navigation.
-                    s.refresh_shadow_term(term);
+                    let consumed = s.handle_input(data);
+                    if consumed {
+                        // tn-pes1: repaint the shadow term only when the
+                        // viewer state actually changed (scroll, expand,
+                        // follow-mode toggle, etc.).  Skipping the repaint
+                        // for unrecognised keys avoids a full VTE rewrite
+                        // on every keystroke.
+                        s.refresh_shadow_term(term);
+                    }
                 }
                 Ok(())
             }

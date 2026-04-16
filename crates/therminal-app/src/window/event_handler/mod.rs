@@ -1259,6 +1259,14 @@ impl App {
             // Regular keypress clears any active selection.
             self.clear_selection();
             self.handle_key_input(key_event);
+            // tn-zhac: Non-PTY backends (JsonlTail) handle input in-place
+            // without a PTY echo loop, so nothing else triggers a redraw.
+            // Request one explicitly. For terminal panes this is harmless
+            // because winit coalesces redundant redraw requests with the
+            // PTY-reader-driven redraw that follows.
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
     }
 }
