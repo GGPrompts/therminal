@@ -273,9 +273,10 @@ fn exec_tui(args: &[String]) -> Result<()> {
 fn run_tui(binary: &std::path::Path, args: &[String]) -> Result<()> {
     use anyhow::Context;
     use std::process::Command as Cmd;
-    let status = Cmd::new(binary).args(args).status().with_context(|| {
-        format!("failed to run {}", binary.display())
-    })?;
+    let status = Cmd::new(binary)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run {}", binary.display()))?;
     std::process::exit(status.code().unwrap_or(1));
 }
 

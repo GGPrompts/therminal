@@ -1022,8 +1022,7 @@ impl App {
                         }),
                     };
                     // tn-tl6u: restore pinned state from daemon summary.
-                    let is_pinned =
-                        pinned_map.get(&daemon_pane_id).copied().unwrap_or(false);
+                    let is_pinned = pinned_map.get(&daemon_pane_id).copied().unwrap_or(false);
                     match crate::pane::remote_spawn::build_remote_pane_state(
                         local_id,
                         daemon_pane_id,

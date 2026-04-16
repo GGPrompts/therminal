@@ -268,7 +268,10 @@ async fn build_reconcile_result(
                 panes.into_iter().map(|s| (s.pane_id, s.pinned)).collect()
             }
             Ok(Ok(other)) => {
-                warn!(?other, "reconcile: unexpected response to ListPanes — pinned state will default to false");
+                warn!(
+                    ?other,
+                    "reconcile: unexpected response to ListPanes — pinned state will default to false"
+                );
                 HashMap::new()
             }
             Ok(Err(e)) => {
@@ -351,8 +354,8 @@ async fn build_reconcile_result(
                 // scan fires an AgentChanged event and the init/split
                 // paths (which DO pass the registry) handle it.
                 None,
-                None, // tn-s8w3: swarm_tx not available in reconcile context
-                None, // swarm_wake
+                None,      // tn-s8w3: swarm_tx not available in reconcile context
+                None,      // swarm_wake
                 is_pinned, // tn-tl6u: restore pinned state from daemon
             )
         })

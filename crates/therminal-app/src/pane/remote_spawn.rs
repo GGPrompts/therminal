@@ -263,8 +263,8 @@ pub fn spawn_remote_pane(
         callbacks,
         None,
         agent_registry,
-        None, // swarm_tx: initial spawn doesn't need hook-driven subagent forwarding yet
-        None, // swarm_wake
+        None,  // swarm_tx: initial spawn doesn't need hook-driven subagent forwarding yet
+        None,  // swarm_wake
         false, // new pane — not pinned yet
     )?;
 
