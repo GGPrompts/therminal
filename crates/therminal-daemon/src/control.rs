@@ -408,6 +408,11 @@ pub fn format_notification(event: &DaemonEvent) -> String {
         DaemonEvent::ToggleTimeline { visible } => {
             format!("%timeline-toggle {visible}\n")
         }
+        DaemonEvent::SpawnWebViewPaneRequested {
+            request_id, url, ..
+        } => {
+            format!("%webview-spawn-requested {request_id} {url}\n")
+        }
     }
 }
 

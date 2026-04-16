@@ -389,13 +389,17 @@ impl App {
     /// (WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS).
     /// The pane participates in the layout tree like any terminal pane
     /// and gets the same header chrome, context menu, and resize behavior.
-    #[allow(dead_code)]
-    pub(crate) fn create_webview_pane(&mut self, url: &str) {
+    ///
+    /// On success returns the newly allocated `PaneId`. On failure returns
+    /// a human-readable reason so the tn-jnn4 daemon forwarder can surface
+    /// it through `IpcRequest::AckWebViewPaneSpawn { error }` to the MCP /
+    /// CLI caller.
+    pub(crate) fn create_webview_pane(&mut self, url: &str) -> Result<crate::pane::PaneId, String> {
         let focused = match self.focused_pane() {
             Some(id) => id,
             None => {
                 info!("create_webview_pane: no focused pane to split from");
-                return;
+                return Err("no focused pane to split from".to_string());
             }
         };
 
@@ -413,22 +417,20 @@ impl App {
         let url_owned = url.to_string();
 
         // Step 1: Insert the WebView PaneState into the layout tree.
-        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
-            Some(l) => l,
-            None => return,
-        };
+        let layout = self
+            .workspaces
+            .as_mut()
+            .map(|wm| wm.layout_mut())
+            .ok_or_else(|| "workspace manager not initialised".to_string())?;
 
-        let new_id = layout.split_pane(focused, direction, |viewport| {
-            Some(crate::pane::spawn_webview_pane(viewport, &url_owned))
-        });
-
-        let new_id = match new_id {
-            Some(id) => id,
-            None => {
+        let new_id = layout
+            .split_pane(focused, direction, |viewport| {
+                Some(crate::pane::spawn_webview_pane(viewport, &url_owned))
+            })
+            .ok_or_else(|| {
                 self.show_toast("failed to split for webview pane".to_string());
-                return;
-            }
-        };
+                "failed to split for webview pane".to_string()
+            })?;
 
         // Step 2: Now that layout is no longer mutably borrowed, create
         // the platform-native webview. Look up the new pane's viewport.
@@ -445,7 +447,7 @@ impl App {
                     if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
                         layout.remove_pane(new_id);
                     }
-                    return;
+                    return Err("no active window to attach webview to".to_string());
                 }
             };
             let pane_count = self.get_layout().map(|l| l.pane_count()).unwrap_or(2);
@@ -462,7 +464,7 @@ impl App {
                     layout.remove_pane(new_id);
                 }
                 self.show_toast(format!("WebView failed: {e}"));
-                return;
+                return Err(format!("failed to create native webview: {e}"));
             }
         }
 
@@ -470,5 +472,51 @@ impl App {
         self.last_split_direction = direction;
         self.set_focused_pane(Some(new_id));
         self.relayout_and_redraw();
+        Ok(new_id)
+    }
+
+    /// Main-thread handler for `UserEvent::DaemonSpawnWebViewPane` (tn-jnn4).
+    ///
+    /// The daemon-event listener translates an `IpcRequest::SpawnWebViewPane`
+    /// from an MCP/CLI caller into a `SpawnWebViewPaneRequested` event and
+    /// forwards it into the winit loop. This method runs on the main thread
+    /// so it can drive wry on the window handle, then fires
+    /// `IpcRequest::AckWebViewPaneSpawn` back to the daemon to complete the
+    /// caller's pending future.
+    ///
+    /// `split_from`, `split_direction`, `ratio`, and `session_id` from the
+    /// original request are currently ignored — `create_webview_pane` always
+    /// splits the focused pane with an auto-picked direction. Wiring those
+    /// fields through is follow-up work; for the v1 round-trip the defaults
+    /// match what the GUI menu would do.
+    pub(crate) fn handle_daemon_webview_spawn(
+        &mut self,
+        request_id: u64,
+        url: &str,
+        _split_from: Option<crate::pane::PaneId>,
+        _split_direction: Option<String>,
+        _ratio: Option<f32>,
+        _session_id: Option<therminal_protocol::SessionId>,
+    ) {
+        let result = self.create_webview_pane(url);
+        let (pane_id, error) = match result {
+            Ok(id) => (Some(id), None),
+            Err(msg) => {
+                warn!(request_id, url, error = %msg, "webview spawn failed on GUI");
+                (None, Some(msg))
+            }
+        };
+        let req = therminal_protocol::daemon::IpcRequest::AckWebViewPaneSpawn {
+            request_id,
+            pane_id,
+            error,
+        };
+        if let Err(e) = self.daemon_rpc_blocking(req) {
+            warn!(
+                request_id,
+                error = %e,
+                "failed to ack SpawnWebViewPane back to daemon"
+            );
+        }
     }
 }

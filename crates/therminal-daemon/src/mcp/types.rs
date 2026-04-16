@@ -307,6 +307,13 @@ pub(crate) struct SpawnPaneParam {
     /// resolves the profile to shell/cwd/env spawn options. Profile takes
     /// precedence over `shell`, `command`, and `cwd` fields. tn-ar79.
     pub(crate) profile: Option<String>,
+    /// URL to load in a new WebView (wry-backed) pane (tn-jnn4). When
+    /// set, the daemon forwards a `SpawnWebViewPaneRequested` event to
+    /// the attached GUI instead of spawning a PTY. Mutually exclusive
+    /// with `command`, `shell`, `startup_command`, `worktree`, and
+    /// `profile` — the daemon rejects combinations that don't make
+    /// sense for a webview (no PTY, so no shell).
+    pub(crate) url: Option<String>,
 }
 
 /// Parameters for `terminal.panes.create_tail` — create a pane that

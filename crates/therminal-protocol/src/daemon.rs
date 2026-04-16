@@ -20,7 +20,7 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -294,6 +294,50 @@ pub enum IpcRequest {
     BatchLayoutOps { ops: Vec<IpcRequest> },
     /// Resolve a pending trust escalation (tn-b99).
     ResolveTrustEscalation { escalation_id: u64, approved: bool },
+    /// Request creation of a WebView (wry-backed) pane on the attached GUI
+    /// (tn-jnn4). Because wry `WebView` instances must be created on the
+    /// GUI's main thread with a live window handle, the daemon cannot
+    /// fulfil this request itself — it forwards a
+    /// [`DaemonEvent::SpawnWebViewPaneRequested`] to the connected GUI
+    /// client and awaits an `AckWebViewPaneSpawn` reply before responding
+    /// to the original caller with
+    /// [`IpcResponse::WebViewPaneSpawned`].
+    ///
+    /// When no GUI is attached (or the GUI does not ack within the daemon's
+    /// timeout), the daemon responds with [`IpcResponse::Error`] rather
+    /// than hanging.
+    SpawnWebViewPane {
+        /// URL to load in the new WebView pane. Must be an absolute URL
+        /// the platform webview can navigate to.
+        url: String,
+        /// Source pane to split from. `None` leaves selection of the
+        /// source up to the GUI (typically the currently focused pane).
+        split_from: Option<PaneId>,
+        /// Split direction: `"horizontal"` (side-by-side) or
+        /// `"vertical"` (stacked). `None` lets the GUI pick its default.
+        split_direction: Option<String>,
+        /// Split ratio for the source child (0.1..=0.9). Default 0.5.
+        ratio: Option<f32>,
+        /// Target session. `None` uses the GUI's focused session.
+        session_id: Option<SessionId>,
+    },
+    /// GUI → daemon acknowledgement for a pending
+    /// [`DaemonEvent::SpawnWebViewPaneRequested`] (tn-jnn4).
+    ///
+    /// Carries the newly allocated pane id on success or a human-readable
+    /// error string on failure. The daemon correlates the reply with the
+    /// original `SpawnWebViewPane` request via `request_id` and completes
+    /// the caller's pending future.
+    AckWebViewPaneSpawn {
+        /// The `request_id` carried by the
+        /// `SpawnWebViewPaneRequested` event this ack corresponds to.
+        request_id: u64,
+        /// New pane id on success.
+        pane_id: Option<PaneId>,
+        /// Error message on failure (e.g. GUI could not split, no focused
+        /// pane to split from). Mutually exclusive with `pane_id`.
+        error: Option<String>,
+    },
 }
 
 /// Typed IPC responses.
@@ -426,6 +470,13 @@ pub enum IpcResponse {
     AgentEventPushed,
     /// Trust escalation resolved (tn-b99).
     TrustEscalationResolved { escalation_id: u64 },
+    /// WebView pane was created on the GUI in response to
+    /// [`IpcRequest::SpawnWebViewPane`] (tn-jnn4).
+    WebViewPaneSpawned { pane_id: PaneId },
+    /// Acknowledgement of an [`IpcRequest::AckWebViewPaneSpawn`] from the
+    /// GUI — the daemon recorded the result and completed the original
+    /// caller's future (tn-jnn4).
+    WebViewPaneSpawnAcked,
     /// Generic error response.
     Error { message: String },
 }
@@ -658,6 +709,24 @@ pub enum DaemonEvent {
     /// Broadcast by the MCP `terminal.widgets.timeline.toggle` tool.
     /// The GUI subscribes to this event to show/hide the timeline overlay.
     ToggleTimeline { visible: bool },
+    /// tn-jnn4: daemon asks the connected GUI to create a WebView pane.
+    ///
+    /// Broadcast when an [`IpcRequest::SpawnWebViewPane`] arrives from an
+    /// MCP/CLI client. The GUI is expected to spawn the webview via
+    /// `create_webview_pane` on the main thread and reply with
+    /// [`IpcRequest::AckWebViewPaneSpawn`] carrying the new pane id (or
+    /// an error). The daemon correlates the ack to the original caller
+    /// via `request_id`.
+    SpawnWebViewPaneRequested {
+        /// Correlation id — matches the `request_id` in the subsequent
+        /// `AckWebViewPaneSpawn` reply.
+        request_id: u64,
+        url: String,
+        split_from: Option<PaneId>,
+        split_direction: Option<String>,
+        ratio: Option<f32>,
+        session_id: Option<SessionId>,
+    },
 }
 
 /// Event kind discriminant for subscription filtering.
@@ -683,6 +752,8 @@ pub enum EventKind {
     SubagentStopped,
     /// tn-cnfi: toggle the timeline widget visibility.
     ToggleTimeline,
+    /// tn-jnn4: daemon asks the GUI to create a WebView pane.
+    SpawnWebViewPaneRequested,
 }
 
 impl DaemonEvent {
@@ -701,6 +772,7 @@ impl DaemonEvent {
             DaemonEvent::SubagentStarted { .. } => EventKind::SubagentStarted,
             DaemonEvent::SubagentStopped { .. } => EventKind::SubagentStopped,
             DaemonEvent::ToggleTimeline { .. } => EventKind::ToggleTimeline,
+            DaemonEvent::SpawnWebViewPaneRequested { .. } => EventKind::SpawnWebViewPaneRequested,
         }
     }
 }
@@ -1540,6 +1612,125 @@ mod tests {
         let msg = IpcMessage::Request {
             request_id: 200,
             payload: IpcRequest::ListAgents,
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    // ── tn-jnn4: WebView pane spawn forward-and-ack ─────────────────────
+
+    #[test]
+    fn spawn_webview_pane_request_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 300,
+            payload: IpcRequest::SpawnWebViewPane {
+                url: "https://example.com".into(),
+                split_from: Some(1),
+                split_direction: Some("vertical".into()),
+                ratio: Some(0.5),
+                session_id: Some(1),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn spawn_webview_pane_request_minimal_round_trip() {
+        // All optional fields None — happy path when the GUI picks defaults.
+        let msg = IpcMessage::Request {
+            request_id: 301,
+            payload: IpcRequest::SpawnWebViewPane {
+                url: "https://example.com".into(),
+                split_from: None,
+                split_direction: None,
+                ratio: None,
+                session_id: None,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn webview_pane_spawned_response_round_trip() {
+        let msg = IpcMessage::Response {
+            request_id: 300,
+            payload: IpcResponse::WebViewPaneSpawned { pane_id: 42 },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn spawn_webview_pane_requested_event_round_trip() {
+        let msg = IpcMessage::Event {
+            payload: DaemonEvent::SpawnWebViewPaneRequested {
+                request_id: 300,
+                url: "https://example.com".into(),
+                split_from: Some(1),
+                split_direction: Some("vertical".into()),
+                ratio: Some(0.5),
+                session_id: Some(1),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn spawn_webview_pane_requested_event_kind() {
+        let e = DaemonEvent::SpawnWebViewPaneRequested {
+            request_id: 1,
+            url: "https://example.com".into(),
+            split_from: None,
+            split_direction: None,
+            ratio: None,
+            session_id: None,
+        };
+        assert_eq!(e.kind(), EventKind::SpawnWebViewPaneRequested);
+    }
+
+    #[test]
+    fn ack_webview_pane_spawn_success_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 302,
+            payload: IpcRequest::AckWebViewPaneSpawn {
+                request_id: 300,
+                pane_id: Some(42),
+                error: None,
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn ack_webview_pane_spawn_error_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 303,
+            payload: IpcRequest::AckWebViewPaneSpawn {
+                request_id: 300,
+                pane_id: None,
+                error: Some("no focused pane to split from".into()),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        let decoded = decode_ipc(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn webview_pane_spawn_acked_response_round_trip() {
+        let msg = IpcMessage::Response {
+            request_id: 302,
+            payload: IpcResponse::WebViewPaneSpawnAcked,
         };
         let encoded = encode_ipc(&msg).unwrap();
         let decoded = decode_ipc(&encoded[4..]).unwrap();

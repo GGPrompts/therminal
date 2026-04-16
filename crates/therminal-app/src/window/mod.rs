@@ -151,6 +151,18 @@ pub(crate) enum UserEvent {
     /// during workspace reconciliation (tn-9jhx). Mount the pane into the
     /// local layout tree and re-render.
     DaemonReconcilePanesReady(Box<ReconcileResult>),
+    /// The daemon forwarded a `SpawnWebViewPane` request from an MCP/CLI
+    /// caller (tn-jnn4). The main thread spawns the wry webview via
+    /// `create_webview_pane` and acks the daemon with the resulting
+    /// pane_id (or error).
+    DaemonSpawnWebViewPane {
+        request_id: u64,
+        url: String,
+        split_from: Option<therminal_protocol::PaneId>,
+        split_direction: Option<String>,
+        ratio: Option<f32>,
+        session_id: Option<therminal_protocol::SessionId>,
+    },
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -1387,6 +1399,27 @@ impl ApplicationHandler<UserEvent> for App {
                 info!(?result, "applying reconciliation result");
                 self.apply_reconcile_result(*result);
             }
+            UserEvent::DaemonSpawnWebViewPane {
+                request_id,
+                url,
+                split_from,
+                split_direction,
+                ratio,
+                session_id,
+            } => {
+                info!(
+                    request_id,
+                    url, "forwarded webview spawn request from daemon"
+                );
+                self.handle_daemon_webview_spawn(
+                    request_id,
+                    &url,
+                    split_from,
+                    split_direction,
+                    ratio,
+                    session_id,
+                );
+            }
         }
     }
 
@@ -1521,7 +1554,10 @@ async fn daemon_event_listener(
             .await?;
 
     match client
-        .subscribe_events(vec![EventKind::WorkspaceChanged])
+        .subscribe_events(vec![
+            EventKind::WorkspaceChanged,
+            EventKind::SpawnWebViewPaneRequested,
+        ])
         .await?
     {
         IpcResponse::Subscribed { .. } => {}
@@ -1532,7 +1568,7 @@ async fn daemon_event_listener(
             anyhow::bail!("unexpected subscribe response: {other:?}");
         }
     }
-    info!("daemon event listener subscribed to WorkspaceChanged");
+    info!("daemon event listener subscribed to WorkspaceChanged + SpawnWebViewPaneRequested");
 
     loop {
         let event = match client.recv_event().await {
@@ -1542,11 +1578,28 @@ async fn daemon_event_listener(
                 break;
             }
         };
-        if let DaemonEvent::WorkspaceChanged { session_id, .. } = event
-            && proxy
-                .send_event(UserEvent::DaemonWorkspaceChanged { session_id })
-                .is_err()
-        {
+        let forward = match event {
+            DaemonEvent::WorkspaceChanged { session_id, .. } => {
+                UserEvent::DaemonWorkspaceChanged { session_id }
+            }
+            DaemonEvent::SpawnWebViewPaneRequested {
+                request_id,
+                url,
+                split_from,
+                split_direction,
+                ratio,
+                session_id,
+            } => UserEvent::DaemonSpawnWebViewPane {
+                request_id,
+                url,
+                split_from,
+                split_direction,
+                ratio,
+                session_id,
+            },
+            _ => continue,
+        };
+        if proxy.send_event(forward).is_err() {
             // Event loop closed — exit gracefully.
             break;
         }

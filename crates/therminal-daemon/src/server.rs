@@ -18,6 +18,7 @@ use crate::ipc_transport::{IpcListener, IpcServerStream, cleanup_socket, socket_
 use crate::framing::{read_frame, write_frame};
 use tracing::{debug, error, info, warn};
 
+use therminal_protocol::PaneId;
 use therminal_protocol::daemon::{
     DaemonEvent, EventKind, IpcMessage, IpcRequest, IpcResponse, MAX_FRAME_SIZE, decode_ipc,
 };
@@ -30,6 +31,86 @@ use crate::session::SessionManager;
 
 /// Capacity of the event broadcast channel.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Timeout the daemon waits for the GUI to ack a `SpawnWebViewPane`
+/// request before giving up and returning an error to the caller (tn-jnn4).
+const WEBVIEW_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Monotonic counter for `SpawnWebViewPane` request ids (tn-jnn4).
+static WEBVIEW_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Map of outstanding `SpawnWebViewPane` request ids to the oneshot
+/// channel waiting on the GUI's ack (tn-jnn4). Modelled on the trust
+/// escalation response map in `mcp/mod.rs`.
+type WebViewSpawnResponseMap = std::sync::Mutex<
+    std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Result<PaneId, String>>>,
+>;
+
+fn webview_spawn_responses() -> &'static WebViewSpawnResponseMap {
+    static MAP: std::sync::OnceLock<WebViewSpawnResponseMap> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Forward a WebView pane spawn request to the attached GUI and await its
+/// ack (tn-jnn4). Shared by the raw `IpcRequest::SpawnWebViewPane`
+/// dispatch path and the MCP `terminal.panes.create { url }` tool.
+///
+/// Returns `IpcResponse::WebViewPaneSpawned` on success,
+/// `IpcResponse::Error` when no GUI is subscribed, the broadcast fails,
+/// the GUI reports an error via `AckWebViewPaneSpawn`, or the ack does
+/// not arrive within [`WEBVIEW_SPAWN_TIMEOUT`].
+pub(crate) async fn spawn_webview_pane_via_gui(
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    url: String,
+    split_from: Option<PaneId>,
+    split_direction: Option<String>,
+    ratio: Option<f32>,
+    session_id: Option<therminal_protocol::SessionId>,
+) -> IpcResponse {
+    if event_tx.receiver_count() == 0 {
+        return IpcResponse::Error {
+            message: "WebView panes require an attached GUI (no event subscribers)".to_string(),
+        };
+    }
+    let request_id = WEBVIEW_SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut map = webview_spawn_responses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.insert(request_id, resp_tx);
+    }
+    let event = DaemonEvent::SpawnWebViewPaneRequested {
+        request_id,
+        url,
+        split_from,
+        split_direction,
+        ratio,
+        session_id,
+    };
+    if event_tx.send(event).is_err() {
+        let mut map = webview_spawn_responses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.remove(&request_id);
+        return IpcResponse::Error {
+            message: "WebView spawn broadcast failed (no subscribers)".to_string(),
+        };
+    }
+    match tokio::time::timeout(WEBVIEW_SPAWN_TIMEOUT, resp_rx).await {
+        Ok(Ok(Ok(pane_id))) => IpcResponse::WebViewPaneSpawned { pane_id },
+        Ok(Ok(Err(msg))) => IpcResponse::Error { message: msg },
+        Ok(Err(_)) | Err(_) => {
+            let mut map = webview_spawn_responses()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.remove(&request_id);
+            IpcResponse::Error {
+                message: "WebView pane spawn timed out (GUI did not ack)".to_string(),
+            }
+        }
+    }
+}
 
 /// The daemon IPC server.
 ///
@@ -1073,6 +1154,48 @@ async fn dispatch_ipc(
             } else {
                 IpcResponse::Error {
                     message: format!("unknown or expired escalation_id: {}", escalation_id),
+                }
+            }
+        }
+        IpcRequest::SpawnWebViewPane {
+            url,
+            split_from,
+            split_direction,
+            ratio,
+            session_id,
+        } => {
+            spawn_webview_pane_via_gui(
+                event_tx,
+                url.clone(),
+                *split_from,
+                split_direction.clone(),
+                *ratio,
+                *session_id,
+            )
+            .await
+        }
+        IpcRequest::AckWebViewPaneSpawn {
+            request_id,
+            pane_id,
+            error,
+        } => {
+            let sender = {
+                let mut map = webview_spawn_responses()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                map.remove(request_id)
+            };
+            if let Some(tx) = sender {
+                let result: Result<PaneId, String> = match (pane_id, error) {
+                    (Some(pid), _) => Ok(*pid),
+                    (None, Some(msg)) => Err(msg.clone()),
+                    (None, None) => Err("GUI returned neither pane_id nor error".to_string()),
+                };
+                let _ = tx.send(result);
+                IpcResponse::WebViewPaneSpawnAcked
+            } else {
+                IpcResponse::Error {
+                    message: format!("unknown or expired webview spawn request_id: {request_id}"),
                 }
             }
         }

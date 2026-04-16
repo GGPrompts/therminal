@@ -129,6 +129,66 @@ impl TherminalMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         use therminal_terminal::pty::SpawnOptions;
 
+        // tn-jnn4: WebView pane path. When `url` is set, the MCP caller
+        // wants a wry-backed pane rather than a PTY. The daemon can't
+        // create wry WebViews (no main-thread window handle) so it
+        // forwards a `SpawnWebViewPaneRequested` event to the attached
+        // GUI and awaits the ack via `crate::server::spawn_webview_pane_via_gui`.
+        if let Some(url) = params.url.as_deref() {
+            let conflicting = [
+                ("command", params.command.is_some()),
+                ("shell", params.shell.is_some()),
+                ("startup_command", params.startup_command.is_some()),
+                ("worktree", params.worktree.is_some()),
+                ("profile", params.profile.is_some()),
+                ("cwd", params.cwd.is_some()),
+            ];
+            if let Some((field, _)) = conflicting.iter().find(|(_, set)| *set) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "`url` is mutually exclusive with `{field}` — WebView panes have no PTY"
+                ))]));
+            }
+            let tx = match self.daemon_event_tx.as_ref() {
+                Some(tx) => tx,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "daemon event bus not wired — cannot forward to GUI".to_string(),
+                    )]));
+                }
+            };
+            let resp = crate::server::spawn_webview_pane_via_gui(
+                tx,
+                url.to_string(),
+                params.split_from,
+                params.split_direction.clone(),
+                params.ratio,
+                params.session_id,
+            )
+            .await;
+            return match resp {
+                therminal_protocol::daemon::IpcResponse::WebViewPaneSpawned { pane_id } => {
+                    // Best-effort: the daemon does not know the webview
+                    // pane's dimensions or session binding (lives only in
+                    // the GUI's local layout tree until the next
+                    // SetWorkspaceState push). Callers can query
+                    // `terminal.panes.list` once the GUI syncs.
+                    let result = SpawnPaneResult {
+                        pane_id,
+                        session_id: params.session_id.unwrap_or(0),
+                        cols: 0,
+                        rows: 0,
+                    };
+                    Ok(CallToolResult::success(vec![json_content(&result)?]))
+                }
+                therminal_protocol::daemon::IpcResponse::Error { message } => {
+                    Ok(CallToolResult::error(vec![Content::text(message)]))
+                }
+                other => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "unexpected response from webview spawn: {other:?}"
+                ))])),
+            };
+        }
+
         let startup_command = params.startup_command.as_deref();
         let worktree_branch = params.worktree.as_deref();
 
@@ -1710,6 +1770,7 @@ impl TherminalMcpServer {
             shell: None,
             worktree: None,
             profile: None,
+            url: None,
         };
 
         // Reuse the spawn pane handler.

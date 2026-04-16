@@ -155,27 +155,36 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             url,
             out,
         } => {
-            if url.is_some() {
-                // tn-s5vj: WebView pane creation is GUI-only. The daemon
-                // doesn't manage WebView panes (no PTY), so the CLI prints
-                // an informational message directing users to the GUI API.
-                bail!(
-                    "WebView panes (--url) are GUI-only and cannot be created via the daemon CLI.\n\
-                     Use the GUI context menu or MCP terminal.panes.create {{ url: \"...\" }}."
-                );
+            if let Some(url_str) = url {
+                // tn-jnn4: WebView panes route through the daemon→GUI
+                // forward path. The daemon broadcasts a
+                // `SpawnWebViewPaneRequested` event, the attached GUI
+                // spawns the wry webview on the main thread, then acks
+                // back with the new pane id.
+                if startup_command.is_some()
+                    || shell.is_some()
+                    || worktree.is_some()
+                    || profile.is_some()
+                {
+                    bail!(
+                        "--url is mutually exclusive with --spawn, --shell, --worktree, --profile"
+                    );
+                }
+                create_webview(ctx, &url_str, from, split, ratio, session, out)
+            } else {
+                create(
+                    ctx,
+                    from,
+                    split,
+                    session,
+                    startup_command,
+                    ratio,
+                    shell,
+                    worktree,
+                    profile,
+                    out,
+                )
             }
-            create(
-                ctx,
-                from,
-                split,
-                session,
-                startup_command,
-                ratio,
-                shell,
-                worktree,
-                profile,
-                out,
-            )
         }
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
         PaneCmd::Send { pane_id, keys, raw } => send(ctx, pane_id, &keys, raw),
@@ -272,6 +281,45 @@ fn create(
         write_json(&serde_json::json!({ "pane_id": new_pane }))
     } else {
         println!("{new_pane}");
+        Ok(())
+    }
+}
+
+/// Create a WebView pane via the daemon→GUI forward path (tn-jnn4).
+///
+/// Requires a GUI window attached to the daemon; the CLI's IPC request
+/// bounces through `DaemonEvent::SpawnWebViewPaneRequested` and waits on
+/// the GUI's `AckWebViewPaneSpawn` reply.
+fn create_webview(
+    ctx: &CliCtx,
+    url: &str,
+    from: Option<u64>,
+    split: Option<String>,
+    ratio: Option<f32>,
+    session: Option<u64>,
+    out: OutputFlags,
+) -> Result<()> {
+    let split_direction = split.map(|s| match s.as_str() {
+        "h" => "horizontal".to_string(),
+        "v" => "vertical".to_string(),
+        other => other.to_string(),
+    });
+    let resp = ctx.send(IpcRequest::SpawnWebViewPane {
+        url: url.to_string(),
+        split_from: from,
+        split_direction,
+        ratio,
+        session_id: session,
+    })?;
+    let pane_id = match resp {
+        IpcResponse::WebViewPaneSpawned { pane_id } => pane_id,
+        IpcResponse::Error { message } => bail!("webview spawn failed: {message}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    };
+    if out.json {
+        write_json(&serde_json::json!({ "pane_id": pane_id }))
+    } else {
+        println!("{pane_id}");
         Ok(())
     }
 }

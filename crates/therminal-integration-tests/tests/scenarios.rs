@@ -27,9 +27,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use therminal_daemon_client::DaemonClient;
 use therminal_integration_tests::{DaemonHarness, wait_for_output};
 use therminal_protocol::IpcResponse;
-use therminal_protocol::daemon::IpcRequest;
+use therminal_protocol::daemon::{DaemonEvent, EventKind, IpcRequest};
 
 /// Scenario 1 — Command capture.
 ///
@@ -627,4 +628,191 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
         .status()
         .expect("git invocation");
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+}
+
+/// Scenario: WebView pane spawn round-trip (tn-jnn4).
+///
+/// WebView panes are created on the GUI's main thread (wry needs a window
+/// handle), so the daemon can't fulfil `SpawnWebViewPane` itself. Instead
+/// it broadcasts a `SpawnWebViewPaneRequested` event, waits for an
+/// `AckWebViewPaneSpawn` reply, and then responds to the original caller.
+///
+/// This test plays both roles: one `DaemonClient` stands in as the MCP /
+/// CLI caller issuing `SpawnWebViewPane`, a second stands in as the GUI,
+/// subscribes to `SpawnWebViewPaneRequested`, and sends back a synthetic
+/// `AckWebViewPaneSpawn`. No wry, no window handle — the test exercises
+/// only the protocol plumbing.
+#[tokio::test]
+async fn webview_spawn_round_trip_without_gui() {
+    let harness = DaemonHarness::spawn()
+        .await
+        .expect("daemon harness should spawn");
+
+    // ── "GUI" client: subscribe first, so the broadcast isn't lost. ──
+    let gui = DaemonClient::connect(harness.socket_path())
+        .await
+        .expect("GUI daemon client connects");
+    match gui
+        .subscribe_events(vec![EventKind::SpawnWebViewPaneRequested])
+        .await
+        .expect("gui subscribe")
+    {
+        IpcResponse::Subscribed { .. } => {}
+        other => panic!("unexpected subscribe response: {other:?}"),
+    }
+
+    // Mock GUI task: receive one event, ack with a synthetic pane id.
+    const MOCK_PANE_ID: u64 = 98765;
+    let gui_task = tokio::spawn(async move {
+        let evt = gui
+            .recv_event()
+            .await
+            .expect("GUI receives webview spawn event");
+        let request_id = match evt {
+            DaemonEvent::SpawnWebViewPaneRequested {
+                request_id, url, ..
+            } => {
+                assert_eq!(url, "https://example.com/");
+                request_id
+            }
+            other => panic!("unexpected event kind: {other:?}"),
+        };
+        let ack = gui
+            .send_request(IpcRequest::AckWebViewPaneSpawn {
+                request_id,
+                pane_id: Some(MOCK_PANE_ID),
+                error: None,
+            })
+            .await
+            .expect("gui ack RPC");
+        assert!(
+            matches!(ack, IpcResponse::WebViewPaneSpawnAcked),
+            "unexpected ack response: {ack:?}"
+        );
+    });
+
+    // ── "MCP caller" client: driven by the default harness client. ──
+    let resp = harness
+        .client()
+        .send_request(IpcRequest::SpawnWebViewPane {
+            url: "https://example.com/".into(),
+            split_from: None,
+            split_direction: None,
+            ratio: None,
+            session_id: None,
+        })
+        .await
+        .expect("spawn webview RPC");
+
+    match resp {
+        IpcResponse::WebViewPaneSpawned { pane_id } => {
+            assert_eq!(pane_id, MOCK_PANE_ID, "caller got the GUI-reported pane id");
+        }
+        other => panic!("unexpected caller response: {other:?}"),
+    }
+
+    gui_task.await.expect("GUI task completes");
+}
+
+/// Scenario: WebView pane spawn surfaces GUI-reported errors verbatim
+/// (tn-jnn4). If `create_webview_pane` fails on the main thread (e.g. no
+/// focused pane, wry construction error), the GUI sends
+/// `AckWebViewPaneSpawn { error: Some(..) }` and the daemon forwards the
+/// message through `IpcResponse::Error` to the caller.
+#[tokio::test]
+async fn webview_spawn_propagates_gui_error() {
+    let harness = DaemonHarness::spawn()
+        .await
+        .expect("daemon harness should spawn");
+    let gui = DaemonClient::connect(harness.socket_path())
+        .await
+        .expect("gui client");
+    match gui
+        .subscribe_events(vec![EventKind::SpawnWebViewPaneRequested])
+        .await
+        .expect("gui subscribe")
+    {
+        IpcResponse::Subscribed { .. } => {}
+        other => panic!("unexpected subscribe response: {other:?}"),
+    }
+
+    let gui_task = tokio::spawn(async move {
+        let evt = gui.recv_event().await.expect("receive event");
+        let request_id = match evt {
+            DaemonEvent::SpawnWebViewPaneRequested { request_id, .. } => request_id,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let _ = gui
+            .send_request(IpcRequest::AckWebViewPaneSpawn {
+                request_id,
+                pane_id: None,
+                error: Some("no focused pane to split from".into()),
+            })
+            .await
+            .expect("gui ack");
+    });
+
+    let resp = harness
+        .client()
+        .send_request(IpcRequest::SpawnWebViewPane {
+            url: "https://example.com/".into(),
+            split_from: None,
+            split_direction: None,
+            ratio: None,
+            session_id: None,
+        })
+        .await
+        .expect("spawn webview RPC");
+
+    match resp {
+        IpcResponse::Error { message } => {
+            assert!(
+                message.contains("no focused pane"),
+                "error propagated verbatim: {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+
+    gui_task.await.expect("gui task");
+}
+
+/// Scenario: `SpawnWebViewPane` with no attached GUI fails fast with a
+/// clear error, not a 5-second timeout (tn-jnn4).
+#[tokio::test]
+async fn webview_spawn_fails_fast_without_gui() {
+    let harness = DaemonHarness::spawn()
+        .await
+        .expect("daemon harness should spawn");
+
+    // No subscriber has been created, so the broadcast channel has 0
+    // receivers. The daemon should short-circuit with a typed error
+    // rather than waiting on the oneshot.
+    let start = Instant::now();
+    let resp = harness
+        .client()
+        .send_request(IpcRequest::SpawnWebViewPane {
+            url: "https://example.com/".into(),
+            split_from: None,
+            split_direction: None,
+            ratio: None,
+            session_id: None,
+        })
+        .await
+        .expect("spawn webview RPC");
+    let elapsed = start.elapsed();
+
+    match resp {
+        IpcResponse::Error { message } => {
+            assert!(
+                message.contains("attached GUI") || message.contains("no event subscribers"),
+                "error mentions missing GUI: {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "should fail fast (got {elapsed:?})"
+    );
 }
