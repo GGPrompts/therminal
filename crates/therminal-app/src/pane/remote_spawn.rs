@@ -265,6 +265,7 @@ pub fn spawn_remote_pane(
         agent_registry,
         None, // swarm_tx: initial spawn doesn't need hook-driven subagent forwarding yet
         None, // swarm_wake
+        false, // new pane — not pinned yet
     )?;
 
     // tn-l3hk: total spawn wall time (includes CreateSession + GetWorkspaces +
@@ -311,6 +312,10 @@ pub(crate) fn build_remote_pane_state(
     // to trigger a debouncer poll on the main thread.
     swarm_tx: Option<std::sync::mpsc::Sender<crate::pane::swarm_watcher::SwarmWatcherEvent>>,
     swarm_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    // tn-tl6u: whether the daemon-side pane is pinned. Callers attaching to
+    // an existing pane should pass `PaneSummary.pinned`; callers creating a
+    // brand-new split pane should pass `false`.
+    pinned: bool,
 ) -> Result<PaneState, anyhow::Error> {
     // ── 2. Build the local Term that the renderer reads from ──────────
     let term_config = TermConfig {
@@ -866,7 +871,7 @@ pub(crate) fn build_remote_pane_state(
                 writer: Some(writer_handle),
             },
         },
-        pinned: false,
+        pinned,
     })
 }
 

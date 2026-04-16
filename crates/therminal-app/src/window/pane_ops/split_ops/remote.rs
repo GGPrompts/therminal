@@ -179,6 +179,7 @@ impl App {
                 Some(agent_registry_for_closure),
                 swarm_tx_for_closure,
                 swarm_wake_for_closure,
+                false, // new split pane — not pinned
             ) {
                 Ok(state) => Some(state),
                 Err(e) => {

@@ -8,7 +8,7 @@
 //! `UserEvent::DaemonReconcilePanesReady`. The main thread then tears
 //! down removed panes and splices new ones into the layout tree.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -253,6 +253,35 @@ async fn build_reconcile_result(
         "reconcile: pane diff computed"
     );
 
+    // 3b. Fetch pane summaries so we can restore per-pane state (e.g.
+    //     pinned flag, tn-tl6u) when building new PaneStates.
+    let pinned_map: HashMap<therminal_protocol::PaneId, bool> = {
+        match tokio::time::timeout(
+            DAEMON_OP_TIMEOUT,
+            client.send_request(IpcRequest::ListPanes {
+                session_id: Some(session_id),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(IpcResponse::Panes { panes })) => {
+                panes.into_iter().map(|s| (s.pane_id, s.pinned)).collect()
+            }
+            Ok(Ok(other)) => {
+                warn!(?other, "reconcile: unexpected response to ListPanes — pinned state will default to false");
+                HashMap::new()
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "reconcile: ListPanes failed — pinned state will default to false");
+                HashMap::new()
+            }
+            Err(_) => {
+                warn!("reconcile: ListPanes timed out — pinned state will default to false");
+                HashMap::new()
+            }
+        }
+    };
+
     // 4. Build PaneState for each new daemon pane. These need a full
     //    RemotePty setup (dedicated connection, worker thread, etc.).
     //    Use a placeholder viewport — the main thread will relayout.
@@ -298,6 +327,8 @@ async fn build_reconcile_result(
         let handle_for_build = handle.clone();
         let socket_for_build = daemon_socket.clone();
         let icfg = interceptor_config.clone();
+        // tn-tl6u: look up pinned state before moving into the blocking closure.
+        let is_pinned = pinned_map.get(&daemon_pane_id).copied().unwrap_or(false);
         let result = tokio::task::spawn_blocking(move || {
             crate::pane::remote_spawn::build_remote_pane_state(
                 local_id,
@@ -322,6 +353,7 @@ async fn build_reconcile_result(
                 None,
                 None, // tn-s8w3: swarm_tx not available in reconcile context
                 None, // swarm_wake
+                is_pinned, // tn-tl6u: restore pinned state from daemon
             )
         })
         .await;

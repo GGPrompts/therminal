@@ -75,6 +75,7 @@ impl App {
             Some(Arc::clone(&self.agent_registry)),
             self.swarm_debouncer_tx.clone(),
             self.swarm_wake_callback(),
+            false, // new workspace pane — not pinned
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -222,6 +223,7 @@ impl App {
             Some(Arc::clone(&self.agent_registry)),
             self.swarm_debouncer_tx.clone(),
             self.swarm_wake_callback(),
+            false, // new split pane — not pinned
         ) {
             Ok(state) => state,
             Err(e) => {
