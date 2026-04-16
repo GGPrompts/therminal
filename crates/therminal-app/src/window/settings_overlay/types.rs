@@ -69,6 +69,8 @@ pub(crate) enum ControlBinding {
     ScrollbackLines,
     // Widget controls (tn-ya01)
     ToggleSystemMetrics,
+    // Appearance controls (tn-ldjq)
+    BackgroundOpacity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +111,8 @@ pub(crate) enum SettingsCommand {
     SetScrollbackLines(usize),
     // Widget mutations (tn-ya01)
     ToggleSystemMetrics,
+    // Appearance mutations (tn-ldjq)
+    SetBackgroundOpacity(usize),
 }
 
 impl ControlBinding {
@@ -139,6 +143,8 @@ impl ControlBinding {
             Self::ScrollbackLines => SettingsCommand::SetScrollbackLines(0),
             // Widgets (tn-ya01)
             Self::ToggleSystemMetrics => SettingsCommand::ToggleSystemMetrics,
+            // Appearance (tn-ldjq)
+            Self::BackgroundOpacity => SettingsCommand::SetBackgroundOpacity(0),
         }
     }
 

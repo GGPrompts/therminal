@@ -117,6 +117,9 @@ pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.
 /// Predefined scrollback line count options (tn-ya01).
 pub(crate) const SCROLLBACK_OPTIONS: &[usize] = &[1_000, 5_000, 10_000, 50_000, 100_000];
 
+/// Predefined background opacity options (tn-ldjq).
+pub(crate) const BACKGROUND_OPACITY_OPTIONS: &[f32] = &[1.0, 0.95, 0.90, 0.85, 0.75, 0.50];
+
 /// Cursor style option labels (tn-ya01).
 pub(crate) const CURSOR_STYLE_OPTIONS: &[&str] = &["Block", "Underline", "Beam", "Hollow Block"];
 
@@ -143,6 +146,21 @@ pub(crate) const FONT_FAMILY_OPTIONS: &[&str] = &[
     "RobotoMono Nerd Font Mono",
     "MesloLGS Nerd Font Mono",
 ];
+
+/// Find the index in [`BACKGROUND_OPACITY_OPTIONS`] closest to the given opacity.
+pub(crate) fn background_opacity_index(opacity: f32) -> usize {
+    BACKGROUND_OPACITY_OPTIONS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (opacity - **a)
+                .abs()
+                .partial_cmp(&(opacity - **b).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0) // default to 1.0 (index 0)
+}
 
 /// Find the index in [`UI_TEXT_SCALE_OPTIONS`] closest to the given scale.
 pub(crate) fn ui_text_scale_index(scale: f32) -> usize {
@@ -229,6 +247,8 @@ pub(crate) struct SettingsRenderValues {
     pub scrollback_index: usize,
     // Widgets section (tn-ya01)
     pub system_metrics_enabled: bool,
+    // Appearance section (tn-ldjq)
+    pub background_opacity_index: usize,
 }
 
 pub(super) fn editor_chain_label(index: usize) -> &'static str {
@@ -313,6 +333,7 @@ impl SettingsOverlayState {
         self.rebuild_notifications_section(values);
         self.rebuild_terminal_section(values);
         self.rebuild_widgets_section(values);
+        self.rebuild_appearance_section(values);
     }
 
     fn rebuild_font_section(&mut self, values: &SettingsRenderValues) {
@@ -622,6 +643,35 @@ impl SettingsOverlayState {
         }
     }
 
+    fn rebuild_appearance_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "appearance") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
+        let opacity_options: Vec<String> = BACKGROUND_OPACITY_OPTIONS
+            .iter()
+            .map(|o| format!("{:.0}%", o * 100.0))
+            .collect();
+        let mut controls = vec![SettingsControl::with_type(
+            "Background opacity",
+            ControlBinding::BackgroundOpacity,
+            ControlType::select(opacity_options, values.background_opacity_index),
+        )];
+        restore_control_states(&mut controls, &prev_states);
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
     fn rebuild_widgets_section(&mut self, values: &SettingsRenderValues) {
         let section_idx = match self.sections.iter().position(|s| s.id == "widgets") {
             Some(idx) => idx,
@@ -656,6 +706,7 @@ impl SettingsOverlayState {
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
         self.register_section(SettingsSection::new("terminal", "Terminal", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
+        self.register_section(SettingsSection::new("appearance", "Appearance", vec![]));
         self.register_section(SettingsSection::new(
             "themes",
             "Theme Presets",

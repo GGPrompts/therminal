@@ -91,13 +91,14 @@ impl App {
                 label: Some("therminal_render"),
             });
 
-        // Clear to background color (respects config overrides).
+        // Clear to background color (respects config overrides + opacity).
         let resolved_bg = renderer.resolved_bg();
+        let opacity = self.config.colors.background_opacity() as f64;
         let clear_color = wgpu::Color {
-            r: resolved_bg[0] as f64,
-            g: resolved_bg[1] as f64,
-            b: resolved_bg[2] as f64,
-            a: resolved_bg[3] as f64,
+            r: resolved_bg[0] as f64 * opacity,
+            g: resolved_bg[1] as f64 * opacity,
+            b: resolved_bg[2] as f64 * opacity,
+            a: opacity,
         };
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

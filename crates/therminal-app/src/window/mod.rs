@@ -1302,6 +1302,7 @@ impl ApplicationHandler<UserEvent> for App {
         let mut attrs = Window::default_attributes()
             .with_title(&self.config.general.title)
             .with_window_icon(load_window_icon())
+            .with_transparent(true)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.general.window_width,
                 self.config.general.window_height,

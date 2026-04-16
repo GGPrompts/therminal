@@ -354,10 +354,21 @@ impl App {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
+            // Prefer PreMultiplied for background transparency support
+            // (tn-ldjq). When opacity=1.0 the window is effectively opaque,
+            // so requesting PreMultiplied is harmless. Fall back to
+            // PostMultiplied, then Auto, then Opaque for platforms that do
+            // not support it (e.g. WSLg).
             alpha_mode: *surface_caps
                 .alpha_modes
                 .iter()
-                .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
+                .find(|m| **m == wgpu::CompositeAlphaMode::PreMultiplied)
+                .or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .iter()
+                        .find(|m| **m == wgpu::CompositeAlphaMode::PostMultiplied)
+                })
                 .or_else(|| {
                     surface_caps
                         .alpha_modes

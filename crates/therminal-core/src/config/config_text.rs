@@ -113,6 +113,11 @@ pub(super) fn default_config_text() -> String {
     out.push_str("#   \"#5555ff\", \"#ff55ff\", \"#55ffff\", \"#ffffff\",\n");
     out.push_str("# ]\n");
     out.push('\n');
+    out.push_str(&format!(
+        "# background_opacity = {:.1}  # 0.0 (fully transparent) to 1.0 (fully opaque)\n",
+        d.colors.background_opacity()
+    ));
+    out.push('\n');
     out.push_str("# Chrome roles (tn-g7oo) — pane headers, separators, focus border,\n");
     out.push_str("# status bar, tab bar, CSD buttons. Defaults derive from the bundled\n");
     out.push_str("# palette so you only need to set the roles you want to recolor.\n");

@@ -803,6 +803,17 @@ pub struct ColorsConfig {
     pub hotspot_gitref: Option<HexColor>,
     /// Dotted underline color for `IssueRef` hotspots.
     pub hotspot_issueref: Option<HexColor>,
+
+    /// Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+    ///
+    /// Controls the alpha channel of the terminal background and
+    /// background-derived chrome elements (pane headers, status bar,
+    /// tab bar). Requires a compositor that supports transparency
+    /// (DWM on Windows 10+, most Wayland/X11 compositors on Linux).
+    /// Harmless when the compositor does not support it — the window
+    /// simply renders opaque. Defaults to 1.0 (fully opaque) when
+    /// absent.
+    pub background_opacity: Option<f32>,
 }
 
 impl ColorsConfig {
@@ -831,6 +842,11 @@ impl ColorsConfig {
             .as_deref()
             .and_then(Self::parse_hex)
             .unwrap_or(Color::BG)
+    }
+
+    /// Resolved background opacity, clamped to 0.0..=1.0. Defaults to 1.0.
+    pub fn background_opacity(&self) -> f32 {
+        self.background_opacity.unwrap_or(1.0).clamp(0.0, 1.0)
     }
 
     /// Resolve foreground color, falling back to palette default.
@@ -1015,6 +1031,19 @@ impl ColorsConfig {
         }
         if let Some(c) = self.hotspot_issueref.as_deref().and_then(Self::parse_hex) {
             p.hotspot_issueref = c.to_f32_array();
+        }
+
+        // ── Background opacity (tn-ldjq) ────────────────────────────────
+        // Multiply the alpha of background-derived chrome roles by the
+        // configured opacity so that pane headers, status bar, and tab bar
+        // become transparent alongside the terminal background.
+        let opacity = self.background_opacity();
+        if opacity < 1.0 {
+            p.header_bg[3] *= opacity;
+            p.header_bg_dim[3] *= opacity;
+            p.status_bar_bg[3] *= opacity;
+            p.tab_bar_bg[3] *= opacity;
+            p.tab_active_bg[3] *= opacity;
         }
 
         p
@@ -3651,5 +3680,90 @@ working_dir = "scratch/{random}"
         assert_eq!(p.chrome_fg_focus, Color::FOCUS);
         assert_eq!(p.chrome_fg_warn, Color::WARN);
         assert_eq!(p.chrome_fg_alert, Color::ALERT);
+    }
+
+    // ── background_opacity (tn-ldjq) ────────────────────────────────────
+
+    #[test]
+    fn background_opacity_default_is_1() {
+        let colors = ColorsConfig::default();
+        assert!((colors.background_opacity() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn background_opacity_clamps_above_1() {
+        let colors = ColorsConfig {
+            background_opacity: Some(2.5),
+            ..ColorsConfig::default()
+        };
+        assert!((colors.background_opacity() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn background_opacity_clamps_below_0() {
+        let colors = ColorsConfig {
+            background_opacity: Some(-0.5),
+            ..ColorsConfig::default()
+        };
+        assert!((colors.background_opacity() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn background_opacity_passes_through_valid_value() {
+        let colors = ColorsConfig {
+            background_opacity: Some(0.85),
+            ..ColorsConfig::default()
+        };
+        assert!((colors.background_opacity() - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_opacity_multiplies_bg_derived_alphas() {
+        let colors = ColorsConfig {
+            background_opacity: Some(0.5),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let default = ChromePalette::default();
+        // Background-derived fields should have alpha *= 0.5.
+        assert!((p.header_bg[3] - default.header_bg[3] * 0.5).abs() < 1e-6);
+        assert!((p.header_bg_dim[3] - default.header_bg_dim[3] * 0.5).abs() < 1e-6);
+        assert!((p.status_bar_bg[3] - default.status_bar_bg[3] * 0.5).abs() < 1e-6);
+        assert!((p.tab_bar_bg[3] - default.tab_bar_bg[3] * 0.5).abs() < 1e-6);
+        assert!((p.tab_active_bg[3] - default.tab_active_bg[3] * 0.5).abs() < 1e-6);
+        // Non-background fields should be unaffected.
+        assert_eq!(p.focus_border, default.focus_border);
+        assert_eq!(p.separator, default.separator);
+    }
+
+    #[test]
+    fn chrome_palette_full_opacity_is_unchanged() {
+        let colors = ColorsConfig {
+            background_opacity: Some(1.0),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        let default = ChromePalette::default();
+        assert_eq!(p.header_bg, default.header_bg);
+        assert_eq!(p.status_bar_bg, default.status_bar_bg);
+    }
+
+    #[test]
+    fn background_opacity_deserializes_from_toml() {
+        let toml_str = r#"
+[colors]
+background_opacity = 0.85
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert!((config.colors.background_opacity() - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn background_opacity_absent_in_toml_defaults_to_1() {
+        let toml_str = r#"
+[colors]
+"#;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        assert!((config.colors.background_opacity() - 1.0).abs() < 1e-6);
     }
 }

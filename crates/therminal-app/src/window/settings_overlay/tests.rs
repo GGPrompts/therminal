@@ -110,6 +110,7 @@ fn test_render_values() -> SettingsRenderValues {
         auto_tile: true,
         scrollback_index: 2,
         system_metrics_enabled: true,
+        background_opacity_index: 0,
     }
 }
 
@@ -811,10 +812,10 @@ fn accessibility_section_rebuilds_from_config() {
 fn accessibility_high_contrast_toggle_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 8: font=0, cursor=1,
-    // shell=2, terminal=3, hotspots=4, themes=5, notifications=6,
-    // widgets=7, accessibility=8).
-    for _ in 0..8 {
+    // Navigate to "accessibility" section (index 9: font=0, cursor=1,
+    // shell=2, terminal=3, hotspots=4, appearance=5, themes=6,
+    // notifications=7, widgets=8, accessibility=9).
+    for _ in 0..9 {
         state.arrow_down();
     }
     state.tab(false);
@@ -825,8 +826,8 @@ fn accessibility_high_contrast_toggle_produces_command() {
 fn accessibility_ui_text_scale_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 8), control index 2 (UI text scale).
-    for _ in 0..8 {
+    // Navigate to "accessibility" section (index 9), control index 2 (UI text scale).
+    for _ in 0..9 {
         state.arrow_down();
     }
     state.tab(false);

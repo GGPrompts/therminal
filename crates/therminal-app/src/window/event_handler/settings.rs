@@ -239,6 +239,10 @@ impl App {
             ),
             // Widgets (tn-ya01)
             system_metrics_enabled: self.config.widgets.system_metrics.enabled,
+            // Appearance (tn-ldjq)
+            background_opacity_index: settings_overlay::background_opacity_index(
+                self.config.colors.background_opacity(),
+            ),
         }
     }
 
@@ -488,6 +492,25 @@ impl App {
                     "off"
                 };
                 self.show_toast(format!("system metrics: {label}"));
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            // -- Appearance mutations (tn-ldjq) --
+            SettingsCommand::SetBackgroundOpacity(idx) => {
+                let opacity = settings_overlay::BACKGROUND_OPACITY_OPTIONS
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(1.0);
+                self.config.colors.background_opacity = Some(opacity);
+                // Rebuild chrome palette so bg-derived chrome alpha updates.
+                if let Some(renderer) = self.grid_renderer.as_mut() {
+                    renderer.apply_color_overrides_with_contrast(
+                        &self.config.colors,
+                        self.config.accessibility.high_contrast,
+                    );
+                }
+                self.show_toast(format!("background opacity: {:.0}%", opacity * 100.0));
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
