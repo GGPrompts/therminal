@@ -138,6 +138,8 @@ fn detect_distro_from_registry() -> Option<String> {
         return None;
     }
 
+    // TODO: [code-review] Registry GUID used as subkey path without format validation — tampered value could traverse to sibling keys; validate against {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} pattern (82%)
+    // TODO: [code-review] open_subkey().ok()? and get_value().ok()? silently swallow errors — add tracing::debug before each .ok()? to log which registry operation failed (80%)
     // Open the subkey for that GUID and read DistributionName.
     let distro_key = lxss.open_subkey(&default_guid).ok()?;
     let name: String = distro_key.get_value("DistributionName").ok()?;

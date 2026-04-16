@@ -453,6 +453,7 @@ _marker_args=()
 # boundaries.
 if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
     _marker_args+=("environment=wsl:${WSL_DISTRO_NAME}")
+# TODO: [code-review] Unsanitized hostname in OSC 1341 marker — docker/SSH hostname can contain terminal escape chars enabling OSC injection; sanitize with tr -d '\000-\037\177' (83%)
 elif [[ -f /.dockerenv ]]; then
     _marker_args+=("environment=docker:$(hostname)")
 elif [[ -n "${SSH_CONNECTION:-}" ]]; then

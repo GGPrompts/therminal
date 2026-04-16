@@ -284,6 +284,7 @@ impl App {
                         if let PaneBackendKind::JsonlTail { ref path, .. } = pane.backend {
                             let mtime = crate::pane::swarm_watcher::file_mtime_via_handle(path);
                             let age = mtime.and_then(|m| m.elapsed().ok());
+                            // TODO: [code-review] unwrap_or(false) treats future-mtime (WSL2 clock skew) as inactive — consider unwrap_or(true) to default to "still active" and add tracing::debug on elapsed() failure (83%)
                             return Some(
                                 age.map(|a| a < crate::pane::swarm_watcher::STALENESS_TIMEOUT)
                                     .unwrap_or(false),

@@ -365,6 +365,7 @@ impl TherminalInterceptor {
         if params.len() >= 3 && params[1] == b"9" {
             let path = match std::str::from_utf8(params[2]) {
                 Ok(s) if !s.is_empty() => s,
+                // TODO: [code-review] Invalid UTF-8 consumed silently — other OSC handlers in this file log on malformed input; add trace!("OSC 9;9: invalid UTF-8 in path payload") for consistency (80%)
                 _ => return true, // malformed — consume silently
             };
             debug!("OSC 9;9 (WSL cwd): {}", path);
