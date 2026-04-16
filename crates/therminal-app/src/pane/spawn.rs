@@ -346,5 +346,6 @@ pub fn spawn_webview_pane(viewport: Rect, url: &str) -> PaneState {
             url: url.to_string(),
             content: String::new(),
         },
+        pinned: false,
     }
 }

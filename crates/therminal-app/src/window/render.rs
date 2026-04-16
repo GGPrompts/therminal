@@ -425,6 +425,7 @@ fn render_single_pane(
                 pane,
                 draw_focus_border || pane_count == 1,
                 is_zoomed,
+                pane.pinned,
                 webview_title.as_deref(),
                 None, // no claude badge
                 renderer,
