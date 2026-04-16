@@ -334,6 +334,16 @@ impl App {
         }
 
         self.active_menu = Some(menu);
+
+        // Proactively hide any visible webview child HWNDs the moment a
+        // menu opens. The render-driver visibility logic would hide them
+        // on the next redraw, but on Windows the webview child HWND can
+        // keep capturing mouse input in its old bounds until `ShowWindow`
+        // is actually flushed. Hiding synchronously here avoids menu
+        // items overlapping a visible webview from being click-stolen.
+        if !self.webview_manager.pane_ids().is_empty() {
+            self.webview_manager.hide_all();
+        }
     }
 
     /// Execute the currently selected menu action and close the menu.

@@ -187,7 +187,6 @@ impl WebViewManager {
     }
 
     /// Hide all webviews (e.g. for focus mode or overlay).
-    #[allow(dead_code)]
     pub fn hide_all(&mut self) {
         for wv in self.views.values() {
             let _ = wv.set_visible(false);
