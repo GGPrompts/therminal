@@ -18,8 +18,10 @@
 #
 #   Use CLI (tn) for:
 #     - Polling: pane list, pane peek, agents list — called N times per turn
-#     - Writes: pane send, pane tag/untag, session/pane create
-#     - Fire-and-forget: workspace switch
+#     - Writes: pane send, pane tag/untag, session/pane create/destroy
+#     - Layout: pane focus/move/swap/resize, workspace create/rename/switch
+#     - Batch: layout batch (atomic multi-op from stdin)
+#     - Hook push: agent-event push (from Claude Code hooks)
 #     - Shell dashboards: events --follow piped to jq
 #
 #   Use MCP for:
@@ -27,7 +29,8 @@
 #     - Blocking waits: terminal.panes.wait_for_output
 #     - Conductor tick: terminal.panes.get_summary (MCP-only, ~120 B/call)
 #     - Structured shape: get_details, get_cadence, find_with_capacity
-#     - Destructive ops: sessions.destroy, panes.destroy (Admin tier)
+#     - Trust-gated destructive ops: MCP sessions.destroy/panes.destroy
+#       (MCP enforces trust tier; CLI equivalents skip the gate)
 #
 # See docs/cli.md for the full decision table.
 #

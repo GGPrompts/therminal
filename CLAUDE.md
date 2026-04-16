@@ -230,6 +230,10 @@ right surface to preserve prompt-cache health:
 **Use `therminal` CLI (or the `tn` short alias in `scripts/tn`) for:**
 - Polling: `pane list`, `pane peek`, `agents list` — called N times per turn
 - Writes: `pane send`, `pane tag/untag`, `session/pane create`
+- Layout: `pane focus/move/swap/resize`, `workspace create/rename/switch`
+- Destroy: `pane destroy`, `session destroy` (no trust-tier gate)
+- Hook push: `agent-event push` (from Claude Code hook scripts)
+- Batch layout: `layout batch` (atomic multi-op from stdin)
 - Shell dashboards: `events --follow | jq`
 
 **Use MCP for:**
@@ -238,10 +242,12 @@ right surface to preserve prompt-cache health:
 - Conductor tick: `terminal.panes.get_summary` (MCP-only, ~120 B/call)
 - Typed structure feeding downstream tool calls: `get_details`, `get_cadence`,
   `find_with_capacity`
-- Destructive / Admin operations: `sessions.destroy`, `panes.destroy`
+- Trust-gated destructive ops: `sessions.destroy`, `panes.destroy` (MCP
+  enforces trust-tier policy; CLI equivalents skip the gate)
 
-The `tn` alias in `scripts/tn` is a thin wrapper around `therminal`; copy it
-to any directory on `$PATH`. Run `tn --help-policy` for a compact reminder.
+The `tn` alias ships as `scripts/tn` (bash), `scripts/tn.cmd` (CMD), and
+`scripts/tn.ps1` (PowerShell). Copy the appropriate wrapper to a directory
+on `$PATH`. Run `tn --help-policy` for a compact reminder.
 
 Full decision table: `docs/cli.md`. Tool-by-tool classification:
 `crates/therminal-daemon/src/mcp/tools.rs` module-level doc comment.

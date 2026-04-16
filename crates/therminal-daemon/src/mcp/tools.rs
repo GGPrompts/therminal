@@ -17,10 +17,10 @@
 //! | `terminal.sessions.list` | CLI (`therminal session list`) | Simple read; TSV << JSON-RPC |
 //! | `terminal.sessions.get` | CLI (wrap with `session list --json \| jq`) | Rarely needed standalone |
 //! | `terminal.sessions.create` | CLI (`therminal session create`) | Fire-and-forget write |
-//! | `terminal.sessions.destroy` | MCP (Admin tier; trust enforcement needed) | Destructive |
+//! | `terminal.sessions.destroy` | CLI or MCP (MCP enforces trust tier) | Destructive; CLI skips trust gate |
 //! | `terminal.panes.list` | CLI (`therminal pane list`) | Most frequent read; ~50–150 bytes TSV |
 //! | `terminal.panes.create` | CLI (`therminal pane create`) | Fire-and-forget write |
-//! | `terminal.panes.destroy` | MCP (Admin tier; trust enforcement needed) | Destructive |
+//! | `terminal.panes.destroy` | CLI or MCP (MCP enforces trust tier) | Destructive; CLI skips trust gate |
 //! | `terminal.panes.get_content` | MCP or CLI peek | Use CLI `pane peek` for quick tail; MCP for full grid with optional params |
 //! | `terminal.panes.get_summary` | MCP (`get_summary` is MCP-only, no CLI peer) | Cheapest polling primitive; use in conductor tick loops |
 //! | `terminal.panes.peek` | CLI (`therminal pane peek`) | Warm-path polling; TSV tail is cache-friendlier |
@@ -40,8 +40,12 @@
 //! | `terminal.agents.get_status` | MCP | Sibling-agent coordination; typed contract |
 //! | `terminal.agents.get_details` | MCP | Rich inference snapshot; typed contract |
 //! | `terminal.agents.get_cadence` | MCP | Timing metrics; structured shape essential |
+//! | `terminal.agents.get_session_detail` | MCP | State-file session detail; typed contract |
+//! | `terminal.panes.capture_result` | MCP | Transcript-first delegate result; no CLI peer |
+//! | `terminal.panes.create_tail` | MCP | JSONL tail pane; specialized; no CLI peer |
 //! | `terminal.patterns.stats` | MCP | Pattern engine diagnostics; rarely called |
 //! | `terminal.events.stats` | MCP | Event bus diagnostics; rarely called |
+//! | `terminal.widgets.timeline.toggle` | MCP | GUI widget control; no CLI peer |
 //!
 //! **Decision rule for agents**: if you would call the same tool more than
 //! once per agent turn (polling, fan-out, swarm inspection), or if you do not

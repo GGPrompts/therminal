@@ -55,36 +55,58 @@ waits, and structured responses that drive downstream tool calls.
 
 | Operation | Preferred surface | Notes |
 |-----------|------------------|-------|
+| **Sessions** | | |
 | List sessions | `tn session list` | TSV; use MCP only if schema-introspecting clients need it |
 | Get session detail | `tn session list --json \| jq` | Rarely needed alone |
 | Create session | `tn session create` | Fire-and-forget |
-| Destroy session | MCP `terminal.sessions.destroy` | Admin tier; destructive |
+| Destroy session | `tn session destroy` or MCP | CLI available; MCP `terminal.sessions.destroy` for trust-tier enforcement |
+| **Panes** | | |
 | List panes | `tn pane list` | Most frequent read; ~50–150 bytes TSV |
-| Create pane | `tn pane create` | Fire-and-forget |
-| Destroy pane | MCP `terminal.panes.destroy` | Admin tier; destructive |
+| Create pane | `tn pane create` | Fire-and-forget; `--worktree`, `--profile`, `--spawn` compose |
+| Destroy pane | `tn pane destroy` or MCP | CLI available; MCP `terminal.panes.destroy` for trust-tier enforcement |
 | Peek pane tail | `tn pane peek <id>` | Cheapest "what just happened?" |
 | Full grid snapshot | MCP `terminal.panes.get_content` | Use when structured `content_hash` / compact params matter |
 | Conductor tick poll | MCP `terminal.panes.get_summary` | ~120 bytes; no CLI peer; cheapest MCP poll primitive |
 | Send keystrokes | `tn pane send <id> <keys>` | Round-trip bytes dominate; CLI wins |
+| Focus pane | `tn pane focus <id>` | Fire-and-forget |
+| Move pane | `tn pane move <id> --workspace N` | Move pane between workspaces |
+| Swap panes | `tn pane swap <a> <b>` | Swap positions in layout tree |
+| Resize pane | `tn pane resize <id> <cols>x<rows>` | PTY resize |
 | Tag pane | `tn pane tag <id> <k=v>` | Metadata write |
 | Untag pane | `tn pane untag <id> <k>` | Metadata write |
 | Capture delegate result | MCP `terminal.panes.capture_result` | Transcript-first with grid fallback; no CLI peer |
 | Wait for output | MCP `terminal.panes.wait_for_output` | Blocking async; no CLI peer |
 | Pane event log | MCP `terminal.panes.query_events` | Structured ring-buffer; no CLI peer |
-| Semantic history | MCP `terminal.semantic.query_history` | Structured region index; no CLI peer |
+| Create JSONL tail pane | MCP `terminal.panes.create_tail` | Specialized; no CLI peer |
+| **Workspaces** | | |
+| List workspaces | `tn workspace list` | Simple read |
+| Create workspace | `tn workspace create --session N` | Fire-and-forget |
+| Rename workspace | `tn workspace rename --session N --workspace-id M --name X` | Fire-and-forget |
+| Switch workspace | `tn workspace switch --session N <id>` | Fire-and-forget; no stdout on success |
+| Workspace layout tree | MCP `terminal.workspaces.get_layout` | Binary layout; structured shape essential |
+| **Semantic** | | |
 | Semantic commands | `tn semantic commands <id>` | TSV sufficient for most callers |
 | Hotspots | `tn semantic hotspots <id>` | TSV sufficient for most callers |
-| List workspaces | `tn workspace list` | Simple read |
-| Workspace layout tree | MCP `terminal.workspaces.get_layout` | Binary layout; structured shape essential |
+| Semantic history | MCP `terminal.semantic.query_history` | Structured region index; no CLI peer |
+| **Agents** | | |
 | List agents | `tn agents list` | Swarm polling; TSV is cache-friendlier |
 | Agent capacity search | MCP `terminal.agents.find_with_capacity` | Structured sort; no CLI peer |
 | Agent status (sibling) | MCP `terminal.agents.get_status` | Sibling-coordination typed contract |
 | Agent inference details | MCP `terminal.agents.get_details` | Rich snapshot; structured shape matters |
+| Agent session detail | MCP `terminal.agents.get_session_detail` | State-file-driven fields; no CLI peer |
 | Agent cadence metrics | MCP `terminal.agents.get_cadence` | Timing data; structured shape essential |
+| **Events & diagnostics** | | |
 | Event stream | `tn events --follow` | JSON Lines piped to `jq`; lower overhead than MCP subscription for shell dashboards |
+| Push agent event | `tn agent-event push` | Hook signal delivery from scripts; no MCP peer |
 | Live pane output sub | MCP `terminal://pane/{id}/output` | Subscription needed; no CLI peer |
 | Claude Code events | MCP `therminal://claude/events` | Subscription; no CLI peer |
 | Agent lifecycle events | MCP `therminal://agents/events` | Subscription; no CLI peer |
+| Pattern engine stats | MCP `terminal.patterns.stats` | Diagnostics; rarely called |
+| Event bus stats | MCP `terminal.events.stats` | Diagnostics; rarely called |
+| **Layout** | | |
+| Batch layout ops | `tn layout batch` | Atomic multi-op from stdin; no MCP peer |
+| **Widgets** | | |
+| Toggle agent timeline | MCP `terminal.widgets.timeline.toggle` | GUI widget control; no CLI peer |
 
 ### When MCP is always the right choice
 
@@ -99,8 +121,14 @@ waits, and structured responses that drive downstream tool calls.
 - **Structured shape feeding downstream tools** — when the JSON response fields
   drive follow-on tool calls (capacity sort, agent coordination), pay the MCP
   framing cost once and process the typed result.
-- **Admin/destructive operations** — `terminal.sessions.destroy`,
-  `terminal.panes.destroy`. Trust-tier enforcement runs at MCP layer.
+
+### Destructive operations: CLI or MCP?
+
+Both `tn session destroy` and `tn pane destroy` are available as CLI commands.
+The MCP equivalents (`terminal.sessions.destroy`, `terminal.panes.destroy`)
+additionally enforce **trust-tier** checks, so orchestrators subject to trust
+policy should use MCP. Direct script callers who already control access can
+use either surface.
 
 ## Why a CLI alongside MCP
 
@@ -207,8 +235,8 @@ therminal session destroy <session_id>
 
 ```text
 therminal workspace list [--session N] [--json]
-therminal workspace create [--session N] [--name <name>] [--json]
-therminal workspace rename <workspace_id> <new_name>
+therminal workspace create --session N [--name <name>] [--json]
+therminal workspace rename --session N --workspace-id M --name <name>
 therminal workspace switch --session N <workspace_id>
 ```
 
@@ -218,8 +246,10 @@ therminal workspace switch --session N <workspace_id>
 session_id  workspace_id  name  pane_count  active(0|1)
 ```
 
-`workspace switch` is wired end-to-end via daemon IPC (`SwitchWorkspace`).
-On success, the command exits cleanly with no stdout payload.
+`workspace create` and `workspace rename` require `--session` because
+workspaces are session-scoped. `workspace switch` is wired end-to-end
+via daemon IPC (`SwitchWorkspace`). On success, the command exits cleanly
+with no stdout payload.
 
 ### `agents`
 
@@ -277,6 +307,44 @@ Each line is a space-separated command matching the existing CLI surface:
 `split`, `kill`, `focus`, `swap`, `move`, `create-workspace`,
 `switch-workspace`, `rename-workspace`. Returns one JSON result per
 operation on stdout.
+
+### `agent-event`
+
+```text
+therminal agent-event push --event <name> [--session-id ID] [--parent-session-id ID]
+    [--agent-id ID] [--agent-type TYPE] [--project-dir DIR] [--pid N]
+    [--tool-name NAME] [--status STATUS] [--tool-input-summary TEXT]
+    [--reason TEXT] [--error-type TYPE]
+```
+
+Pushes a structured hook signal to the daemon so the harness broadcast
+channel receives lifecycle events without relying on file-system polling.
+Primary consumer: Claude Code hook scripts calling from WSL when the
+daemon runs as a Windows native process. Valid `--event` values:
+`session_start`, `session_stop`, `tool_state`, `subagent_start`,
+`subagent_stop`, `stop_failure`.
+
+## Windows support (tn-08oc)
+
+The `scripts/` directory ships three wrappers:
+
+| File | Shell | Binary discovery |
+|------|-------|-----------------|
+| `scripts/tn` | bash (Linux / macOS / WSL2) | Full: `THERMINAL_BIN` env, `therminal` on PATH, `therminal.exe` on PATH (WSL interop), Windows Desktop probe via `USERPROFILE` |
+| `scripts/tn.cmd` | CMD | `THERMINAL_BIN` env, then `therminal` on PATH |
+| `scripts/tn.ps1` | PowerShell | `THERMINAL_BIN` env, then `therminal` on PATH |
+
+### Windows-specific notes
+
+- **IPC**: The daemon listens on a named pipe (`\\.\pipe\therminal-<name>`)
+  instead of a Unix socket. The CLI auto-discovers the pipe via the same
+  `socket_path()` logic the GUI uses.
+- **Path translation**: When the daemon runs as a Windows native process
+  and panes run `wsl.exe`, the harness translates `/tmp/claude-code-state`
+  etc. to UNC paths transparently. The CLI does not need special handling.
+- **Recommended install**: Copy `tn.cmd` to a directory on `%PATH%`
+  (e.g. `%USERPROFILE%\bin\`). Alternatively, copy the `therminal.exe`
+  binary and rename a copy to `tn.exe` so both names resolve.
 
 ## Cache-friendliness notes
 
