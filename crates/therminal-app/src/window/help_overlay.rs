@@ -625,7 +625,7 @@ pub(crate) fn build_help_categories(
     ));
     mouse_section.1.push((
         "Shift+RightClick".to_string(),
-        "Context menu in TUI mouse mode".to_string(),
+        "Force context menu (TUI mouse / WebView)".to_string(),
     ));
     mouse_section.1.push((
         "Shift+Scroll".to_string(),
