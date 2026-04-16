@@ -175,10 +175,24 @@ Recognised keys (v1 -- tn-nrur):
 | `cwd`             | string                                         | Working directory                       |
 | `context_percent` | float (0.0 -- 100.0)                           | Context window usage percentage         |
 | `model`           | string                                         | Model name (e.g. `claude-opus-4-6`)  |
+| `environment`     | `<type>:<name>` or `local`                     | Runtime environment (tn-ncmj)           |
 | `subagent_start`  | agent_id string                                | Subagent spawned                        |
 | `subagent_stop`   | agent_id string                                | Subagent stopped                        |
 
-Unknown keys are preserved as-is in an `extra` subobject in the emitted event body for forward-compatibility. The event `kind` is `claude.state` for state/tool/session_id/cwd/context_percent/model markers, and `claude.subagent` for subagent_start/subagent_stop.
+Unknown keys are preserved as-is in an `extra` subobject in the emitted event body for forward-compatibility. The event `kind` is `claude.state` for state/tool/session_id/cwd/context_percent/model/environment markers, and `claude.subagent` for subagent_start/subagent_stop.
+
+### Environment detection (tn-ncmj)
+
+The `environment` key carries the shell's self-identified runtime environment. The hook script (`resources/hooks/state-tracker.sh`) detects the environment at emit time using standard env vars / filesystem markers:
+
+| Value pattern | Detection | Example |
+|---|---|---|
+| `wsl:<distro>` | `$WSL_DISTRO_NAME` is set | `wsl:Ubuntu-24.04` |
+| `docker:<hostname>` | `/.dockerenv` exists | `docker:abc123` |
+| `ssh:<hostname>` | `$SSH_CONNECTION` is set | `ssh:devbox` |
+| `local` | None of the above | `local` |
+
+This is a cooperative detection pattern -- the shell self-identifies so the daemon knows the signal origin without crossing process boundaries or probing PIDs. The field flows through `MarkerPatch` into `PaneCapacityEntry` and is surfaced in `terminal.agents.get_session_detail` MCP results.
 
 ### Priority inversion (tn-nrur)
 

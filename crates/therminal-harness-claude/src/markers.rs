@@ -42,6 +42,7 @@
 //! | `cwd`             | string                                         | Working directory                       |
 //! | `context_percent` | float (0.0 – 100.0)                            | Context window usage percentage         |
 //! | `model`           | string                                         | Model name (e.g. `claude-opus-4-6`)  |
+//! | `environment`     | `<type>:<name>` or `local`                     | Runtime environment (tn-ncmj)           |
 //! | `subagent_start`  | agent_id string                                | Subagent spawned                        |
 //! | `subagent_stop`   | agent_id string                                | Subagent stopped                        |
 //!
@@ -151,6 +152,7 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
     let mut cwd: Option<String> = None;
     let mut context_percent: Option<f32> = None;
     let mut model: Option<String> = None;
+    let mut environment: Option<String> = None;
     let mut subagent_start: Option<String> = None;
     let mut subagent_stop: Option<String> = None;
     let mut extra: Map<String, Value> = Map::new();
@@ -175,6 +177,7 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
             "cwd" => cwd = Some(value.to_string()),
             "context_percent" => context_percent = value.parse::<f32>().ok(),
             "model" => model = Some(value.to_string()),
+            "environment" => environment = Some(value.to_string()),
             "subagent_start" => subagent_start = Some(value.to_string()),
             "subagent_stop" => subagent_stop = Some(value.to_string()),
             _ => {
@@ -191,6 +194,7 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
         && cwd.is_none()
         && context_percent.is_none()
         && model.is_none()
+        && environment.is_none()
         && subagent_start.is_none()
         && subagent_stop.is_none()
         && extra.is_empty()
@@ -229,6 +233,9 @@ fn parse_osc_1341(params: &[&[u8]]) -> Option<HarnessEvent> {
     }
     if let Some(m) = model {
         body.insert("model".to_string(), Value::String(m));
+    }
+    if let Some(env) = environment {
+        body.insert("environment".to_string(), Value::String(env));
     }
     if let Some(agent_id) = subagent_start {
         body.insert("subagent_start".to_string(), Value::String(agent_id));
@@ -414,6 +421,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_environment_wsl() {
+        let params: &[&[u8]] = &[b"1341", b"state=idle", b"environment=wsl:Ubuntu-24.04"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_STATE_KIND);
+        assert_eq!(
+            event.body,
+            serde_json::json!({
+                "state": "idle",
+                "environment": "wsl:Ubuntu-24.04",
+            })
+        );
+    }
+
+    #[test]
+    fn parses_environment_docker() {
+        let params: &[&[u8]] = &[b"1341", b"environment=docker:abc123"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(event.kind, CLAUDE_STATE_KIND);
+        assert_eq!(
+            event.body,
+            serde_json::json!({ "environment": "docker:abc123" })
+        );
+    }
+
+    #[test]
+    fn parses_environment_local() {
+        let params: &[&[u8]] = &[b"1341", b"state=processing", b"environment=local"];
+        let event = parse_osc_1341(params).expect("event");
+        assert_eq!(
+            event.body,
+            serde_json::json!({
+                "state": "processing",
+                "environment": "local",
+            })
+        );
+    }
+
+    #[test]
     fn full_state_marker_with_all_keys() {
         let params: &[&[u8]] = &[
             b"1341",
@@ -423,6 +468,7 @@ mod tests {
             b"context_percent=73.2",
             b"model=claude-opus-4-6",
             b"tool=Bash",
+            b"environment=wsl:Ubuntu-24.04",
         ];
         let event = parse_osc_1341(params).expect("event");
         assert_eq!(event.kind, CLAUDE_STATE_KIND);
@@ -432,6 +478,7 @@ mod tests {
         assert_eq!(body["cwd"], "/home/user");
         assert_eq!(body["model"], "claude-opus-4-6");
         assert_eq!(body["tool"], "Bash");
+        assert_eq!(body["environment"], "wsl:Ubuntu-24.04");
         // f32→f64 round-trip: check approximate equality
         let cp = body["context_percent"].as_f64().unwrap();
         assert!((cp - 73.2).abs() < 0.1);

@@ -862,6 +862,12 @@ pub(crate) struct AgentSessionDetail {
     /// Model string (e.g. "claude-opus-4-6").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    /// Runtime environment where the agent is running (tn-ncmj).
+    /// Format: `<type>:<name>` (e.g. `wsl:Ubuntu-24.04`, `docker:abc123`,
+    /// `ssh:devbox`) or `local` for native execution. Sourced from
+    /// OSC 1341 `environment=` markers — the shell self-identifies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) environment: Option<String>,
 }
 
 /// Parameters for `terminal.agents.find_with_capacity`.

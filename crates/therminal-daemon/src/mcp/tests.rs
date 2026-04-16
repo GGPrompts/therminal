@@ -1561,6 +1561,7 @@ async fn get_agent_session_detail_returns_all_five_fields() {
                 session_title: Some("therminal / tn-ifee".into()),
                 current_tool: Some("Bash".into()),
                 working_dir: Some("/home/marci/projects/therminal".into()),
+                environment: Some("wsl:Ubuntu-24.04".into()),
                 updated_at: 0,
                 last_seen_at: 0,
                 marker_seen_at: 0,
@@ -1588,6 +1589,7 @@ async fn get_agent_session_detail_returns_all_five_fields() {
     assert_eq!(v["working_dir"], "/home/marci/projects/therminal");
     assert_eq!(v["model"], "claude-opus-4-6");
     assert!((v["context_percent"].as_f64().unwrap() - 9.0).abs() < 1e-6);
+    assert_eq!(v["environment"], "wsl:Ubuntu-24.04");
 }
 
 // ── terminal.semantic.query_commands ────────────────────────────────

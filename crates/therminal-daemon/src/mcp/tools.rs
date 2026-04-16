@@ -794,12 +794,12 @@ impl TherminalMcpServer {
 
     /// Return the enriched Claude Code session detail for a pane (tn-ifee).
     ///
-    /// Surfaces the five fields agreed in tn-ifee:
+    /// Surfaces:
     /// `session_title`, `current_tool`, `working_dir`, `context_percent`,
-    /// `model`. All fields are sourced from the per-pane `PaneCapacityCache`
-    /// — populated by the Claude state poller in `therminal-harness-claude`.
-    /// All fields are nullable. Returns a tool error only if the pane does
-    /// not exist.
+    /// `model`, `environment` (tn-ncmj). All fields are sourced from the
+    /// per-pane `PaneCapacityCache` — populated by the Claude state poller
+    /// in `therminal-harness-claude`. All fields are nullable. Returns a
+    /// tool error only if the pane does not exist.
     pub(super) async fn handle_get_agent_session_detail(
         &self,
         params: PaneIdParam,
@@ -822,6 +822,7 @@ impl TherminalMcpServer {
             working_dir: cap.as_ref().and_then(|e| e.working_dir.clone()),
             context_percent: cap.as_ref().and_then(|e| e.context_percent),
             model: cap.as_ref().and_then(|e| e.model.clone()),
+            environment: cap.as_ref().and_then(|e| e.environment.clone()),
         };
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }

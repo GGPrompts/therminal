@@ -448,6 +448,19 @@ _marker_args=()
 [[ -n "$PWD" ]] && _marker_args+=("cwd=$PWD")
 [[ -n "$CURRENT_TOOL" ]] && _marker_args+=("tool=$CURRENT_TOOL")
 
+# Environment detection (tn-ncmj): the shell self-identifies its runtime
+# environment so the daemon knows the signal origin without crossing process
+# boundaries.
+if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+    _marker_args+=("environment=wsl:${WSL_DISTRO_NAME}")
+elif [[ -f /.dockerenv ]]; then
+    _marker_args+=("environment=docker:$(hostname)")
+elif [[ -n "${SSH_CONNECTION:-}" ]]; then
+    _marker_args+=("environment=ssh:$(hostname)")
+else
+    _marker_args+=("environment=local")
+fi
+
 # Emit state marker (only if we have at least one field).
 if [[ ${#_marker_args[@]} -gt 0 ]]; then
     emit_osc_marker "${_marker_args[@]}"

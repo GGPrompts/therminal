@@ -323,6 +323,10 @@ async fn start_daemon(
                             .get("model")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string()),
+                        environment: body
+                            .get("environment")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                     };
                     capacity_cache_for_drain.upsert_from_marker(pane_id, patch);
                     debug!(

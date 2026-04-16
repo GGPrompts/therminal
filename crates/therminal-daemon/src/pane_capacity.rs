@@ -50,6 +50,11 @@ pub struct PaneCapacityEntry {
     pub session_title: Option<String>,
     pub current_tool: Option<String>,
     pub working_dir: Option<String>,
+    /// Runtime environment where the agent is running (tn-ncmj).
+    /// Format: `<type>:<name>` (e.g. `wsl:Ubuntu-24.04`, `docker:abc123`,
+    /// `ssh:devbox`) or `local` for native execution. Populated from
+    /// OSC 1341 `environment=` markers.
+    pub environment: Option<String>,
     pub updated_at: u64,
     /// Wall-clock timestamp (Unix secs) of the most recent upsert.
     pub last_seen_at: u64,
@@ -111,6 +116,9 @@ impl PaneCapacityCache {
             }
             if let Some(m) = patch.model {
                 entry.model = Some(m);
+            }
+            if let Some(env) = patch.environment {
+                entry.environment = Some(env);
             }
             entry.marker_seen_at = now;
             entry.last_seen_at = now;
@@ -261,6 +269,7 @@ pub fn entry_from_state(state: &ClaudeSessionState) -> PaneCapacityEntry {
         session_title: state.session_title.clone(),
         current_tool: state.current_tool.clone(),
         working_dir: state.working_dir.clone(),
+        environment: None,
         updated_at: now,
         last_seen_at: now,
         marker_seen_at: 0,
@@ -278,6 +287,9 @@ pub struct MarkerPatch {
     pub cwd: Option<String>,
     pub context_percent: Option<f32>,
     pub model: Option<String>,
+    /// Runtime environment (tn-ncmj): `wsl:<distro>`, `docker:<hostname>`,
+    /// `ssh:<hostname>`, or `local`.
+    pub environment: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -596,6 +608,7 @@ mod tests {
             session_title: Some("My Cool Session".into()),
             current_tool: Some("Bash".into()), // differs from marker
             working_dir: Some("/file/dir".into()), // differs from marker
+            environment: None,
             updated_at: now_secs(),
             last_seen_at: now_secs(),
             marker_seen_at: 0,
@@ -658,5 +671,40 @@ mod tests {
         assert_eq!(after.context_percent, Some(30.0));
         // model should be merged from file.
         assert_eq!(after.model.as_deref(), Some("new-model"));
+    }
+
+    #[test]
+    fn upsert_from_marker_applies_environment() {
+        let cache = PaneCapacityCache::new();
+        let patch = MarkerPatch {
+            session_id: Some("sess-env".into()),
+            status: Some("idle".into()),
+            environment: Some("wsl:Ubuntu-24.04".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch);
+        let entry = cache.get(10).expect("entry created");
+        assert_eq!(entry.environment.as_deref(), Some("wsl:Ubuntu-24.04"));
+    }
+
+    #[test]
+    fn upsert_from_marker_preserves_environment_when_patch_none() {
+        let cache = PaneCapacityCache::new();
+        // First marker sets environment.
+        let patch1 = MarkerPatch {
+            session_id: Some("sess-env".into()),
+            environment: Some("docker:abc123".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch1);
+        // Second marker updates status but not environment.
+        let patch2 = MarkerPatch {
+            status: Some("processing".into()),
+            ..Default::default()
+        };
+        cache.upsert_from_marker(10, patch2);
+        let entry = cache.get(10).unwrap();
+        assert_eq!(entry.environment.as_deref(), Some("docker:abc123"));
+        assert_eq!(entry.status.as_deref(), Some("processing"));
     }
 }
