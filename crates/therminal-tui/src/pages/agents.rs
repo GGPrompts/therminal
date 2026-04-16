@@ -88,10 +88,13 @@ impl TuiPage for AgentsPage {
         "Agents"
     }
 
-    fn tick(&mut self, backend: &DaemonBackend) {
+    fn tick(&mut self, backend: &DaemonBackend) -> bool {
         if self.last_refresh.elapsed() >= std::time::Duration::from_secs(2) {
             self.refresh(backend);
             self.last_refresh = Instant::now();
+            true
+        } else {
+            false
         }
     }
 

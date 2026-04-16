@@ -26,8 +26,14 @@ pub trait TuiPage {
     /// Tab title shown in the tab bar.
     fn title(&self) -> &str;
 
-    /// Called every tick (~250ms) to refresh data from the daemon.
-    fn tick(&mut self, backend: &DaemonBackend);
+    /// Called from the event loop on each iteration. Pages MUST throttle
+    /// their own work (the loop calls this at the input-poll cadence,
+    /// which can be much faster than once per second). Return `true` if
+    /// any rendered state changed and a redraw should happen, `false` if
+    /// the call was a no-op. This drives the loop's dirty flag — an
+    /// always-true return defeats the redraw gate and brings the
+    /// flicker back.
+    fn tick(&mut self, backend: &DaemonBackend) -> bool;
 
     /// Render the page into the given area.
     fn render(&mut self, f: &mut Frame, area: Rect);

@@ -5,7 +5,7 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -163,12 +163,18 @@ impl App {
         }
     }
 
-    fn tick(&mut self) {
+    /// Drive the active page's tick. Returns `true` if the page did
+    /// real work (and the rendered state may have changed), `false` if
+    /// the call was a throttled no-op. The run loop uses this to
+    /// decide whether to repaint.
+    fn tick(&mut self) -> bool {
         // Only tick the active page to avoid blocking the UI thread with
         // IPC calls for invisible pages (each call can block up to 5s if
         // the daemon is unreachable).
         if let Some(page) = self.pages.get_mut(self.active_tab) {
-            page.tick(&self.backend);
+            page.tick(&self.backend)
+        } else {
+            false
         }
     }
 
@@ -234,6 +240,24 @@ fn ui(f: &mut Frame, app: &mut App) {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// Maximum redraw cadence when idle. The loop never repaints faster than
+/// this — even bursts of input or rapid `tick()` state changes coalesce.
+/// 16ms ≈ 60 fps, which is the upper bound; the real cadence is set by
+/// the dirty flag and is usually much slower.
+const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Idle redraw interval. With a clean dirty flag and no events, we still
+/// repaint at this cadence so that wall-clock-derived state (none today,
+/// but reserved for future "X seconds ago" labels) eventually catches up.
+/// Anything faster than this is perceived as flicker on most terminals.
+const IDLE_REDRAW_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long to wait for a crossterm event before falling through to a
+/// tick. This is the upper bound on input latency; the loop does NOT
+/// redraw on every poll wakeup, so this can be short without burning
+/// frames.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Launch the TUI dashboard. Blocks until the user quits.
 pub fn run(socket_path: PathBuf) -> Result<()> {
     let backend = DaemonBackend::connect(&socket_path)?;
@@ -242,57 +266,85 @@ pub fn run(socket_path: PathBuf) -> Result<()> {
     let terminal_backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(terminal_backend)?;
 
+    // Hide the hardware cursor for the lifetime of the TUI. Ratatui's
+    // `Terminal::draw` re-positions the cursor on every flush, so a
+    // visible cursor visibly jumps between draws and reads as "flicker"
+    // even when no cells changed. The Drop impl on `ScreenGuard`
+    // re-enables the cursor via `Show` on shutdown (tn-dyo1).
+    terminal.hide_cursor()?;
+
     let mut app = App::new(backend);
 
-    // Initial tick.
+    // Initial tick + initial draw.
     app.tick();
+    terminal.draw(|f| ui(f, &mut app))?;
+    let mut last_draw = Instant::now();
+    let mut dirty = false;
 
     loop {
-        terminal.draw(|f| ui(f, &mut app))?;
-
-        if event::poll(Duration::from_millis(250))? {
+        // Wait for input. Short timeout because we don't redraw on
+        // wakeup unless something actually changed.
+        let event_arrived = event::poll(POLL_INTERVAL)?;
+        if event_arrived {
             match event::read()? {
-                Event::Key(key) => match key.code {
-                    KeyCode::Char('q') if !app.is_text_input() => {
-                        app.should_quit = true;
-                    }
-                    KeyCode::Char('1') if !app.is_text_input() => app.set_tab(0),
-                    KeyCode::Char('2') if !app.is_text_input() => app.set_tab(1),
-                    KeyCode::Char('3') if !app.is_text_input() => app.set_tab(2),
-                    KeyCode::Char('c')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        app.should_quit = true;
-                    }
-                    KeyCode::Char('n')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        app.next_tab();
-                    }
-                    KeyCode::Char('p')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        app.prev_tab();
-                    }
-                    KeyCode::BackTab if !app.is_text_input() => {
-                        app.prev_tab();
-                    }
-                    _ => {
-                        if let Some(page) = app.pages.get_mut(app.active_tab) {
-                            let result = page.handle_key(key);
-                            if result.quit {
-                                app.should_quit = true;
+                Event::Key(key) => {
+                    dirty = true;
+                    match key.code {
+                        KeyCode::Char('q') if !app.is_text_input() => {
+                            app.should_quit = true;
+                        }
+                        KeyCode::Char('1') if !app.is_text_input() => app.set_tab(0),
+                        KeyCode::Char('2') if !app.is_text_input() => app.set_tab(1),
+                        KeyCode::Char('3') if !app.is_text_input() => app.set_tab(2),
+                        KeyCode::Char('c')
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            app.should_quit = true;
+                        }
+                        KeyCode::Char('n')
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            app.next_tab();
+                        }
+                        KeyCode::Char('p')
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            app.prev_tab();
+                        }
+                        KeyCode::BackTab if !app.is_text_input() => {
+                            app.prev_tab();
+                        }
+                        _ => {
+                            if let Some(page) = app.pages.get_mut(app.active_tab) {
+                                let result = page.handle_key(key);
+                                if result.quit {
+                                    app.should_quit = true;
+                                }
                             }
                         }
                     }
-                },
+                }
                 Event::Mouse(mouse) => {
+                    // Only treat actionable mouse events as dirty —
+                    // motion and release don't change rendered state, so
+                    // they shouldn't force a redraw. (Mouse drag events
+                    // during a button hold can otherwise flood the loop.)
+                    let actionable = matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(_)
+                            | MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                    );
+                    if !actionable {
+                        continue;
+                    }
+                    dirty = true;
                     // Tab bar occupies rows 0..3.
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                         && mouse.row < 3
@@ -307,11 +359,37 @@ pub fn run(socket_path: PathBuf) -> Result<()> {
                         }
                     }
                 }
-                _ => {}
+                Event::Resize(_, _) => {
+                    // The terminal backend handles the resize, but we
+                    // need to redraw at the new size.
+                    dirty = true;
+                }
+                _ => {
+                    // FocusGained/FocusLost/Paste — none of these change
+                    // anything rendered, ignore.
+                }
             }
         }
 
-        app.tick();
+        // Tick the active page. `tick()` is internally throttled to
+        // its own refresh cadence (typically 2s) and returns `true`
+        // only when it actually fetched new data. Most calls are
+        // sub-microsecond no-ops.
+        if app.tick() {
+            dirty = true;
+        }
+
+        // Draw gating: only redraw if something changed, AND respect
+        // the minimum redraw interval. Also force a redraw at the idle
+        // cadence so any time-derived state catches up.
+        let elapsed = last_draw.elapsed();
+        let should_draw =
+            (dirty && elapsed >= MIN_REDRAW_INTERVAL) || elapsed >= IDLE_REDRAW_INTERVAL;
+        if should_draw {
+            terminal.draw(|f| ui(f, &mut app))?;
+            last_draw = Instant::now();
+            dirty = false;
+        }
 
         if app.should_quit {
             break;
@@ -341,5 +419,34 @@ mod tests {
     fn tab_title_line_format() {
         let line = tab_title_line(0, "Sessions");
         assert_eq!(line.spans.len(), 3);
+    }
+
+    /// tn-dyo1: the TUI flickered because the run loop repainted on
+    /// every iteration — including on mouse-motion events and after
+    /// every no-op tick. These invariants guard the redraw gate:
+    ///
+    /// - Idle redraws at 2 Hz, not 60+ Hz.
+    /// - Dirty-flag redraws still respect a minimum interval to
+    ///   coalesce input bursts.
+    /// - Poll interval is short enough for snappy input but shorter
+    ///   than both redraw windows, so wakeups don't force a paint.
+    #[test]
+    fn redraw_cadence_sane() {
+        assert!(
+            POLL_INTERVAL < IDLE_REDRAW_INTERVAL,
+            "poll must be faster than idle redraws so wakeups don't force frames"
+        );
+        assert!(
+            POLL_INTERVAL >= MIN_REDRAW_INTERVAL,
+            "poll should be at least one frame; otherwise we wake hot for no reason"
+        );
+        assert!(
+            MIN_REDRAW_INTERVAL <= Duration::from_millis(33),
+            "min redraw interval must stay within ≤ 30 fps to feel responsive"
+        );
+        assert!(
+            IDLE_REDRAW_INTERVAL >= Duration::from_millis(250),
+            "idle redraws faster than 4 Hz look like flicker on most terminals"
+        );
     }
 }
