@@ -157,7 +157,18 @@ impl App {
         };
         self.pane_id_map.remove_by_local(target_id);
         // tn-s5vj: destroy the platform-native webview if this was a WebView pane.
+        let was_webview = self.webview_manager.contains(target_id);
         self.webview_manager.destroy(target_id);
+        // tn-shgq: when closing a WebView that was not the focused pane,
+        // set_focused_pane (which carries the tn-0xuo focus_window hook) is
+        // never called, so keyboard focus stays orphaned on the destroyed
+        // child HWND and Windows beeps on every key. Restore OS focus to
+        // the main window directly.
+        if was_webview
+            && let Some(window) = self.window.as_ref()
+        {
+            window.focus_window();
+        }
 
         if let Some(last) = self.last_close_action
             && last.elapsed() < std::time::Duration::from_millis(100)

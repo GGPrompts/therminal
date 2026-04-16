@@ -466,6 +466,14 @@ impl App {
                 self.show_toast(format!("WebView failed: {e}"));
                 return Err(format!("failed to create native webview: {e}"));
             }
+
+            // tn-shgq: the wry WebView child HWND takes OS keyboard focus on
+            // creation (despite `.with_focused(false)`), so the source pane
+            // — which stays focused in our internal state (tn-2wco) — no
+            // longer receives key events through winit. Pull OS focus back
+            // to the main window so the user can keep typing into the pane
+            // that spawned the webview.
+            window.focus_window();
         }
 
         info!(pane_id = new_id, url, "created webview pane");

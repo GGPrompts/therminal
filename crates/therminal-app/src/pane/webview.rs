@@ -124,7 +124,6 @@ impl WebViewManager {
     }
 
     /// Returns true if a webview exists for this pane.
-    #[allow(dead_code)]
     pub fn contains(&self, pane_id: PaneId) -> bool {
         self.views.contains_key(&pane_id)
     }
