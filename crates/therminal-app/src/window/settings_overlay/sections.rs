@@ -390,8 +390,8 @@ impl SettingsOverlayState {
                 ControlBinding::ApplyThemePreset(ThemePreset::TomorrowNightBright),
             ),
             SettingsControl::new(
-                ThemePreset::HemisuDark.menu_label(),
-                ControlBinding::ApplyThemePreset(ThemePreset::HemisuDark),
+                ThemePreset::RetroTerminal.menu_label(),
+                ControlBinding::ApplyThemePreset(ThemePreset::RetroTerminal),
             ),
             // Font
             SettingsControl::with_type(

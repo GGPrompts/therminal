@@ -397,7 +397,7 @@ fn theme_presets_keep_readable_fg_bg_contrast() {
         ThemePreset::Paper,
         ThemePreset::TokyoNightLight,
         ThemePreset::TomorrowNightBright,
-        ThemePreset::HemisuDark,
+        ThemePreset::RetroTerminal,
     ] {
         apply_theme_preset(&mut colors, preset);
         let ratio = contrast_ratio(
@@ -416,7 +416,7 @@ fn theme_presets_keep_readable_fg_bg_contrast() {
         ThemePreset::Paper,
         ThemePreset::TokyoNightLight,
         ThemePreset::TomorrowNightBright,
-        ThemePreset::HemisuDark,
+        ThemePreset::RetroTerminal,
     ] {
         apply_theme_preset(&mut colors, preset);
         let name = format!("{preset:?}");
@@ -434,7 +434,7 @@ fn theme_presets_ansi_bg_contrast_for_white_text() {
         ThemePreset::Paper,
         ThemePreset::TokyoNightLight,
         ThemePreset::TomorrowNightBright,
-        ThemePreset::HemisuDark,
+        ThemePreset::RetroTerminal,
     ] {
         apply_theme_preset(&mut colors, preset);
         assert_ansi_bg_contrast(&colors, &format!("{preset:?}"));
@@ -452,7 +452,7 @@ fn theme_presets_ansi_semantic_correctness() {
         ThemePreset::Paper,
         ThemePreset::TokyoNightLight,
         ThemePreset::TomorrowNightBright,
-        ThemePreset::HemisuDark,
+        ThemePreset::RetroTerminal,
     ] {
         apply_theme_preset(&mut colors, preset);
         let ansi = colors.ansi.as_ref().unwrap();
@@ -506,7 +506,7 @@ fn theme_presets_set_all_chrome_role_fields() {
         ThemePreset::Paper,
         ThemePreset::TokyoNightLight,
         ThemePreset::TomorrowNightBright,
-        ThemePreset::HemisuDark,
+        ThemePreset::RetroTerminal,
     ] {
         apply_theme_preset(&mut colors, preset);
         let missing = [
@@ -557,7 +557,7 @@ fn theme_presets_chrome_text_readable_on_chrome_bg() {
         ThemePreset::Paper,
         ThemePreset::TokyoNightLight,
         ThemePreset::TomorrowNightBright,
-        ThemePreset::HemisuDark,
+        ThemePreset::RetroTerminal,
     ] {
         apply_theme_preset(&mut colors, preset);
         let fg = colors.chrome_fg.as_deref().unwrap();
@@ -898,8 +898,8 @@ fn active_theme_indicator_tracks_applied_preset() {
     assert_eq!(state.active_theme(), None);
     state.set_active_theme(ThemePreset::Paper);
     assert_eq!(state.active_theme(), Some(ThemePreset::Paper));
-    state.set_active_theme(ThemePreset::HemisuDark);
-    assert_eq!(state.active_theme(), Some(ThemePreset::HemisuDark));
+    state.set_active_theme(ThemePreset::RetroTerminal);
+    assert_eq!(state.active_theme(), Some(ThemePreset::RetroTerminal));
 }
 
 // -- Appearance section tests (consolidated from font/cursor/theme/opacity) --

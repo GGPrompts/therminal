@@ -290,53 +290,56 @@ fn palette_for(preset: ThemePreset) -> ThemePalette {
             hotspot_issueref: "#C397D8",
         },
 
-        // ── Hemisu Dark ─────────────────────────────────────────────────
-        // Desaturated dark theme with characteristic green cursor. ANSI
-        // colors are cleaned up: yellow is now a proper warm tone (was a
-        // muddy brown), blue is darkened for bg-safety, all remain
-        // readable on true black.
-        ThemePreset::HemisuDark => ThemePalette {
-            background: "#000000",
-            foreground: "#FFFFFF",
-            foreground_bright: "#FFFFFF",
-            foreground_muted: "#888888",
-            surface: "#1a1a1a",
-            cursor: "#BAFFAA",
-            selection: "#4d7a44",
+        // ── Retro Terminal ───────────────────────────────────────────
+        // Green phosphor CRT aesthetic. Dark green-tinted background,
+        // monochrome green foreground, amber accents. Inspired by the
+        // classic VT220 / IBM 3278 terminals. Instantly recognizable —
+        // nothing else looks like this. ANSI colors keep semantic
+        // correctness while fitting the phosphor palette: greens are
+        // brighter phosphor, reds are warm amber-red, blues are cool
+        // cyan to provide contrast within the green-dominated scheme.
+        ThemePreset::RetroTerminal => ThemePalette {
+            background: "#0a120a",
+            foreground: "#33ff33",
+            foreground_bright: "#66ff66",
+            foreground_muted: "#2a8a2a",
+            surface: "#0f1e0f",
+            cursor: "#ffb000",
+            selection: "#2a6e2a",
             ansi: [
-                "#444444", // 0  Black       — dark grey
-                "#FF0054", // 1  Red         — hot pink-red
-                "#B1D630", // 2  Green       — lime green (already correct)
-                "#D4A520", // 3  Yellow      — goldenrod, proper warm yellow
-                "#4B88C7", // 4  Blue        — medium blue, bg-safe for white text
-                "#B576BC", // 5  Magenta     — mauve purple
-                "#569A9F", // 6  Cyan        — muted teal
-                "#EDEDED", // 7  White       — near-white
-                "#777777", // 8  Bright Black — grey
-                "#FF5C84", // 9  Bright Red  — lighter hot pink
-                "#BAFFAA", // 10 Bright Green — bright lime
-                "#F0D060", // 11 Bright Yellow — bright gold
-                "#7DB4E6", // 12 Bright Blue — lighter blue
-                "#DEB3DF", // 13 Bright Magenta — light mauve
-                "#83C5C9", // 14 Bright Cyan — lighter teal
-                "#FFFFFF", // 15 Bright White
+                "#1a2a1a", // 0  Black       — dark green-tinted black
+                "#e05030", // 1  Red         — warm amber-red, distinct from green
+                "#44dd44", // 2  Green       — bright phosphor green
+                "#ccaa22", // 3  Yellow      — amber gold, warm CRT tone
+                "#4080b8", // 4  Blue        — medium teal-blue, bg-safe
+                "#b85ab8", // 5  Magenta     — warm magenta-purple, R > G
+                "#40a8a8", // 6  Cyan        — teal-cyan, distinct from green
+                "#c0dcc0", // 7  White       — green-tinted white
+                "#558855", // 8  Bright Black — muted phosphor grey-green
+                "#ff7850", // 9  Bright Red  — brighter amber-red
+                "#66ff66", // 10 Bright Green — full phosphor green
+                "#eedd55", // 11 Bright Yellow — bright amber
+                "#60a0d8", // 12 Bright Blue — lighter teal-blue
+                "#dd80dd", // 13 Bright Magenta — lighter magenta
+                "#66cccc", // 14 Bright Cyan — lighter teal
+                "#e0ffe0", // 15 Bright White — phosphor white
             ],
-            chrome_focus_border: "#67BEE3",
-            chrome_separator: "#2a2a2a",
-            chrome_header_bg: "#141414",
-            chrome_header_bg_dim: "#0a0a0a",
-            chrome_status_bar_bg: "#0a0a0a",
-            chrome_csd_close: "#FF0054",
-            chrome_fg: "#EDEDED",
-            chrome_fg_muted: "#777777",
-            chrome_fg_focus: "#67BEE3",
-            chrome_fg_warn: "#D4A520",
-            chrome_fg_alert: "#FF0054",
-            hotspot_filepath: "#569A9F",
-            hotspot_url: "#67BEE3",
-            hotspot_error: "#FF0054",
-            hotspot_gitref: "#D4A520",
-            hotspot_issueref: "#B576BC",
+            chrome_focus_border: "#33ff33",
+            chrome_separator: "#1a3a1a",
+            chrome_header_bg: "#0f200f",
+            chrome_header_bg_dim: "#0a150a",
+            chrome_status_bar_bg: "#0a150a",
+            chrome_csd_close: "#e05030",
+            chrome_fg: "#33ff33",
+            chrome_fg_muted: "#2a8a2a",
+            chrome_fg_focus: "#66ff66",
+            chrome_fg_warn: "#ffb000",
+            chrome_fg_alert: "#e05030",
+            hotspot_filepath: "#40a8a8",
+            hotspot_url: "#66ff66",
+            hotspot_error: "#e05030",
+            hotspot_gitref: "#ffb000",
+            hotspot_issueref: "#b85ab8",
         },
     }
 }

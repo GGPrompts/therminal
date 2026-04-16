@@ -13,7 +13,7 @@ pub(crate) enum ThemePreset {
     Paper,
     TokyoNightLight,
     TomorrowNightBright,
-    HemisuDark,
+    RetroTerminal,
 }
 
 impl ThemePreset {
@@ -23,7 +23,7 @@ impl ThemePreset {
             Self::Paper => "Paper (light)",
             Self::TokyoNightLight => "Tokyo Night Light (light)",
             Self::TomorrowNightBright => "Tomorrow Night Bright (dark)",
-            Self::HemisuDark => "Hemisu Dark (dark)",
+            Self::RetroTerminal => "Retro Terminal (dark)",
         }
     }
 
@@ -33,7 +33,7 @@ impl ThemePreset {
             Self::Paper => "Paper",
             Self::TokyoNightLight => "Tokyo Night Light",
             Self::TomorrowNightBright => "Tomorrow Night Bright",
-            Self::HemisuDark => "Hemisu Dark",
+            Self::RetroTerminal => "Retro Terminal",
         }
     }
 }

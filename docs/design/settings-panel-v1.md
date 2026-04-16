@@ -17,7 +17,7 @@ Implemented sections (in order as they appear in the panel):
 
 1. **Shell** — default shell path, shell arguments, new-pane cwd behavior (inherit from focused pane or home directory)
 2. **Hotspots** — editor chain entries (`Editor #1`…`#16`), folder pane command, folder opener entries
-3. **Theme Presets** — one-click apply for bundled palette presets (Original Therminal, Paper, Tokyo Night Light, Tomorrow Night Bright, Hemisu Dark)
+3. **Theme Presets** — one-click apply for bundled palette presets (Original Therminal, Paper, Tokyo Night Light, Tomorrow Night Bright, Retro Terminal)
 4. **Accessibility** — high contrast mode toggle, reduced motion toggle, UI text scale (75%–300%)
 
 Out of scope for V1 (not implemented):
