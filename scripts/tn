@@ -42,4 +42,41 @@ if [[ "${1:-}" == "--help-policy" ]]; then
     exit 0
 fi
 
-exec therminal "$@"
+# ── Binary discovery ────────────────────────────────────────────────
+# 1. THERMINAL_BIN env var (explicit override)
+# 2. `therminal` on PATH (native Linux/macOS build, or cargo install)
+# 3. `therminal.exe` on PATH (Windows build; WSL interop appends Windows
+#    PATH entries by default so this catches most setups)
+# 4. Probe Windows Desktop via USERPROFILE (common dev setup: build script
+#    copies therminal.exe to Desktop)
+#
+# To hardwire a path, set THERMINAL_BIN in your shell profile:
+#   export THERMINAL_BIN=/mnt/c/Users/you/Desktop/therminal.exe
+
+if [[ -n "${THERMINAL_BIN:-}" ]] && [[ -x "$THERMINAL_BIN" ]]; then
+    exec "$THERMINAL_BIN" "$@"
+elif command -v therminal &>/dev/null; then
+    exec therminal "$@"
+elif command -v therminal.exe &>/dev/null; then
+    exec therminal.exe "$@"
+elif [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+    # WSL2: probe Windows Desktop for a dev build.
+    # Try USERPROFILE first (set if WSLENV forwards it), then fall back
+    # to cmd.exe to discover the Windows home without hardcoded paths.
+    win_home=""
+    if [[ -n "${USERPROFILE:-}" ]]; then
+        win_home="$(wslpath -u "$USERPROFILE" 2>/dev/null || true)"
+    fi
+    if [[ -z "$win_home" ]]; then
+        win_profile="$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' || true)"
+        [[ -n "$win_profile" ]] && win_home="$(wslpath -u "$win_profile" 2>/dev/null || true)"
+    fi
+    if [[ -n "$win_home" ]] && [[ -x "$win_home/Desktop/therminal.exe" ]]; then
+        exec "$win_home/Desktop/therminal.exe" "$@"
+    fi
+fi
+
+echo "tn: therminal binary not found" >&2
+echo "  Checked: THERMINAL_BIN env, PATH (therminal / therminal.exe), Windows Desktop" >&2
+echo "  Fix: set THERMINAL_BIN or add the binary to PATH" >&2
+exit 1

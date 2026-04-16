@@ -54,6 +54,11 @@ impl SettingsOverlayState {
             if self.text_cursor_left() {
                 return;
             }
+            // If the active control is being edited, consume the key even
+            // when the cursor can't move further — don't yank focus away.
+            if self.is_text_editing() {
+                return;
+            }
             if self.active_control_is_select_expanded() {
                 self.cycle_select(-1);
                 return;
@@ -65,6 +70,11 @@ impl SettingsOverlayState {
     pub(crate) fn arrow_right(&mut self) {
         if self.focus == SettingsFocus::Controls {
             if self.text_cursor_right() {
+                return;
+            }
+            // If the active control is being edited, consume the key even
+            // when the cursor can't move further — don't yank focus away.
+            if self.is_text_editing() {
                 return;
             }
             if self.active_control_is_select_expanded() {

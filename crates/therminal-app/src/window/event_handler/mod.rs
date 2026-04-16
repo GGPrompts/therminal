@@ -1158,7 +1158,10 @@ impl App {
                             self.apply_settings_command(cmd);
                         }
                     }
-                    Key::Named(NamedKey::Space) if !is_editing => {
+                    Key::Named(NamedKey::Space) if is_editing => {
+                        self.settings_overlay.char_input(' ');
+                    }
+                    Key::Named(NamedKey::Space) => {
                         if let Some(cmd) = self.settings_overlay.space() {
                             self.apply_settings_command(cmd);
                         }
