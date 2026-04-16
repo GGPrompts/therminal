@@ -999,11 +999,30 @@ impl App {
                 && button == MouseButton::Left
                 && let Some((px, py)) = self.cursor_position
                 && let Some(pane_id) = self.pane_at_position(px, py)
-                && self.focused_pane() != Some(pane_id)
             {
-                self.set_focused_pane(Some(pane_id));
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
+                let internal_focus_changed = self.focused_pane() != Some(pane_id);
+                if internal_focus_changed {
+                    self.set_focused_pane(Some(pane_id));
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                } else {
+                    // tn-shgq: click landed in the already-internally-focused
+                    // pane, so set_focused_pane (and its tn-0xuo focus_window
+                    // hook) is skipped. If the user clicked a WebView earlier,
+                    // OS keyboard focus is stranded on that child HWND; this
+                    // click is the natural moment to reclaim it for a
+                    // non-WebView pane. Clicks inside a WebView pane's content
+                    // never reach winit (the child HWND captures them), so
+                    // this only fires when the click landed on a terminal
+                    // pane's content or drawn area.
+                    if let Some(layout) = self.workspaces.as_ref().map(|wm| wm.layout())
+                        && let Some(pane) = layout.find_pane(pane_id)
+                        && !pane.is_webview()
+                        && let Some(w) = self.window.as_ref()
+                    {
+                        w.focus_window();
+                    }
                 }
             }
             self.handle_mouse_input(state, button);
