@@ -382,4 +382,90 @@ impl App {
 
         info!("Spawned {n} additional panes via auto-split");
     }
+
+    /// Create a WebView pane by splitting the focused pane (tn-s5vj).
+    ///
+    /// The webview loads the given URL in a platform-native child surface
+    /// (WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS).
+    /// The pane participates in the layout tree like any terminal pane
+    /// and gets the same header chrome, context menu, and resize behavior.
+    #[allow(dead_code)]
+    pub(crate) fn create_webview_pane(&mut self, url: &str) {
+        let focused = match self.focused_pane() {
+            Some(id) => id,
+            None => {
+                info!("create_webview_pane: no focused pane to split from");
+                return;
+            }
+        };
+
+        let direction = self
+            .get_layout()
+            .and_then(|l| l.find_pane(focused))
+            .map(|p| {
+                crate::pane::LayoutNode::auto_split_direction(
+                    p.viewport,
+                    crate::pane::SplitDirection::Horizontal,
+                )
+            })
+            .unwrap_or(crate::pane::SplitDirection::Horizontal);
+
+        let url_owned = url.to_string();
+
+        // Step 1: Insert the WebView PaneState into the layout tree.
+        let layout = match self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let new_id = layout.split_pane(focused, direction, |viewport| {
+            Some(crate::pane::spawn_webview_pane(viewport, &url_owned))
+        });
+
+        let new_id = match new_id {
+            Some(id) => id,
+            None => {
+                self.show_toast("failed to split for webview pane".to_string());
+                return;
+            }
+        };
+
+        // Step 2: Now that layout is no longer mutably borrowed, create
+        // the platform-native webview. Look up the new pane's viewport.
+        let viewport = self
+            .get_layout()
+            .and_then(|l| l.find_pane(new_id))
+            .map(|p| p.viewport);
+
+        if let Some(viewport) = viewport {
+            let window = match self.window.as_ref() {
+                Some(w) => Arc::clone(w),
+                None => {
+                    warn!("create_webview_pane: no window available");
+                    return;
+                }
+            };
+            let pane_count = self.get_layout().map(|l| l.pane_count()).unwrap_or(2);
+            let header_h = crate::pane::effective_header_height(pane_count, !self.focus_mode);
+            let content_rect = crate::pane::webview::webview_content_rect(viewport, header_h);
+
+            if let Err(e) = self
+                .webview_manager
+                .create(new_id, &url_owned, content_rect, &window)
+            {
+                warn!(error = %e, "failed to create native webview, removing pane");
+                // Remove the pane from layout since the webview failed.
+                if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+                    layout.remove_pane(new_id);
+                }
+                self.show_toast(format!("WebView failed: {e}"));
+                return;
+            }
+        }
+
+        info!(pane_id = new_id, url, "created webview pane");
+        self.last_split_direction = direction;
+        self.set_focused_pane(Some(new_id));
+        self.relayout_and_redraw();
+    }
 }

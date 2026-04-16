@@ -180,6 +180,33 @@ impl App {
             self.pattern_engine.as_ref(),
         );
 
+        // ── Sync WebView positions and visibility (tn-s5vj) ────────────
+        // After rendering panes, reposition any platform-native webviews
+        // so they align with their pane's content area (below header).
+        // WebViews not in the current layout are hidden (workspace switch).
+        if !self.webview_manager.pane_ids().is_empty() {
+            let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
+            let visible_ids: std::collections::HashSet<crate::pane::PaneId> =
+                layout.pane_ids().into_iter().collect();
+            // Hide webviews for all overlays (focus mode keeps headers hidden
+            // but webviews should still show; however, modal overlays like
+            // help/settings should hide webviews so they don't occlude).
+            let modal_active = self.overlay_mode.is_some() || self.active_menu.is_some();
+            for wv_pane_id in self.webview_manager.pane_ids() {
+                let in_layout = visible_ids.contains(&wv_pane_id);
+                if in_layout && !modal_active {
+                    if let Some(pane) = layout.find_pane(wv_pane_id) {
+                        let content_rect =
+                            crate::pane::webview::webview_content_rect(pane.viewport, header_h);
+                        self.webview_manager.set_bounds(wv_pane_id, content_rect);
+                    }
+                    self.webview_manager.set_visible(wv_pane_id, true);
+                } else {
+                    self.webview_manager.set_visible(wv_pane_id, false);
+                }
+            }
+        }
+
         // ── Overlay pass: chrome backgrounds ────────────────────────────
         // Collect chrome overlay quads (status bar bg, visual bell) into a
         // shared OverlayLayer and render them in a single batched pass.

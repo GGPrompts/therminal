@@ -118,6 +118,9 @@ pub enum KeyAction {
         /// Commit hash captured from the hotspot text.
         hash: String,
     },
+    /// Open a URL in the system default browser (tn-s5vj).
+    /// Used by the WebView pane context menu "Open in browser" action.
+    OpenInBrowser(String),
 }
 
 impl KeyAction {
@@ -171,6 +174,7 @@ impl KeyAction {
             KeyAction::HotspotOpenFolderInPane(_) => "Open folder in new pane",
             KeyAction::HotspotOpenFolderInFileManager(_) => "Open folder in file manager",
             KeyAction::HotspotShowGitRef { .. } => "Show git commit in TUI tool",
+            KeyAction::OpenInBrowser(_) => "Open URL in browser",
         }
     }
 
@@ -221,7 +225,8 @@ impl KeyAction {
             | KeyAction::HotspotOpenExternal(_)
             | KeyAction::HotspotOpenFolderInPane(_)
             | KeyAction::HotspotOpenFolderInFileManager(_)
-            | KeyAction::HotspotShowGitRef { .. } => "Hotspot",
+            | KeyAction::HotspotShowGitRef { .. }
+            | KeyAction::OpenInBrowser(_) => "Hotspot",
         }
     }
 }

@@ -14,6 +14,7 @@ pub mod remote_spawn;
 pub mod spawn;
 pub mod state;
 pub mod swarm_watcher;
+pub mod webview;
 pub mod workspace;
 
 use std::sync::Arc;
@@ -88,8 +89,10 @@ pub use self::geometry::{
 };
 pub use self::layout::{FocusDirection, LayoutNode, LayoutSnapshot, SpatialDirection};
 #[allow(unused_imports)]
-pub use self::spawn::{PaneCallbacks, next_pane_id, spawn_pane};
+pub use self::spawn::{PaneCallbacks, next_pane_id, spawn_pane, spawn_webview_pane};
 #[allow(unused_imports)]
 pub use self::state::{PaneState, PaneStatus, grid_size_for_rect, grid_size_for_rect_with_header};
+#[allow(unused_imports)]
+pub use self::webview::WebViewManager;
 #[allow(unused_imports)]
 pub use self::workspace::{PaneRemoveResult, Workspace, WorkspaceManager};

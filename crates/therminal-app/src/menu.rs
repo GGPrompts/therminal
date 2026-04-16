@@ -183,6 +183,64 @@ fn format_hotkey(key: &str) -> String {
         .join("+")
 }
 
+/// Build the context menu for a WebView pane (tn-s5vj).
+pub(crate) fn build_webview_pane_menu(
+    pane_id: PaneId,
+    url: &str,
+    bindings: &[therminal_core::config::Keybinding],
+    position: (f32, f32),
+) -> ContextMenu {
+    let hint = |action: &KeyAction| hotkey_for_action(bindings, action);
+
+    ContextMenu {
+        sections: vec![
+            MenuSection(vec![MenuItem {
+                label: "Open in browser".into(),
+                hotkey_hint: None,
+                action: KeyAction::OpenInBrowser(url.to_string()),
+                enabled: true,
+            }]),
+            MenuSection(vec![
+                MenuItem {
+                    label: "Split Horizontal".into(),
+                    hotkey_hint: hint(&KeyAction::SplitHorizontal),
+                    action: KeyAction::SplitHorizontal,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Split Vertical".into(),
+                    hotkey_hint: hint(&KeyAction::SplitVertical),
+                    action: KeyAction::SplitVertical,
+                    enabled: true,
+                },
+            ]),
+            MenuSection(vec![MenuItem {
+                label: "Close Pane".into(),
+                hotkey_hint: hint(&KeyAction::ClosePane),
+                action: KeyAction::ClosePane,
+                enabled: true,
+            }]),
+            MenuSection(vec![
+                MenuItem {
+                    label: "Copy pane ID".into(),
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(pane_id.to_string()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Copy URL".into(),
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(url.to_string()),
+                    enabled: true,
+                },
+            ]),
+        ],
+        position,
+        selected_index: None,
+        context: MenuContext::Pane { pane_id },
+    }
+}
+
 /// Build the context menu for a pane (no selection).
 pub(crate) fn build_pane_menu(
     pane_id: PaneId,

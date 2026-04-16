@@ -325,3 +325,26 @@ where
         pinned: false,
     })
 }
+
+/// Create a WebView pane (tn-s5vj). No PTY, no Term — the content is
+/// rendered by a platform-native webview managed by `WebViewManager`.
+/// The pane participates in layout like any other pane.
+#[allow(dead_code)]
+pub fn spawn_webview_pane(viewport: Rect, url: &str) -> PaneState {
+    let id = next_pane_id();
+    let status = Arc::new(Mutex::new(PaneStatus::default()));
+    let region_index = Arc::new(Mutex::new(RegionIndex::new()));
+
+    info!(pane_id = id, url, "WebView pane created");
+
+    PaneState {
+        id,
+        viewport,
+        status,
+        region_index,
+        backend: PaneBackendKind::WebView {
+            url: url.to_string(),
+            content: String::new(),
+        },
+    }
+}

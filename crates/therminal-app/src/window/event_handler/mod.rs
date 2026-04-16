@@ -205,7 +205,8 @@ impl App {
             | KeyAction::HotspotOpenExternal(_)
             | KeyAction::HotspotOpenFolderInPane(_)
             | KeyAction::HotspotOpenFolderInFileManager(_)
-            | KeyAction::HotspotShowGitRef { .. } => {}
+            | KeyAction::HotspotShowGitRef { .. }
+            | KeyAction::OpenInBrowser(_) => {}
         }
         true
     }
@@ -259,7 +260,22 @@ impl App {
             false
         };
 
-        let mut menu = if has_selection {
+        // tn-s5vj: WebView panes get a dedicated context menu with
+        // "Open in browser" + "Copy URL" instead of terminal actions.
+        let is_webview_pane = self
+            .get_layout()
+            .and_then(|l| l.find_pane(pane_id))
+            .map(|p| p.is_webview())
+            .unwrap_or(false);
+
+        let mut menu = if is_webview_pane {
+            let url = self
+                .get_layout()
+                .and_then(|l| l.find_pane(pane_id))
+                .and_then(|p| p.webview_url().map(|u| u.to_string()))
+                .unwrap_or_default();
+            crate::menu::build_webview_pane_menu(pane_id, &url, bindings, (px, py))
+        } else if has_selection {
             let text = self
                 .get_layout()
                 .and_then(|l| l.find_pane(pane_id))
@@ -366,6 +382,12 @@ impl App {
                 self.show_git_ref_in_pane(tool, hash);
             }
             KeyAction::TogglePinPane => self.toggle_pin_focused_pane(),
+            KeyAction::OpenInBrowser(ref url) => {
+                if let Err(e) = open::that(url) {
+                    warn!("failed to open URL in browser {url}: {e}");
+                    self.show_toast(format!("Failed to open in browser: {e}"));
+                }
+            }
             KeyAction::NewWorkspace => self.create_new_workspace(),
             KeyAction::RenameWorkspace => {
                 let ws_id = self

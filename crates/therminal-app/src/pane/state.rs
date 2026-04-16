@@ -120,6 +120,19 @@ impl PaneState {
     pub fn get_content(&self) -> String {
         self.backend.get_content()
     }
+
+    /// Returns the URL for WebView panes, `None` for other backend types.
+    pub fn webview_url(&self) -> Option<&str> {
+        match &self.backend {
+            PaneBackendKind::WebView { url, .. } => Some(url.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this pane is a WebView backend.
+    pub fn is_webview(&self) -> bool {
+        matches!(&self.backend, PaneBackendKind::WebView { .. })
+    }
 }
 
 /// Compute (cols, rows) for a viewport rect using the renderer's cell metrics.

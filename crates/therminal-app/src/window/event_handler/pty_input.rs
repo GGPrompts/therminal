@@ -38,6 +38,12 @@ impl App {
             None => return,
         };
 
+        // tn-s5vj: WebView panes handle their own input through the
+        // platform's native input system. Skip PTY encoding.
+        if pane.is_webview() {
+            return;
+        }
+
         let key_code = match &key_event.logical_key {
             Key::Named(named) => match named {
                 NamedKey::Enter => Some(KeyCode::Enter),

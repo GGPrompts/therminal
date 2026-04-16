@@ -89,6 +89,8 @@ impl App {
             return;
         }
         self.pane_id_map.remove_by_local(focused);
+        // tn-s5vj: destroy the platform-native webview if this was a WebView pane.
+        self.webview_manager.destroy(focused);
 
         // Use remove_pane_any which searches all workspaces and handles cleanup.
         let wm = match self.workspaces.as_mut() {
@@ -154,6 +156,8 @@ impl App {
             None
         };
         self.pane_id_map.remove_by_local(target_id);
+        // tn-s5vj: destroy the platform-native webview if this was a WebView pane.
+        self.webview_manager.destroy(target_id);
 
         if let Some(last) = self.last_close_action
             && last.elapsed() < std::time::Duration::from_millis(100)

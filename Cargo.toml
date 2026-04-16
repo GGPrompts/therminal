@@ -103,6 +103,10 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 # transitively on Linux; hoisting avoids a second copy in the build graph.
 tiny-skia = "0.11"
 
+# WebView embedding (tn-s5vj). Platform-native webview via wry (Tauri's
+# webview library). Linux: WebKitGTK, Windows: WebView2, macOS: WKWebView.
+wry = "0.55"
+
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 vte = { path = "vendor/vte" }

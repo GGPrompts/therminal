@@ -539,6 +539,12 @@ pub struct App {
     /// then-up "trick" compacts that row away. We wait a few frames so
     /// the shell's first output has landed in the Term.
     pub(crate) scrollback_compact_countdown: u8,
+
+    /// WebView pane manager (tn-s5vj). Owns all wry `WebView` instances
+    /// for panes using the `PaneBackendKind::WebView` backend. WebViews
+    /// are platform-native child surfaces positioned on top of the wgpu
+    /// surface to match their pane's viewport rect.
+    pub(crate) webview_manager: crate::pane::WebViewManager,
 }
 
 /// Rewrite a `LayoutSnapshot` tree, translating every leaf pane id from

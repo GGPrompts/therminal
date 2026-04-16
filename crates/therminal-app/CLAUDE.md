@@ -84,6 +84,7 @@ src/
 │   ├── remote_spawn.rs  # Remote pane spawn via daemon IPC
 │   ├── swarm_watcher.rs # Agent swarm monitoring
 │   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView | JsonlTail)
+│   ├── webview.rs       # WebViewManager — wry-based platform-native webview embedding (tn-s5vj)
 │   ├── jsonl_tail.rs    # JsonlTailState — file watcher, JSONL parser, structured rendering (tn-14c0)
 │   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
 ├── widgets/
@@ -220,9 +221,31 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 
 `PaneBackendKind` is the concrete enum stored in each `PaneState`:
 - **Terminal** — PTY-backed pane using alacritty_terminal `Term`. Holds `Arc<FairMutex<Term>>`, PTY writer, and PTY master.
-- **WebView** — stub variant for future wry integration. Stores a URL and a content buffer.
+- **WebView** (tn-s5vj) — Platform-native webview via wry. Stores a URL and content buffer. The actual webview surface is owned by `WebViewManager` on App, not by the backend enum, because wry `WebView` instances must be created with a window handle that lives on the main thread. The render path draws only the pane header/focus border; content is rendered by the native webview child surface positioned on top of the wgpu surface. Input is routed to the native webview by the OS; PTY key encoding is skipped for WebView panes.
+- **JsonlTail** — Read-only JSONL file tail with structured rendering.
+- **RemotePty** — Daemon-hosted PTY with local shadow Term.
 
 The enum also provides `resize_to_viewport()` which computes grid dimensions from a pixel `Rect` and renderer metrics before delegating to `resize()`.
+
+## WebView Pane Architecture (tn-s5vj)
+
+Platform-native webviews embedded via wry (Tauri's webview library). v1 is "sidecar mode" — loads URLs from running servers.
+
+**Data flow**: `App.webview_manager: WebViewManager` owns all wry `WebView` instances keyed by PaneId. The render driver syncs webview bounds with pane viewports every frame and toggles visibility on workspace switch / modal overlay.
+
+**Key integration points**:
+- `pane/webview.rs` — `WebViewManager` (create/destroy/bounds/visibility), `webview_content_rect()` helper
+- `pane/spawn.rs` — `spawn_webview_pane()` creates a `PaneState` with `PaneBackendKind::WebView`
+- `window/render.rs` — WebView branch in `render_single_pane`: draws header + focus border, skips grid content
+- `window/render_driver.rs` — post-render webview position sync + visibility management
+- `window/event_handler/pty_input.rs` — early return for WebView panes (no PTY to encode to)
+- `window/event_handler/mod.rs` — WebView-specific context menu with "Open in browser" / "Copy URL"
+- `window/pane_ops/close_ops.rs` — `webview_manager.destroy()` on pane close
+- `window/pane_ops/split_ops/local.rs` — `create_webview_pane()` method
+- `menu.rs` — `build_webview_pane_menu()` with "Open in browser" action
+- `config/keybindings.rs` — `KeyAction::OpenInBrowser(String)` for the "Open in browser" action
+
+**Platform requirements**: Linux requires `libwebkit2gtk-4.1-dev`. Windows requires WebView2 (ships with Win10+). macOS uses system WKWebView.
 
 ## Auto-Tiling
 

@@ -67,6 +67,11 @@ pub enum PaneCmd {
         /// precedence over `--shell` (tn-ar79).
         #[arg(long)]
         profile: Option<String>,
+        /// Create a WebView pane loading this URL instead of a terminal
+        /// (tn-s5vj). Requires a running GUI window. Mutually exclusive
+        /// with --spawn, --shell, --worktree, --profile.
+        #[arg(long)]
+        url: Option<String>,
         #[command(flatten)]
         out: OutputFlags,
     },
@@ -147,19 +152,31 @@ pub fn run(ctx: &CliCtx, cmd: PaneCmd) -> Result<()> {
             shell,
             worktree,
             profile,
+            url,
             out,
-        } => create(
-            ctx,
-            from,
-            split,
-            session,
-            startup_command,
-            ratio,
-            shell,
-            worktree,
-            profile,
-            out,
-        ),
+        } => {
+            if url.is_some() {
+                // tn-s5vj: WebView pane creation is GUI-only. The daemon
+                // doesn't manage WebView panes (no PTY), so the CLI prints
+                // an informational message directing users to the GUI API.
+                bail!(
+                    "WebView panes (--url) are GUI-only and cannot be created via the daemon CLI.\n\
+                     Use the GUI context menu or MCP terminal.panes.create {{ url: \"...\" }}."
+                );
+            }
+            create(
+                ctx,
+                from,
+                split,
+                session,
+                startup_command,
+                ratio,
+                shell,
+                worktree,
+                profile,
+                out,
+            )
+        }
         PaneCmd::Destroy { pane_id } => destroy(ctx, pane_id),
         PaneCmd::Send { pane_id, keys, raw } => send(ctx, pane_id, &keys, raw),
         PaneCmd::Peek {

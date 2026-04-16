@@ -400,9 +400,60 @@ fn render_single_pane(
             Some(format!("{name} \u{00b7} {label}"))
         });
     let vp = pane.viewport;
+
+    // WebView panes have no Term — render only the pane header and focus
+    // border. The content area is filled by a platform-native webview
+    // child surface managed by WebViewManager (tn-s5vj).
+    if pane.is_webview() {
+        renderer.set_current_pane(pane.id);
+        let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
+        // Show a short domain label in the pane header instead of "pane N".
+        let webview_title = pane.webview_url().map(|u| {
+            // Extract host from URL without pulling in the url crate.
+            // "http://localhost:8080/path" -> "localhost:8080"
+            let host = u
+                .strip_prefix("https://")
+                .or_else(|| u.strip_prefix("http://"))
+                .unwrap_or(u)
+                .split('/')
+                .next()
+                .unwrap_or(u);
+            format!("[web] {host}")
+        });
+        if show_pane_headers {
+            draw_pane_header(
+                pane,
+                draw_focus_border || pane_count == 1,
+                is_zoomed,
+                webview_title.as_deref(),
+                None, // no claude badge
+                renderer,
+                device,
+                queue,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+        }
+        if draw_focus_border {
+            draw_pane_focus_border(
+                pane,
+                renderer,
+                device,
+                encoder,
+                view,
+                surface_width,
+                surface_height,
+            );
+        }
+        let _ = header_h; // used by webview positioning, not rendering
+        return;
+    }
+
     let term = match pane.backend.term() {
         Some(t) => t,
-        None => return, // Non-terminal panes don't render via this path.
+        None => return, // Non-terminal panes without a term don't render.
     };
     let mut term_guard = term.lock();
 

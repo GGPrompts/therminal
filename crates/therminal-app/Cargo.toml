@@ -39,6 +39,7 @@ sysinfo = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tiny-skia = { workspace = true }
+wry = { workspace = true }
 dirs = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

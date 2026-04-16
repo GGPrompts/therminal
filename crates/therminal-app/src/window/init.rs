@@ -294,6 +294,7 @@ impl App {
             minimized: false,
             deferred_remote_spawn: None,
             scrollback_compact_countdown: 0,
+            webview_manager: crate::pane::WebViewManager::new(),
         }
     }
 
