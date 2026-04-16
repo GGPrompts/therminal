@@ -767,6 +767,12 @@ pub struct ColorsConfig {
     pub chrome_tab_active_bg: Option<HexColor>,
     /// CSD close button hover color.
     pub chrome_csd_close: Option<HexColor>,
+    /// Background fill for the hovered/selected row in floating menus
+    /// (right-click context menu, ...). Defaults to a dimmed `Color::FOCUS`
+    /// at α=0.35 so the highlighted row stays visibly distinct from the
+    /// menu's `chrome_fg` / `chrome_fg_muted` text on both light and dark
+    /// themes (tn-r0lt).
+    pub chrome_menu_hover_bg: Option<HexColor>,
     /// Primary chrome text color (pane header process labels, status bar
     /// center text). Themes that re-skin chrome backgrounds should set
     /// this to something readable against the new background.
@@ -976,6 +982,16 @@ impl ColorsConfig {
         }
         if let Some(c) = self.chrome_csd_close.as_deref().and_then(Self::parse_hex) {
             p.csd_close = c.to_f32_array();
+        }
+        // Menu hover row: preserve the default α (0.35) so an opaque hex
+        // override still composites as a tint over the menu backdrop and
+        // doesn't fight the foreground glyphs (tn-r0lt).
+        if let Some(c) = self
+            .chrome_menu_hover_bg
+            .as_deref()
+            .and_then(Self::parse_hex)
+        {
+            rgb_into(&mut p.menu_hover_bg, c);
         }
 
         // Chrome text-color roles. These are stored as `Color` (u8 channels)
@@ -3374,6 +3390,7 @@ working_dir = "scratch/{random}"
         assert_eq!(derived.exit_error, default.exit_error);
         assert_eq!(derived.csd_close, default.csd_close);
         assert_eq!(derived.csd_button_hover, default.csd_button_hover);
+        assert_eq!(derived.menu_hover_bg, default.menu_hover_bg);
         assert_eq!(derived.selection, default.selection);
         assert_eq!(derived.cursor, default.cursor);
         assert_eq!(derived.hyperlink, default.hyperlink);
@@ -3396,6 +3413,32 @@ working_dir = "scratch/{random}"
         assert!((p.focus_border[2] - 1.0).abs() < 1e-6);
         // Default 0.92 alpha is preserved through the override.
         assert!((p.focus_border[3] - 0.92).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_menu_hover_bg_override_preserves_alpha() {
+        let colors = ColorsConfig {
+            chrome_menu_hover_bg: Some("#ff8800".into()),
+            ..ColorsConfig::default()
+        };
+        let p = colors.chrome_palette();
+        assert!((p.menu_hover_bg[0] - 1.0).abs() < 1e-6);
+        assert!((p.menu_hover_bg[1] - 0x88 as f32 / 255.0).abs() < 1e-6);
+        assert!((p.menu_hover_bg[2] - 0.0).abs() < 1e-6);
+        // Default 0.35 alpha is preserved through the override so an
+        // opaque hex value still composites as a tint over the menu
+        // backdrop and doesn't fight the foreground glyphs (tn-r0lt).
+        assert!((p.menu_hover_bg[3] - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chrome_palette_menu_hover_bg_default_distinct_from_focus_border() {
+        // Regression: the default hover tint must not be the bright
+        // `focus_border` accent — that's exactly the contrast bug
+        // tn-r0lt fixed. Verify the default carries the dimmed alpha.
+        let p = ChromePalette::default();
+        assert!((p.menu_hover_bg[3] - 0.35).abs() < 1e-6);
+        assert!(p.menu_hover_bg[3] < p.focus_border[3]);
     }
 
     #[test]

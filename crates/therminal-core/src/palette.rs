@@ -306,6 +306,14 @@ pub struct ChromePalette {
     /// translucent overlay).
     pub csd_button_hover: [f32; 4],
 
+    // ── Floating menus / overlays ──────────────────────────────────────
+    /// Background fill for the hovered/selected row in the right-click
+    /// context menu (and other future hover-row overlays). Defaults to a
+    /// dimmed `Color::FOCUS` so it stays visibly distinct from menu text
+    /// (`chrome_fg`, `chrome_fg_muted`, `chrome_fg_focus`) on both light
+    /// and dark themes (tn-r0lt).
+    pub menu_hover_bg: [f32; 4],
+
     // ── Selection / cursor ─────────────────────────────────────────────
     /// Selection-highlight rect color (alpha already applied).
     pub selection: [f32; 4],
@@ -369,6 +377,12 @@ impl Default for ChromePalette {
 
             csd_close: [0.85, 0.25, 0.25, 1.0],
             csd_button_hover: [1.0, 1.0, 1.0, 0.1],
+
+            // Dimmed FOCUS — renderer composites the hover row over the
+            // menu's `status_bar_bg`-derived backdrop, so a translucent
+            // accent reads as a tinted highlight rather than a bright
+            // bar that fights with the foreground glyphs.
+            menu_hover_bg: with_alpha(Color::FOCUS, 0.35),
 
             selection: with_alpha(Color::ACCENT_COOL, 0.45),
             cursor: with_alpha(Color::WHITE_HOT, 0.85),
@@ -483,6 +497,11 @@ impl ChromePalette {
             // same as the default. It works on both light and dark
             // because alpha=0.1.
             csd_button_hover: [1.0, 1.0, 1.0, 0.1],
+
+            // Theme-derived hover row tint: dimmed accent over the menu's
+            // own backdrop. Same alpha as the default so the contrast
+            // budget tracks the bundled palette.
+            menu_hover_bg: with_alpha(accent_focus, 0.35),
 
             selection: with_alpha(accent_focus, 0.45),
             cursor: with_alpha(fg, 0.85),

@@ -141,6 +141,7 @@ Chrome modules read directly from `&renderer.chrome_palette.<role>`. There is no
 | `tab_active_underline` | `focus_border` | 2 px underline beneath the active workspace tab |
 | `csd_close` | `[0.85, 0.25, 0.25, 1.0]` (red) | CSD close-button hover tint |
 | `csd_button_hover` | `[1.0, 1.0, 1.0, 0.1]` (white α=0.1) | CSD min/max/settings hover tint |
+| `menu_hover_bg` | `Color::FOCUS` @ α=0.35 | Hovered/selected row tint in the right-click context menu (read by `menu.rs`); dimmed accent so the highlighted row stays distinct from menu text |
 | `chrome_fg` | `Color::INK` | Primary chrome text — pane header process, status bar center, tab labels (active), CSD icons |
 | `chrome_fg_muted` | `Color::INK_MUTED` | Pane indices, button labels, status bar muted text, inactive tab labels |
 | `chrome_fg_focus` | `Color::FOCUS` | Workspace number, agent indicator, claude badge, topic-branch text |
@@ -174,6 +175,7 @@ chrome_header_bg_dim = "#ece2c4"   # unfocused pane header
 chrome_status_bar_bg = "#ece2c4"   # bottom status bar (also tab bar)
 chrome_tab_active_bg = "#f3ead6"   # active workspace tab
 chrome_csd_close     = "#cc3333"   # close-button hover tint
+chrome_menu_hover_bg = "#2563eb"   # context-menu hover row (alpha kept @ 0.35)
 
 # Text colors that ride the new background — set these whenever you re-skin
 # the chrome backgrounds, or pane labels become unreadable.
@@ -197,7 +199,7 @@ A few derivation rules to know:
 - **`chrome_header_bg` propagates** to `tab_active_bg`.
 - **`chrome_status_bar_bg` propagates** to `tab_bar_bg`. To re-skin only the tab bar, set `chrome_tab_bar_bg` (which does not propagate).
 - **`hotspot_url` propagates** to the OSC 8 `hyperlink` underline so hand-rolled and regex-detected URLs match. Set `chrome_hyperlink` to override only the OSC 8 underline without affecting the click-to-open URL hotspot color.
-- **`cursor` and `selection` overrides** keep their default alpha (0.85 / 0.45) — only the RGB channels are replaced.
+- **`cursor`, `selection`, and `menu_hover_bg` overrides** keep their default alpha (0.85 / 0.45 / 0.35) — only the RGB channels are replaced. This guarantees a recolor of the context-menu hover row stays a tint over the menu backdrop instead of an opaque bar that fights the foreground glyphs.
 
 Invalid hex strings fall back to the default for that single role; the rest of the palette is unaffected.
 
@@ -207,6 +209,7 @@ Invalid hex strings fall back to the default for that single role; the rest of t
 - `crates/therminal-core/src/config/mod.rs` — `ColorsConfig` chrome/hotspot fields + `chrome_palette()` resolver + tests.
 - `crates/therminal-app/src/grid_renderer.rs` — `GridRenderer.chrome_palette` field, rebuilt on every `apply_color_overrides` call.
 - `crates/therminal-app/src/window/chrome/{colors,csd,pane_header,status_bar,tab_bar,overlays}.rs` — chrome modules read `renderer.chrome_palette.*` directly.
+- `crates/therminal-app/src/menu.rs` — right-click context menu reads `chrome_palette.menu_hover_bg` for the hovered/selected row tint.
 - `crates/therminal-app/src/color_mapping.rs` — `hotspot_kind_color(kind, &chrome_palette)` resolves kind-specific underline colors.
 
 ## Building & Testing

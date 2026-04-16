@@ -671,10 +671,11 @@ pub(crate) fn render_context_menu(
         [r, g, b, 0.8]
     };
 
-    let highlight_color: [f32; 4] = {
-        let [r, g, b, _] = chrome_palette.focus_border;
-        [r, g, b, 0.9]
-    };
+    // Hover/selection row tint. Reads `menu_hover_bg` (tn-r0lt) — a dimmed
+    // accent at α=0.35 by default — so the highlighted row stays distinct
+    // from the menu text instead of borrowing the bright `focus_border`
+    // accent and drowning out the foreground glyphs.
+    let highlight_color: [f32; 4] = chrome_palette.menu_hover_bg;
 
     let separator_color: [f32; 4] = {
         let [r, g, b, _] = chrome_palette.separator;
