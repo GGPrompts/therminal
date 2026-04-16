@@ -216,10 +216,10 @@ case "$HOOK_TYPE" in
         _EXISTING_TITLE=$(jq -r '.session_title // ""' "$STATE_FILE" 2>/dev/null || echo "")
         if [[ -z "$_EXISTING_TITLE" ]]; then
             # Try beads issue ID first (e.g. "tn-xxxx" or "bd-xxxx")
-            _TITLE=$(echo "$PROMPT" | grep -oE '\b[a-z]{2,}-[a-z0-9]{2,}\b' | head -1)
+            _TITLE=$(echo "$PROMPT" | grep -oE '\b[a-z]{2,}-[a-z0-9]{2,}\b' | head -1 || true)
             # Try slash command (e.g. "/commit", "/review-pr 123")
             if [[ -z "$_TITLE" ]]; then
-                _TITLE=$(echo "$PROMPT" | grep -oE '^/[a-z-]+(\s+\S+)?' | head -1)
+                _TITLE=$(echo "$PROMPT" | grep -oE '^/[a-z-]+(\s+\S+)?' | head -1 || true)
             fi
             # Fallback: first ~60 chars trimmed to word boundary
             if [[ -z "$_TITLE" ]]; then
