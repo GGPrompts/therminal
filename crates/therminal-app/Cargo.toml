@@ -45,6 +45,12 @@ dirs = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# tn-shgq: Win32 SetFocus/GetFocus to move keyboard focus from a wry
+# WebView2 child HWND back to our main HWND. winit's focus_window() uses
+# SetForegroundWindow, which doesn't change child-HWND keyboard focus.
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse"] }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 

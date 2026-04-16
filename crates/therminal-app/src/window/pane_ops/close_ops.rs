@@ -174,7 +174,7 @@ impl App {
         // the wry HWND teardown on Windows is observably async.
         if was_webview {
             if let Some(window) = self.window.as_ref() {
-                window.focus_window();
+                crate::window::restore_main_window_focus(window);
             }
             crate::window::App::schedule_webview_focus_retries(self.event_proxy.clone());
         }

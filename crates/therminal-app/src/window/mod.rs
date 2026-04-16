@@ -113,6 +113,40 @@ use therminal_core::geometry::Rect;
 
 use keybindings::{BindingLookup, build_binding_map};
 
+/// Restore OS keyboard focus to our main winit window (tn-shgq).
+///
+/// On Windows, `Window::focus_window()` calls `SetForegroundWindow`, which
+/// moves the top-level window to the foreground but does *not* change the
+/// keyboard-focus HWND within that top-level window. When a wry WebView2
+/// child HWND holds keyboard focus, only a direct Win32 `SetFocus` call
+/// on the main HWND actually retargets key events back to winit.
+///
+/// On other platforms `focus_window()` is sufficient, so the Win32 branch
+/// is Windows-only.
+pub(crate) fn restore_main_window_focus(window: &winit::window::Window) {
+    window.focus_window();
+    #[cfg(target_os = "windows")]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::Win32(h) = handle.as_raw()
+        {
+            let hwnd = h.hwnd.get() as HWND;
+            if !hwnd.is_null() {
+                // SAFETY: `hwnd` comes from winit's own handle for the main
+                // window; it is valid for the window's lifetime. `SetFocus`
+                // is safe to call with a valid HWND owned by the current
+                // thread; winit's event loop runs on this thread.
+                unsafe {
+                    SetFocus(hwnd);
+                }
+            }
+        }
+    }
+}
+
 // ── Custom event for waking the event loop from the PTY reader ───────────
 
 /// Events sent from background threads to the winit event loop.
@@ -1031,7 +1065,7 @@ impl App {
             && !pane.is_webview()
             && let Some(window) = self.window.as_ref()
         {
-            window.focus_window();
+            restore_main_window_focus(window);
         }
     }
 
@@ -1414,7 +1448,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // creation). A background retry-burst fires this event on a
                 // schedule so we win the race. No-op if there's no window.
                 if let Some(window) = self.window.as_ref() {
-                    window.focus_window();
+                    restore_main_window_focus(window);
                 }
             }
             UserEvent::SwarmWatcherTick => {

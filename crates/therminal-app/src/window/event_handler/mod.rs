@@ -1021,7 +1021,7 @@ impl App {
                         && !pane.is_webview()
                         && let Some(w) = self.window.as_ref()
                     {
-                        w.focus_window();
+                        crate::window::restore_main_window_focus(w);
                     }
                 }
             }

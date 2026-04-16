@@ -477,7 +477,7 @@ impl App {
             // when the page finishes loading (often seconds later), so we
             // also kick off a retry-burst that reposts `RestoreMainFocus`
             // events over ~10 s to win the async race.
-            window.focus_window();
+            crate::window::restore_main_window_focus(&window);
             crate::window::App::schedule_webview_focus_retries(self.event_proxy.clone());
         }
 
