@@ -922,7 +922,8 @@ fn run_remote_worker(
                 idx.push_event(&event);
             }
             match event {
-                InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
+                // OSC 7 only — see spawn.rs for rationale (tn-5o34).
+                InterceptedEvent::CurrentDirectory(path) => {
                     if let Ok(mut s) = status.lock() {
                         s.git_state = crate::git_state::detect(std::path::Path::new(&path));
                         s.cwd = Some(path);

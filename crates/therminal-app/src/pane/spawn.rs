@@ -137,7 +137,13 @@ impl PtyReaderHandler for AppPtyHandler {
                 idx.push_event(&event);
             }
             match event {
-                InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
+                // OSC 7 only — OSC 9;9 (WslCwd) carries the same location
+                // as a Windows-native path, and overwriting `s.cwd` with
+                // it breaks WSL pane detection (tn-5o34): `is_wsl_pane_path`
+                // requires POSIX-absolute cwd to route hotspot clicks
+                // through the WSL branch. `linux_to_unc` recomputes the
+                // Windows form on demand wherever it's actually needed.
+                InterceptedEvent::CurrentDirectory(path) => {
                     if let Ok(mut s) = self.status.lock() {
                         s.git_state = crate::git_state::detect(std::path::Path::new(&path));
                         s.cwd = Some(path);

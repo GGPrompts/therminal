@@ -92,13 +92,16 @@ impl PtyReaderHandler for DaemonPtyHandler {
 
         // Drain intercepted events into the region index and update cwd.
         while let Ok(event) = self.interceptor_rx.try_recv() {
-            match &event {
-                InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
-                    if let Ok(mut cwd) = self.cwd.lock() {
-                        *cwd = path.clone();
-                    }
-                }
-                _ => {}
+            // OSC 7 only — OSC 9;9 (WslCwd) carries the same location as
+            // a Windows-native path, and overwriting the pane cwd with it
+            // breaks WSL-aware consumers (tn-5o34): worktree resolution
+            // via `git -C`, split inheritance for WSL children, and
+            // `pane.list` cwd reporting. `linux_to_unc` recomputes the
+            // Windows form on demand wherever it's actually needed.
+            if let InterceptedEvent::CurrentDirectory(path) = &event
+                && let Ok(mut cwd) = self.cwd.lock()
+            {
+                *cwd = path.clone();
             }
             // tn-ttie: capture WSL-side shell PID from OSC 7337.
             if let InterceptedEvent::WslShellPid(pid) = &event

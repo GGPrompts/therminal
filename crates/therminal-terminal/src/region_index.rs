@@ -94,7 +94,11 @@ impl RegionIndex {
             InterceptedEvent::Osc633(mark) | InterceptedEvent::Osc133(mark) => {
                 self.apply_mark(mark);
             }
-            InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
+            // OSC 7 only — OSC 9;9 carries the same location as a
+            // Windows-native path (tn-5o34). Annotating the region with
+            // both would record two different-looking cwds for the same
+            // prompt; the Linux-shaped one is the canonical semantic key.
+            InterceptedEvent::CurrentDirectory(path) => {
                 let mut metadata = HashMap::new();
                 metadata.insert("cwd".to_string(), path.clone());
                 self.push_region(Region {
@@ -151,6 +155,11 @@ impl RegionIndex {
             }
             InterceptedEvent::WslShellPid(_) => {
                 // WSL shell PID is used by the process detector, not regions.
+            }
+            InterceptedEvent::WslCwd(_) => {
+                // OSC 9;9 — same location as OSC 7 in Windows-native form.
+                // Skipped here to avoid duplicate cwd annotations (tn-5o34);
+                // the OSC 7 arm above already records the Linux-shaped cwd.
             }
         }
     }
