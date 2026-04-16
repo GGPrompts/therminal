@@ -537,6 +537,7 @@ impl SettingsOverlayState {
             ControlBinding::CursorStyle => SettingsCommand::SetCursorStyle(selected),
             ControlBinding::BellStyle => SettingsCommand::SetBellStyle(selected),
             ControlBinding::ScrollbackLines => SettingsCommand::SetScrollbackLines(selected),
+            ControlBinding::BackgroundOpacity => SettingsCommand::SetBackgroundOpacity(selected),
             _ => binding.command(),
         }
     }
