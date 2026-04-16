@@ -7,12 +7,14 @@ use therminal_core::palette::ChromePalette;
 
 use super::super::state::SettingsOverlayState;
 use super::super::types::{ControlType, SettingsFocus};
+use super::CaretOffsets;
 use super::layout::PanelLayout;
 
 pub(super) fn build_rect_vertices(
     state: &SettingsOverlayState,
     layout: &PanelLayout,
     chrome_palette: &ChromePalette,
+    caret_offsets: &CaretOffsets,
 ) -> Vec<ColorVertex> {
     let PanelLayout {
         sw,
@@ -159,6 +161,17 @@ pub(super) fn build_rect_vertices(
             0.9,
         ];
         let value_col_x = content_x + 28.0 + (panel_w - nav_w - 56.0) * 0.55;
+        let section_idx = state.active_section_index();
+        // Caret placement uses the shaped pixel width of `value[..cursor]`
+        // precomputed in `mod.rs::build_caret_offsets`. Fallback to 0.0 if
+        // the offset is missing (shouldn't happen for editing controls).
+        let caret_x_from_offset = |i: usize, field_w: f32| -> f32 {
+            let off = caret_offsets.get(&(section_idx, i)).copied().unwrap_or(0.0);
+            // 4.0 px left padding matches the text draw offset
+            // (`value_col_x + 4.0` in text.rs), and the clamp keeps the
+            // caret inside the field when the value overflows.
+            value_col_x + 4.0 + off.min(field_w - 8.0).max(0.0)
+        };
         for (i, control) in section.controls.iter().enumerate() {
             let row_y = ctrl_start_y + i as f32 * ctrl_row_h;
             match &control.control_type {
@@ -177,9 +190,7 @@ pub(super) fn build_rect_vertices(
                         bg,
                     ));
                 }
-                ControlType::TextInput {
-                    cursor, editing, ..
-                } => {
+                ControlType::TextInput { editing, .. } => {
                     let field_w = (panel_w - nav_w - 56.0) * 0.42;
                     let field_h = 24.0_f32;
                     let field_y = row_y + (ctrl_row_h - field_h) * 0.5;
@@ -198,9 +209,7 @@ pub(super) fn build_rect_vertices(
                         bg,
                     ));
                     if *editing {
-                        let char_w = 9.0_f32;
-                        let cursor_x =
-                            value_col_x + 4.0 + (*cursor as f32 * char_w).min(field_w - 8.0);
+                        let cursor_x = caret_x_from_offset(i, field_w);
                         verts.extend_from_slice(&pixel_rect_to_ndc(
                             cursor_x,
                             field_y + 2.0,
@@ -226,9 +235,7 @@ pub(super) fn build_rect_vertices(
                         text_field_bg,
                     ));
                 }
-                ControlType::ListRow {
-                    cursor, editing, ..
-                } => {
+                ControlType::ListRow { editing, .. } => {
                     let field_w = (panel_w - nav_w - 56.0) * 0.42;
                     let field_h = 24.0_f32;
                     let field_y = row_y + (ctrl_row_h - field_h) * 0.5;
@@ -242,9 +249,7 @@ pub(super) fn build_rect_vertices(
                             sh,
                             text_field_editing_bg,
                         ));
-                        let char_w = 9.0_f32;
-                        let cursor_x =
-                            value_col_x + 4.0 + (*cursor as f32 * char_w).min(field_w - 8.0);
+                        let cursor_x = caret_x_from_offset(i, field_w);
                         verts.extend_from_slice(&pixel_rect_to_ndc(
                             cursor_x,
                             field_y + 2.0,

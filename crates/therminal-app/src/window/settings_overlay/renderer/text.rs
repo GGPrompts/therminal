@@ -22,6 +22,40 @@ pub(super) struct TextPlacement {
     pub bounds: TextBounds,
 }
 
+/// Shape `prefix` through the chrome font + value-row metrics and return
+/// the total advance width in pixels. This is the canonical way to place a
+/// caret in the settings overlay (tn-3vlz): it uses the same `FontSystem`,
+/// font family, and `Metrics` the value text is drawn with, so the result
+/// is correct for any UI scale, custom UI font, or non-ASCII content
+/// (graphemes, ligatures, wide chars).
+///
+/// Returns 0.0 for an empty prefix.
+pub(super) fn shape_prefix_width(renderer: &mut GridRenderer, prefix: &str) -> f32 {
+    if prefix.is_empty() {
+        return 0.0;
+    }
+    let metrics = Metrics::new(18.0, 24.0);
+    let mut buf = Buffer::new(&mut renderer.font_system, metrics);
+    // Single-line layout: a generous width avoids wrapping; height of 2
+    // line-heights is enough headroom for any single-line shape.
+    buf.set_size(&mut renderer.font_system, Some(10_000.0), Some(48.0));
+    buf.set_text(
+        &mut renderer.font_system,
+        prefix,
+        &Attrs::new()
+            .family(Family::Name(renderer.font_config.chrome_font_family()))
+            .weight(Weight::NORMAL),
+        Shaping::Advanced,
+        None,
+    );
+    buf.shape_until_scroll(&mut renderer.font_system, false);
+    // Width is the rightmost glyph end on the (single) layout run.
+    buf.layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.x + g.w).fold(0.0_f32, f32::max))
+        .unwrap_or(0.0)
+}
+
 fn truncate_for_width(text: &str, width_px: f32) -> String {
     let max_chars = (width_px / 9.0).floor().max(4.0) as usize;
     let len = text.chars().count();

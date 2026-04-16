@@ -338,6 +338,69 @@ fn text_input_backspace() {
     assert!(state.delete().is_none());
 }
 #[test]
+fn text_input_multibyte_char_advances_cursor_by_utf8_len() {
+    // tn-3vlz: cursor is a byte offset advanced by ch.len_utf8(), so a
+    // multi-byte char must (a) advance the cursor by its UTF-8 byte length
+    // and (b) leave value[..cursor] as a valid UTF-8 boundary so the
+    // settings renderer can shape `value[..cursor]` for caret placement.
+    let mut state = SettingsOverlayState::new();
+    state.register_section(SettingsSection::new(
+        "tu",
+        "TU",
+        vec![SettingsControl::with_type(
+            "U",
+            ControlBinding::ToggleHighContrast,
+            ControlType::text_input(""),
+        )],
+    ));
+    let target = state.sections().len() - 1;
+    for _ in 0..target {
+        state.arrow_down();
+    }
+    state.tab(false);
+    state.enter();
+    assert!(state.is_text_editing());
+
+    // 'é' is 2 bytes in UTF-8.
+    assert!(state.char_input('é'));
+    // '€' is 3 bytes in UTF-8.
+    assert!(state.char_input('€'));
+    // 'a' is 1 byte (ASCII).
+    assert!(state.char_input('a'));
+
+    if let ControlType::TextInput { value, cursor, .. } =
+        &state.sections[state.selected_section].controls[0].control_type
+    {
+        assert_eq!(value, "é€a");
+        assert_eq!(*cursor, 6, "cursor must be a byte offset (2+3+1=6)");
+        // value[..cursor] must be a valid UTF-8 slice — would panic if not.
+        let _prefix: &str = &value[..*cursor];
+        assert_eq!(_prefix, "é€a");
+    } else {
+        panic!("expected TextInput");
+    }
+
+    // Backspace must remove the trailing 1-byte char and leave cursor on a
+    // UTF-8 boundary.
+    assert!(state.backspace());
+    if let ControlType::TextInput { value, cursor, .. } =
+        &state.sections[state.selected_section].controls[0].control_type
+    {
+        assert_eq!(value, "é€");
+        assert_eq!(*cursor, 5);
+        // Backspace again removes the 3-byte '€'.
+        let _ok = &value[..*cursor];
+    }
+    assert!(state.backspace());
+    if let ControlType::TextInput { value, cursor, .. } =
+        &state.sections[state.selected_section].controls[0].control_type
+    {
+        assert_eq!(value, "é");
+        assert_eq!(*cursor, 2, "cursor must land on a UTF-8 boundary");
+    }
+}
+
+#[test]
 fn escape_cancels_text_editing() {
     let mut state = SettingsOverlayState::new();
     state.register_section(SettingsSection::new(

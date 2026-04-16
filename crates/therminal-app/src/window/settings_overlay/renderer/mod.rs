@@ -19,6 +19,50 @@ use wgpu::util::DeviceExt;
 use crate::grid_renderer::GridRenderer;
 
 use super::state::SettingsOverlayState;
+use super::types::ControlType;
+
+/// Pixel-space caret offsets keyed by `(section_index, control_index)`.
+///
+/// Built once per frame for editing TextInput/ListRow controls so the
+/// rect builder can position the caret at the real glyph advance instead
+/// of guessing with a hardcoded `char_w`. The offset is the shaped pixel
+/// width of `value[..cursor]` through the same chrome font + metrics the
+/// text builder uses (see [`text::shape_prefix_width`]).
+pub(super) type CaretOffsets = std::collections::HashMap<(usize, usize), f32>;
+
+fn build_caret_offsets(state: &SettingsOverlayState, renderer: &mut GridRenderer) -> CaretOffsets {
+    let mut out = CaretOffsets::new();
+    let section_idx = state.active_section_index();
+    let Some(section) = state.active_section() else {
+        return out;
+    };
+    for (i, control) in section.controls.iter().enumerate() {
+        let (value, cursor_byte, editing) = match &control.control_type {
+            ControlType::TextInput {
+                value,
+                cursor,
+                editing,
+            } => (value.as_str(), *cursor, *editing),
+            ControlType::ListRow {
+                display_value,
+                cursor,
+                editing,
+                ..
+            } => (display_value.as_str(), *cursor, *editing),
+            _ => continue,
+        };
+        if !editing {
+            continue;
+        }
+        // `cursor` is a byte offset advanced by `ch.len_utf8()` in nav.rs,
+        // so it always sits on a UTF-8 char boundary by construction.
+        let prefix_end = cursor_byte.min(value.len());
+        let prefix = &value[..prefix_end];
+        let width = text::shape_prefix_width(renderer, prefix);
+        out.insert((section_idx, i), width);
+    }
+    out
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_settings_overlay(
@@ -42,8 +86,13 @@ pub(crate) fn draw_settings_overlay(
     // without conflicting with the `&mut renderer` borrow in pass 2.
     let chrome_palette = renderer.chrome_palette;
 
+    // Compute caret pixel offsets via the chrome shaper for each editing
+    // text control, so the rect builder can place the caret at the real
+    // glyph advance instead of `cursor * 9.0` (tn-3vlz).
+    let caret_offsets = build_caret_offsets(state, renderer);
+
     // ── Pass 1: rect pipeline (scrim + panel + nav + focus + control bgs) ──
-    let verts = rects::build_rect_vertices(state, &layout, &chrome_palette);
+    let verts = rects::build_rect_vertices(state, &layout, &chrome_palette, &caret_offsets);
     let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("settings_overlay_rects"),
         contents: bytemuck::cast_slice(&verts),
