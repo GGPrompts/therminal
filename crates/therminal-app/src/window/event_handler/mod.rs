@@ -269,12 +269,17 @@ impl App {
             .unwrap_or(false);
 
         let mut menu = if is_webview_pane {
-            let url = self
+            let (url, is_pinned) = self
                 .get_layout()
                 .and_then(|l| l.find_pane(pane_id))
-                .and_then(|p| p.webview_url().map(|u| u.to_string()))
+                .map(|p| {
+                    (
+                        p.webview_url().map(|u| u.to_string()).unwrap_or_default(),
+                        p.pinned,
+                    )
+                })
                 .unwrap_or_default();
-            crate::menu::build_webview_pane_menu(pane_id, &url, bindings, (px, py))
+            crate::menu::build_webview_pane_menu(pane_id, &url, is_pinned, bindings, (px, py))
         } else if has_selection {
             let text = self
                 .get_layout()

@@ -187,10 +187,13 @@ fn format_hotkey(key: &str) -> String {
 pub(crate) fn build_webview_pane_menu(
     pane_id: PaneId,
     url: &str,
+    is_pinned: bool,
     bindings: &[therminal_core::config::Keybinding],
     position: (f32, f32),
 ) -> ContextMenu {
     let hint = |action: &KeyAction| hotkey_for_action(bindings, action);
+
+    let pin_label = if is_pinned { "Unpin pane" } else { "Pin pane" };
 
     ContextMenu {
         sections: vec![
@@ -214,12 +217,20 @@ pub(crate) fn build_webview_pane_menu(
                     enabled: true,
                 },
             ]),
-            MenuSection(vec![MenuItem {
-                label: "Close Pane".into(),
-                hotkey_hint: hint(&KeyAction::ClosePane),
-                action: KeyAction::ClosePane,
-                enabled: true,
-            }]),
+            MenuSection(vec![
+                MenuItem {
+                    label: pin_label.into(),
+                    hotkey_hint: hint(&KeyAction::TogglePinPane),
+                    action: KeyAction::TogglePinPane,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Close Pane".into(),
+                    hotkey_hint: hint(&KeyAction::ClosePane),
+                    action: KeyAction::ClosePane,
+                    enabled: true,
+                },
+            ]),
             MenuSection(vec![
                 MenuItem {
                     label: "Copy pane ID".into(),
