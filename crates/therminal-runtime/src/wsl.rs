@@ -6,8 +6,10 @@
 //!
 //! # What lives here
 //!
-//! - [`detect_default_distro`] — runs `wsl.exe -l -q` **once per process** via
-//!   a `OnceLock` cache and returns the first (default) distribution name.
+//! - [`detect_default_distro`] — reads the Windows registry **first** (instant,
+//!   no process spawn), falling back to `wsl.exe -l -q` when the registry probe
+//!   fails. Cached **once per process** via a `OnceLock`. Docker-desktop
+//!   distributions are filtered out. (tn-2r9a)
 //! - [`detect_wsl_home`] — runs `wsl.exe -e sh -c 'printf %s "$HOME"'` **once
 //!   per process** and returns the Linux `$HOME`.
 //! - [`linux_to_unc`] — pure path builder: `/tmp/foo` → `\\wsl.localhost\<distro>\tmp\foo`.
@@ -15,6 +17,8 @@
 //!   Used internally by [`detect_default_distro`] **and** exported so callers
 //!   can validate externally-supplied names.
 //! - [`is_wsl_unc_path`] — returns `true` for `\\wsl.localhost\…` and `\\wsl$\…`.
+//! - [`is_docker_distro`] — returns `true` for `docker-desktop*` distribution
+//!   names that should be excluded from default distro detection.
 //!
 //! # One probe per process
 //!
@@ -23,13 +27,24 @@
 //! shelled out to `wsl.exe` separately — two probes on the first click / first
 //! harness tick. The shared statics here eliminate the duplicate probes.
 //!
+//! # Registry-primary detection (tn-2r9a)
+//!
+//! `detect_default_distro` reads `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
+//! to find the default WSL distribution. This is the same approach Windows
+//! Terminal uses (`WslDistroGenerator.cpp`). The registry read is instant and
+//! avoids the multi-second cold-start latency of `wsl.exe -l -q`. The `wsl.exe`
+//! fallback is retained for edge cases where the registry key is absent (e.g.
+//! WSL installed via manual sideloading without Lxss registration).
+//!
 //! # Pure vs impure
 //!
-//! - [`linux_to_unc`] and [`is_safe_distro_name`] are pure — no I/O, no env, no
-//!   process spawn. Fully unit-testable on any platform.
-//! - [`detect_default_distro`] and [`detect_wsl_home`] shell out to `wsl.exe`
-//!   on the first call, then cache. On non-Windows builds they are compile-time
-//!   `None` (the `#[cfg(windows)]` statics never exist).
+//! - [`linux_to_unc`], [`is_safe_distro_name`], and [`is_docker_distro`] are
+//!   pure — no I/O, no env, no process spawn. Fully unit-testable on any
+//!   platform.
+//! - [`detect_default_distro`] and [`detect_wsl_home`] perform I/O (registry
+//!   read or process spawn) on the first call, then cache. On non-Windows
+//!   builds they are compile-time `None` (the `#[cfg(windows)]` statics never
+//!   exist).
 
 use std::path::{Path, PathBuf};
 
@@ -55,54 +70,39 @@ static WSL_HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new(
 /// Return the name of the user's default WSL distribution, or `None`
 /// if WSL is not installed / not detectable.
 ///
+/// Detection strategy (tn-2r9a):
+/// 1. **Registry (primary)** — reads `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
+///    to find the `DefaultDistribution` GUID, then resolves it to a
+///    `DistributionName`. Instant, no process spawn.
+/// 2. **`wsl.exe -l -q` (fallback)** — shells out when the registry probe
+///    fails. Subject to multi-second cold-start latency.
+///
+/// Docker-desktop distributions (`docker-desktop`, `docker-desktop-data`)
+/// are filtered from both paths.
+///
 /// Caches the first result for the lifetime of the process. Compile-time
-/// `None` on non-Windows targets — no `wsl.exe` probe ever happens.
+/// `None` on non-Windows targets — no probe ever happens.
 pub fn detect_default_distro() -> Option<String> {
     #[cfg(windows)]
     {
         DEFAULT_DISTRO
             .get_or_init(|| {
-                use std::process::Command;
-                // `wsl.exe -l -q` lists distro names (quiet, one per line).
-                // The first line is the default. Output is UTF-16 LE on
-                // Windows; strip the BOM (0xFF 0xFE) before removing the
-                // interleaved NUL bytes so the ASCII distro name decodes
-                // cleanly without pulling in a full UTF-16 dependency.
-                let output = Command::new("wsl.exe").args(["-l", "-q"]).output().ok()?;
-                if !output.status.success() {
-                    tracing::debug!(
-                        status = ?output.status,
-                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                        "wsl: `wsl.exe -l -q` failed, no distro detected"
-                    );
-                    return None;
+                // Primary: registry lookup (instant).
+                match detect_distro_from_registry() {
+                    Some(name) => {
+                        tracing::info!(
+                            distro = %name,
+                            source = "registry",
+                            "wsl: detected default WSL distro"
+                        );
+                        return Some(name);
+                    }
+                    None => {
+                        tracing::debug!("wsl: registry probe failed, falling back to wsl.exe");
+                    }
                 }
-                let raw = &output.stdout;
-                let raw = if raw.starts_with(&[0xFF, 0xFE]) {
-                    &raw[2..]
-                } else {
-                    raw
-                };
-                let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
-                let s = String::from_utf8_lossy(&cleaned);
-                let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
-                if first.is_empty() {
-                    None
-                } else if !is_safe_distro_name(first) {
-                    // Defense-in-depth: reject anything outside the
-                    // installer-enforced distro name charset before splicing
-                    // it into a UNC path string. A tampered `wsl.exe` or
-                    // malformed output could otherwise inject a path like
-                    // `..\..\Windows\System32` and escape the UNC root.
-                    tracing::warn!(
-                        distro = %first,
-                        "wsl: rejecting unsafe distro name from `wsl.exe -l -q`"
-                    );
-                    None
-                } else {
-                    tracing::info!(distro = %first, "wsl: detected default WSL distro");
-                    Some(first.to_string())
-                }
+                // Fallback: shell out to `wsl.exe -l -q`.
+                detect_distro_from_wsl_exe()
             })
             .clone()
     }
@@ -110,6 +110,134 @@ pub fn detect_default_distro() -> Option<String> {
     {
         None
     }
+}
+
+/// Read the default WSL distribution from the Windows registry.
+///
+/// Registry layout (`HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`):
+/// - `DefaultDistribution` (REG_SZ) — GUID string pointing to the default
+///   distro's subkey, e.g. `{12345678-abcd-...}`.
+/// - Each subkey is a GUID containing `DistributionName` (REG_SZ).
+///
+/// Returns `None` on any registry error, missing keys, or if the resolved
+/// distro is a docker-desktop distribution.
+#[cfg(windows)]
+fn detect_distro_from_registry() -> Option<String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let lxss = hkcu
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss")
+        .ok()?;
+
+    // Read the GUID of the default distribution.
+    let default_guid: String = lxss.get_value("DefaultDistribution").ok()?;
+    if default_guid.is_empty() {
+        tracing::debug!("wsl: registry DefaultDistribution is empty");
+        return None;
+    }
+
+    // Open the subkey for that GUID and read DistributionName.
+    let distro_key = lxss.open_subkey(&default_guid).ok()?;
+    let name: String = distro_key.get_value("DistributionName").ok()?;
+
+    if name.is_empty() {
+        tracing::debug!(guid = %default_guid, "wsl: registry DistributionName is empty");
+        return None;
+    }
+
+    if !is_safe_distro_name(&name) {
+        tracing::warn!(
+            distro = %name,
+            "wsl: rejecting unsafe distro name from registry"
+        );
+        return None;
+    }
+
+    if is_docker_distro(&name) {
+        tracing::debug!(
+            distro = %name,
+            "wsl: registry default is a docker-desktop distro, searching for alternative"
+        );
+        // Enumerate all subkeys looking for a non-docker distro.
+        return find_first_non_docker_distro(&lxss);
+    }
+
+    Some(name)
+}
+
+/// Enumerate all Lxss subkeys and return the first non-docker distro.
+#[cfg(windows)]
+fn find_first_non_docker_distro(lxss: &winreg::RegKey) -> Option<String> {
+    for key_name in lxss.enum_keys().filter_map(|r| r.ok()) {
+        if let Ok(subkey) = lxss.open_subkey(&key_name) {
+            if let Ok(name) = subkey.get_value::<String, _>("DistributionName") {
+                if !name.is_empty() && is_safe_distro_name(&name) && !is_docker_distro(&name) {
+                    tracing::info!(
+                        distro = %name,
+                        source = "registry-fallback",
+                        "wsl: found non-docker WSL distro"
+                    );
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect the default WSL distro by shelling out to `wsl.exe -l -q`.
+///
+/// This is the legacy path, retained as a fallback when registry lookup
+/// fails. Output is UTF-16 LE with a BOM on Windows; the BOM and
+/// interleaved NUL bytes are stripped before parsing.
+#[cfg(windows)]
+fn detect_distro_from_wsl_exe() -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("wsl.exe").args(["-l", "-q"]).output().ok()?;
+    if !output.status.success() {
+        tracing::debug!(
+            status = ?output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "wsl: `wsl.exe -l -q` failed, no distro detected"
+        );
+        return None;
+    }
+    let raw = &output.stdout;
+    let raw = if raw.starts_with(&[0xFF, 0xFE]) {
+        &raw[2..]
+    } else {
+        raw
+    };
+    let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
+    let s = String::from_utf8_lossy(&cleaned);
+
+    // Find the first non-empty, non-docker distro line.
+    for line in s.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        if !is_safe_distro_name(line) {
+            tracing::warn!(
+                distro = %line,
+                "wsl: rejecting unsafe distro name from `wsl.exe -l -q`"
+            );
+            continue;
+        }
+        if is_docker_distro(line) {
+            tracing::debug!(
+                distro = %line,
+                "wsl: skipping docker-desktop distro from `wsl.exe -l -q`"
+            );
+            continue;
+        }
+        tracing::info!(
+            distro = %line,
+            source = "wsl.exe",
+            "wsl: detected default WSL distro"
+        );
+        return Some(line.to_string());
+    }
+    None
 }
 
 /// Return the Linux `$HOME` of the default WSL distribution, or `None`
@@ -203,6 +331,18 @@ pub fn is_safe_distro_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+}
+
+/// Return `true` when `name` is a Docker Desktop WSL distribution.
+///
+/// Docker Desktop installs two helper distributions (`docker-desktop` and
+/// `docker-desktop-data`) that are not user-facing shells. These should be
+/// excluded when resolving the user's default WSL distribution.
+///
+/// The check is case-insensitive and matches any name starting with
+/// `docker-desktop` to cover future variants.
+pub fn is_docker_distro(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("docker-desktop")
 }
 
 /// Return `true` when `path` looks like a UNC path into the WSL virtual
@@ -487,6 +627,38 @@ mod tests {
         assert!(!is_safe_distro_name("U\u{00A0}b")); // non-breaking space
     }
 
+    // ── is_docker_distro ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_docker_distro_matches_known_names() {
+        assert!(is_docker_distro("docker-desktop"));
+        assert!(is_docker_distro("docker-desktop-data"));
+    }
+
+    #[test]
+    fn is_docker_distro_case_insensitive() {
+        assert!(is_docker_distro("Docker-Desktop"));
+        assert!(is_docker_distro("DOCKER-DESKTOP"));
+        assert!(is_docker_distro("Docker-Desktop-Data"));
+    }
+
+    #[test]
+    fn is_docker_distro_matches_future_variants() {
+        // Any name starting with docker-desktop should match.
+        assert!(is_docker_distro("docker-desktop-future"));
+        assert!(is_docker_distro("docker-desktop-v2"));
+    }
+
+    #[test]
+    fn is_docker_distro_rejects_non_docker() {
+        assert!(!is_docker_distro("Ubuntu"));
+        assert!(!is_docker_distro("Ubuntu-24.04"));
+        assert!(!is_docker_distro("Debian"));
+        assert!(!is_docker_distro("kali-linux"));
+        assert!(!is_docker_distro("docker")); // not docker-desktop
+        assert!(!is_docker_distro("my-docker-desktop-distro")); // doesn't start with it
+    }
+
     // ── is_wsl_unc_path edge cases ──────────────────────────────────────────
 
     #[test]
@@ -515,11 +687,11 @@ mod tests {
         assert!(!is_wsl_unc_path(Path::new("/")));
     }
 
-    // ── Distro parsing logic (mirrors detect_default_distro internals) ──────
+    // ── Distro parsing logic (mirrors detect_distro_from_wsl_exe internals) ──
 
-    /// Replicate the parsing logic from `detect_default_distro` so we can
+    /// Replicate the parsing logic from `detect_distro_from_wsl_exe` so we can
     /// exercise it without calling `wsl.exe`. This covers BOM stripping,
-    /// NUL filtering, line splitting, trim, and safety checks.
+    /// NUL filtering, line splitting, trim, safety checks, and docker filtering.
     fn parse_distro_from_raw(raw: &[u8]) -> Option<String> {
         let raw = if raw.starts_with(&[0xFF, 0xFE]) {
             &raw[2..]
@@ -528,12 +700,16 @@ mod tests {
         };
         let cleaned: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
         let s = String::from_utf8_lossy(&cleaned);
-        let first = s.lines().map(|l| l.trim()).find(|l| !l.is_empty())?;
-        if first.is_empty() || !is_safe_distro_name(first) {
-            None
-        } else {
-            Some(first.to_string())
+        for line in s.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+            if !is_safe_distro_name(line) {
+                continue;
+            }
+            if is_docker_distro(line) {
+                continue;
+            }
+            return Some(line.to_string());
         }
+        None
     }
 
     #[test]
@@ -597,6 +773,26 @@ mod tests {
     #[test]
     fn distro_parse_spaces_rejected() {
         assert_eq!(parse_distro_from_raw(b"My Custom Distro\n"), None);
+    }
+
+    #[test]
+    fn distro_parse_skips_docker_desktop_default() {
+        // When docker-desktop is listed first (the default), skip it and
+        // pick the next real distro.
+        let raw = b"docker-desktop\nUbuntu-24.04\nDebian\n";
+        assert_eq!(parse_distro_from_raw(raw), Some("Ubuntu-24.04".to_string()));
+    }
+
+    #[test]
+    fn distro_parse_skips_all_docker_distros() {
+        let raw = b"docker-desktop\ndocker-desktop-data\nkali-linux\n";
+        assert_eq!(parse_distro_from_raw(raw), Some("kali-linux".to_string()));
+    }
+
+    #[test]
+    fn distro_parse_only_docker_distros_returns_none() {
+        let raw = b"docker-desktop\ndocker-desktop-data\n";
+        assert_eq!(parse_distro_from_raw(raw), None);
     }
 
     // ── Home parsing logic (mirrors detect_wsl_home internals) ──────────────

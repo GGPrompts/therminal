@@ -51,16 +51,17 @@ All functions return absolute `PathBuf` values. The `dirs` crate provides platfo
 - **Windows**: Uses `FOLDERID_RoamingAppData` and `FOLDERID_LocalAppData`. Socket paths return named pipe paths (`\\.\pipe\therminal-*`) instead of filesystem paths.
 - **Headless/no-home**: All standard dir functions fall back to `/tmp/therminal` with a `tracing::warn`.
 
-## WSL Detection (tn-9ixz)
+## WSL Detection (tn-9ixz, tn-2r9a)
 
 Shared WSL helpers extracted from the harness and app crates. All functions are cached in `OnceLock`s — one probe per process instead of two.
 
 | Function | Purpose |
 |----------|---------|
-| `detect_default_distro()` | Cached `wsl.exe -l -q` output, BOM-stripped, first non-empty line |
+| `detect_default_distro()` | Registry-primary (instant) with `wsl.exe -l -q` fallback; filters docker-desktop distros (tn-2r9a) |
 | `detect_wsl_home()` | Cached `wsl.exe -e sh -c 'printf %s "$HOME"'` |
 | `linux_to_unc(distro, path)` | Build `\\wsl.localhost\<distro>\<path>` from components |
 | `is_safe_distro_name(name)` | Allowlist check for known-safe distro names |
+| `is_docker_distro(name)` | Returns true for `docker-desktop*` distributions (tn-2r9a) |
 | `is_wsl_unc_path(path)` | Check `\\wsl.localhost\` prefix |
 
 Consumers: `therminal-harness-claude/src/wsl_paths.rs` (state file / JSONL path resolution), `therminal-app/src/window/wsl_paths.rs` (hotspot path translation).

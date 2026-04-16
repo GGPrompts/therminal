@@ -97,6 +97,7 @@ pollster = "0.4"
 tempfile = "3"
 dirs = "6"
 libc = "0.2"
+winreg = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 
 # 2D vector rasterization (widget pre-rasterization, tn-npd).
