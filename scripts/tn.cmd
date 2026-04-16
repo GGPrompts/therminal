@@ -14,8 +14,10 @@ rem The .exe copy is preferred — it works in both CMD and
 rem PowerShell without execution-policy concerns.
 
 if defined THERMINAL_BIN (
-    "%THERMINAL_BIN%" %*
-    exit /b %ERRORLEVEL%
+    if exist "%THERMINAL_BIN%" (
+        "%THERMINAL_BIN%" %*
+        exit /b %ERRORLEVEL%
+    )
 )
 
 where therminal >nul 2>nul

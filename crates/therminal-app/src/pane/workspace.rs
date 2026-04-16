@@ -524,6 +524,10 @@ impl WorkspaceManager {
                 }
             }
         }
+
+        // Remove source workspaces that were fully drained of pinned panes,
+        // preventing zombie empty-workspace tabs in the tab bar.
+        self.gc_empty_workspaces();
     }
 
     /// Rename the active workspace.

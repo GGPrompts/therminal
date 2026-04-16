@@ -159,7 +159,7 @@ per-tool classification table. The short version:
 - `terminal.sessions.destroy`, `terminal.panes.destroy` — Admin tier; trust
   enforcement is enforced at the MCP layer, not the CLI layer.
 
-Tools exposed (32 tools):
+Tools exposed (34 tools):
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -178,6 +178,8 @@ Tools exposed (32 tools):
 | `terminal.panes.write` | Writer | Send keystrokes or commands to a pane's PTY |
 | `terminal.panes.tag` | Writer | Merge opaque key/value tags into a pane's metadata (tn-bbvf). Tags are arbitrary strings — therminal does not interpret them. Existing keys are overwritten; other keys are left untouched. Tags persist across daemon restarts via `sessions.json`. |
 | `terminal.panes.untag` | Writer | Remove tags from a pane. Omit `keys` to clear all tags; pass a list to remove only the named keys. |
+| `terminal.panes.pin` | Writer | Pin a pane so it persists across workspace switches. Sets the `pinned=true` tag. |
+| `terminal.panes.unpin` | Writer | Unpin a pane. Removes the `pinned` tag. |
 | `terminal.panes.wait_for_output` | Observer | Wait for output matching a pattern (string/regex) |
 | `terminal.panes.query_events` | Observer | Snapshot recent structured lifecycle events from a pane's in-memory `EventLog` (spawn / status_change / command_start / command_finish / resize / pty_eof / bell). Supports `since_timestamp_secs` and `limit` (default 100). Backed by a per-pane `Arc<Mutex<EventLog>>` ring buffer (5000-entry cap); the JSONL file on disk is never read. |
 | `terminal.semantic.query_history` | Observer | Query semantic region index (Prompt, Command, Output, Error) |

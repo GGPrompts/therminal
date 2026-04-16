@@ -720,7 +720,7 @@ fn sandboxed_is_minimum_tier_for_resources() {
 /// Lock in the count: exactly 34 tools must be returned. Bumped from
 /// 32 to 34: +2 in tn-n5jk (`terminal.panes.pin`, `terminal.panes.unpin`).
 #[test]
-fn tool_definitions_returns_32_tools() {
+fn tool_definitions_returns_34_tools() {
     let tools = tool_definitions();
     assert_eq!(tools.len(), 34, "expected exactly 34 tool definitions");
 }

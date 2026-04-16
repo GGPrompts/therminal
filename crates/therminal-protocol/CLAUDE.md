@@ -50,7 +50,7 @@ Defined in `lib.rs` as `u64` type aliases -- `Copy`, `Eq`, `Hash`, cheap to pass
 
 - **Framing**: 4-byte big-endian length prefix + MessagePack payload. Max frame: 1 MiB (`MAX_FRAME_SIZE`).
 - **`encode_ipc()` / `decode_ipc()`** -- Serialize/deserialize `IpcMessage` with length-prefixed framing.
-- **`PROTOCOL_VERSION`** -- Bumped when IPC wire format changes in a way that requires daemon restart. Normal rebuilds reuse the running daemon. Current value: 7 (bumped for `SplitPane.worktree` from tn-h7tq).
+- **`PROTOCOL_VERSION`** -- Bumped when IPC wire format changes in a way that requires daemon restart. Normal rebuilds reuse the running daemon. Current value: 9 (bumped for `PaneSummary.pinned` array-encoded field from tn-n5jk).
 
 ### Message Bus (`message.rs`)
 

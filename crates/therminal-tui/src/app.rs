@@ -164,7 +164,10 @@ impl App {
     }
 
     fn tick(&mut self) {
-        for page in &mut self.pages {
+        // Only tick the active page to avoid blocking the UI thread with
+        // IPC calls for invisible pages (each call can block up to 5s if
+        // the daemon is unreachable).
+        if let Some(page) = self.pages.get_mut(self.active_tab) {
             page.tick(&self.backend);
         }
     }
