@@ -16,10 +16,40 @@ use std::sync::Arc;
 
 use therminal_core::geometry::Rect;
 use tracing::{debug, info, warn};
+use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
 use wry::{Rect as WryRect, WebView, WebViewBuilder};
 
 use super::PaneId;
+use crate::window::UserEvent;
+
+/// JS injected into every webview frame (tn-gm6f).
+///
+/// Clicks inside a wry child HWND don't reach winit, so the page itself
+/// has to cooperate: on mousedown it tells therminal to focus this pane,
+/// and on shift+contextmenu it calls preventDefault and tells therminal
+/// to open the pane context menu at the click point.
+///
+/// Guarded with `__therminal_hooks_installed` so re-injection into
+/// sub-frames is a no-op. Wrapped in try/catch because `window.ipc` may
+/// not exist if IPC isn't configured (e.g. tests).
+const WEBVIEW_INIT_SCRIPT: &str = r#"
+(function () {
+  if (window.__therminal_hooks_installed) return;
+  window.__therminal_hooks_installed = true;
+  document.addEventListener('mousedown', function () {
+    try { window.ipc.postMessage('focus'); } catch (_) {}
+  }, true);
+  document.addEventListener('contextmenu', function (e) {
+    if (e.shiftKey) {
+      e.preventDefault();
+      try {
+        window.ipc.postMessage('menu:' + Math.round(e.clientX) + ':' + Math.round(e.clientY));
+      } catch (_) {}
+    }
+  }, true);
+})();
+"#;
 
 /// Manages all wry `WebView` instances across the application.
 ///
@@ -49,6 +79,7 @@ impl WebViewManager {
         url: &str,
         content_rect: Rect,
         window: &Arc<Window>,
+        proxy: EventLoopProxy<UserEvent>,
     ) -> Result<(), String> {
         if self.views.contains_key(&pane_id) {
             debug!(pane_id, "webview already exists, skipping creation");
@@ -57,11 +88,38 @@ impl WebViewManager {
 
         let bounds = rect_to_wry_rect(content_rect);
 
+        // tn-gm6f: closure captures pane_id + proxy so every IPC message
+        // from this webview carries the originating pane_id back to the
+        // main thread.
+        let ipc_pane_id = pane_id;
+        let ipc_proxy = proxy;
+        let ipc_handler = move |request: wry::http::Request<String>| {
+            let body = request.body().as_str();
+            if body == "focus" {
+                let _ = ipc_proxy.send_event(UserEvent::WebViewFocusRequest {
+                    pane_id: ipc_pane_id,
+                });
+            } else if let Some(rest) = body.strip_prefix("menu:") {
+                let mut parts = rest.split(':');
+                if let (Some(xs), Some(ys)) = (parts.next(), parts.next())
+                    && let (Ok(x), Ok(y)) = (xs.parse::<f64>(), ys.parse::<f64>())
+                {
+                    let _ = ipc_proxy.send_event(UserEvent::WebViewContextMenu {
+                        pane_id: ipc_pane_id,
+                        client_x: x,
+                        client_y: y,
+                    });
+                }
+            }
+        };
+
         // Build the webview as a child of the winit window.
         let builder = WebViewBuilder::new()
             .with_url(url)
             .with_bounds(bounds)
-            .with_focused(false);
+            .with_focused(false)
+            .with_initialization_script(WEBVIEW_INIT_SCRIPT)
+            .with_ipc_handler(ipc_handler);
 
         let webview = builder
             .build_as_child(window.as_ref())

@@ -454,10 +454,13 @@ impl App {
             let header_h = crate::pane::effective_header_height(pane_count, !self.focus_mode);
             let content_rect = crate::pane::webview::webview_content_rect(viewport, header_h);
 
-            if let Err(e) = self
-                .webview_manager
-                .create(new_id, &url_owned, content_rect, &window)
-            {
+            if let Err(e) = self.webview_manager.create(
+                new_id,
+                &url_owned,
+                content_rect,
+                &window,
+                self.event_proxy.clone(),
+            ) {
                 warn!(error = %e, "failed to create native webview, removing pane");
                 // Remove the pane from layout since the webview failed.
                 if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {

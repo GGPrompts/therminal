@@ -202,6 +202,21 @@ pub(crate) enum UserEvent {
     /// WebView2 asynchronously grabs OS keyboard focus once the page
     /// finishes loading (seconds later), stranding the user.
     RestoreMainFocus,
+    /// A mousedown happened inside a WebView's content area (tn-gm6f).
+    /// Clicks inside the wry child HWND don't reach winit, so the page
+    /// posts an IPC message that we route here to update internal focus
+    /// to the webview pane.
+    WebViewFocusRequest { pane_id: crate::pane::PaneId },
+    /// A shift+right-click happened inside a WebView's content area
+    /// (tn-gm6f). The page's JS intercepts the contextmenu event with
+    /// shiftKey, calls preventDefault, and posts client-space coords
+    /// through IPC so we can open the therminal context menu at the
+    /// corresponding screen position.
+    WebViewContextMenu {
+        pane_id: crate::pane::PaneId,
+        client_x: f64,
+        client_y: f64,
+    },
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -1449,6 +1464,56 @@ impl ApplicationHandler<UserEvent> for App {
                 // schedule so we win the race. No-op if there's no window.
                 if let Some(window) = self.window.as_ref() {
                     restore_main_window_focus(window);
+                }
+            }
+            UserEvent::WebViewFocusRequest { pane_id } => {
+                // tn-gm6f: mousedown inside a WebView's content area.
+                // Update internal focused pane so the rest of the app
+                // (chrome highlights, status bar, close hotkey target)
+                // reflects reality. Does not pull OS keyboard focus —
+                // the WebView2 child HWND owns that.
+                self.set_focused_pane(Some(pane_id));
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::WebViewContextMenu {
+                pane_id,
+                client_x,
+                client_y,
+            } => {
+                // tn-gm6f: shift+right-click inside a WebView's content.
+                // Convert client-space (CSS pixels, relative to the
+                // webview viewport) into window physical pixels and open
+                // the therminal context menu at that point.
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor())
+                    .unwrap_or(1.0);
+                let viewport = self
+                    .workspaces
+                    .as_ref()
+                    .and_then(|wm| wm.layout().find_pane(pane_id))
+                    .map(|p| p.viewport);
+                if let Some(vp) = viewport {
+                    let pane_count = self
+                        .workspaces
+                        .as_ref()
+                        .map(|wm| wm.layout().pane_count())
+                        .unwrap_or(2);
+                    let header_h =
+                        crate::pane::effective_header_height(pane_count, !self.focus_mode);
+                    let content_rect = crate::pane::webview::webview_content_rect(vp, header_h);
+                    let px = content_rect.x() + (client_x * scale) as f32;
+                    let py = content_rect.y() + (client_y * scale) as f32;
+                    // Update internal focus first so the menu belongs to
+                    // the webview pane and picks the webview layout.
+                    self.set_focused_pane(Some(pane_id));
+                    self.open_context_menu(px, py, true);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
             UserEvent::SwarmWatcherTick => {

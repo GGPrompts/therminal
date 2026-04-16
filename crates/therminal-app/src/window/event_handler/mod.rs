@@ -213,7 +213,12 @@ impl App {
 
     /// Open a context menu at the given pixel position, or pass through to
     /// the PTY if the pane has mouse reporting enabled (like tmux does).
-    pub(super) fn open_context_menu(&mut self, px: f32, py: f32) {
+    ///
+    /// `force_show` bypasses the TUI mouse-reporting passthrough so the
+    /// therminal context menu always opens. Wired up for Shift+Right-Click
+    /// (tn-gm6f) as a universal escape hatch when the TUI or WebView would
+    /// normally consume the click.
+    pub(super) fn open_context_menu(&mut self, px: f32, py: f32, force_show: bool) {
         let pane_id = match self.pane_at_position(px as f64, py as f64) {
             Some(id) => id,
             None => return,
@@ -222,13 +227,16 @@ impl App {
         // Smart pass-through: if the terminal app has mouse reporting enabled,
         // forward the right-click to the PTY instead of showing our menu.
         // This lets TUI apps like btop, lazygit, etc. handle their own menus.
+        // `force_show` (Shift+Right-Click) bypasses this so the user can always
+        // reach the therminal menu — useful when the TUI menu is broken or
+        // they want pane-level actions like Split/Close.
         let mode = self.pane_term_mode(pane_id);
         let mouse_mode = mode.contains(alacritty_terminal::term::TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE)
             || mode.contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
             || mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
 
-        if mouse_mode {
+        if mouse_mode && !force_show {
             // Encode the right-click as a mouse press event and send to the PTY.
             if let Some((col, row)) = self.pixel_to_grid_for_pane(px as f64, py as f64, pane_id) {
                 let mods = self.input_mods();
@@ -765,7 +773,8 @@ impl App {
                     self.tab_menu_workspace_id = Some(ws_id);
                 }
             } else {
-                self.open_context_menu(px as f32, py as f32);
+                let force_show = self.modifiers.state().shift_key();
+                self.open_context_menu(px as f32, py as f32, force_show);
             }
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
