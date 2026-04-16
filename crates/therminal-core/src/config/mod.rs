@@ -1819,7 +1819,7 @@ pub struct AccessibilityConfig {
 impl Default for AccessibilityConfig {
     fn default() -> Self {
         Self {
-            high_contrast: false,
+            high_contrast: true,
             reduced_motion: false,
             ui_text_scale: 1.0,
         }
@@ -2002,7 +2002,7 @@ mod tests {
     #[test]
     fn accessibility_defaults_are_sensible() {
         let d = AccessibilityConfig::default();
-        assert!(!d.high_contrast);
+        assert!(d.high_contrast);
         assert!(!d.reduced_motion);
         assert!((d.ui_text_scale - 1.0).abs() < f32::EPSILON);
     }

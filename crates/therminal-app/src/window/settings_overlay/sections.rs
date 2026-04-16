@@ -325,28 +325,24 @@ impl SettingsOverlayState {
                 }
             }
         }
-        self.rebuild_font_section(values);
-        self.rebuild_hotspots_section(values);
-        self.rebuild_shell_section(values);
-        self.rebuild_accessibility_section(values);
-        self.rebuild_cursor_section(values);
-        self.rebuild_notifications_section(values);
-        self.rebuild_terminal_section(values);
-        self.rebuild_widgets_section(values);
         self.rebuild_appearance_section(values);
+        self.rebuild_shell_section(values);
+        self.rebuild_terminal_section(values);
+        self.rebuild_hotspots_section(values);
+        self.rebuild_notifications_section(values);
+        self.rebuild_widgets_section(values);
+        self.rebuild_accessibility_section(values);
     }
 
-    fn rebuild_font_section(&mut self, values: &SettingsRenderValues) {
-        let section_idx = match self.sections.iter().position(|s| s.id == "font") {
+    fn rebuild_appearance_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "appearance") {
             Some(idx) => idx,
             None => return,
         };
         let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
 
-        // Show only fonts that are actually installed on the system.
-        // Fall back to the full static list if the availability check
-        // returned empty (e.g. font database not yet initialised).
-        let options: Vec<String> = if values.available_font_families.is_empty() {
+        // -- Font family --
+        let font_options: Vec<String> = if values.available_font_families.is_empty() {
             FONT_FAMILY_OPTIONS
                 .iter()
                 .map(|s| (*s).to_string())
@@ -354,21 +350,73 @@ impl SettingsOverlayState {
         } else {
             values.available_font_families.clone()
         };
-        // Find the current font in the filtered list (indices differ
-        // from FONT_FAMILY_OPTIONS when unavailable fonts are removed).
         let current_family = values
             .font_family_index
             .map(|i| FONT_FAMILY_OPTIONS[i])
             .unwrap_or("");
-        let selected = options
+        let font_selected = font_options
             .iter()
             .position(|o| o.eq_ignore_ascii_case(current_family))
             .unwrap_or(0);
-        let mut controls = vec![SettingsControl::with_type(
-            "Font family",
-            ControlBinding::FontFamily,
-            ControlType::select(options, selected),
-        )];
+
+        // -- Cursor --
+        let style_options: Vec<String> = CURSOR_STYLE_OPTIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        // -- Background opacity --
+        let opacity_options: Vec<String> = BACKGROUND_OPACITY_OPTIONS
+            .iter()
+            .map(|o| format!("{:.0}%", o * 100.0))
+            .collect();
+
+        let mut controls = vec![
+            // Theme presets (action buttons — Enter to apply)
+            SettingsControl::new(
+                ThemePreset::OriginalTherminal.menu_label(),
+                ControlBinding::ApplyThemePreset(ThemePreset::OriginalTherminal),
+            ),
+            SettingsControl::new(
+                ThemePreset::Paper.menu_label(),
+                ControlBinding::ApplyThemePreset(ThemePreset::Paper),
+            ),
+            SettingsControl::new(
+                ThemePreset::TokyoNightLight.menu_label(),
+                ControlBinding::ApplyThemePreset(ThemePreset::TokyoNightLight),
+            ),
+            SettingsControl::new(
+                ThemePreset::TomorrowNightBright.menu_label(),
+                ControlBinding::ApplyThemePreset(ThemePreset::TomorrowNightBright),
+            ),
+            SettingsControl::new(
+                ThemePreset::HemisuDark.menu_label(),
+                ControlBinding::ApplyThemePreset(ThemePreset::HemisuDark),
+            ),
+            // Font
+            SettingsControl::with_type(
+                "Font family",
+                ControlBinding::FontFamily,
+                ControlType::select(font_options, font_selected),
+            ),
+            // Background opacity
+            SettingsControl::with_type(
+                "Background opacity",
+                ControlBinding::BackgroundOpacity,
+                ControlType::select(opacity_options, values.background_opacity_index),
+            ),
+            // Cursor
+            SettingsControl::with_type(
+                "Cursor style",
+                ControlBinding::CursorStyle,
+                ControlType::select(style_options, values.cursor_style_index),
+            ),
+            SettingsControl::with_type(
+                "Cursor blink",
+                ControlBinding::ToggleCursorBlink,
+                ControlType::toggle(values.cursor_blink),
+            ),
+        ];
         restore_control_states(&mut controls, &prev_states);
         let prev_sel = self
             .selected_control_by_section
@@ -519,42 +567,6 @@ impl SettingsOverlayState {
         }
     }
 
-    fn rebuild_cursor_section(&mut self, values: &SettingsRenderValues) {
-        let section_idx = match self.sections.iter().position(|s| s.id == "cursor") {
-            Some(idx) => idx,
-            None => return,
-        };
-        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
-
-        let style_options: Vec<String> = CURSOR_STYLE_OPTIONS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let mut controls = vec![
-            SettingsControl::with_type(
-                "Cursor style",
-                ControlBinding::CursorStyle,
-                ControlType::select(style_options, values.cursor_style_index),
-            ),
-            SettingsControl::with_type(
-                "Cursor blink",
-                ControlBinding::ToggleCursorBlink,
-                ControlType::toggle(values.cursor_blink),
-            ),
-        ];
-        restore_control_states(&mut controls, &prev_states);
-        let prev_sel = self
-            .selected_control_by_section
-            .get(section_idx)
-            .copied()
-            .unwrap_or(0);
-        self.sections[section_idx].controls = controls;
-        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
-        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
-            *sel = prev_sel.min(max_idx);
-        }
-    }
-
     fn rebuild_notifications_section(&mut self, values: &SettingsRenderValues) {
         let section_idx = match self.sections.iter().position(|s| s.id == "notifications") {
             Some(idx) => idx,
@@ -643,35 +655,6 @@ impl SettingsOverlayState {
         }
     }
 
-    fn rebuild_appearance_section(&mut self, values: &SettingsRenderValues) {
-        let section_idx = match self.sections.iter().position(|s| s.id == "appearance") {
-            Some(idx) => idx,
-            None => return,
-        };
-        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
-
-        let opacity_options: Vec<String> = BACKGROUND_OPACITY_OPTIONS
-            .iter()
-            .map(|o| format!("{:.0}%", o * 100.0))
-            .collect();
-        let mut controls = vec![SettingsControl::with_type(
-            "Background opacity",
-            ControlBinding::BackgroundOpacity,
-            ControlType::select(opacity_options, values.background_opacity_index),
-        )];
-        restore_control_states(&mut controls, &prev_states);
-        let prev_sel = self
-            .selected_control_by_section
-            .get(section_idx)
-            .copied()
-            .unwrap_or(0);
-        self.sections[section_idx].controls = controls;
-        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
-        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
-            *sel = prev_sel.min(max_idx);
-        }
-    }
-
     fn rebuild_widgets_section(&mut self, values: &SettingsRenderValues) {
         let section_idx = match self.sections.iter().position(|s| s.id == "widgets") {
             Some(idx) => idx,
@@ -698,41 +681,13 @@ impl SettingsOverlayState {
     }
 
     pub(super) fn seed_defaults(&mut self) {
-        // tn-t2yd.2: Layout section (show pane headers / show status bar)
-        // was removed — those toggles are replaced by the runtime F11
-        // focus mode keybinding (`KeyAction::FocusMode`).
-        self.register_section(SettingsSection::new("font", "Font", vec![]));
-        self.register_section(SettingsSection::new("cursor", "Cursor", vec![]));
+        // Consolidated layout: Appearance first (theme + font + cursor +
+        // opacity), then Shell, Terminal, Hotspots, Notifications, Widgets,
+        // Accessibility. Theme presets are action buttons inside Appearance.
+        self.register_section(SettingsSection::new("appearance", "Appearance", vec![]));
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
         self.register_section(SettingsSection::new("terminal", "Terminal", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
-        self.register_section(SettingsSection::new("appearance", "Appearance", vec![]));
-        self.register_section(SettingsSection::new(
-            "themes",
-            "Theme Presets",
-            vec![
-                SettingsControl::new(
-                    ThemePreset::OriginalTherminal.menu_label(),
-                    ControlBinding::ApplyThemePreset(ThemePreset::OriginalTherminal),
-                ),
-                SettingsControl::new(
-                    ThemePreset::Paper.menu_label(),
-                    ControlBinding::ApplyThemePreset(ThemePreset::Paper),
-                ),
-                SettingsControl::new(
-                    ThemePreset::TokyoNightLight.menu_label(),
-                    ControlBinding::ApplyThemePreset(ThemePreset::TokyoNightLight),
-                ),
-                SettingsControl::new(
-                    ThemePreset::TomorrowNightBright.menu_label(),
-                    ControlBinding::ApplyThemePreset(ThemePreset::TomorrowNightBright),
-                ),
-                SettingsControl::new(
-                    ThemePreset::HemisuDark.menu_label(),
-                    ControlBinding::ApplyThemePreset(ThemePreset::HemisuDark),
-                ),
-            ],
-        ));
         self.register_section(SettingsSection::new(
             "notifications",
             "Notifications",

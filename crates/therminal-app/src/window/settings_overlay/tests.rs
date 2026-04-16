@@ -85,6 +85,18 @@ fn assert_ansi_bg_contrast(colors: &ColorsConfig, theme_name: &str) {
     }
 }
 
+/// Navigate the settings overlay to the section with the given ID.
+fn navigate_to_section(state: &mut SettingsOverlayState, section_id: &str) {
+    let idx = state
+        .sections()
+        .iter()
+        .position(|s| s.id == section_id)
+        .unwrap_or_else(|| panic!("section '{}' not found", section_id));
+    for _ in 0..idx {
+        state.arrow_down();
+    }
+}
+
 fn test_render_values() -> SettingsRenderValues {
     SettingsRenderValues {
         editor_chain: vec!["$VISUAL".into(), "$EDITOR".into(), "code".into()],
@@ -93,7 +105,7 @@ fn test_render_values() -> SettingsRenderValues {
         shell: String::new(),
         shell_args: String::new(),
         new_pane_cwd_index: 0,
-        high_contrast: false,
+        high_contrast: true,
         reduced_motion: false,
         ui_text_scale_index: 1,
         font_family_index: Some(0),
@@ -606,9 +618,7 @@ fn hotspots_section_rebuilds_from_config() {
 fn editor_chain_enter_enters_edit_mode() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 2: font=0, shell=1, hotspots=2).
-    state.arrow_down();
-    state.arrow_down();
+    navigate_to_section(&mut state, "hotspots");
     state.tab(false);
     // First Enter enters edit mode (returns None).
     let cmd = state.enter();
@@ -620,10 +630,7 @@ fn editor_chain_enter_enters_edit_mode() {
 fn editor_chain_enter_confirms_edit() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 4).
-    for _ in 0..4 {
-        state.arrow_down();
-    }
+    navigate_to_section(&mut state, "hotspots");
     state.tab(false);
     // Enter edit mode.
     state.enter();
@@ -643,8 +650,7 @@ fn editor_chain_enter_confirms_edit() {
 fn editor_chain_escape_cancels_edit() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    state.arrow_down();
-    state.arrow_down();
+    navigate_to_section(&mut state, "hotspots");
     state.tab(false);
     state.enter(); // enter edit mode
     state.char_input('X');
@@ -667,10 +673,7 @@ fn editor_chain_escape_cancels_edit() {
 fn editor_chain_delete_removes_entry() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 4: font=0, cursor=1, shell=2, terminal=3, hotspots=4).
-    for _ in 0..4 {
-        state.arrow_down();
-    }
+    navigate_to_section(&mut state, "hotspots");
     state.tab(false);
     // Delete on non-editing ListRow should produce remove command.
     let cmd = state.delete();
@@ -681,10 +684,7 @@ fn editor_chain_delete_removes_entry() {
 fn add_editor_button_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 4).
-    for _ in 0..4 {
-        state.arrow_down();
-    }
+    navigate_to_section(&mut state, "hotspots");
     state.tab(false);
     // The "Add editor" button is after the 3 editor chain entries (index 3).
     for _ in 0..3 {
@@ -697,10 +697,7 @@ fn add_editor_button_produces_command() {
 fn folder_pane_command_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 4: font=0, cursor=1, shell=2, terminal=3, hotspots=4).
-    for _ in 0..4 {
-        state.arrow_down();
-    }
+    navigate_to_section(&mut state, "hotspots");
     state.tab(false);
     // Folder pane command is now at index 4 (3 editors + 1 "Add editor" button).
     state.arrow_down();
@@ -746,9 +743,7 @@ fn shell_section_rebuilds_from_config() {
 fn shell_default_shell_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "shell" section is at index 2 (font=0, cursor=1, shell=2).
-    state.arrow_down();
-    state.arrow_down();
+    navigate_to_section(&mut state, "shell");
     state.tab(false);
     // Enter to start editing the "Default shell" text input.
     assert_eq!(state.enter(), None);
@@ -761,9 +756,7 @@ fn shell_default_shell_text_edit_produces_command() {
 fn shell_new_pane_cwd_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "shell" section is at index 2 (font=0, cursor=1, shell=2), "New pane cwd" is control index 2.
-    state.arrow_down();
-    state.arrow_down();
+    navigate_to_section(&mut state, "shell");
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
@@ -795,7 +788,7 @@ fn accessibility_section_rebuilds_from_config() {
     assert_eq!(a11y.controls[0].label, "High contrast chrome");
     assert!(matches!(
         a11y.controls[0].control_type,
-        ControlType::Toggle { value: false }
+        ControlType::Toggle { value: true }
     ));
     assert_eq!(a11y.controls[1].label, "Suppress visual bell");
     assert!(matches!(
@@ -812,12 +805,7 @@ fn accessibility_section_rebuilds_from_config() {
 fn accessibility_high_contrast_toggle_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 9: font=0, cursor=1,
-    // shell=2, terminal=3, hotspots=4, appearance=5, themes=6,
-    // notifications=7, widgets=8, accessibility=9).
-    for _ in 0..9 {
-        state.arrow_down();
-    }
+    navigate_to_section(&mut state, "accessibility");
     state.tab(false);
     let cmd = state.enter();
     assert_eq!(cmd, Some(SettingsCommand::ToggleHighContrast));
@@ -826,10 +814,7 @@ fn accessibility_high_contrast_toggle_produces_command() {
 fn accessibility_ui_text_scale_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 9), control index 2 (UI text scale).
-    for _ in 0..9 {
-        state.arrow_down();
-    }
+    navigate_to_section(&mut state, "accessibility");
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
@@ -864,9 +849,7 @@ fn ui_text_scale_index_finds_closest_match() {
 fn select_expanded_state_survives_sync_toggle_values() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 2: font=0, cursor=1, shell=2), "New pane cwd" Select (control 2).
-    state.arrow_down();
-    state.arrow_down();
+    navigate_to_section(&mut state, "shell");
     state.tab(false);
     state.arrow_down();
     state.arrow_down();
@@ -891,9 +874,7 @@ fn select_expanded_state_survives_sync_toggle_values() {
 fn text_editing_state_survives_sync_toggle_values() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 2: font=0, cursor=1, shell=2), "Default shell" TextInput (control 0).
-    state.arrow_down();
-    state.arrow_down();
+    navigate_to_section(&mut state, "shell");
     state.tab(false);
     // Enter to start editing.
     assert_eq!(state.enter(), None);
@@ -921,33 +902,39 @@ fn active_theme_indicator_tracks_applied_preset() {
     assert_eq!(state.active_theme(), Some(ThemePreset::HemisuDark));
 }
 
-// -- Font section tests (tn-0zfo) --
+// -- Appearance section tests (consolidated from font/cursor/theme/opacity) --
 
 #[test]
-fn font_section_is_registered() {
+fn appearance_section_is_registered() {
     let state = SettingsOverlayState::new();
-    assert!(state.sections().iter().any(|s| s.id == "font"));
+    assert!(state.sections().iter().any(|s| s.id == "appearance"));
 }
 
 #[test]
-fn font_section_rebuilds_from_config() {
+fn appearance_section_contains_font_and_cursor() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    let font = state.sections().iter().find(|s| s.id == "font").unwrap();
-    assert_eq!(font.controls.len(), 1);
-    assert_eq!(font.controls[0].label, "Font family");
-    assert!(matches!(
-        font.controls[0].control_type,
-        ControlType::Select { .. }
-    ));
+    let appearance = state
+        .sections()
+        .iter()
+        .find(|s| s.id == "appearance")
+        .unwrap();
+    // Theme presets (5) + Font family + Background opacity + Cursor style + Cursor blink
+    assert_eq!(appearance.controls.len(), 9);
+    assert_eq!(appearance.controls[5].label, "Font family");
+    assert_eq!(appearance.controls[7].label, "Cursor style");
 }
 
 #[test]
 fn font_family_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "font" section is at index 0.
+    // "appearance" section is at index 0.
     state.tab(false);
+    // Navigate down to "Font family" control (index 5, after 5 theme presets).
+    for _ in 0..5 {
+        state.arrow_down();
+    }
     // First Enter expands the select (returns None).
     assert_eq!(state.enter(), None);
     assert!(state.is_select_expanded());
@@ -996,8 +983,11 @@ fn font_family_options_has_expected_entries() {
 fn font_select_expanded_state_survives_sync() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "font" section is at index 0.
+    // "appearance" section is at index 0, font family at control index 5.
     state.tab(false);
+    for _ in 0..5 {
+        state.arrow_down();
+    }
     // Expand the select.
     assert_eq!(state.enter(), None);
     assert!(state.is_select_expanded());
