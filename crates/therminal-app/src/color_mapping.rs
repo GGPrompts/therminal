@@ -52,38 +52,38 @@ pub(crate) fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
 
 /// Map named ANSI colors to thermal palette foreground colors.
 ///
-/// Spread across the full thermal spectrum: dark bg -> blue -> teal -> green ->
-/// yellow -> orange -> red -> white-hot.  Avoids clustering everything in the
-/// purple/indigo range.
+/// Semantically correct: red is red, green is green, magenta is distinct
+/// from blue, cyan is distinct from green. Each color meets WCAG AA
+/// (4.5:1) contrast against the dark background.
 pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
     match named {
         NamedColor::Black => PaletteColor::BG.to_f32_array(),
-        NamedColor::Red => PaletteColor::SEARING.to_f32_array(),
-        NamedColor::Green => PaletteColor::WARM.to_f32_array(),
-        NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
-        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::ACCENT_COLD.to_f32_array(),
-        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
+        NamedColor::Red => [1.0, 0.37, 0.43, 1.0], // #ff5f6d — coral red
+        NamedColor::Green => [0.31, 0.79, 0.44, 1.0], // #4ec970 — true green
+        NamedColor::Yellow => [0.91, 0.77, 0.28, 1.0], // #e7c547 — warm yellow
+        NamedColor::Blue => [0.29, 0.56, 0.85, 1.0], // #4a8fd9 — medium blue
+        NamedColor::Magenta => [0.79, 0.48, 0.86, 1.0], // #c97bdb — purple-pink
+        NamedColor::Cyan => [0.34, 0.78, 0.85, 1.0], // #56c8d8 — teal-cyan
         NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(),
 
         NamedColor::BrightBlack => PaletteColor::INK_DIM.to_f32_array(),
-        NamedColor::BrightRed => [1.0, 0.49, 0.56, 1.0], // lighter ALERT
-        NamedColor::BrightGreen => [0.35, 1.0, 0.78, 1.0], // lighter SIGNAL
-        NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::BrightBlue => PaletteColor::ACCENT_COLD.to_f32_array(),
-        NamedColor::BrightMagenta => PaletteColor::TEXT.to_f32_array(),
-        NamedColor::BrightCyan => [0.30, 0.90, 0.80, 1.0],
+        NamedColor::BrightRed => [1.0, 0.56, 0.63, 1.0], // #ff8fa0 — lighter coral
+        NamedColor::BrightGreen => [0.45, 0.89, 0.60, 1.0], // #74e39a — bright green
+        NamedColor::BrightYellow => [1.0, 0.84, 0.37, 1.0], // #ffd75f — bright gold
+        NamedColor::BrightBlue => [0.47, 0.72, 0.97, 1.0], // #79b8f8 — lighter blue
+        NamedColor::BrightMagenta => [0.87, 0.63, 0.93, 1.0], // #dda0ee — lighter purple
+        NamedColor::BrightCyan => [0.49, 0.86, 0.91, 1.0], // #7edce8 — lighter teal
         NamedColor::BrightWhite | NamedColor::BrightForeground => {
             PaletteColor::WHITE_HOT.to_f32_array()
         }
 
         NamedColor::DimBlack => TERM_BG,
-        NamedColor::DimRed => [0.85, 0.35, 0.42, 1.0], // muted ALERT
-        NamedColor::DimGreen => [0.20, 0.80, 0.60, 1.0], // muted SIGNAL
-        NamedColor::DimYellow => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::DimBlue => [0.30, 0.55, 0.85, 1.0], // muted FOCUS
-        NamedColor::DimMagenta => PaletteColor::ACCENT_COLD.to_f32_array(),
-        NamedColor::DimCyan => [0.20, 0.72, 0.66, 1.0],
+        NamedColor::DimRed => [0.80, 0.35, 0.40, 1.0], // muted coral
+        NamedColor::DimGreen => [0.22, 0.58, 0.32, 1.0], // muted green
+        NamedColor::DimYellow => [0.68, 0.58, 0.22, 1.0], // muted yellow
+        NamedColor::DimBlue => [0.30, 0.50, 0.75, 1.0], // muted blue
+        NamedColor::DimMagenta => [0.58, 0.36, 0.63, 1.0], // muted purple
+        NamedColor::DimCyan => [0.25, 0.58, 0.63, 1.0], // muted teal
         NamedColor::DimWhite | NamedColor::DimForeground => PaletteColor::TEXT.to_f32_array(),
 
         NamedColor::Background => TERM_BG,
@@ -93,43 +93,45 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
 
 /// Map named ANSI colors to thermal palette background colors.
 ///
-/// Bright/Dim variants use muted/dark palette entries so they don't paint
-/// vivid colored backgrounds. `Black` and `Background` are handled upstream
-/// in `ansi_to_glyphon_bg` (both return `None` -> transparent), so those arms
+/// Background variants are darkened enough that white/bright text remains
+/// readable on top. Semantically correct: green bg is green, blue bg is
+/// blue, magenta bg is purple. Bright/Dim variants use muted/dark palette
+/// entries. `Black` and `Background` are handled upstream in
+/// `ansi_to_glyphon_bg` (both return `None` -> transparent), so those arms
 /// are retained here only as a safety fallback.
 pub(crate) fn named_to_thermal_bg(named: NamedColor) -> [f32; 4] {
     match named {
         NamedColor::Black => TERM_BG,
-        NamedColor::Red => PaletteColor::SEARING.to_f32_array(),
-        NamedColor::Green => PaletteColor::WARM.to_f32_array(),
-        NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
-        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(),
-        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
+        NamedColor::Red => [0.65, 0.15, 0.20, 1.0], // dark red bg — white text safe
+        NamedColor::Green => [0.10, 0.40, 0.18, 1.0], // dark green bg — white text safe
+        NamedColor::Yellow => [0.50, 0.40, 0.05, 1.0], // dark yellow/brown bg — white text safe
+        NamedColor::Blue => [0.12, 0.25, 0.55, 1.0], // dark blue bg — white text safe
+        NamedColor::Magenta => [0.40, 0.15, 0.50, 1.0], // dark purple bg — white text safe
+        NamedColor::Cyan => [0.05, 0.35, 0.40, 1.0], // dark teal bg — white text safe
         NamedColor::White => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::Foreground => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::Background => TERM_BG,
         NamedColor::Cursor => PaletteColor::BG_SURFACE.to_f32_array(),
 
-        // Bright backgrounds — muted variants
-        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(),
-        NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(),
-        NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(),
-        NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::BrightBlue => PaletteColor::COOL.to_f32_array(),
-        NamedColor::BrightMagenta => PaletteColor::FREEZING.to_f32_array(),
-        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),
+        // Bright backgrounds — slightly lighter but still dark enough for text
+        NamedColor::BrightBlack => [0.18, 0.18, 0.20, 1.0], // dark grey
+        NamedColor::BrightRed => [0.55, 0.12, 0.15, 1.0],   // deep red
+        NamedColor::BrightGreen => [0.08, 0.35, 0.15, 1.0], // deep green
+        NamedColor::BrightYellow => [0.45, 0.35, 0.05, 1.0], // deep gold
+        NamedColor::BrightBlue => [0.10, 0.22, 0.48, 1.0],  // deep blue
+        NamedColor::BrightMagenta => [0.35, 0.12, 0.45, 1.0], // deep purple
+        NamedColor::BrightCyan => [0.04, 0.30, 0.35, 1.0],  // deep teal
         NamedColor::BrightWhite => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::BrightForeground => PaletteColor::TEXT_MUTED.to_f32_array(),
 
         // Dim backgrounds — deep dark palette entries
         NamedColor::DimBlack => TERM_BG,
-        NamedColor::DimRed => PaletteColor::FREEZING.to_f32_array(),
-        NamedColor::DimGreen => PaletteColor::BG_SURFACE.to_f32_array(),
-        NamedColor::DimYellow => PaletteColor::BG_SURFACE.to_f32_array(),
-        NamedColor::DimBlue => PaletteColor::BG_SURFACE.to_f32_array(),
-        NamedColor::DimMagenta => PaletteColor::BG_SURFACE.to_f32_array(),
-        NamedColor::DimCyan => PaletteColor::BG_SURFACE.to_f32_array(),
+        NamedColor::DimRed => [0.30, 0.08, 0.10, 1.0], // very dark red
+        NamedColor::DimGreen => [0.05, 0.20, 0.08, 1.0], // very dark green
+        NamedColor::DimYellow => [0.25, 0.20, 0.03, 1.0], // very dark yellow
+        NamedColor::DimBlue => [0.06, 0.12, 0.30, 1.0], // very dark blue
+        NamedColor::DimMagenta => [0.20, 0.08, 0.25, 1.0], // very dark purple
+        NamedColor::DimCyan => [0.03, 0.18, 0.20, 1.0], // very dark teal
         NamedColor::DimWhite => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::DimForeground => PaletteColor::TEXT_MUTED.to_f32_array(),
     }
@@ -360,6 +362,78 @@ mod tests {
         assert_wcag_text("DimGreen", named_to_thermal_fg(NamedColor::DimGreen));
         assert_wcag_text("DimBlue", named_to_thermal_fg(NamedColor::DimBlue));
         assert_wcag_text("DimCyan", named_to_thermal_fg(NamedColor::DimCyan));
+    }
+
+    /// tn-oei7 — core ANSI fg colors (Red, Green, Yellow, Blue, Magenta,
+    /// Cyan) must all meet WCAG AA against the dark BG.
+    #[test]
+    fn core_ansi_fg_colors_meet_wcag_text() {
+        assert_wcag_text("Red", named_to_thermal_fg(NamedColor::Red));
+        assert_wcag_text("Green", named_to_thermal_fg(NamedColor::Green));
+        assert_wcag_text("Yellow", named_to_thermal_fg(NamedColor::Yellow));
+        assert_wcag_text("Blue", named_to_thermal_fg(NamedColor::Blue));
+        assert_wcag_text("Magenta", named_to_thermal_fg(NamedColor::Magenta));
+        assert_wcag_text("Cyan", named_to_thermal_fg(NamedColor::Cyan));
+    }
+
+    /// tn-oei7 — ANSI bg colors (when used as backgrounds) must provide
+    /// enough contrast for white text (3:1 minimum for large text elements).
+    #[test]
+    fn ansi_bg_colors_safe_for_white_text() {
+        let white = PaletteColor::from_hex(0xFFFFFF);
+        for (name, named) in [
+            ("Red", NamedColor::Red),
+            ("Green", NamedColor::Green),
+            ("Blue", NamedColor::Blue),
+            ("Magenta", NamedColor::Magenta),
+            ("Cyan", NamedColor::Cyan),
+        ] {
+            let bg = named_to_thermal_bg(named);
+            let bg_color = rgba_to_palette_color(bg);
+            let ratio = white.contrast_ratio(bg_color);
+            assert!(
+                ratio >= 3.0,
+                "{name} bg: white text contrast {ratio:.2}:1 < 3.0 ({bg:?})"
+            );
+        }
+    }
+
+    /// tn-oei7 — Green, Magenta, Cyan foreground colors must be
+    /// semantically correct (green looks green, not amber/orange, etc.)
+    #[test]
+    fn ansi_fg_colors_are_semantically_correct() {
+        let green = named_to_thermal_fg(NamedColor::Green);
+        // Green: G channel dominates
+        assert!(
+            green[1] > green[0],
+            "Green: G ({}) should exceed R ({})",
+            green[1],
+            green[0]
+        );
+        assert!(
+            green[1] > green[2],
+            "Green: G ({}) should exceed B ({})",
+            green[1],
+            green[2]
+        );
+
+        let magenta = named_to_thermal_fg(NamedColor::Magenta);
+        let blue = named_to_thermal_fg(NamedColor::Blue);
+        // Magenta must differ from Blue
+        assert_ne!(magenta, blue, "Magenta and Blue must be different colors");
+        // Magenta has higher R than G
+        assert!(
+            magenta[0] > magenta[1],
+            "Magenta: R ({}) should exceed G ({})",
+            magenta[0],
+            magenta[1]
+        );
+
+        let cyan = named_to_thermal_fg(NamedColor::Cyan);
+        // Cyan: B channel should be significant, not dominated by G alone
+        assert!(cyan[2] > 0.5, "Cyan: B ({}) should be > 0.5", cyan[2]);
+        // Cyan should differ from green visually (blue component distinguishes)
+        assert!(cyan[2] > green[2], "Cyan should have more blue than Green");
     }
 
     #[test]
