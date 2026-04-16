@@ -136,7 +136,7 @@ and `crates/therminal-daemon/CLAUDE.md`.
 
 ```text
 therminal pane list [--session N] [--json]
-therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--ratio 0.1..0.9] [--worktree <branch>] [--json]
+therminal pane create [--from N] [--split horizontal|vertical] [--session N] [--spawn <command>] [--ratio 0.1..0.9] [--worktree <branch>] [--profile <name>] [--json]
 therminal pane destroy <pane_id>
 therminal pane send <pane_id> <keys> [--raw]
 therminal pane peek <pane_id> [--last N] [--trim] [--json]
@@ -183,6 +183,13 @@ tn pane create --worktree feature-x --spawn 'claude -p "fix the bug"'
 
 When both `--worktree` and `--cwd`-style options are provided, the
 worktree path wins.
+
+`pane create --profile <name>` (tn-ar79) spawns a pane using a named
+profile from `[profiles.*]` in `therminal.toml`. The profile determines
+shell, args, env, cwd, and shell-integration settings. Profile takes
+precedence over `--shell` when both are specified. Compose with
+`--spawn` and `--worktree` — worktree overrides the profile's cwd if
+both are set.
 
 `pane focus` selects the given pane as the focused pane in its workspace.
 

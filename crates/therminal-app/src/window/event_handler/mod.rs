@@ -120,11 +120,11 @@ impl App {
                 }
             }
             KeyAction::ShowLauncher => {
-                if self.overlay_mode == Some(OverlayMode::Launcher) {
-                    self.close_overlay();
-                } else {
-                    self.open_launcher_overlay();
-                }
+                // The close branch is handled by the overlay key handler
+                // (line ~1199), which catches all keys — including the
+                // ShowLauncher binding — and returns before handle_keybinding
+                // runs. So we only need the open path here.
+                self.open_launcher_overlay();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -407,6 +407,13 @@ impl App {
             self.last_resize_at = Some(now);
             self.pending_resize = None;
             self.resize(new_size);
+            // Keep launcher grid cols in sync with the new surface width.
+            if self.overlay_mode == Some(OverlayMode::Launcher) {
+                self.launcher_state.cols = super::launcher_overlay::compute_cols(
+                    self.launcher_state.entries.len(),
+                    new_size.width as f32,
+                );
+            }
             if was_minimized {
                 self.relayout_and_redraw();
             } else {
@@ -444,6 +451,13 @@ impl App {
         if let Some(size) = self.pending_resize.take() {
             self.last_resize_at = Some(Instant::now());
             self.resize(size);
+            // Keep launcher grid cols in sync with the new surface width.
+            if self.overlay_mode == Some(OverlayMode::Launcher) {
+                self.launcher_state.cols = super::launcher_overlay::compute_cols(
+                    self.launcher_state.entries.len(),
+                    size.width as f32,
+                );
+            }
         }
 
         // tn-ou30: fallback for platforms that do not synthesize an early

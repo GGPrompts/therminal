@@ -189,12 +189,7 @@ pub(crate) fn draw_launcher_overlay(
     let title_h = 36.0_f32;
     let title_gap = 12.0_f32;
 
-    let max_panel_w = (sw * 0.8).min(800.0);
-    let usable_w = max_panel_w - padding_h * 2.0;
-    let cols = ((usable_w + TILE_GAP) / (TILE_W + TILE_GAP))
-        .floor()
-        .max(1.0) as usize;
-    let cols = cols.min(state.entries.len());
+    let cols = compute_cols(state.entries.len(), sw);
     let rows = state.entries.len().div_ceil(cols);
 
     let grid_w = cols as f32 * TILE_W + (cols as f32 - 1.0).max(0.0) * TILE_GAP;

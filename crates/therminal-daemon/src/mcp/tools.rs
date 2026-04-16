@@ -125,40 +125,6 @@ impl TherminalMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         use therminal_terminal::pty::SpawnOptions;
 
-        // tn-ar79: resolve profile if set — profile wins over shell/command/cwd.
-        let mut spawn_options = if let Some(ref profile_name) = params.profile {
-            // Use the source pane's cwd (if available) as inherit_cwd for profile
-            // resolution. We'll refine this later when we know the split_from pane.
-            let inherit_cwd = params.cwd.as_deref().unwrap_or("");
-            match therminal_core::config::profiles::resolve_profile(
-                &self.profiles,
-                profile_name,
-                inherit_cwd,
-            ) {
-                Ok(resolved) => SpawnOptions {
-                    shell: resolved.shell,
-                    shell_args: resolved.shell_args,
-                    env: resolved.env,
-                    cwd: resolved.cwd,
-                    skip_shell_integration: resolved.skip_shell_integration,
-                },
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "profile resolve failed: {e}"
-                    ))]));
-                }
-            }
-        } else {
-            // Build spawn options from params.
-            // `shell` sets the PTY shell binary; `command` is the legacy alias.
-            // When both are set, `shell` takes precedence.
-            let shell_override = params.shell.or(params.command).unwrap_or_default();
-            SpawnOptions {
-                shell: shell_override,
-                cwd: params.cwd.unwrap_or_default(),
-                ..Default::default()
-            }
-        };
         let startup_command = params.startup_command.as_deref();
         let worktree_branch = params.worktree.as_deref();
 
@@ -181,6 +147,37 @@ impl TherminalMcpServer {
             .and_then(|r| if r.is_finite() { Some(r) } else { None });
 
         if let Some(split_from_id) = params.split_from {
+            // tn-ar79: resolve profile using the source pane's cwd as
+            // inherit_cwd, matching the IPC server path in server.rs.
+            let mut spawn_options = if let Some(ref profile_name) = params.profile {
+                let inherit_cwd = mgr.pane_cwd(split_from_id).unwrap_or_default();
+                match therminal_core::config::profiles::resolve_profile(
+                    &self.profiles,
+                    profile_name,
+                    &inherit_cwd,
+                ) {
+                    Ok(resolved) => SpawnOptions {
+                        shell: resolved.shell,
+                        shell_args: resolved.shell_args,
+                        env: resolved.env,
+                        cwd: resolved.cwd,
+                        skip_shell_integration: resolved.skip_shell_integration,
+                    },
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "profile resolve failed: {e}"
+                        ))]));
+                    }
+                }
+            } else {
+                let shell_override = params.shell.or(params.command).unwrap_or_default();
+                SpawnOptions {
+                    shell: shell_override,
+                    cwd: params.cwd.unwrap_or_default(),
+                    ..Default::default()
+                }
+            };
+
             // tn-h7tq: resolve worktree against the source pane's cwd
             // before spawning, and remember the resolution so we can
             // auto-tag the new pane.
@@ -247,6 +244,37 @@ impl TherminalMcpServer {
                 ))])),
             }
         } else {
+            // tn-ar79: resolve profile for the session-add path. When no
+            // split_from pane exists, use params.cwd as inherit_cwd.
+            let mut spawn_options = if let Some(ref profile_name) = params.profile {
+                let inherit_cwd = params.cwd.as_deref().unwrap_or("");
+                match therminal_core::config::profiles::resolve_profile(
+                    &self.profiles,
+                    profile_name,
+                    inherit_cwd,
+                ) {
+                    Ok(resolved) => SpawnOptions {
+                        shell: resolved.shell,
+                        shell_args: resolved.shell_args,
+                        env: resolved.env,
+                        cwd: resolved.cwd,
+                        skip_shell_integration: resolved.skip_shell_integration,
+                    },
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "profile resolve failed: {e}"
+                        ))]));
+                    }
+                }
+            } else {
+                let shell_override = params.shell.or(params.command).unwrap_or_default();
+                SpawnOptions {
+                    shell: shell_override,
+                    cwd: params.cwd.unwrap_or_default(),
+                    ..Default::default()
+                }
+            };
+
             // Create in an existing session or a new one.
             let session_id = if let Some(sid) = params.session_id {
                 if mgr.get_session_info(sid).is_none() {
