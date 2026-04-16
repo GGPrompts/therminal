@@ -470,7 +470,11 @@ impl App {
 
         info!(pane_id = new_id, url, "created webview pane");
         self.last_split_direction = direction;
-        self.set_focused_pane(Some(new_id));
+        // tn-2wco: do NOT auto-focus the new WebView pane. Keystrokes to
+        // WebView panes are silently dropped by `handle_key_input`
+        // (pty_input.rs), so auto-focusing would strand the user with no
+        // input path and no cue. Spawning a webview is an ambient action;
+        // focus stays on the source pane so the user can keep working.
         self.relayout_and_redraw();
         Ok(new_id)
     }

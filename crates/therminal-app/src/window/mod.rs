@@ -1013,6 +1013,21 @@ impl App {
         if let Some(id) = id {
             self.select_pane_remote(id);
         }
+        // tn-0xuo: when focus moves to a non-WebView pane, restore
+        // OS-level keyboard focus to the winit window. On Windows the
+        // wry WebView2 is a child HWND that holds keyboard focus once
+        // clicked; without this call, winit never receives KeyboardInput
+        // events for the newly-focused terminal pane. No-op when the
+        // target is a WebView (we want the webview to keep keystrokes)
+        // or when the window is already focused.
+        if let Some(id) = id
+            && let Some(layout) = self.workspaces.as_ref().map(|wm| wm.layout())
+            && let Some(pane) = layout.find_pane(id)
+            && !pane.is_webview()
+            && let Some(window) = self.window.as_ref()
+        {
+            window.focus_window();
+        }
     }
 
     /// Get the focused pane's OSC 7 cwd, if any (tn-vm2j).
