@@ -233,6 +233,18 @@ fn untag_pane_accepts_stringified_pane_id() {
 }
 
 #[test]
+fn pin_pane_accepts_stringified_pane_id() {
+    let p: super::PinPaneParam = parse(r#"{"pane_id":"5"}"#);
+    assert_eq!(p.pane_id, 5);
+}
+
+#[test]
+fn unpin_pane_accepts_stringified_pane_id() {
+    let p: super::UnpinPaneParam = parse(r#"{"pane_id":"7"}"#);
+    assert_eq!(p.pane_id, 7);
+}
+
+#[test]
 fn write_to_pane_accepts_stringified_pane_id() {
     let params: super::WriteToPaneParam = parse(r#"{"pane_id":"1","input":"ls\n"}"#);
     assert_eq!(params.pane_id, 1);
