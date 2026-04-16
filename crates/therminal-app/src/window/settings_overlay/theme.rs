@@ -302,12 +302,12 @@ fn palette_for(preset: ThemePreset) -> ThemePalette {
             background: "#0a120a",
             foreground: "#33ff33",
             foreground_bright: "#66ff66",
-            foreground_muted: "#2a8a2a",
+            foreground_muted: "#2a902a", // was #2a8a2a (4.32:1 vs bg); brightened to meet WCAG AA 4.5:1 (4.64:1)
             surface: "#0f1e0f",
             cursor: "#ffb000",
             selection: "#2a6e2a",
             ansi: [
-                "#1a2a1a", // 0  Black       — dark green-tinted black
+                "#050d05", // 0  Black       — near-black green-tinted; was #1a2a1a (1.26:1 vs bg, invisible in reverse video)
                 "#e05030", // 1  Red         — warm amber-red, distinct from green
                 "#44dd44", // 2  Green       — bright phosphor green
                 "#ccaa22", // 3  Yellow      — amber gold, warm CRT tone
@@ -331,7 +331,7 @@ fn palette_for(preset: ThemePreset) -> ThemePalette {
             chrome_status_bar_bg: "#0a150a",
             chrome_csd_close: "#e05030",
             chrome_fg: "#33ff33",
-            chrome_fg_muted: "#2a8a2a",
+            chrome_fg_muted: "#44a844", // was #2a8a2a (3.86:1 vs header_bg); brightened to meet WCAG AA 4.5:1 (5.62:1)
             chrome_fg_focus: "#66ff66",
             chrome_fg_warn: "#ffb000",
             chrome_fg_alert: "#e05030",
