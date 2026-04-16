@@ -533,6 +533,10 @@ impl SettingsOverlayState {
                 let name = options.get(selected).cloned().unwrap_or_default();
                 SettingsCommand::SetFontFamily(name)
             }
+            // tn-ya01 select controls
+            ControlBinding::CursorStyle => SettingsCommand::SetCursorStyle(selected),
+            ControlBinding::BellStyle => SettingsCommand::SetBellStyle(selected),
+            ControlBinding::ScrollbackLines => SettingsCommand::SetScrollbackLines(selected),
             _ => binding.command(),
         }
     }

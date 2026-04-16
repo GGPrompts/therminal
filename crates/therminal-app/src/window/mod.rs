@@ -409,6 +409,14 @@ pub struct App {
     /// watcher, so reclaim events can find the right pane to close.
     pub(crate) swarm_panes: HashMap<String, PaneId>,
 
+    /// Cursor blink visibility state (tn-ya01). Toggled every ~530ms when
+    /// `config.cursor.blink` is true and `accessibility.reduced_motion` is
+    /// false. When false, the cursor rect is skipped during rendering.
+    pub(crate) cursor_blink_visible: bool,
+
+    /// Timestamp of the last cursor blink toggle (tn-ya01).
+    pub(crate) last_cursor_blink: Instant,
+
     /// Timestamp when a visual bell flash started (for timed invert effect).
     visual_bell_start: Option<Instant>,
 
@@ -792,7 +800,10 @@ impl App {
         // 500ms by the config watcher, so unconditionally running it on
         // every config event is the robust fix.
         if let Some(renderer) = self.grid_renderer.as_mut() {
-            renderer.apply_color_overrides(&self.config.colors);
+            renderer.apply_color_overrides_with_contrast(
+                &self.config.colors,
+                self.config.accessibility.high_contrast,
+            );
             info!("color overrides re-applied via hot-reload");
         }
 

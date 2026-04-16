@@ -57,6 +57,18 @@ pub(crate) enum ControlBinding {
     UiTextScale,
     // Font controls (tn-0zfo)
     FontFamily,
+    // Cursor controls (tn-ya01)
+    CursorStyle,
+    ToggleCursorBlink,
+    // Notification controls (tn-ya01)
+    BellStyle,
+    ToggleAgentWaiting,
+    ToggleOsc9Enabled,
+    // Terminal controls (tn-ya01)
+    ToggleAutoTile,
+    ScrollbackLines,
+    // Widget controls (tn-ya01)
+    ToggleSystemMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +97,18 @@ pub(crate) enum SettingsCommand {
     SetUiTextScale(usize),
     // Font mutations (tn-0zfo)
     SetFontFamily(String),
+    // Cursor mutations (tn-ya01)
+    SetCursorStyle(usize),
+    ToggleCursorBlink,
+    // Notification mutations (tn-ya01)
+    SetBellStyle(usize),
+    ToggleAgentWaiting,
+    ToggleOsc9Enabled,
+    // Terminal mutations (tn-ya01)
+    ToggleAutoTile,
+    SetScrollbackLines(usize),
+    // Widget mutations (tn-ya01)
+    ToggleSystemMetrics,
 }
 
 impl ControlBinding {
@@ -103,6 +127,18 @@ impl ControlBinding {
             Self::ToggleReducedMotion => SettingsCommand::ToggleReducedMotion,
             Self::UiTextScale => SettingsCommand::SetUiTextScale(0),
             Self::FontFamily => SettingsCommand::SetFontFamily(String::new()),
+            // Cursor (tn-ya01)
+            Self::CursorStyle => SettingsCommand::SetCursorStyle(0),
+            Self::ToggleCursorBlink => SettingsCommand::ToggleCursorBlink,
+            // Notifications (tn-ya01)
+            Self::BellStyle => SettingsCommand::SetBellStyle(0),
+            Self::ToggleAgentWaiting => SettingsCommand::ToggleAgentWaiting,
+            Self::ToggleOsc9Enabled => SettingsCommand::ToggleOsc9Enabled,
+            // Terminal (tn-ya01)
+            Self::ToggleAutoTile => SettingsCommand::ToggleAutoTile,
+            Self::ScrollbackLines => SettingsCommand::SetScrollbackLines(0),
+            // Widgets (tn-ya01)
+            Self::ToggleSystemMetrics => SettingsCommand::ToggleSystemMetrics,
         }
     }
 

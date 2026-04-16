@@ -130,6 +130,33 @@ impl App {
         // contribute entries that persist until the next frame.
         renderer.clear_frame_maps();
 
+        // ── Cursor blink timer tick (tn-ya01) ───────────────────────────
+        // Toggle cursor visibility every ~530ms when blink is enabled and
+        // reduced_motion is off. Sync the config cursor shape each frame.
+        {
+            use alacritty_terminal::vte::ansi::CursorShape;
+            use therminal_core::config::CursorStyle;
+            renderer.config_cursor_shape = match self.config.cursor.style {
+                CursorStyle::Block => CursorShape::Block,
+                CursorStyle::Underline => CursorShape::Underline,
+                CursorStyle::Beam => CursorShape::Beam,
+                CursorStyle::HollowBlock => CursorShape::HollowBlock,
+            };
+            let blink_enabled =
+                self.config.cursor.blink && !self.config.accessibility.reduced_motion;
+            if blink_enabled {
+                let elapsed = self.last_cursor_blink.elapsed();
+                if elapsed.as_millis() >= 530 {
+                    self.cursor_blink_visible = !self.cursor_blink_visible;
+                    self.last_cursor_blink = Instant::now();
+                }
+                renderer.cursor_blink_visible = self.cursor_blink_visible;
+            } else {
+                self.cursor_blink_visible = true;
+                renderer.cursor_blink_visible = true;
+            }
+        }
+
         let mut pane_counter = 0;
         let show_pane_headers = !self.focus_mode;
         let is_zoomed = self.zoomed_layout.is_some();
@@ -614,6 +641,15 @@ impl App {
         // expire cleanly. `is_visible()` returns true for both active and
         // fade-window entries.
         if self.delegate_summary.is_visible()
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
+        }
+
+        // tn-ya01: Keep the event loop ticking when cursor blink is active
+        // so the blink timer can toggle visibility each frame.
+        if self.config.cursor.blink
+            && !self.config.accessibility.reduced_motion
             && let Some(w) = self.window.as_ref()
         {
             w.request_redraw();

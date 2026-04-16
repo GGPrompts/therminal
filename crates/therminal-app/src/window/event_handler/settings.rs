@@ -225,6 +225,20 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default(),
+            // Cursor (tn-ya01)
+            cursor_style_index: settings_overlay::cursor_style_index(&self.config.cursor.style),
+            cursor_blink: self.config.cursor.blink,
+            // Notifications (tn-ya01)
+            bell_style_index: settings_overlay::bell_style_index(&self.config.bell.style),
+            agent_waiting: self.config.notifications.agent_waiting,
+            osc9_enabled: self.config.notifications.osc9_enabled,
+            // Terminal (tn-ya01)
+            auto_tile: self.config.general.auto_tile,
+            scrollback_index: settings_overlay::scrollback_index(
+                self.config.general.scrollback_lines,
+            ),
+            // Widgets (tn-ya01)
+            system_metrics_enabled: self.config.widgets.system_metrics.enabled,
         }
     }
 
@@ -244,7 +258,10 @@ impl App {
             SettingsCommand::ApplyThemePreset(preset) => {
                 settings_overlay::apply_theme_preset(&mut self.config.colors, preset);
                 if let Some(renderer) = self.grid_renderer.as_mut() {
-                    renderer.apply_color_overrides(&self.config.colors);
+                    renderer.apply_color_overrides_with_contrast(
+                        &self.config.colors,
+                        self.config.accessibility.high_contrast,
+                    );
                 }
                 self.settings_overlay.set_active_theme(preset);
                 self.show_toast(format!("theme preset applied: {}", preset.label()));
@@ -354,6 +371,19 @@ impl App {
             // -- Accessibility mutations (tn-avjv.6) --
             SettingsCommand::ToggleHighContrast => {
                 self.config.accessibility.high_contrast = !self.config.accessibility.high_contrast;
+                // Rebuild chrome palette with the new contrast setting.
+                if let Some(renderer) = self.grid_renderer.as_mut() {
+                    renderer.apply_color_overrides_with_contrast(
+                        &self.config.colors,
+                        self.config.accessibility.high_contrast,
+                    );
+                }
+                let label = if self.config.accessibility.high_contrast {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.show_toast(format!("high contrast chrome: {label}"));
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -376,6 +406,91 @@ impl App {
                 }
                 self.show_toast(format!("UI text scale: {:.0}%", scale * 100.0));
                 self.relayout_and_redraw();
+            }
+            // -- Cursor mutations (tn-ya01) --
+            SettingsCommand::SetCursorStyle(idx) => {
+                use therminal_core::config::CursorStyle;
+                self.config.cursor.style = match idx {
+                    0 => CursorStyle::Block,
+                    1 => CursorStyle::Underline,
+                    2 => CursorStyle::Beam,
+                    3 => CursorStyle::HollowBlock,
+                    _ => CursorStyle::Block,
+                };
+                self.show_toast(format!("cursor style: {:?}", self.config.cursor.style));
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            SettingsCommand::ToggleCursorBlink => {
+                self.config.cursor.blink = !self.config.cursor.blink;
+                // Reset blink state so cursor is immediately visible after toggle.
+                self.cursor_blink_visible = true;
+                self.last_cursor_blink = std::time::Instant::now();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            // -- Notification mutations (tn-ya01) --
+            SettingsCommand::SetBellStyle(idx) => {
+                use therminal_core::config::BellStyle;
+                self.config.bell.style = match idx {
+                    0 => BellStyle::Taskbar,
+                    1 => BellStyle::Visual,
+                    2 => BellStyle::None,
+                    _ => BellStyle::Taskbar,
+                };
+                self.show_toast(format!("bell style: {:?}", self.config.bell.style));
+            }
+            SettingsCommand::ToggleAgentWaiting => {
+                self.config.notifications.agent_waiting = !self.config.notifications.agent_waiting;
+                let label = if self.config.notifications.agent_waiting {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.show_toast(format!("agent waiting notifications: {label}"));
+            }
+            SettingsCommand::ToggleOsc9Enabled => {
+                self.config.notifications.osc9_enabled = !self.config.notifications.osc9_enabled;
+                let label = if self.config.notifications.osc9_enabled {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.show_toast(format!("desktop notifications (OSC 9): {label}"));
+            }
+            // -- Terminal mutations (tn-ya01) --
+            SettingsCommand::ToggleAutoTile => {
+                self.config.general.auto_tile = !self.config.general.auto_tile;
+                let label = if self.config.general.auto_tile {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.show_toast(format!("auto-tile: {label}"));
+            }
+            SettingsCommand::SetScrollbackLines(idx) => {
+                let lines = settings_overlay::SCROLLBACK_OPTIONS
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(10_000);
+                self.config.general.scrollback_lines = lines;
+                self.show_toast(format!("scrollback: {lines} lines"));
+            }
+            // -- Widget mutations (tn-ya01) --
+            SettingsCommand::ToggleSystemMetrics => {
+                self.config.widgets.system_metrics.enabled =
+                    !self.config.widgets.system_metrics.enabled;
+                let label = if self.config.widgets.system_metrics.enabled {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.show_toast(format!("system metrics: {label}"));
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
             }
             // -- Font mutations (tn-0zfo) --
             SettingsCommand::SetFontFamily(ref family) => {

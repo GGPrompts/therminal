@@ -114,6 +114,16 @@ fn restore_control_states(controls: &mut [SettingsControl], snapshots: &[Control
 /// Predefined UI text scale options (select control values).
 pub(crate) const UI_TEXT_SCALE_OPTIONS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 
+/// Predefined scrollback line count options (tn-ya01).
+pub(crate) const SCROLLBACK_OPTIONS: &[usize] = &[1_000, 5_000, 10_000, 50_000, 100_000];
+
+/// Cursor style option labels (tn-ya01).
+pub(crate) const CURSOR_STYLE_OPTIONS: &[&str] = &["Block", "Underline", "Beam", "Hollow Block"];
+
+/// Bell style option labels (tn-ya01). Audible is excluded (falls back to
+/// Taskbar) per the task spec.
+pub(crate) const BELL_STYLE_OPTIONS: &[&str] = &["Taskbar", "Visual", "None"];
+
 /// Predefined font family options for the unified font selector (tn-0zfo).
 ///
 /// Only Mono Nerd Font variants are listed — these are monospaced (required
@@ -149,6 +159,39 @@ pub(crate) fn ui_text_scale_index(scale: f32) -> usize {
         .unwrap_or(1) // default to 1.0 (index 1)
 }
 
+/// Find the closest index in [`SCROLLBACK_OPTIONS`] for a given line count.
+pub(crate) fn scrollback_index(lines: usize) -> usize {
+    SCROLLBACK_OPTIONS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, opt)| (**opt as i64 - lines as i64).unsigned_abs())
+        .map(|(i, _)| i)
+        .unwrap_or(2) // default to 10_000 (index 2)
+}
+
+/// Map a `CursorStyle` config value to an index in [`CURSOR_STYLE_OPTIONS`].
+pub(crate) fn cursor_style_index(style: &therminal_core::config::CursorStyle) -> usize {
+    use therminal_core::config::CursorStyle;
+    match style {
+        CursorStyle::Block => 0,
+        CursorStyle::Underline => 1,
+        CursorStyle::Beam => 2,
+        CursorStyle::HollowBlock => 3,
+    }
+}
+
+/// Map a `BellStyle` config value to an index in [`BELL_STYLE_OPTIONS`].
+pub(crate) fn bell_style_index(style: &therminal_core::config::BellStyle) -> usize {
+    use therminal_core::config::BellStyle;
+    match style {
+        BellStyle::Taskbar => 0,
+        BellStyle::Visual => 1,
+        // Audible falls back to Taskbar in practice.
+        BellStyle::Audible => 0,
+        BellStyle::None => 2,
+    }
+}
+
 /// Find the index in [`FONT_FAMILY_OPTIONS`] matching the given family name.
 /// Returns `None` when the family is not in the predefined list (custom value).
 pub(crate) fn font_family_index(family: &str) -> Option<usize> {
@@ -174,6 +217,18 @@ pub(crate) struct SettingsRenderValues {
     pub font_family_index: Option<usize>,
     /// Subset of FONT_FAMILY_OPTIONS that are actually installed on the system.
     pub available_font_families: Vec<String>,
+    // Cursor section (tn-ya01)
+    pub cursor_style_index: usize,
+    pub cursor_blink: bool,
+    // Notification section (tn-ya01)
+    pub bell_style_index: usize,
+    pub agent_waiting: bool,
+    pub osc9_enabled: bool,
+    // Terminal section (tn-ya01)
+    pub auto_tile: bool,
+    pub scrollback_index: usize,
+    // Widgets section (tn-ya01)
+    pub system_metrics_enabled: bool,
 }
 
 pub(super) fn editor_chain_label(index: usize) -> &'static str {
@@ -231,6 +286,21 @@ impl SettingsOverlayState {
                     (ControlBinding::ToggleReducedMotion, ControlType::Toggle { value }) => {
                         *value = values.reduced_motion;
                     }
+                    (ControlBinding::ToggleCursorBlink, ControlType::Toggle { value }) => {
+                        *value = values.cursor_blink;
+                    }
+                    (ControlBinding::ToggleAgentWaiting, ControlType::Toggle { value }) => {
+                        *value = values.agent_waiting;
+                    }
+                    (ControlBinding::ToggleOsc9Enabled, ControlType::Toggle { value }) => {
+                        *value = values.osc9_enabled;
+                    }
+                    (ControlBinding::ToggleAutoTile, ControlType::Toggle { value }) => {
+                        *value = values.auto_tile;
+                    }
+                    (ControlBinding::ToggleSystemMetrics, ControlType::Toggle { value }) => {
+                        *value = values.system_metrics_enabled;
+                    }
                     _ => {}
                 }
             }
@@ -239,6 +309,10 @@ impl SettingsOverlayState {
         self.rebuild_hotspots_section(values);
         self.rebuild_shell_section(values);
         self.rebuild_accessibility_section(values);
+        self.rebuild_cursor_section(values);
+        self.rebuild_notifications_section(values);
+        self.rebuild_terminal_section(values);
+        self.rebuild_widgets_section(values);
     }
 
     fn rebuild_font_section(&mut self, values: &SettingsRenderValues) {
@@ -396,12 +470,12 @@ impl SettingsOverlayState {
         let scale_selected = values.ui_text_scale_index;
         let mut controls = vec![
             SettingsControl::with_type(
-                "High contrast mode",
+                "High contrast chrome",
                 ControlBinding::ToggleHighContrast,
                 ControlType::toggle(values.high_contrast),
             ),
             SettingsControl::with_type(
-                "Reduced motion",
+                "Suppress visual bell",
                 ControlBinding::ToggleReducedMotion,
                 ControlType::toggle(values.reduced_motion),
             ),
@@ -424,12 +498,163 @@ impl SettingsOverlayState {
         }
     }
 
+    fn rebuild_cursor_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "cursor") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
+        let style_options: Vec<String> = CURSOR_STYLE_OPTIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let mut controls = vec![
+            SettingsControl::with_type(
+                "Cursor style",
+                ControlBinding::CursorStyle,
+                ControlType::select(style_options, values.cursor_style_index),
+            ),
+            SettingsControl::with_type(
+                "Cursor blink",
+                ControlBinding::ToggleCursorBlink,
+                ControlType::toggle(values.cursor_blink),
+            ),
+        ];
+        restore_control_states(&mut controls, &prev_states);
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
+    fn rebuild_notifications_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "notifications") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
+        let bell_options: Vec<String> = BELL_STYLE_OPTIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let mut controls = vec![
+            SettingsControl::with_type(
+                "Bell style",
+                ControlBinding::BellStyle,
+                ControlType::select(bell_options, values.bell_style_index),
+            ),
+            SettingsControl::with_type(
+                "Notify when agents wait",
+                ControlBinding::ToggleAgentWaiting,
+                ControlType::toggle(values.agent_waiting),
+            ),
+            SettingsControl::with_type(
+                "Desktop notifications (OSC 9)",
+                ControlBinding::ToggleOsc9Enabled,
+                ControlType::toggle(values.osc9_enabled),
+            ),
+        ];
+        restore_control_states(&mut controls, &prev_states);
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
+    fn rebuild_terminal_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "terminal") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
+        let scrollback_options: Vec<String> = SCROLLBACK_OPTIONS
+            .iter()
+            .map(|n| {
+                // Simple comma-separated thousands formatting.
+                let s = n.to_string();
+                let mut result = String::new();
+                for (i, ch) in s.chars().rev().enumerate() {
+                    if i > 0 && i % 3 == 0 {
+                        result.insert(0, ',');
+                    }
+                    result.insert(0, ch);
+                }
+                result
+            })
+            .collect();
+        let mut controls = vec![
+            SettingsControl::with_type(
+                "Auto-tile on agent spawn",
+                ControlBinding::ToggleAutoTile,
+                ControlType::toggle(values.auto_tile),
+            ),
+            SettingsControl::with_type(
+                "Scrollback lines",
+                ControlBinding::ScrollbackLines,
+                ControlType::select(scrollback_options, values.scrollback_index),
+            ),
+        ];
+        restore_control_states(&mut controls, &prev_states);
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
+    fn rebuild_widgets_section(&mut self, values: &SettingsRenderValues) {
+        let section_idx = match self.sections.iter().position(|s| s.id == "widgets") {
+            Some(idx) => idx,
+            None => return,
+        };
+        let prev_states = snapshot_control_states(&self.sections[section_idx].controls);
+
+        let mut controls = vec![SettingsControl::with_type(
+            "Show system metrics",
+            ControlBinding::ToggleSystemMetrics,
+            ControlType::toggle(values.system_metrics_enabled),
+        )];
+        restore_control_states(&mut controls, &prev_states);
+        let prev_sel = self
+            .selected_control_by_section
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0);
+        self.sections[section_idx].controls = controls;
+        let max_idx = self.sections[section_idx].controls.len().saturating_sub(1);
+        if let Some(sel) = self.selected_control_by_section.get_mut(section_idx) {
+            *sel = prev_sel.min(max_idx);
+        }
+    }
+
     pub(super) fn seed_defaults(&mut self) {
         // tn-t2yd.2: Layout section (show pane headers / show status bar)
         // was removed — those toggles are replaced by the runtime F11
         // focus mode keybinding (`KeyAction::FocusMode`).
         self.register_section(SettingsSection::new("font", "Font", vec![]));
+        self.register_section(SettingsSection::new("cursor", "Cursor", vec![]));
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
+        self.register_section(SettingsSection::new("terminal", "Terminal", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
         self.register_section(SettingsSection::new(
             "themes",
@@ -457,6 +682,12 @@ impl SettingsOverlayState {
                 ),
             ],
         ));
+        self.register_section(SettingsSection::new(
+            "notifications",
+            "Notifications",
+            vec![],
+        ));
+        self.register_section(SettingsSection::new("widgets", "Widgets", vec![]));
         self.register_section(SettingsSection::new(
             "accessibility",
             "Accessibility",

@@ -303,6 +303,8 @@ pub struct TherminalConfig {
     pub mcp: McpConfig,
     /// Daemon auto-spawn settings.
     pub daemon: DaemonConfig,
+    /// Cursor appearance and behavior settings.
+    pub cursor: CursorConfig,
     /// Bell behavior settings.
     pub bell: BellConfig,
     /// Notification settings.
@@ -1342,6 +1344,49 @@ where
     use serde::Deserialize;
     let opt: Option<String> = Option::deserialize(deserializer)?;
     Ok(opt.and_then(|s| if s.is_empty() { None } else { Some(s.into()) }))
+}
+
+// ── Section: Cursor ─────────────────────────────────────────────────────
+
+/// Cursor shape for the terminal grid.
+///
+/// Maps to alacritty_terminal's `CursorShape`. Programs can still
+/// override this via DECSCUSR escape sequences; this config sets the
+/// *default* shape when no program has requested a specific one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorStyle {
+    /// Filled rectangle covering the cell.
+    #[default]
+    Block,
+    /// Thin horizontal bar at the bottom of the cell.
+    Underline,
+    /// Thin vertical bar at the left of the cell.
+    Beam,
+    /// Unfilled rectangle outline.
+    #[serde(rename = "hollow_block")]
+    HollowBlock,
+}
+
+/// Cursor appearance and behavior configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CursorConfig {
+    /// Default cursor shape. Programs can override via DECSCUSR.
+    pub style: CursorStyle,
+    /// Enable cursor blinking (~530ms interval). When
+    /// `accessibility.reduced_motion` is true, blink is suppressed
+    /// regardless of this setting.
+    pub blink: bool,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            style: CursorStyle::Block,
+            blink: false,
+        }
+    }
 }
 
 // ── Section: Bell ───────────────────────────────────────────────────────

@@ -302,6 +302,22 @@ pub(super) fn default_config_text() -> String {
     );
     out.push('\n');
 
+    // ── [cursor] ────────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [cursor] — Cursor appearance and behavior.\n");
+    out.push_str("# style: \"block\" | \"underline\" | \"beam\" | \"hollow_block\"\n");
+    out.push_str("# blink: enable cursor blinking (~530ms interval).\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("[cursor]\n");
+    out.push_str(
+        "# style = \"block\"  # default cursor shape (programs can override via DECSCUSR)\n",
+    );
+    out.push_str(&format!(
+        "# blink = {}  # cursor blinking (suppressed when reduced_motion = true)\n",
+        d.cursor.blink
+    ));
+    out.push('\n');
+
     // ── [bell] ──────────────────────────────────────────────────────────
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("# [bell] — BEL character handling.\n");

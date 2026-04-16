@@ -272,6 +272,8 @@ impl App {
             swarm_debouncer_tx,
             swarm_pane_session_ids,
             swarm_panes: std::collections::HashMap::new(),
+            cursor_blink_visible: true,
+            last_cursor_blink: std::time::Instant::now(),
             visual_bell_start: None,
             zoomed_layout: None,
             status_bar_hit_areas: chrome::StatusBarHitAreas::default(),
@@ -401,7 +403,10 @@ impl App {
             font_config,
             padding,
         );
-        grid_renderer.apply_color_overrides(&self.config.colors);
+        grid_renderer.apply_color_overrides_with_contrast(
+            &self.config.colors,
+            self.config.accessibility.high_contrast,
+        );
         grid_renderer.set_ui_text_scale(self.config.accessibility.ui_text_scale);
 
         // ── Widget pipeline (tn-npd) ─────────────────────────────────────

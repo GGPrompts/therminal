@@ -505,6 +505,14 @@ pub struct GridRenderer {
     /// overlays). `1.0` is default. Applied by `chrome_font_size()`.
     /// Set from `config.accessibility.ui_text_scale` (tn-avjv.6).
     pub(crate) ui_text_scale: f32,
+
+    /// Default cursor shape from config (tn-ya01). Applied in
+    /// `add_cursor_rects` when no program has overridden the shape.
+    pub(crate) config_cursor_shape: CursorShape,
+
+    /// Whether cursor blink is currently in the "visible" phase (tn-ya01).
+    /// When false and blinking is active, the cursor rect is suppressed.
+    pub(crate) cursor_blink_visible: bool,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -700,6 +708,8 @@ impl GridRenderer {
             overlay_cache: HashMap::new(),
             pattern_widget_sink: Vec::new(),
             ui_text_scale: 1.0,
+            config_cursor_shape: CursorShape::Block,
+            cursor_blink_visible: true,
         }
     }
 
@@ -745,6 +755,31 @@ impl GridRenderer {
     /// used by every chrome module (tn-g7oo). Called from `init()`,
     /// `apply_config()`, and the hot-reload event handler — themes can
     /// re-skin the entire window without a restart.
+    pub fn apply_color_overrides_with_contrast(
+        &mut self,
+        colors: &therminal_core::config::ColorsConfig,
+        high_contrast: bool,
+    ) {
+        self.apply_color_overrides(colors);
+        if high_contrast {
+            // Boost focus border alpha from default 0.92 to 1.0 for
+            // maximum visibility, and make muted text brighter.
+            self.chrome_palette.focus_border[3] = 1.0;
+            self.chrome_palette.separator_focus[3] = 1.0;
+            self.chrome_palette.tab_active_underline[3] = 1.0;
+            // Brighten muted chrome text: blend toward chrome_fg by 50%
+            // so secondary labels are more readable on dark backgrounds.
+            let fg = self.chrome_palette.chrome_fg;
+            let muted = self.chrome_palette.chrome_fg_muted;
+            self.chrome_palette.chrome_fg_muted = therminal_core::palette::Color::from_rgba(
+                muted.r.saturating_add((fg.r.saturating_sub(muted.r)) / 2),
+                muted.g.saturating_add((fg.g.saturating_sub(muted.g)) / 2),
+                muted.b.saturating_add((fg.b.saturating_sub(muted.b)) / 2),
+                muted.a,
+            );
+        }
+    }
+
     pub fn apply_color_overrides(&mut self, colors: &therminal_core::config::ColorsConfig) {
         self.bg_override = colors
             .background
@@ -1314,6 +1349,12 @@ impl GridRenderer {
     /// Append the cursor rect(s) to `bg_rects`. Block / underline / beam /
     /// hollow-block all share the same anchor formula but emit different
     /// geometry. Hidden cursors emit nothing.
+    ///
+    /// Applies the config default cursor shape (tn-ya01): when the cursor
+    /// shape is `Block` (the alacritty default, meaning no program sent
+    /// DECSCUSR), the renderer substitutes `config_cursor_shape` instead.
+    /// Cursor blink visibility is also checked here — when blinking and in
+    /// the "invisible" phase, the cursor rect is suppressed entirely.
     fn add_cursor_rects(
         &self,
         cursor: &RenderableCursor,
@@ -1323,6 +1364,18 @@ impl GridRenderer {
         if cursor.shape == CursorShape::Hidden {
             return;
         }
+        // Suppress cursor during blink's invisible phase (tn-ya01).
+        if !self.cursor_blink_visible {
+            return;
+        }
+        // Apply config default cursor shape: when alacritty reports the
+        // default Block (no DECSCUSR override from the running program),
+        // substitute the user's configured shape.
+        let shape = if cursor.shape == CursorShape::Block {
+            self.config_cursor_shape
+        } else {
+            cursor.shape
+        };
         let cursor_line = cursor.point.line.0;
         if cursor_line < 0 || (cursor_line as usize) >= screen_lines {
             return;
@@ -1333,7 +1386,7 @@ impl GridRenderer {
         let cy = self.padding_y + cursor_row as f32 * self.cell_height;
         let cursor_color = self.resolved_cursor_color();
 
-        match cursor.shape {
+        match shape {
             CursorShape::Block => {
                 bg_rects.push(([cx, cy, self.cell_width, self.cell_height], cursor_color));
             }
@@ -1676,7 +1729,15 @@ impl GridRenderer {
                 continue;
             }
 
-            let is_block_cursor = cursor.shape == CursorShape::Block
+            // Apply the same config-default shape mapping as add_cursor_rects:
+            // when alacritty reports Block (no DECSCUSR), use config shape.
+            let effective_shape = if cursor.shape == CursorShape::Block {
+                self.config_cursor_shape
+            } else {
+                cursor.shape
+            };
+            let is_block_cursor = effective_shape == CursorShape::Block
+                && self.cursor_blink_visible
                 && cursor_col == cell.col
                 && cursor_row == cell.row;
             let fg = if is_block_cursor {

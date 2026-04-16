@@ -101,6 +101,15 @@ fn test_render_values() -> SettingsRenderValues {
             .iter()
             .map(|s| (*s).to_string())
             .collect(),
+        // tn-ya01 new fields
+        cursor_style_index: 0,
+        cursor_blink: false,
+        bell_style_index: 0,
+        agent_waiting: true,
+        osc9_enabled: true,
+        auto_tile: true,
+        scrollback_index: 2,
+        system_metrics_enabled: true,
     }
 }
 
@@ -610,8 +619,10 @@ fn editor_chain_enter_enters_edit_mode() {
 fn editor_chain_enter_confirms_edit() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    state.arrow_down();
-    state.arrow_down();
+    // Navigate to "hotspots" section (index 4).
+    for _ in 0..4 {
+        state.arrow_down();
+    }
     state.tab(false);
     // Enter edit mode.
     state.enter();
@@ -655,8 +666,10 @@ fn editor_chain_escape_cancels_edit() {
 fn editor_chain_delete_removes_entry() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    state.arrow_down();
-    state.arrow_down();
+    // Navigate to "hotspots" section (index 4: font=0, cursor=1, shell=2, terminal=3, hotspots=4).
+    for _ in 0..4 {
+        state.arrow_down();
+    }
     state.tab(false);
     // Delete on non-editing ListRow should produce remove command.
     let cmd = state.delete();
@@ -667,8 +680,10 @@ fn editor_chain_delete_removes_entry() {
 fn add_editor_button_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    state.arrow_down();
-    state.arrow_down();
+    // Navigate to "hotspots" section (index 4).
+    for _ in 0..4 {
+        state.arrow_down();
+    }
     state.tab(false);
     // The "Add editor" button is after the 3 editor chain entries (index 3).
     for _ in 0..3 {
@@ -681,9 +696,10 @@ fn add_editor_button_produces_command() {
 fn folder_pane_command_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "hotspots" section (index 2: font=0, shell=1, hotspots=2).
-    state.arrow_down();
-    state.arrow_down();
+    // Navigate to "hotspots" section (index 4: font=0, cursor=1, shell=2, terminal=3, hotspots=4).
+    for _ in 0..4 {
+        state.arrow_down();
+    }
     state.tab(false);
     // Folder pane command is now at index 4 (3 editors + 1 "Add editor" button).
     state.arrow_down();
@@ -729,7 +745,8 @@ fn shell_section_rebuilds_from_config() {
 fn shell_default_shell_text_edit_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "shell" section is at index 1 (font=0, shell=1).
+    // "shell" section is at index 2 (font=0, cursor=1, shell=2).
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     // Enter to start editing the "Default shell" text input.
@@ -743,7 +760,8 @@ fn shell_default_shell_text_edit_produces_command() {
 fn shell_new_pane_cwd_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // "shell" section is at index 1 (font=0, shell=1), "New pane cwd" is control index 2.
+    // "shell" section is at index 2 (font=0, cursor=1, shell=2), "New pane cwd" is control index 2.
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     state.arrow_down();
@@ -773,12 +791,12 @@ fn accessibility_section_rebuilds_from_config() {
         .find(|s| s.id == "accessibility")
         .unwrap();
     assert_eq!(a11y.controls.len(), 3);
-    assert_eq!(a11y.controls[0].label, "High contrast mode");
+    assert_eq!(a11y.controls[0].label, "High contrast chrome");
     assert!(matches!(
         a11y.controls[0].control_type,
         ControlType::Toggle { value: false }
     ));
-    assert_eq!(a11y.controls[1].label, "Reduced motion");
+    assert_eq!(a11y.controls[1].label, "Suppress visual bell");
     assert!(matches!(
         a11y.controls[1].control_type,
         ControlType::Toggle { value: false }
@@ -793,9 +811,10 @@ fn accessibility_section_rebuilds_from_config() {
 fn accessibility_high_contrast_toggle_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 4: font=0, shell=1,
-    // hotspots=2, themes=3, accessibility=4).
-    for _ in 0..4 {
+    // Navigate to "accessibility" section (index 8: font=0, cursor=1,
+    // shell=2, terminal=3, hotspots=4, themes=5, notifications=6,
+    // widgets=7, accessibility=8).
+    for _ in 0..8 {
         state.arrow_down();
     }
     state.tab(false);
@@ -806,8 +825,8 @@ fn accessibility_high_contrast_toggle_produces_command() {
 fn accessibility_ui_text_scale_select_produces_command() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "accessibility" section (index 4), control index 2 (UI text scale).
-    for _ in 0..4 {
+    // Navigate to "accessibility" section (index 8), control index 2 (UI text scale).
+    for _ in 0..8 {
         state.arrow_down();
     }
     state.tab(false);
@@ -844,7 +863,8 @@ fn ui_text_scale_index_finds_closest_match() {
 fn select_expanded_state_survives_sync_toggle_values() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 1: font=0, shell=1), "New pane cwd" Select (control 2).
+    // Navigate to "shell" section (index 2: font=0, cursor=1, shell=2), "New pane cwd" Select (control 2).
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     state.arrow_down();
@@ -870,7 +890,8 @@ fn select_expanded_state_survives_sync_toggle_values() {
 fn text_editing_state_survives_sync_toggle_values() {
     let mut state = SettingsOverlayState::new();
     state.sync_toggle_values(&test_render_values());
-    // Navigate to "shell" section (index 1: font=0, shell=1), "Default shell" TextInput (control 0).
+    // Navigate to "shell" section (index 2: font=0, cursor=1, shell=2), "Default shell" TextInput (control 0).
+    state.arrow_down();
     state.arrow_down();
     state.tab(false);
     // Enter to start editing.
