@@ -96,7 +96,7 @@ struct Tracked {
 /// (e.g. `\\wsl.localhost\...`) is cached by the SMB redirector for 10+
 /// seconds, returning stale values. Opening the file forces a server
 /// roundtrip and returns the real mtime.
-fn file_mtime_via_handle(path: &Path) -> Option<SystemTime> {
+pub(crate) fn file_mtime_via_handle(path: &Path) -> Option<SystemTime> {
     fs::File::open(path)
         .and_then(|f| f.metadata())
         .and_then(|m| m.modified())

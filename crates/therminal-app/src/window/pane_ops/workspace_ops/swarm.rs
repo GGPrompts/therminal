@@ -232,11 +232,82 @@ impl App {
     /// Guards against closing the last pane: if reclaiming would leave zero
     /// panes, spawns a fresh default shell pane first so the user lands on a
     /// prompt instead of the app exiting (tn-pvvi).
+    ///
+    /// Validates before closing (tn-9wfz): if the pane is a `JsonlTail`
+    /// backend whose file is still being written to (mtime within
+    /// `STALENESS_TIMEOUT`), the reclaim is stale/premature — likely
+    /// triggered by a transient mtime plateau or a premature
+    /// `SubagentStopped` event. In that case the pane is kept alive and
+    /// the agent_id is re-inserted into `swarm_panes` so future reclaims
+    /// can retry.
     pub(crate) fn reclaim_subagent_pane(&mut self, agent_id: &str) {
         let Some(pane_id) = self.swarm_panes.remove(agent_id) else {
             debug!(agent = %agent_id, "swarm: reclaim for unknown agent, ignoring");
             return;
         };
+
+        // ── tn-9wfz: validate the reclaim before closing ────────────────
+        //
+        // Check whether the target pane still exists in any workspace and,
+        // for JsonlTail panes, whether the underlying JSONL file is still
+        // being actively written to. A reclaim event can become stale when
+        // it was queued based on a temporary mtime plateau (file scanner)
+        // or a premature SubagentStopped daemon event, and then fires on
+        // an unrelated redraw (e.g. closing a different pane).
+        let pane_exists = self
+            .workspaces
+            .as_ref()
+            .map(|wm| {
+                wm.iter_workspaces()
+                    .any(|ws| ws.layout.pane_ids().contains(&pane_id))
+            })
+            .unwrap_or(false);
+
+        if !pane_exists {
+            debug!(
+                agent = %agent_id,
+                pane_id,
+                "swarm: reclaim target pane already gone, skipping"
+            );
+            return;
+        }
+
+        // For JsonlTail panes, verify the JSONL file is actually stale
+        // before reclaiming. If the file was modified recently the
+        // subagent is still active and the reclaim event is premature.
+        let jsonl_still_active = self
+            .workspaces
+            .as_ref()
+            .and_then(|wm| {
+                for ws in wm.iter_workspaces() {
+                    if let Some(pane) = ws.layout.find_pane(pane_id) {
+                        if let PaneBackendKind::JsonlTail { ref path, .. } = pane.backend {
+                            let mtime = crate::pane::swarm_watcher::file_mtime_via_handle(path);
+                            let age = mtime.and_then(|m| m.elapsed().ok());
+                            return Some(
+                                age.map(|a| a < crate::pane::swarm_watcher::STALENESS_TIMEOUT)
+                                    .unwrap_or(false),
+                            );
+                        }
+                        // Non-JsonlTail pane: no file-based validation
+                        // available — proceed with the reclaim.
+                        return Some(false);
+                    }
+                }
+                None
+            })
+            .unwrap_or(false);
+
+        if jsonl_still_active {
+            debug!(
+                agent = %agent_id,
+                pane_id,
+                "swarm: JSONL file still active, suppressing premature reclaim"
+            );
+            // Re-insert so a future reclaim attempt can re-evaluate.
+            self.swarm_panes.insert(agent_id.to_string(), pane_id);
+            return;
+        }
 
         // If this is the last pane, spawn a fresh default pane before closing
         // so the user always has a shell to land on.
