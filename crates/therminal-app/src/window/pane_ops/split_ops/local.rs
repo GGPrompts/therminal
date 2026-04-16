@@ -441,7 +441,10 @@ impl App {
             let window = match self.window.as_ref() {
                 Some(w) => Arc::clone(w),
                 None => {
-                    warn!("create_webview_pane: no window available");
+                    warn!("create_webview_pane: no window available, removing orphaned pane");
+                    if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
+                        layout.remove_pane(new_id);
+                    }
                     return;
                 }
             };
