@@ -95,6 +95,15 @@ enum Command {
     /// Push agent lifecycle events to the daemon (hook-push path).
     #[command(name = "agent-event", subcommand)]
     AgentEvent(cli::agent_event::AgentEventCmd),
+    /// Launch the Ratatui TUI dashboard (therminal-tui).
+    ///
+    /// Locates the `therminal-tui` binary next to the current executable
+    /// or on PATH and exec's it, forwarding any trailing arguments.
+    Tui {
+        /// Arguments forwarded to therminal-tui (e.g. --socket PATH).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -147,6 +156,7 @@ fn main() -> Result<()> {
             Command::AgentEvent(c) => {
                 cli::runtime::with_runtime(|ctx| cli::agent_event::run(ctx, c))
             }
+            Command::Tui { args } => exec_tui(&args),
         };
     }
 
@@ -220,6 +230,53 @@ fn main() -> Result<()> {
     };
 
     window::run(daemon_client, daemon_runtime)
+}
+
+/// Locate and exec `therminal-tui`, forwarding any extra arguments.
+///
+/// Discovery chain (same as daemon auto-spawn):
+/// 1. Next to the current executable.
+/// 2. PATH lookup.
+fn exec_tui(args: &[String]) -> Result<()> {
+    let name = if cfg!(windows) {
+        "therminal-tui.exe"
+    } else {
+        "therminal-tui"
+    };
+
+    // 1. Next to the current exe (cargo build puts workspace siblings here).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return run_tui(&candidate, args);
+        }
+    }
+
+    // 2. PATH lookup.
+    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return run_tui(&candidate, args);
+        }
+    }
+
+    anyhow::bail!(
+        "therminal-tui binary not found. \
+         Install it next to therminal{exe} or add it to PATH.\n  \
+         Build with: cargo build -p therminal-tui",
+        exe = if cfg!(windows) { ".exe" } else { "" },
+    );
+}
+
+fn run_tui(binary: &std::path::Path, args: &[String]) -> Result<()> {
+    use anyhow::Context;
+    use std::process::Command as Cmd;
+    let status = Cmd::new(binary).args(args).status().with_context(|| {
+        format!("failed to run {}", binary.display())
+    })?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// Open a persistent IPC connection to the therminal-daemon control socket.

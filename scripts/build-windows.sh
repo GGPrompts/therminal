@@ -48,4 +48,4 @@ powershell.exe -ExecutionPolicy Bypass \
 
 echo ""
 echo "=== Done ==="
-echo "Executable should be on your Desktop: therminal.exe"
+echo "Executables should be on your Desktop: therminal.exe, therminal-daemon.exe, therminal-tui.exe"

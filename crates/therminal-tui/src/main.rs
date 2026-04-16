@@ -34,10 +34,31 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let explicit_socket = cli.socket.is_some();
     let socket_path = cli
         .socket
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| therminal_runtime::paths::socket_path("daemon"));
+
+    // WSL2 warning: if we're a Linux binary but the daemon is likely
+    // running as a Windows native process, the Unix socket won't exist.
+    if cfg!(not(windows))
+        && std::env::var_os("WSL_DISTRO_NAME").is_some()
+        && !explicit_socket
+        && !socket_path.exists()
+    {
+        eprintln!(
+            "therminal-tui: daemon socket not found at {}\n\
+             \n\
+             You appear to be running inside WSL2, but the daemon is likely\n\
+             a Windows native process using a named pipe.\n\
+             \n\
+             Use `tn tui` instead (routes through therminal.exe), or rebuild\n\
+             for Windows with: ./scripts/build-windows.sh",
+            socket_path.display()
+        );
+        std::process::exit(1);
+    }
 
     app::run(socket_path)
 }

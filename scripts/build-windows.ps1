@@ -84,7 +84,7 @@ try {
 Set-Location $repoRoot
 
 $profile = if ($Debug) { "debug" } else { "release" }
-$buildArgs = @("build", "-p", "therminal-app", "--bin", "therminal", "-p", "therminal-daemon", "--bin", "therminal-daemon")
+$buildArgs = @("build", "-p", "therminal-app", "--bin", "therminal", "-p", "therminal-daemon", "--bin", "therminal-daemon", "-p", "therminal-tui", "--bin", "therminal-tui")
 if (-not $Debug) {
     $buildArgs += "--release"
 }
@@ -180,6 +180,16 @@ if (-not $NoCopy) {
         Write-Host "Copied daemon to: $daemonDest"
     } else {
         Write-Host "WARNING: therminal-daemon.exe not found at $daemonExe - MCP bridge will not work"
+    }
+
+    # --- Also deploy therminal-tui.exe alongside therminal.exe ---
+    $tuiExe = Join-Path $repoRoot "target\$profile\therminal-tui.exe"
+    if (Test-Path $tuiExe) {
+        $tuiDest = Join-Path (Split-Path -Parent $Destination) "therminal-tui.exe"
+        Copy-Item -Force $tuiExe $tuiDest
+        Write-Host "Copied TUI to: $tuiDest"
+    } else {
+        Write-Host "WARNING: therminal-tui.exe not found at $tuiExe - 'therminal tui' will not work"
     }
 
     # --- Copy resources alongside the executable ---

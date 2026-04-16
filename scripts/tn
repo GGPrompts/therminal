@@ -13,6 +13,7 @@
 #   tn events --follow        # stream daemon events as JSON Lines
 #   tn semantic commands 1    # recent OSC 633 commands for pane 1
 #   tn semantic hotspots 1    # file/URL/git hotspots in pane 1
+#   tn tui                    # launch the Ratatui TUI dashboard
 #
 # CLI-vs-MCP policy (encoded here so `tn --help-policy` surfaces it):
 #
