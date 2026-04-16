@@ -922,7 +922,7 @@ fn run_remote_worker(
                 idx.push_event(&event);
             }
             match event {
-                InterceptedEvent::CurrentDirectory(path) => {
+                InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
                     if let Ok(mut s) = status.lock() {
                         s.git_state = crate::git_state::detect(std::path::Path::new(&path));
                         s.cwd = Some(path);

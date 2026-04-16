@@ -13,6 +13,7 @@
 //! | OSC 633   | VS Code             | Shell integration (extended)   |
 //! | OSC 7     | Standard            | Current working directory      |
 //! | OSC 9     | ConEmu/mintty       | Desktop notifications          |
+//! | OSC 9;9   | Windows Terminal    | WSL cwd (Windows-native path)  |
 //! | OSC 1337  | iTerm2              | Various (used by some agents)  |
 //! | OSC 7337  | Therminal           | WSL-side shell PID (tn-ttie)   |
 //! | OSC 7777  | Therminal           | Cooperative agent self-report   |
@@ -46,6 +47,14 @@ pub enum InterceptedEvent {
     Iterm2 { key: String, value: String },
     /// A desktop notification was requested via OSC 9.
     DesktopNotification(String),
+    /// The shell reported its current working directory as a Windows-native
+    /// path via OSC 9;9 (tn-kkr8).
+    ///
+    /// Emitted by the shell integration scripts when `WSL_DISTRO_NAME` is
+    /// set. The payload is a Windows path (e.g. `\\wsl.localhost\Ubuntu\home\user`)
+    /// produced by `wslpath -w "$PWD"`, so the daemon does not need to run
+    /// `linux_to_unc()` — the path is usable on the Windows host as-is.
+    WslCwd(String),
     /// The WSL-side shell reported its PID via OSC 7337 (tn-ttie).
     ///
     /// Emitted once at shell startup by the therminal bash rcfile running
@@ -335,13 +344,36 @@ impl TherminalInterceptor {
         true
     }
 
-    /// Handle OSC 9 (desktop notification). Returns `true` to consume.
+    /// Handle OSC 9 (desktop notification / WSL cwd). Returns `true` to consume.
+    ///
+    /// Two sub-formats are recognised:
+    /// - `OSC 9 ; 9 ; <windows-path> ST` — Windows Terminal–style WSL cwd
+    ///   report (tn-kkr8). The path is a Windows-native string produced by
+    ///   `wslpath -w "$PWD"` inside WSL, so the daemon can use it directly
+    ///   without `linux_to_unc()`.
+    /// - `OSC 9 ; <text> ST` — ConEmu/mintty desktop notification.
     fn handle_osc_9(&mut self, params: &[&[u8]]) -> bool {
         // Format: OSC 9 ; <notification text> ST
+        //     or: OSC 9 ; 9 ; <windows-path> ST
         if params.len() < 2 {
             return false;
         }
 
+        // ── OSC 9;9 — WSL cwd (tn-kkr8) ────────────────────────────────
+        // The VTE parser splits on ';', so OSC 9;9;<path> arrives as:
+        //   params[0] = b"9", params[1] = b"9", params[2] = <path bytes>
+        if params.len() >= 3 && params[1] == b"9" {
+            let path = match std::str::from_utf8(params[2]) {
+                Ok(s) if !s.is_empty() => s,
+                _ => return true, // malformed — consume silently
+            };
+            debug!("OSC 9;9 (WSL cwd): {}", path);
+            self.emit(InterceptedEvent::WslCwd(path.to_string()));
+            // Consume: alacritty_terminal doesn't handle OSC 9.
+            return true;
+        }
+
+        // ── OSC 9 — desktop notification ────────────────────────────────
         let text = match std::str::from_utf8(params[1]) {
             Ok(s) => s,
             Err(_) => return false,
@@ -1126,6 +1158,132 @@ mod tests {
         assert!(!is_spurious_conpty_notification("Powershell:4")); // no space after colon
         assert!(!is_spurious_conpty_notification(""));
         assert!(!is_spurious_conpty_notification("Powershell: ")); // empty after colon-space
+    }
+
+    // -- OSC 9;9 WSL cwd tests (tn-kkr8) ----------------------------------------
+
+    #[test]
+    fn osc_9_9_wsl_cwd_unc_path() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"9", b"\\\\wsl.localhost\\Ubuntu\\home\\marci"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::WslCwd(path) => {
+                assert_eq!(path, "\\\\wsl.localhost\\Ubuntu\\home\\marci");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_9_wsl_cwd_windows_drive_path() {
+        // wslpath -w on /mnt/c/Users/... returns a Windows drive path.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"9", b"C:\\Users\\marci\\projects"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::WslCwd(path) => {
+                assert_eq!(path, "C:\\Users\\marci\\projects");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_9_empty_path_consumed_no_event() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"9", b""];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        // Consumed (malformed) but no event emitted.
+        assert!(consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_9_does_not_collide_with_plain_notification() {
+        // A plain OSC 9 notification (not subtype 9) should still work.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"Build complete!"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(text) => {
+                assert_eq!(text, "Build complete!");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_9_disabled_config_not_consumed() {
+        let config = InterceptorConfig {
+            osc_9: false,
+            ..InterceptorConfig::default()
+        };
+        let (mut interceptor, rx) = TherminalInterceptor::new(config);
+        let params: &[&[u8]] = &[b"9", b"9", b"C:\\Users\\marci"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(!consumed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc_9_9_unicode_path() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let path = "\\\\wsl.localhost\\Ubuntu\\home\\marci\\日本語";
+        let params: &[&[u8]] = &[b"9", b"9", path.as_bytes()];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::WslCwd(p) => assert_eq!(p, path),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn osc_9_9_missing_path_param() {
+        // Only params[0]=9, params[1]=9 — no path. len < 3, falls through
+        // to the plain notification path where params[1]=b"9" is just the
+        // text "9" (not a known shell name, so it passes the ConPTY filter).
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"9"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        // Falls through to plain notification with text "9".
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::DesktopNotification(t) => assert_eq!(t, "9"),
+            other => panic!("unexpected event: {:?}", other),
+        }
     }
 
     // -- OSC 7777 tests ---------------------------------------------------------

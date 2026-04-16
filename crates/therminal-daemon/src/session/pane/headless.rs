@@ -92,10 +92,13 @@ impl PtyReaderHandler for DaemonPtyHandler {
 
         // Drain intercepted events into the region index and update cwd.
         while let Ok(event) = self.interceptor_rx.try_recv() {
-            if let InterceptedEvent::CurrentDirectory(ref path) = event
-                && let Ok(mut cwd) = self.cwd.lock()
-            {
-                *cwd = path.clone();
+            match &event {
+                InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
+                    if let Ok(mut cwd) = self.cwd.lock() {
+                        *cwd = path.clone();
+                    }
+                }
+                _ => {}
             }
             // tn-ttie: capture WSL-side shell PID from OSC 7337.
             if let InterceptedEvent::WslShellPid(pid) = &event

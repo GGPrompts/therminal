@@ -16,6 +16,11 @@ __therminal_osc() {
 
 __therminal_report_cwd() {
     __therminal_osc "7;file://$(hostname)${PWD}"
+    # OSC 9;9: emit Windows-native path when running inside WSL so the
+    # daemon can use it directly without linux_to_unc() (tn-kkr8).
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        __therminal_osc "9;9;$(wslpath -w "$PWD")"
+    fi
 }
 
 # -- Prompt hooks (via precmd / preexec) ---------------------------------------

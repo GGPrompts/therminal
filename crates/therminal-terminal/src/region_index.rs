@@ -94,7 +94,7 @@ impl RegionIndex {
             InterceptedEvent::Osc633(mark) | InterceptedEvent::Osc133(mark) => {
                 self.apply_mark(mark);
             }
-            InterceptedEvent::CurrentDirectory(path) => {
+            InterceptedEvent::CurrentDirectory(path) | InterceptedEvent::WslCwd(path) => {
                 let mut metadata = HashMap::new();
                 metadata.insert("cwd".to_string(), path.clone());
                 self.push_region(Region {
