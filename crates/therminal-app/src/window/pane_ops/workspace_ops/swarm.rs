@@ -283,11 +283,19 @@ impl App {
                     if let Some(pane) = ws.layout.find_pane(pane_id) {
                         if let PaneBackendKind::JsonlTail { ref path, .. } = pane.backend {
                             let mtime = crate::pane::swarm_watcher::file_mtime_via_handle(path);
-                            let age = mtime.and_then(|m| m.elapsed().ok());
-                            // TODO: [code-review] unwrap_or(false) treats future-mtime (WSL2 clock skew) as inactive — consider unwrap_or(true) to default to "still active" and add tracing::debug on elapsed() failure (83%)
+                            let age = mtime.and_then(|m| {
+                                m.elapsed()
+                                    .map_err(|e| {
+                                        tracing::debug!(
+                                            "swarm reclaim: elapsed() failed (clock skew?): {e}"
+                                        );
+                                        e
+                                    })
+                                    .ok()
+                            });
                             return Some(
                                 age.map(|a| a < crate::pane::swarm_watcher::STALENESS_TIMEOUT)
-                                    .unwrap_or(false),
+                                    .unwrap_or(true),
                             );
                         }
                         // Non-JsonlTail pane: no file-based validation

@@ -24,9 +24,9 @@ __therminal_report_cwd() {
     __therminal_osc "7;file://$(hostname)${PWD}"
     # OSC 9;9: emit Windows-native path when running inside WSL so the
     # daemon can use it directly without linux_to_unc() (tn-kkr8).
-    # TODO: [code-review] wslpath failure output used as cwd path — guard with: _wpath=$(wslpath -w "$PWD" 2>/dev/null) && __therminal_osc "9;9;$_wpath" (81%)
     if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
-        __therminal_osc "9;9;$(wslpath -w "$PWD")"
+        local _wpath
+        _wpath=$(wslpath -w "$PWD" 2>/dev/null) && __therminal_osc "9;9;$_wpath"
     fi
 }
 
