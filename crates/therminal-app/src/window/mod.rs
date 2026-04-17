@@ -127,9 +127,9 @@ pub(crate) fn restore_main_window_focus(window: &winit::window::Window) {
     window.focus_window();
     #[cfg(target_os = "windows")]
     {
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         if let Ok(handle) = window.window_handle()
             && let RawWindowHandle::Win32(h) = handle.as_raw()
         {

@@ -13,6 +13,7 @@
 //! | OSC 633   | VS Code             | Shell integration (extended)   |
 //! | OSC 7     | Standard            | Current working directory      |
 //! | OSC 9     | ConEmu/mintty       | Desktop notifications          |
+//! | OSC 9;4   | ConEmu/WT           | Taskbar progress (consumed)    |
 //! | OSC 9;9   | Windows Terminal    | WSL cwd (Windows-native path)  |
 //! | OSC 1337  | iTerm2              | Various (used by some agents)  |
 //! | OSC 7337  | Therminal           | WSL-side shell PID (tn-ttie)   |
@@ -344,9 +345,14 @@ impl TherminalInterceptor {
         true
     }
 
-    /// Handle OSC 9 (desktop notification / WSL cwd). Returns `true` to consume.
+    /// Handle OSC 9 (desktop notification / WSL cwd / taskbar progress).
+    /// Returns `true` to consume.
     ///
-    /// Two sub-formats are recognised:
+    /// Sub-formats recognised:
+    /// - `OSC 9 ; 4 ; <state> [; <pct>] ST` — ConEmu/Windows Terminal taskbar
+    ///   progress. Emitted by PowerShell/PSReadLine and by Claude Code when
+    ///   `preferredNotifChannel = auto` on Windows. Consumed silently; we do
+    ///   not render taskbar progress yet.
     /// - `OSC 9 ; 9 ; <windows-path> ST` — Windows Terminal–style WSL cwd
     ///   report (tn-kkr8). The path is a Windows-native string produced by
     ///   `wslpath -w "$PWD"` inside WSL, so the daemon can use it directly
@@ -354,9 +360,20 @@ impl TherminalInterceptor {
     /// - `OSC 9 ; <text> ST` — ConEmu/mintty desktop notification.
     fn handle_osc_9(&mut self, params: &[&[u8]]) -> bool {
         // Format: OSC 9 ; <notification text> ST
+        //     or: OSC 9 ; 4 ; <state> [; <pct>] ST
         //     or: OSC 9 ; 9 ; <windows-path> ST
         if params.len() < 2 {
             return false;
+        }
+
+        // ── OSC 9;4 — ConEmu/WT taskbar progress ──────────────────────
+        // PowerShell (via PSReadLine) and Claude Code emit this to drive
+        // the Windows taskbar progress indicator. Without this branch
+        // params[1] = b"4" falls through to the plain-notification path
+        // and surfaces as a toast with body "4".
+        if params[1] == b"4" {
+            trace!("OSC 9;4 (taskbar progress) consumed");
+            return true;
         }
 
         // ── OSC 9;9 — WSL cwd (tn-kkr8) ────────────────────────────────
@@ -1287,6 +1304,53 @@ mod tests {
             InterceptedEvent::DesktopNotification(t) => assert_eq!(t, "9"),
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    // -- OSC 9;4 taskbar progress tests -----------------------------------------
+
+    #[test]
+    fn osc_9_4_clear_progress_consumed_no_event() {
+        // `OSC 9 ; 4 ; 0 ST` — clear taskbar progress. This is what hit
+        // the user's desktop as a bogus "Therminal / 4" toast before this
+        // branch existed.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"4", b"0"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        assert!(rx.try_recv().is_err(), "OSC 9;4 must not emit any event");
+    }
+
+    #[test]
+    fn osc_9_4_set_progress_consumed_no_event() {
+        // `OSC 9 ; 4 ; 1 ; 50 ST` — set default progress to 50%.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"4", b"1", b"50"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        assert!(rx.try_recv().is_err(), "OSC 9;4 must not emit any event");
+    }
+
+    #[test]
+    fn osc_9_4_bare_consumed_no_event() {
+        // `OSC 9 ; 4 ST` — no state/pct. Still a progress sequence; must
+        // not fall through to the desktop-notification path.
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let params: &[&[u8]] = &[b"9", b"4"];
+        let consumed = alacritty_terminal::vte::SequenceInterceptor::intercept_osc(
+            &mut interceptor,
+            params,
+            true,
+        );
+        assert!(consumed);
+        assert!(rx.try_recv().is_err(), "OSC 9;4 must not emit any event");
     }
 
     // -- OSC 7777 tests ---------------------------------------------------------
