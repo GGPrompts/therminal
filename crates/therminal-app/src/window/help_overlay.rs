@@ -43,10 +43,11 @@ fn section_order(name: &str) -> u8 {
         "Pane Management" => 0,
         "Font" => 1,
         "General" => 2,
-        "Navigation" => 3,
-        "Widgets" => 4,
-        "Mouse" => 5,
-        _ => 6,
+        "WebView" => 3,
+        "Navigation" => 4,
+        "Widgets" => 5,
+        "Mouse" => 6,
+        _ => 7,
     }
 }
 
@@ -949,47 +950,37 @@ mod tests {
     }
 
     /// Regression for tn-22l4 (extended for tn-eq9g): the WebView
-    /// keybindings (`Ctrl+L` NavigateWebView, tn-wvll; `Ctrl+Shift+B`
-    /// SpawnWebViewPane, tn-ojy9; `Alt+Home` WebViewHome, tn-eq9g) must
-    /// surface in the `Ctrl+Shift+?` help overlay under the "General"
-    /// section so users can discover them. A bug where any row was
-    /// elided (e.g. via dedup, numeric-group collapse, or a mis-sectioned
-    /// action) would make the bindings feel invisible.
+    /// keybindings must surface in the `Ctrl+Shift+?` help overlay under
+    /// a dedicated "WebView" section so users discover them as a family.
+    /// Dual bindings (`Ctrl+L`/`Alt+L` for NavigateWebView, `Ctrl+Shift+B`/
+    /// `Alt+Enter` for SpawnWebViewPane) all render as distinct rows.
     #[test]
-    fn webview_bindings_appear_in_general_section() {
+    fn webview_bindings_appear_in_webview_section() {
         let kb = KeybindingsConfig::default();
         let cats = build_help_categories(&kb);
         let section_names: Vec<&str> = cats.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
-            section_names.contains(&"General"),
-            "expected General section, got {section_names:?}"
+            section_names.contains(&"WebView"),
+            "expected WebView section, got {section_names:?}"
         );
-        let general_rows: &Vec<(String, String)> = &cats
+        let webview_rows: &Vec<(String, String)> = &cats
             .iter()
-            .find(|(n, _)| n == "General")
-            .expect("General section must exist")
+            .find(|(n, _)| n == "WebView")
+            .expect("WebView section must exist")
             .1;
-        let has_navigate = general_rows
-            .iter()
-            .any(|(k, d)| k == "Ctrl+L" && d == "Navigate WebView pane to URL");
-        let has_spawn = general_rows
-            .iter()
-            .any(|(k, d)| k == "Ctrl+Shift+B" && d == "Spawn new WebView pane from URL");
-        let has_home = general_rows
-            .iter()
-            .any(|(k, d)| k == "Alt+Home" && d == "Return WebView to spawn URL");
-        assert!(
-            has_navigate,
-            "expected Ctrl+L NavigateWebView row in General, got {general_rows:?}"
-        );
-        assert!(
-            has_spawn,
-            "expected Ctrl+Shift+B SpawnWebViewPane row in General, got {general_rows:?}"
-        );
-        assert!(
-            has_home,
-            "expected Alt+Home WebViewHome row in General, got {general_rows:?}"
-        );
+        let expected = [
+            ("Ctrl+L", "Navigate WebView pane to URL"),
+            ("Alt+L", "Navigate WebView pane to URL"),
+            ("Ctrl+Shift+B", "Spawn new WebView pane from URL"),
+            ("Alt+Enter", "Spawn new WebView pane from URL"),
+            ("Alt+Home", "Return WebView to spawn URL"),
+        ];
+        for (k, d) in expected {
+            assert!(
+                webview_rows.iter().any(|(rk, rd)| rk == k && rd == d),
+                "expected {k:?} / {d:?} row in WebView, got {webview_rows:?}"
+            );
+        }
     }
 
     /// Sections appear in the documented order.
@@ -1002,6 +993,7 @@ mod tests {
             "Pane Management",
             "Font",
             "General",
+            "WebView",
             "Navigation",
             "Widgets",
             "Mouse",

@@ -247,10 +247,10 @@ impl KeyAction {
             | KeyAction::ShowHelp
             | KeyAction::ShowSettings
             | KeyAction::ShowLauncher
-            | KeyAction::FocusMode
-            | KeyAction::NavigateWebView
-            | KeyAction::SpawnWebViewPane
-            | KeyAction::WebViewHome => "General",
+            | KeyAction::FocusMode => "General",
+            KeyAction::NavigateWebView | KeyAction::SpawnWebViewPane | KeyAction::WebViewHome => {
+                "WebView"
+            }
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
@@ -317,10 +317,6 @@ impl Default for KeybindingsConfig {
                 },
                 Keybinding {
                     key: "ctrl+shift+enter".to_string(),
-                    action: KeyAction::SplitAuto,
-                },
-                Keybinding {
-                    key: "alt+enter".to_string(),
                     action: KeyAction::SplitAuto,
                 },
                 // Pane management
@@ -395,16 +391,30 @@ impl Default for KeybindingsConfig {
                 // Only fires when the focused pane is a WebView — on
                 // terminal panes the dispatcher falls through so the
                 // shell's own ctrl+l (readline clear-screen) still works.
+                // Dual-bound: ctrl+l preserves browser muscle memory;
+                // alt+l matches the Alt=WebView family (alt+enter spawn,
+                // alt+home origin, alt+l navigate).
                 Keybinding {
                     key: "ctrl+l".to_string(),
+                    action: KeyAction::NavigateWebView,
+                },
+                Keybinding {
+                    key: "alt+l".to_string(),
                     action: KeyAction::NavigateWebView,
                 },
                 // Spawn a new WebView pane from a URL prompt (tn-ojy9).
                 // Opens the same inline input as NavigateWebView but the
                 // committed URL spawns a fresh WebView pane split off the
-                // currently focused pane.
+                // currently focused pane. Dual-bound: ctrl+shift+b and
+                // alt+enter (the latter mirrors ctrl+shift+enter SplitAuto
+                // for terminal panes — Enter births a pane, modifier picks
+                // the type).
                 Keybinding {
                     key: "ctrl+shift+b".to_string(),
+                    action: KeyAction::SpawnWebViewPane,
+                },
+                Keybinding {
+                    key: "alt+enter".to_string(),
                     action: KeyAction::SpawnWebViewPane,
                 },
                 // WebView Home (tn-eq9g): return to the URL the pane was
@@ -745,23 +755,51 @@ mod tests {
     }
 
     #[test]
-    fn keybindings_default_has_spawn_webview_pane_on_ctrl_shift_b() {
-        // tn-ojy9: Ctrl+Shift+B must be wired to SpawnWebViewPane so the
-        // GUI has a keyboard path to birth a fresh WebView pane.
+    fn keybindings_default_has_spawn_webview_pane_dual_bound() {
+        // Ctrl+Shift+B and Alt+Enter must both be wired to SpawnWebViewPane
+        // so the GUI has two keyboard paths to birth a fresh WebView pane.
+        // Ctrl+Shift+B preserves tn-ojy9 muscle memory; Alt+Enter mirrors
+        // the terminal Ctrl+Shift+Enter SplitAuto pattern so "Enter births
+        // a pane, modifier picks the type".
         let kb = KeybindingsConfig::default();
-        let entry = kb
+        let keys: Vec<&str> = kb
             .bindings
             .iter()
-            .find(|b| b.action == KeyAction::SpawnWebViewPane)
-            .expect("SpawnWebViewPane must be bound by default");
-        assert_eq!(entry.key, "ctrl+shift+b");
+            .filter(|b| b.action == KeyAction::SpawnWebViewPane)
+            .map(|b| b.key.as_str())
+            .collect();
+        assert!(
+            keys.contains(&"ctrl+shift+b"),
+            "ctrl+shift+b missing, got {keys:?}"
+        );
+        assert!(
+            keys.contains(&"alt+enter"),
+            "alt+enter missing, got {keys:?}"
+        );
     }
 
     #[test]
-    fn spawn_webview_pane_help_overlay_section_is_general() {
-        // tn-ojy9: the help overlay groups SpawnWebViewPane under
-        // "General" alongside NavigateWebView so users discover both.
-        assert_eq!(KeyAction::SpawnWebViewPane.section(), "General");
+    fn keybindings_default_has_navigate_webview_dual_bound() {
+        // Ctrl+L preserves the universal browser address-bar convention
+        // (tn-wvll); Alt+L completes the Alt=WebView family.
+        let kb = KeybindingsConfig::default();
+        let keys: Vec<&str> = kb
+            .bindings
+            .iter()
+            .filter(|b| b.action == KeyAction::NavigateWebView)
+            .map(|b| b.key.as_str())
+            .collect();
+        assert!(keys.contains(&"ctrl+l"), "ctrl+l missing, got {keys:?}");
+        assert!(keys.contains(&"alt+l"), "alt+l missing, got {keys:?}");
+    }
+
+    #[test]
+    fn webview_actions_live_in_webview_section() {
+        // The three WebView actions get their own help-overlay section so
+        // users discover them as a family rather than lost under "General".
+        assert_eq!(KeyAction::NavigateWebView.section(), "WebView");
+        assert_eq!(KeyAction::SpawnWebViewPane.section(), "WebView");
+        assert_eq!(KeyAction::WebViewHome.section(), "WebView");
     }
 
     #[test]
