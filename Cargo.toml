@@ -107,7 +107,7 @@ tiny-skia = "0.11"
 
 # WebView embedding (tn-s5vj). Platform-native webview via wry (Tauri's
 # webview library). Linux: WebKitGTK, Windows: WebView2, macOS: WKWebView.
-wry = "0.55"
+wry = { version = "0.55", features = ["devtools"] }
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }

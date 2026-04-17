@@ -137,10 +137,13 @@ impl WebViewManager {
         // open its own surface (which would also silently drop).
 
         // Build the webview as a child of the winit window.
+        // Devtools are enabled in debug builds so right-click → Inspect Element
+        // works for diagnosing input / layout issues in hosted pages.
         let builder = WebViewBuilder::new()
             .with_url(url)
             .with_bounds(bounds)
             .with_focused(false)
+            .with_devtools(cfg!(debug_assertions))
             .with_initialization_script(WEBVIEW_INIT_SCRIPT)
             .with_ipc_handler(ipc_handler)
             .with_new_window_req_handler(move |url, _features| {
