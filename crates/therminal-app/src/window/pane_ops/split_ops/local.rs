@@ -286,6 +286,21 @@ impl App {
             );
             return;
         }
+        self.split_pane_by_id_local(target_id, direction);
+    }
+
+    /// Local-only variant of `split_pane_by_id` that spawns a terminal pane
+    /// directly (no daemon RPC). Used both as the local-mode branch of
+    /// `split_pane_by_id` and as a graceful fallback from `split_pane_remote`
+    /// when the source pane has no daemon mapping (tn-7mvn — e.g. splitting
+    /// off a WebView pane, which is GUI-only and never round-trips through
+    /// the daemon).
+    ///
+    /// Trade-off: the new terminal pane stays GUI-local and therefore isn't
+    /// visible to MCP `terminal.panes.list` or persisted across daemon
+    /// restart. Acceptable for v1 — panes split from WebViews are already
+    /// rooted in GUI-only state.
+    pub(crate) fn split_pane_by_id_local(&mut self, target_id: PaneId, direction: SplitDirection) {
         let renderer = match self.grid_renderer.as_ref() {
             Some(r) => r,
             None => return,

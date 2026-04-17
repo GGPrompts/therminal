@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::pane::SplitDirection;
 use therminal_protocol::daemon::{IpcRequest, IpcResponse};
@@ -14,6 +14,33 @@ use super::super::{DAEMON_OP_TIMEOUT, cwd_from_source_pane, make_pane_callbacks}
 use super::{DaemonSplitOnComplete, DaemonSplitResult};
 use crate::pane::PaneId;
 use crate::window::{App, UserEvent};
+
+/// Decide what the remote split path should do when the source pane has no
+/// daemon mapping (tn-7mvn).
+///
+/// Factored out for unit testing — lets us verify the FocusAndRelayout
+/// fallback fires for the standard header-click path (WebView or otherwise)
+/// and that other completion variants still bail rather than silently
+/// producing a local pane.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NoDaemonMappingDecision {
+    /// Dispatch to the local split path (GUI-only fallback).
+    FallbackLocal,
+    /// Log and bail — completion variant can't be served by a local-only
+    /// pane (e.g. NewWorkspace, WriteBytesAndFocus).
+    Bail,
+}
+
+pub(crate) fn decide_no_daemon_mapping(
+    on_complete: &DaemonSplitOnComplete,
+) -> NoDaemonMappingDecision {
+    match on_complete {
+        DaemonSplitOnComplete::FocusAndRelayout => NoDaemonMappingDecision::FallbackLocal,
+        DaemonSplitOnComplete::AutoTile { .. }
+        | DaemonSplitOnComplete::WriteBytesAndFocus { .. }
+        | DaemonSplitOnComplete::NewWorkspace { .. } => NoDaemonMappingDecision::Bail,
+    }
+}
 
 impl App {
     /// Phase B split path: fire the daemon `SplitPane` RPC asynchronously so
@@ -32,10 +59,34 @@ impl App {
         let daemon_source = match self.pane_id_map.daemon_for_local(source_local) {
             Some(d) => d,
             None => {
-                warn!(
-                    source_local,
-                    "split_pane_remote: no daemon id mapping (local-mode pane pre-cutover); bailing"
-                );
+                // tn-7mvn: no daemon mapping means the source pane is
+                // GUI-local (e.g. a WebView pane — never round-tripped
+                // through the daemon). Instead of silently dropping the
+                // user's click, fall back to the local split path for
+                // the standard FocusAndRelayout case. The new terminal
+                // sibling stays GUI-local too (not visible to MCP), which
+                // is fine — WebView panes are GUI-only by nature.
+                //
+                // Other completion variants (AutoTile, WriteBytesAndFocus,
+                // NewWorkspace) are only issued against daemon-mapped
+                // source panes in practice, so they keep the original
+                // bail-and-log behavior.
+                match decide_no_daemon_mapping(&on_complete) {
+                    NoDaemonMappingDecision::FallbackLocal => {
+                        debug!(
+                            source_local,
+                            "split_pane_remote: no daemon mapping (GUI-only source); falling back to local split"
+                        );
+                        self.split_pane_by_id_local(source_local, direction);
+                    }
+                    NoDaemonMappingDecision::Bail => {
+                        warn!(
+                            source_local,
+                            ?on_complete,
+                            "split_pane_remote: no daemon id mapping and non-default on_complete; bailing"
+                        );
+                    }
+                }
                 return;
             }
         };
@@ -263,5 +314,75 @@ impl App {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // tn-7mvn: when a WebView (GUI-only) pane is split from its header,
+    // split_pane_remote no longer has a daemon id to RPC against. The
+    // `decide_no_daemon_mapping` helper encodes the "fall back to local
+    // split" vs "bail with a log" decision for every completion variant.
+
+    #[test]
+    fn fallback_to_local_for_focus_and_relayout() {
+        // The standard header-click path — clicking H/V on a WebView
+        // header arrives here. Must fall back to local, NOT bail.
+        assert_eq!(
+            decide_no_daemon_mapping(&DaemonSplitOnComplete::FocusAndRelayout),
+            NoDaemonMappingDecision::FallbackLocal,
+        );
+    }
+
+    #[test]
+    fn bail_for_auto_tile() {
+        // AutoTile is only fired for daemon-mapped agent panes. A WebView
+        // would never trigger it, so bail rather than silently producing
+        // a local pane that skips the auto-tile debouncer registration.
+        assert_eq!(
+            decide_no_daemon_mapping(&DaemonSplitOnComplete::AutoTile { parent_pane_id: 7 }),
+            NoDaemonMappingDecision::Bail,
+        );
+    }
+
+    #[test]
+    fn bail_for_write_bytes_and_focus() {
+        // WriteBytesAndFocus needs the daemon pane to send keys into —
+        // a local-mode pane doesn't round-trip through SendKeys RPC, so
+        // the bytes would be dropped. Bail.
+        assert_eq!(
+            decide_no_daemon_mapping(&DaemonSplitOnComplete::WriteBytesAndFocus {
+                bytes: b"ls\n".to_vec(),
+                toast: None,
+            }),
+            NoDaemonMappingDecision::Bail,
+        );
+    }
+
+    #[test]
+    fn bail_for_new_workspace() {
+        // NewWorkspace builds a pane state for the full viewport and
+        // inserts it as the sole leaf in a new workspace tab — the local
+        // split path inserts into the current workspace layout, so
+        // falling back would silently violate the caller's intent. Bail.
+        assert_eq!(
+            decide_no_daemon_mapping(&DaemonSplitOnComplete::NewWorkspace { workspace_id: 3 }),
+            NoDaemonMappingDecision::Bail,
+        );
+    }
+
+    #[test]
+    fn default_variant_is_focus_and_relayout_and_falls_back() {
+        // The enum's #[default] is FocusAndRelayout. If someone ever flips
+        // the default, this test will fail loudly — the fallback behavior
+        // is load-bearing for the WebView-header-click UX fix.
+        let default = DaemonSplitOnComplete::default();
+        assert!(matches!(default, DaemonSplitOnComplete::FocusAndRelayout));
+        assert_eq!(
+            decide_no_daemon_mapping(&default),
+            NoDaemonMappingDecision::FallbackLocal,
+        );
     }
 }
