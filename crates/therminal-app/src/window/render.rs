@@ -407,19 +407,35 @@ fn render_single_pane(
         });
     let vp = pane.viewport;
 
+    // tn-ojy9: when the inline URL input is in Spawn mode targeting this
+    // pane as its split source, override the header title with the live
+    // edit buffer so the user has visible feedback while typing. Unlike
+    // tn-wvll's navigate override (which only fires on WebView panes),
+    // Spawn mode can target any backend — the source is typically a
+    // terminal pane.
+    let spawn_input_override: Option<String> = navigate_state
+        .filter(|ns| ns.pane_id == pane.id && matches!(ns.mode, super::NavigateMode::Spawn))
+        .map(|ns| format!("+web \u{2192} {}_", ns.buffer));
+
     // WebView panes have no Term — render only the pane header and focus
     // border. The content area is filled by a platform-native webview
     // child surface managed by WebViewManager (tn-s5vj).
     if pane.is_webview() {
         renderer.set_current_pane(pane.id);
         let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
-        // tn-wvll: when the inline navigate input targets this pane,
+        // tn-wvll / tn-ojy9: when the inline URL input targets this pane,
         // surface the live edit buffer with a trailing cursor glyph
         // instead of the usual "[web] <host>" label. Matches the
         // rename-in-tab-label rendering pattern in build_tab_labels.
-        let navigate_override = navigate_state
-            .filter(|ns| ns.pane_id == pane.id)
-            .map(|ns| format!("\u{2192} {}_", ns.buffer));
+        // Spawn mode uses a distinct prefix so the user knows a NEW
+        // pane is being created rather than navigating the current one.
+        let navigate_override =
+            navigate_state
+                .filter(|ns| ns.pane_id == pane.id)
+                .map(|ns| match ns.mode {
+                    super::NavigateMode::Navigate => format!("\u{2192} {}_", ns.buffer),
+                    super::NavigateMode::Spawn => format!("+web \u{2192} {}_", ns.buffer),
+                });
         // Default: show a short domain label in the pane header instead of "pane N".
         let webview_title = navigate_override.or_else(|| {
             pane.webview_url().map(|u| {
@@ -545,12 +561,15 @@ fn render_single_pane(
         // Draw pane header even when content is unchanged.
         let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
         if show_pane_headers {
+            let header_title = spawn_input_override
+                .as_deref()
+                .or(claude_header_title.as_deref());
             draw_pane_header(
                 pane,
                 draw_focus_border || pane_count == 1,
                 is_zoomed,
                 pane.pinned,
-                claude_header_title.as_deref(),
+                header_title,
                 claude_badge.as_deref(),
                 renderer,
                 device,
@@ -743,12 +762,15 @@ fn render_single_pane(
     // ── Draw pane header strip ──
     let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
     if show_pane_headers {
+        let header_title = spawn_input_override
+            .as_deref()
+            .or(claude_header_title.as_deref());
         draw_pane_header(
             pane,
             draw_focus_border || pane_count == 1,
             is_zoomed,
             pane.pinned,
-            claude_header_title.as_deref(),
+            header_title,
             claude_badge.as_deref(),
             renderer,
             device,

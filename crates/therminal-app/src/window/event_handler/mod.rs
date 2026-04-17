@@ -20,7 +20,7 @@ use therminal_core::config::KeyAction;
 use super::keybindings::lookup_binding;
 use super::mouse::HeaderAction;
 use super::render_driver::JumpDirection;
-use super::{App, NavigateState, OverlayMode, chrome, help_overlay};
+use super::{App, NavigateMode, NavigateState, OverlayMode, chrome, help_overlay};
 use crate::pane::SplitDirection;
 
 impl App {
@@ -66,6 +66,19 @@ impl App {
                 return false;
             }
             self.start_navigate_webview(pane_id);
+            return true;
+        }
+
+        // tn-ojy9: SpawnWebViewPane opens an inline URL input; on commit a
+        // NEW WebView pane is created, splitting off the focused pane.
+        // Unlike NavigateWebView, this works regardless of the focused
+        // pane's backend.
+        if matches!(action, KeyAction::SpawnWebViewPane) {
+            let pane_id = match self.focused_pane() {
+                Some(id) => id,
+                None => return false,
+            };
+            self.start_spawn_webview(pane_id);
             return true;
         }
 
@@ -224,6 +237,9 @@ impl App {
             // WebView. If we reach this match arm it means the guard
             // approved the action; the arm is unreachable in practice.
             KeyAction::NavigateWebView => {}
+            // tn-ojy9: SpawnWebViewPane is handled above by an early-return
+            // guard. Unreachable in practice.
+            KeyAction::SpawnWebViewPane => {}
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
@@ -1220,9 +1236,29 @@ impl App {
         }
     }
 
-    /// Commit the navigate buffer: route the URL through the WebViewManager
-    /// and update the pane backend's stored URL so subsequent reads (menu
-    /// "Copy URL", header label, future pre-fill) see the new value.
+    /// Open the inline URL input to spawn a NEW WebView pane off the given
+    /// source pane (tn-ojy9). The source pane is typically the focused pane
+    /// at the moment `Ctrl+Shift+B` was pressed; the new WebView will split
+    /// off it when the user commits a URL. Unlike [`start_navigate_webview`],
+    /// the source pane does NOT have to be a WebView — any backend works.
+    pub(super) fn start_spawn_webview(&mut self, source_pane_id: crate::pane::PaneId) {
+        self.navigate_state = Some(NavigateState::new_spawn(source_pane_id, String::new()));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Commit the navigate buffer. Behavior depends on
+    /// [`NavigateState::mode`]:
+    ///
+    /// - [`NavigateMode::Navigate`] (tn-wvll): route the URL through the
+    ///   WebViewManager and update the pane backend's stored URL so
+    ///   subsequent reads (menu "Copy URL", header label, future pre-fill)
+    ///   see the new value.
+    /// - [`NavigateMode::Spawn`] (tn-ojy9): spawn a new WebView pane split
+    ///   off the stored source pane id. `create_webview_pane` picks the
+    ///   split direction automatically from the source pane viewport.
+    ///
     /// Empty submit cancels (treated identically to Esc).
     pub(super) fn commit_navigate(&mut self) {
         let Some(state) = self.navigate_state.take() else {
@@ -1230,17 +1266,32 @@ impl App {
         };
         let url = state.buffer.trim().to_string();
         if url.is_empty() {
-            // Empty submit → cancel without navigating.
+            // Empty submit → cancel without acting.
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
             return;
         }
-        self.webview_manager.navigate(state.pane_id, &url);
-        if let Some(layout) = self.get_layout_mut()
-            && let Some(pane) = layout.find_pane_mut(state.pane_id)
-        {
-            pane.set_webview_url(url);
+        match state.mode {
+            NavigateMode::Navigate => {
+                self.webview_manager.navigate(state.pane_id, &url);
+                if let Some(layout) = self.get_layout_mut()
+                    && let Some(pane) = layout.find_pane_mut(state.pane_id)
+                {
+                    pane.set_webview_url(url);
+                }
+            }
+            NavigateMode::Spawn => {
+                // tn-ojy9: spawn the new WebView pane splitting off the
+                // stored source pane. `create_webview_pane` uses the
+                // focused pane as the split source, so ensure focus is
+                // on the recorded source pane first.
+                self.set_focused_pane(Some(state.pane_id));
+                if let Err(e) = self.create_webview_pane(&url) {
+                    warn!(url = %url, error = %e, "failed to spawn webview pane");
+                    self.show_toast(format!("WebView spawn failed: {e}"));
+                }
+            }
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();

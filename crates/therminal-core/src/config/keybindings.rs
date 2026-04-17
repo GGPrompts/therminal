@@ -127,6 +127,10 @@ pub enum KeyAction {
     /// is a WebView; on terminal panes the binding falls through to the
     /// shell so e.g. readline `Ctrl+L` (clear-screen) keeps working.
     NavigateWebView,
+    /// Open an inline URL input that spawns a NEW WebView pane on commit
+    /// (tn-ojy9). The new pane splits off the currently focused pane; the
+    /// layout auto-picks the split direction. Default binding: `Ctrl+Shift+B`.
+    SpawnWebViewPane,
 }
 
 impl KeyAction {
@@ -182,6 +186,7 @@ impl KeyAction {
             KeyAction::HotspotShowGitRef { .. } => "Show git commit in TUI tool",
             KeyAction::OpenInBrowser(_) => "Open URL in browser",
             KeyAction::NavigateWebView => "Navigate WebView pane to URL",
+            KeyAction::SpawnWebViewPane => "Spawn new WebView pane from URL",
         }
     }
 
@@ -227,7 +232,8 @@ impl KeyAction {
             | KeyAction::ShowSettings
             | KeyAction::ShowLauncher
             | KeyAction::FocusMode
-            | KeyAction::NavigateWebView => "General",
+            | KeyAction::NavigateWebView
+            | KeyAction::SpawnWebViewPane => "General",
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
@@ -374,6 +380,14 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+l".to_string(),
                     action: KeyAction::NavigateWebView,
+                },
+                // Spawn a new WebView pane from a URL prompt (tn-ojy9).
+                // Opens the same inline input as NavigateWebView but the
+                // committed URL spawns a fresh WebView pane split off the
+                // currently focused pane.
+                Keybinding {
+                    key: "ctrl+shift+b".to_string(),
+                    action: KeyAction::SpawnWebViewPane,
                 },
                 // Batch pane operations
                 Keybinding {
@@ -702,6 +716,26 @@ mod tests {
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::ClosePane));
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::ZoomPane));
         assert!(kb.bindings.iter().any(|b| b.action == KeyAction::FocusNext));
+    }
+
+    #[test]
+    fn keybindings_default_has_spawn_webview_pane_on_ctrl_shift_b() {
+        // tn-ojy9: Ctrl+Shift+B must be wired to SpawnWebViewPane so the
+        // GUI has a keyboard path to birth a fresh WebView pane.
+        let kb = KeybindingsConfig::default();
+        let entry = kb
+            .bindings
+            .iter()
+            .find(|b| b.action == KeyAction::SpawnWebViewPane)
+            .expect("SpawnWebViewPane must be bound by default");
+        assert_eq!(entry.key, "ctrl+shift+b");
+    }
+
+    #[test]
+    fn spawn_webview_pane_help_overlay_section_is_general() {
+        // tn-ojy9: the help overlay groups SpawnWebViewPane under
+        // "General" alongside NavigateWebView so users discover both.
+        assert_eq!(KeyAction::SpawnWebViewPane.section(), "General");
     }
 
     #[test]

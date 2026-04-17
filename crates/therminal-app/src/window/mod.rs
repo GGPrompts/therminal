@@ -801,14 +801,30 @@ impl RenameState {
     }
 }
 
-/// State for an in-progress inline WebView pane URL navigation (tn-wvll).
+/// What the URL input overlay will do on commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NavigateMode {
+    /// Navigate the existing WebView pane identified by `pane_id` (tn-wvll).
+    Navigate,
+    /// Spawn a NEW WebView pane, splitting off `pane_id` as the source
+    /// (tn-ojy9). The layout picks an auto-tile direction.
+    Spawn,
+}
+
+/// State for an in-progress inline WebView pane URL prompt.
 ///
-/// Mirrors [`RenameState`] for the "type a string then commit" UX, but
-/// targets a [`PaneId`] (a WebView pane) instead of a workspace tab.
+/// Covers both navigating an existing WebView (tn-wvll) and spawning a
+/// brand-new WebView pane off the focused source (tn-ojy9). Mirrors
+/// [`RenameState`] for the "type a string then commit" UX.
 #[derive(Debug, Clone)]
 pub(crate) struct NavigateState {
-    /// WebView pane being navigated.
+    /// For [`NavigateMode::Navigate`]: the WebView pane being navigated.
+    /// For [`NavigateMode::Spawn`]: the source pane the new WebView will
+    /// split off (typically the focused pane at the moment Ctrl+Shift+B
+    /// was pressed).
     pub pane_id: PaneId,
+    /// Which action the committed URL triggers.
+    pub mode: NavigateMode,
     /// Current edit buffer (the URL the user is typing).
     pub buffer: String,
     /// Cursor position as a byte offset into `buffer` (always at a char boundary).
@@ -820,6 +836,20 @@ impl NavigateState {
         let cursor = initial.len();
         Self {
             pane_id,
+            mode: NavigateMode::Navigate,
+            buffer: initial,
+            cursor,
+        }
+    }
+
+    /// Construct a [`NavigateMode::Spawn`] instance for tn-ojy9's
+    /// "spawn new WebView pane" flow. `source_pane_id` is the pane the
+    /// new WebView will split off.
+    pub fn new_spawn(source_pane_id: PaneId, initial: String) -> Self {
+        let cursor = initial.len();
+        Self {
+            pane_id: source_pane_id,
+            mode: NavigateMode::Spawn,
             buffer: initial,
             cursor,
         }
@@ -1993,6 +2023,41 @@ mod rename_state_tests {
         assert_eq!(s.pane_id, 3);
         assert_eq!(s.buffer, "");
         assert_eq!(s.cursor, 0);
+    }
+
+    // ── NavigateState spawn mode (tn-ojy9) ────────────────────────────
+
+    #[test]
+    fn navigate_state_new_spawn_seeds_mode_and_source_pane() {
+        use super::{NavigateMode, NavigateState};
+        let s = NavigateState::new_spawn(42, String::new());
+        assert_eq!(s.pane_id, 42);
+        assert_eq!(s.mode, NavigateMode::Spawn);
+        assert_eq!(s.buffer, "");
+        assert_eq!(s.cursor, 0);
+    }
+
+    #[test]
+    fn navigate_state_new_defaults_to_navigate_mode() {
+        use super::{NavigateMode, NavigateState};
+        let s = NavigateState::new(1, "x".to_string());
+        assert_eq!(s.mode, NavigateMode::Navigate);
+    }
+
+    #[test]
+    fn navigate_state_spawn_mode_preserves_text_edit_semantics() {
+        use super::{NavigateMode, NavigateState};
+        // Spawn mode must accept the same insert_char / backspace behavior
+        // as navigate mode, since the same key handler drives both.
+        let mut s = NavigateState::new_spawn(9, String::new());
+        for c in "https://example.com".chars() {
+            s.insert_char(c);
+        }
+        assert_eq!(s.buffer, "https://example.com");
+        assert_eq!(s.cursor, 19);
+        s.backspace();
+        assert_eq!(s.buffer, "https://example.co");
+        assert_eq!(s.mode, NavigateMode::Spawn);
     }
 
     // ── Claude session title → tab label (tn-lxq9) ─────────────────────
