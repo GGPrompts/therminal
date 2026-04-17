@@ -20,7 +20,7 @@
 //!   pid to a Claude session id.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,6 +28,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use therminal_harness_claude::state::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
+use therminal_terminal::hotspot_detection::resolve_relative_to_cwd;
 
 /// Shared Claude metadata used by chrome surfaces for one pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +252,61 @@ impl ClaudeCwdTracker {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.by_session.get(session_id).and_then(|m| m.cwd.clone())
     }
+
+    /// Public session -> cwd lookup used by the hotspot resolvers in the
+    /// `open_in_editor` / `open_folder_in_pane` fallback path (tn-shbw).
+    pub fn cwd_for_session_public(&self, session_id: &str) -> Option<PathBuf> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.by_session.get(session_id).and_then(|m| m.cwd.clone())
+    }
+}
+
+/// Resolve a (tilde-expanded) hotspot path with a harness-cwd fallback (tn-shbw).
+///
+/// Precedence, strictest → loosest:
+///
+/// 1. If the input path is already absolute, [`resolve_relative_to_cwd`] returns
+///    it unchanged — we just stat it and return it either way.
+/// 2. Otherwise, join against `shell_cwd` (the pane's OSC 7 cwd). If the result
+///    stats as the expected type (`stat_ok` returns `true`), use it.
+/// 3. Otherwise, if `harness_cwd` is set, re-join against the Claude session's
+///    `working_dir`. If the result stats, use it.
+/// 4. Fall through to the shell-cwd attempt so the caller's "file not found"
+///    error still blames the more likely source (the visible shell).
+///
+/// The tn-gidy tool-call-marker `resolved_text` override is enforced *outside*
+/// this function: `handle_hotspot_click` in `mouse.rs` substitutes the
+/// resolved absolute path into the click action before `open_in_editor` is
+/// ever called, so by the time we reach here the path is already absolute
+/// and step 1 short-circuits. The harness fallback only fires for bare
+/// `FilePath` hotspots in Claude-linked panes — exactly the gap tn-shbw
+/// targets.
+///
+/// `stat_ok` is passed a concrete `&str` so tests can stub the filesystem.
+/// Production callers pass either `|p| std::fs::metadata(p).map(|m|
+/// m.is_file()).unwrap_or(false)` (editor path) or the `is_dir` equivalent
+/// (folder path).
+pub(crate) fn resolve_with_harness_fallback<F>(
+    expanded: &str,
+    shell_cwd: Option<&str>,
+    harness_cwd: Option<&Path>,
+    stat_ok: F,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    let shell_resolved = resolve_relative_to_cwd(expanded, shell_cwd).into_owned();
+    if stat_ok(&shell_resolved) {
+        return shell_resolved;
+    }
+    if let Some(h) = harness_cwd {
+        let harness_cwd_s = h.to_string_lossy();
+        let harness_resolved = resolve_relative_to_cwd(expanded, Some(harness_cwd_s.as_ref()));
+        if stat_ok(&harness_resolved) {
+            return harness_resolved.into_owned();
+        }
+    }
+    shell_resolved
 }
 
 #[cfg(test)]
@@ -486,5 +542,133 @@ mod tests {
             .chrome_meta_for_session("sid-wsl")
             .expect("session-based lookup should succeed");
         assert_eq!(meta.session_title.as_deref(), Some("WSL session"));
+    }
+
+    // ── tn-shbw: harness-cwd fallback for generic FilePath hotspots ──
+    //
+    // These tests exercise `resolve_with_harness_fallback` — the pure
+    // resolver called by `open_in_editor` / `open_folder_in_pane`. The
+    // scenarios mirror the task acceptance criteria:
+    //   (a) harness cwd beats shell cwd when file exists only in harness cwd
+    //   (b) shell cwd still wins when the pane has no harness link
+    //   (c) tool-call marker resolved_text still takes precedence (via the
+    //       click layer substituting an absolute path before we're called,
+    //       which short-circuits through branch 1 below)
+    //   (d) JsonlTail pane (no OSC 7) resolves purely via harness cwd
+
+    use super::resolve_with_harness_fallback;
+    use std::collections::HashSet;
+
+    fn mk_stat_fn(existing: &[&str]) -> impl Fn(&str) -> bool {
+        let set: HashSet<String> = existing.iter().map(|s| s.to_string()).collect();
+        move |p| set.contains(p)
+    }
+
+    #[test]
+    fn fallback_a_harness_cwd_beats_shell_cwd_when_only_harness_has_file() {
+        // File is 2026-04-17.md; shell cwd /home/u/beads doesn't contain
+        // it, but harness cwd /home/u/notes does. Fallback must pick harness.
+        let stat_ok = mk_stat_fn(&["/home/u/notes/2026-04-17.md"]);
+        let harness = PathBuf::from("/home/u/notes");
+        let out = resolve_with_harness_fallback(
+            "2026-04-17.md",
+            Some("/home/u/beads"),
+            Some(harness.as_path()),
+            stat_ok,
+        );
+        assert_eq!(out, "/home/u/notes/2026-04-17.md");
+    }
+
+    #[test]
+    fn fallback_b_shell_cwd_still_wins_without_harness_link() {
+        // No harness cwd is provided — must honor shell_cwd and return
+        // exactly what resolve_relative_to_cwd produces, even if stat_ok
+        // says the file doesn't exist (caller's plan_open_in_editor will
+        // toast "file not found", which is the pre-shbw behavior).
+        let stat_ok = mk_stat_fn(&[]); // nothing exists
+        let out = resolve_with_harness_fallback("foo.md", Some("/home/u/beads"), None, stat_ok);
+        assert_eq!(out, "/home/u/beads/foo.md");
+    }
+
+    #[test]
+    fn fallback_b_shell_cwd_wins_when_file_present_in_shell_cwd() {
+        // File is visible in both shell and harness cwds; shell wins
+        // because it's tried first (the pane's OSC 7 is the more
+        // specific signal for "where the user currently is").
+        let stat_ok = mk_stat_fn(&["/home/u/beads/foo.md", "/home/u/notes/foo.md"]);
+        let harness = PathBuf::from("/home/u/notes");
+        let out = resolve_with_harness_fallback(
+            "foo.md",
+            Some("/home/u/beads"),
+            Some(harness.as_path()),
+            stat_ok,
+        );
+        assert_eq!(out, "/home/u/beads/foo.md");
+    }
+
+    #[test]
+    fn fallback_c_absolute_resolved_path_short_circuits_both_cwds() {
+        // Simulates the tn-gidy path: the click layer already substituted
+        // the resolved absolute path, so by the time we reach the resolver
+        // the input is absolute. resolve_relative_to_cwd leaves it alone,
+        // stat confirms it, and neither shell_cwd nor harness_cwd is
+        // consulted. The returned path must be the original absolute path
+        // verbatim — **no** accidental re-rooting under a different cwd.
+        let stat_ok = mk_stat_fn(&["/abs/path/to/file.rs"]);
+        let harness = PathBuf::from("/harness/cwd");
+        let out = resolve_with_harness_fallback(
+            "/abs/path/to/file.rs",
+            Some("/shell/cwd"),
+            Some(harness.as_path()),
+            stat_ok,
+        );
+        assert_eq!(out, "/abs/path/to/file.rs");
+    }
+
+    #[test]
+    fn fallback_d_jsonl_tail_pane_resolves_via_harness_cwd() {
+        // JsonlTail panes have no OSC 7 cwd — shell_cwd is None. The
+        // harness-cwd fallback must still reach the file; otherwise the
+        // hotspot is dead for every JSONL-observed session.
+        let stat_ok = mk_stat_fn(&["/home/u/project/src/lib.rs"]);
+        let harness = PathBuf::from("/home/u/project");
+        let out = resolve_with_harness_fallback(
+            "src/lib.rs",
+            None, // no OSC 7 on a JsonlTail pane
+            Some(harness.as_path()),
+            stat_ok,
+        );
+        assert_eq!(out, "/home/u/project/src/lib.rs");
+    }
+
+    #[test]
+    fn fallback_preserves_shell_resolution_when_neither_cwd_contains_file() {
+        // If neither cwd locates the file, return the shell-cwd attempt so
+        // the caller's "file not found: <shell path>" message still blames
+        // the more likely source (the visible shell, not the hidden harness).
+        let stat_ok = mk_stat_fn(&[]);
+        let harness = PathBuf::from("/home/u/notes");
+        let out = resolve_with_harness_fallback(
+            "missing.md",
+            Some("/home/u/beads"),
+            Some(harness.as_path()),
+            stat_ok,
+        );
+        assert_eq!(out, "/home/u/beads/missing.md");
+    }
+
+    #[test]
+    fn fallback_directory_variant_with_is_dir_stat() {
+        // Same function, caller passes an is_dir stat. Used by
+        // open_folder_in_pane / open_folder_in_file_manager.
+        let stat_ok = mk_stat_fn(&["/home/u/project/src"]);
+        let harness = PathBuf::from("/home/u/project");
+        let out = resolve_with_harness_fallback(
+            "src",
+            Some("/home/u/beads"),
+            Some(harness.as_path()),
+            stat_ok,
+        );
+        assert_eq!(out, "/home/u/project/src");
     }
 }

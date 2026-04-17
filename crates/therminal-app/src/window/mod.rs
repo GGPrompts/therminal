@@ -1209,6 +1209,29 @@ impl App {
         status.cwd.clone()
     }
 
+    /// Get the focused pane's harness working_dir if the pane is linked
+    /// to a Claude session (tn-shbw).
+    ///
+    /// Looks up `PaneStatus.claude_session_id` (populated by the daemon's
+    /// capacity-cache-driven forwarder on `DaemonEvent::AgentChanged`)
+    /// and asks the app-side `ClaudeCwdTracker` for that session's
+    /// `working_dir`. Returns `None` when the pane isn't linked to a
+    /// known Claude session, when the session has no `working_dir` yet,
+    /// or when the Claude state poller is disabled. Used by the
+    /// `open_in_editor` / `open_folder_in_pane` fallback path to
+    /// resolve bare `FilePath` hotspots against the agent's cwd when
+    /// the shell's OSC 7 cwd doesn't find the file.
+    pub(crate) fn focused_pane_harness_cwd(&self) -> Option<std::path::PathBuf> {
+        let id = self.focused_pane()?;
+        let layout = self.get_layout()?;
+        let pane = layout.find_pane(id)?;
+        let sid = {
+            let status = pane.status.lock().ok()?;
+            status.claude_session_id.clone()?
+        };
+        self.claude_cwd.cwd_for_session_public(&sid)
+    }
+
     /// Whether chrome (pane headers, status bar, tab bar) should be drawn.
     ///
     /// tn-t2yd.2: returns `false` when focus mode is active, baking the

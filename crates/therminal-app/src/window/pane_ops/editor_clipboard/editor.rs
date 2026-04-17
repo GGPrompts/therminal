@@ -52,11 +52,38 @@ impl App {
         // OSC 7 shell cwd. A raw `./src/main.rs:42` from shell output
         // would otherwise stat as "not a regular file" and silently
         // fail the editor hand-off.
-        let resolved = therminal_terminal::hotspot_detection::resolve_relative_to_cwd(
+        //
+        // tn-shbw: if the shell-cwd join doesn't stat as a regular file
+        // AND the focused pane is linked to a Claude session with a
+        // known `working_dir`, re-attempt the resolve against the
+        // harness cwd. This covers bare-filename hotspots in Claude
+        // prose output (the tn-gidy `resolved_text` override already
+        // handles tool-call markers, and still wins because those
+        // arrive as absolute paths). JsonlTail panes with no OSC 7 at
+        // all also resolve purely via this harness branch.
+        //
+        // The stat closure is structured to return `false` on any error
+        // (ENOENT, permission, non-regular file) so `plan_open_in_editor`'s
+        // subsequent `metadata(...).map(|m| m.is_file())` call is the
+        // single source of truth for the user-visible error message.
+        // We just pick the *better* resolved string to hand it.
+        let harness_cwd = self.focused_pane_harness_cwd();
+        let resolved = crate::claude_cwd::resolve_with_harness_fallback(
             expanded.as_ref(),
             cwd.as_deref(),
+            harness_cwd.as_deref(),
+            |candidate| {
+                // Strip any `:line[:col]` suffix before stat — hotspots
+                // carry line/col on the path string and the filesystem
+                // obviously doesn't know about that.
+                let prefix =
+                    therminal_terminal::hotspot_detection::strip_line_col_suffix(candidate);
+                std::fs::metadata(prefix)
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+            },
         );
-        let path_with_loc = resolved.as_ref();
+        let path_with_loc = resolved.as_str();
 
         let chain = self.config.hotspots.editor_chain.clone();
         let outcome = plan_open_in_editor(

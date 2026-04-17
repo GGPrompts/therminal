@@ -26,7 +26,9 @@ use std::process::Command;
 
 use tracing::{debug, info, warn};
 
-use therminal_terminal::hotspot_detection::{expand_tilde, resolve_relative_to_cwd};
+use therminal_terminal::hotspot_detection::expand_tilde;
+
+use crate::claude_cwd::resolve_with_harness_fallback;
 
 use super::App;
 
@@ -204,8 +206,24 @@ impl App {
         // tn-vm2j: join relative paths against the focused pane's
         // OSC 7 shell cwd before building the `cd` line. Absolute and
         // tilde-expanded paths pass through unchanged.
-        let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
-        let path = resolved.as_ref();
+        //
+        // tn-shbw: if the shell-cwd join doesn't stat as a directory
+        // AND the pane is linked to a Claude session, fall back to
+        // the harness's `working_dir` so "Open folder in new pane"
+        // works when a bare directory name appears in Claude's
+        // natural-language output but the shell cwd has since moved.
+        let harness_cwd = self.focused_pane_harness_cwd();
+        let resolved_owned = resolve_with_harness_fallback(
+            expanded.as_ref(),
+            cwd.as_deref(),
+            harness_cwd.as_deref(),
+            |candidate| {
+                std::fs::metadata(candidate)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+            },
+        );
+        let path = resolved_owned.as_str();
         let command = self.config.hotspots.folder_pane_command.clone();
         let plan = plan_folder_pane_open(path, &command, which_on_path);
 
@@ -371,14 +389,30 @@ impl App {
         // refuse to open relative paths or treat them as relative to
         // their own cwd (which is therminal's process cwd, almost
         // never what the user meant).
-        let resolved = resolve_relative_to_cwd(expanded.as_ref(), cwd.as_deref());
+        //
+        // tn-shbw: if the shell-cwd join doesn't stat as a directory
+        // AND the pane is linked to a Claude session, fall back to
+        // the harness's `working_dir`. Without this fallback, "Reveal
+        // in file manager" would silently open the file-manager-picked
+        // ancestor of a wrong path.
+        let harness_cwd = self.focused_pane_harness_cwd();
+        let resolved = resolve_with_harness_fallback(
+            expanded.as_ref(),
+            cwd.as_deref(),
+            harness_cwd.as_deref(),
+            |candidate| {
+                std::fs::metadata(candidate)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+            },
+        );
         // tn-q8ce: on native Windows with a WSL pane, translate the
         // Linux path into the `\\wsl.localhost\…` UNC form so that
         // Explorer / xdg-open-on-WSL / etc. can actually reveal the
         // folder. File managers stat the path as a Windows path and
         // need to reach the Linux filesystem through the UNC provider.
         // No-op on Linux/macOS and on Windows with Windows-shaped paths.
-        let translated = crate::window::wsl_paths::translate_if_wsl_windows(resolved.as_ref());
+        let translated = crate::window::wsl_paths::translate_if_wsl_windows(resolved.as_str());
         let path = translated.as_ref();
         let chain = self.config.hotspots.folder_opener.clone();
         let plan = plan_folder_opener(&chain, which_on_path, |var| {
