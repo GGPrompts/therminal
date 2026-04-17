@@ -44,6 +44,7 @@ pub mod runtime;
 
 pub mod agent_event;
 pub mod agents;
+pub mod bookmarks;
 pub mod events;
 pub mod layout;
 pub mod pane;

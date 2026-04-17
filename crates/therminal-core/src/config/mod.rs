@@ -319,6 +319,13 @@ pub struct TherminalConfig {
     pub widgets: WidgetsConfig,
     /// Accessibility settings (tn-avjv.6).
     pub accessibility: AccessibilityConfig,
+    /// Text-first bookmark list (tn-co6n).
+    ///
+    /// Each `[[bookmarks]]` entry is printed by `therminal bookmarks` as a
+    /// two-column `name  url` line. URLs become clickable hotspots via the
+    /// existing URL regex — no overlay code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<BookmarkEntry>,
     /// Result of the template-version scan performed by [`Self::load_from`].
     ///
     /// Computed in-process and never round-tripped through TOML
@@ -1109,6 +1116,30 @@ pub struct ProfileConfig {
     pub color: Option<String>,
 }
 
+// ── Section: Bookmarks ───────────────────────────────────────────────────
+
+/// A single `[[bookmarks]]` entry (tn-co6n).
+///
+/// Text-first bookmark surface: rendered by `therminal bookmarks` as a
+/// two-column "name  url" line. URLs become clickable hotspots via the
+/// existing URL regex — zero overlay code.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BookmarkEntry {
+    /// Human-readable label printed in the left column.
+    pub name: String,
+    /// Target URL printed in the right column and picked up by the URL
+    /// hotspot regex for click-to-open.
+    pub url: String,
+    /// Optional Nerd Font glyph (or any short icon string) rendered before
+    /// the name when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Optional category tag used by `--category <X>` to filter the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
 // ── Section: Terminal ────────────────────────────────────────────────────
 
 /// Configuration for the terminal sequence interceptor.
@@ -1888,6 +1919,47 @@ mod tests {
         assert_eq!(decoded.general.title, "Therminal");
         assert_eq!(decoded.font.size, 17.0);
         assert_eq!(decoded.trust.default_tier, TrustTier::Supervised);
+    }
+
+    #[test]
+    fn bookmarks_round_trip_through_toml() {
+        // tn-co6n: exercise the array-of-tables shape `therminal bookmarks`
+        // reads. Empty default stays empty; non-empty survives serialize +
+        // reparse without rearranging fields.
+        let default = TherminalConfig::default();
+        assert!(default.bookmarks.is_empty());
+
+        let config = TherminalConfig {
+            bookmarks: vec![
+                BookmarkEntry {
+                    name: "docs".into(),
+                    url: "https://docs.therminal.dev".into(),
+                    icon: None,
+                    category: Some("reference".into()),
+                },
+                BookmarkEntry {
+                    name: "repo".into(),
+                    url: "https://github.com/example/therminal".into(),
+                    icon: Some("\u{f09b}".into()), // nf-fa-github
+                    category: None,
+                },
+            ],
+            ..TherminalConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(decoded.bookmarks.len(), 2);
+        assert_eq!(decoded.bookmarks[0].name, "docs");
+        assert_eq!(decoded.bookmarks[0].url, "https://docs.therminal.dev");
+        assert_eq!(decoded.bookmarks[0].category.as_deref(), Some("reference"));
+        assert_eq!(decoded.bookmarks[1].icon.as_deref(), Some("\u{f09b}"));
+    }
+
+    #[test]
+    fn bookmarks_missing_section_parses_as_empty() {
+        // Config files without a `[[bookmarks]]` block must still load.
+        let config: TherminalConfig = toml::from_str("").unwrap();
+        assert!(config.bookmarks.is_empty());
     }
 
     #[test]

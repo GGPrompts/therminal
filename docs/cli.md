@@ -105,6 +105,8 @@ waits, and structured responses that drive downstream tool calls.
 | Event bus stats | MCP `terminal.events.stats` | Diagnostics; rarely called |
 | **Layout** | | |
 | Batch layout ops | `tn layout batch` | Atomic multi-op from stdin; no MCP peer |
+| **Bookmarks** | | |
+| List bookmarks | `tn bookmarks` | Text-first; URLs clickable via hotspot regex; no MCP peer |
 | **Widgets** | | |
 | Toggle agent timeline | MCP `terminal.widgets.timeline.toggle` | GUI widget control; no CLI peer |
 
@@ -307,6 +309,45 @@ Each line is a space-separated command matching the existing CLI surface:
 `split`, `kill`, `focus`, `swap`, `move`, `create-workspace`,
 `switch-workspace`, `rename-workspace`. Returns one JSON result per
 operation on stdout.
+
+### `bookmarks`
+
+```text
+therminal bookmarks [--category <X>] [--json]
+```
+
+Prints the `[[bookmarks]]` array-of-tables from `therminal.toml` as a
+two-column line per entry. The URL rides in its own column so the
+existing URL-hotspot regex picks it up cleanly and it becomes clickable
+without any overlay code. Text-first by design — matches the tiling
+thesis: visible text over hidden modals (tn-co6n).
+
+TSV columns:
+
+```
+name  url  icon  category
+```
+
+Empty `icon` / `category` fields are emitted as empty cells. When
+`[[bookmarks]]` is absent (or filtered to zero rows), the command exits
+0 with no stdout so scripts piping to `awk` don't trip. `--json` emits
+a single-line JSON array (empty `[]` when no entries match) so `jq`
+consumers see a valid document regardless.
+
+Sample `therminal.toml`:
+
+```toml
+[[bookmarks]]
+name = "Therminal docs"
+url = "https://docs.therminal.dev"
+category = "reference"
+
+[[bookmarks]]
+name = "GitHub"
+url = "https://github.com"
+icon = "\uf09b"  # Nerd Font: nf-fa-github
+category = "dev"
+```
 
 ### `agent-event`
 

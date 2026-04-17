@@ -501,6 +501,28 @@ pub(super) fn default_config_text() -> String {
     ));
     out.push('\n');
 
+    // ── [[bookmarks]] ────────────────────────────────────────────────────
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [[bookmarks]] — Text-first bookmark list (tn-co6n).\n");
+    out.push_str("#\n");
+    out.push_str("# Print with `therminal bookmarks` (or `tn bookmarks`). URLs become\n");
+    out.push_str("# clickable hotspots via the existing URL regex — no overlay code.\n");
+    out.push_str("# Filter with `--category <X>` or emit structured output with `--json`.\n");
+    out.push_str("# Fields: name (required), url (required), icon (optional),\n");
+    out.push_str("#         category (optional).\n");
+    out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
+    out.push_str("# [[bookmarks]]\n");
+    out.push_str("# name = \"Therminal docs\"\n");
+    out.push_str("# url = \"https://docs.therminal.dev\"\n");
+    out.push_str("# category = \"reference\"\n");
+    out.push_str("#\n");
+    out.push_str("# [[bookmarks]]\n");
+    out.push_str("# name = \"GitHub\"\n");
+    out.push_str("# url = \"https://github.com\"\n");
+    out.push_str("# icon = \"\\uf09b\"  # Nerd Font: nf-fa-github\n");
+    out.push_str("# category = \"dev\"\n");
+    out.push('\n');
+
     out
 }
 

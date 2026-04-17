@@ -95,6 +95,12 @@ enum Command {
     /// Push agent lifecycle events to the daemon (hook-push path).
     #[command(name = "agent-event", subcommand)]
     AgentEvent(cli::agent_event::AgentEventCmd),
+    /// Print the `[[bookmarks]]` list from `therminal.toml` (tn-co6n).
+    ///
+    /// Text-first bookmark surface — two-column `name  url` per line, URLs
+    /// become clickable via the existing URL hotspot regex. Filter with
+    /// `--category <X>` or emit structured output with `--json`.
+    Bookmarks(cli::bookmarks::BookmarksArgs),
     /// Launch the Ratatui TUI dashboard (therminal-tui).
     ///
     /// Locates the `therminal-tui` binary next to the current executable
@@ -156,6 +162,8 @@ fn main() -> Result<()> {
             Command::AgentEvent(c) => {
                 cli::runtime::with_runtime(|ctx| cli::agent_event::run(ctx, c))
             }
+            // tn-co6n: bookmarks are a pure config read, no daemon needed.
+            Command::Bookmarks(args) => cli::bookmarks::run(args),
             Command::Tui { args } => exec_tui(&args),
         };
     }
