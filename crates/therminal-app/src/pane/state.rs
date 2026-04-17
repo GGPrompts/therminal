@@ -14,6 +14,21 @@ use crate::grid_renderer::GridRenderer;
 
 // ── Dimensions adapter ──────────────────────────────────────────────────
 
+/// Minimum column count for any PTY / Term / backend resize (tn-6061).
+///
+/// Shells and TUIs (Claude Code, vim, htop, etc.) re-flow when the column
+/// count drops below a usable threshold. On Windows, minimizing the window
+/// (or other OS quirks) can briefly report tiny-but-nonzero inner sizes,
+/// which previously reached the PTY as e.g. `cols=3`. Claude Code then
+/// re-wraps its TUI at 3 cols and the garbled state persists through the
+/// un-minimize transition. Clamping here makes that impossible regardless
+/// of how the sub-minimum size was produced.
+pub const MIN_COLS: usize = 10;
+
+/// Minimum row count for any PTY / Term / backend resize (tn-6061). See
+/// [`MIN_COLS`] for rationale.
+pub const MIN_ROWS: usize = 3;
+
 pub(crate) struct PaneTermSize {
     pub columns: usize,
     pub screen_lines: usize,
@@ -190,8 +205,13 @@ pub fn grid_size_from_metrics(
 ) -> (usize, usize) {
     let usable_w = rect.width() - padding_x * 2.0;
     let usable_h = rect.height() - padding_y * 2.0 - header_h;
-    let cols = (usable_w / cell_width).floor().max(2.0) as usize;
-    let rows = (usable_h / cell_height).floor().max(1.0) as usize;
+    // tn-6061: floor to MIN_COLS / MIN_ROWS so a pathologically tiny surface
+    // (e.g. a Windows minimize event that reports a small-but-nonzero inner
+    // size, or the scale-factor path running before the minimize guard) can
+    // never push the PTY below a usable grid. Downstream `PaneBackendKind::
+    // resize` enforces the same floor as a belt-and-braces clamp.
+    let cols = (usable_w / cell_width).floor().max(MIN_COLS as f32) as usize;
+    let rows = (usable_h / cell_height).floor().max(MIN_ROWS as f32) as usize;
     (cols, rows)
 }
 
@@ -235,11 +255,32 @@ mod tests {
 
     #[test]
     fn grid_size_clamps_to_minimum_dims() {
-        // Pathologically tiny rect: cols clamps to 2, rows clamps to 1.
-        // No panic, no zero divides.
+        // Pathologically tiny rect: cols clamps to MIN_COLS, rows clamps
+        // to MIN_ROWS. No panic, no zero divides. (tn-6061 raised the
+        // floors from 2/1 to MIN_COLS/MIN_ROWS so Claude Code-class TUIs
+        // never re-flow at sub-usable column counts.)
         let tiny = Rect::new(0.0, 0.0, 10.0, 10.0);
         let (cols, rows) = grid_size_from_metrics(tiny, 8.0, 8.0, 0.0, 10.0, 20.0);
-        assert_eq!(cols, 2);
-        assert_eq!(rows, 1);
+        assert_eq!(cols, MIN_COLS);
+        assert_eq!(rows, MIN_ROWS);
+    }
+
+    /// tn-6061: a 1x1 "surface" (the worst case a Windows minimize leak
+    /// could plausibly produce after the event-handler guards) must still
+    /// yield grid dimensions at or above the MIN_COLS / MIN_ROWS floor.
+    /// If this regresses, the PTY would see sub-minimum values and
+    /// Claude Code's TUI would wrap at ~3 cols on un-minimize.
+    #[test]
+    fn grid_size_from_one_by_one_surface_clamps_to_minimum() {
+        let surface = Rect::new(0.0, 0.0, 1.0, 1.0);
+        let (cols, rows) = grid_size_from_metrics(surface, 8.0, 8.0, 24.0, 10.0, 20.0);
+        assert!(
+            cols >= MIN_COLS,
+            "cols={cols} should be >= MIN_COLS={MIN_COLS}",
+        );
+        assert!(
+            rows >= MIN_ROWS,
+            "rows={rows} should be >= MIN_ROWS={MIN_ROWS}",
+        );
     }
 }

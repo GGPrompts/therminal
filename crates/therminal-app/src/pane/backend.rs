@@ -200,6 +200,14 @@ impl PaneBackend for PaneBackendKind {
     }
 
     fn resize(&mut self, cols: usize, rows: usize) {
+        // tn-6061: defensive floor at the lowest layer. Every callsite that
+        // reaches this method — `resize_to_viewport`, the daemon-driven
+        // RemotePty apply, hot-reload font changes, snapshot replay — is
+        // expected to pre-clamp, but enforcing `MIN_COLS` / `MIN_ROWS`
+        // here means a regression upstream can't push the PTY to e.g.
+        // `cols=3` and re-flow a Claude Code TUI into a mangled state.
+        let cols = cols.max(super::state::MIN_COLS);
+        let rows = rows.max(super::state::MIN_ROWS);
         match self {
             PaneBackendKind::Terminal {
                 term, pty_master, ..
@@ -399,6 +407,11 @@ impl PaneBackendKind {
 
     /// Resize the backend to match new grid dimensions, with access to renderer
     /// metrics for the terminal case.
+    ///
+    /// tn-6061: `grid_size_for_rect_with_header` floors to `MIN_COLS` /
+    /// `MIN_ROWS` so sub-minimum values cannot reach the PTY even for a
+    /// 1×1 surface rect; `PaneBackendKind::resize` enforces the same floor
+    /// as a second line of defence.
     pub fn resize_to_viewport(
         &mut self,
         rect: therminal_core::geometry::Rect,
@@ -406,9 +419,6 @@ impl PaneBackendKind {
         header_h: f32,
     ) {
         let (cols, rows) = super::state::grid_size_for_rect_with_header(rect, renderer, header_h);
-        if cols == 0 || rows == 0 {
-            return;
-        }
         self.resize(cols, rows);
     }
 }

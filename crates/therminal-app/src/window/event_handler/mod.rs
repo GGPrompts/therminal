@@ -544,8 +544,24 @@ impl App {
             minimized = self.minimized,
             "handle_resized"
         );
-        if new_size.width == 0 || new_size.height == 0 {
-            // tn-rl6i: on Windows, minimizing sends Resized(0, 0).
+        // tn-rl6i + tn-6061: on Windows, minimizing normally sends
+        // `Resized(0, 0)`, but with CSD enabled (therminal's default) some
+        // style combinations report a small-but-nonzero inner size instead
+        // (seen in practice with client-decorated frames). The zero-only
+        // check leaked those events through to `self.resize()`, which
+        // re-flowed every PTY down to ~3 cols and garbled any TUI (Claude
+        // Code especially) for the duration of the un-minimize. Prefer
+        // winit's `Window::is_minimized()` where available; fall back to a
+        // `< 80 × 80` heuristic (1 px shy of a comfortable terminal) so
+        // platforms that return `None` from `is_minimized()` still get the
+        // correct treatment.
+        let winit_says_minimized = self
+            .window
+            .as_ref()
+            .and_then(|w| w.is_minimized())
+            .unwrap_or(false);
+        let heuristic_minimized = new_size.width < 80 || new_size.height < 80;
+        if winit_says_minimized || heuristic_minimized {
             self.minimized = true;
             return;
         }
@@ -597,8 +613,21 @@ impl App {
     }
 
     pub(super) fn handle_scale_factor_changed(&mut self) {
+        // tn-6061: the scale-factor path previously had no minimize guard
+        // and called `self.resize()` unconditionally. On Windows a DPI
+        // change event can fire while the window is minimized (e.g. when
+        // the user drags a minimized app to a different-DPI monitor) with
+        // a tiny `inner_size()`, which would then shrink every PTY. Mirror
+        // the guards in `handle_resized`: skip while flagged minimized and
+        // short-circuit on zero dimensions before touching `self.resize`.
+        if self.minimized {
+            return;
+        }
         let new_size = self.window.as_ref().map(|w| w.inner_size());
         if let Some(size) = new_size {
+            if size.width == 0 || size.height == 0 {
+                return;
+            }
             self.resize(size);
         }
         if let Some(w) = self.window.as_ref() {
