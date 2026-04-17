@@ -948,6 +948,42 @@ mod tests {
         }
     }
 
+    /// Regression for tn-22l4: the WebView keybindings (`Ctrl+L`
+    /// NavigateWebView, tn-wvll; `Ctrl+Shift+B` SpawnWebViewPane, tn-ojy9)
+    /// must surface in the `Ctrl+Shift+?` help overlay under the "General"
+    /// section so users can discover them. A bug where either row was
+    /// elided (e.g. via dedup, numeric-group collapse, or a mis-sectioned
+    /// action) would make the bindings feel invisible.
+    #[test]
+    fn webview_bindings_appear_in_general_section() {
+        let kb = KeybindingsConfig::default();
+        let cats = build_help_categories(&kb);
+        let section_names: Vec<&str> = cats.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            section_names.contains(&"General"),
+            "expected General section, got {section_names:?}"
+        );
+        let general_rows: &Vec<(String, String)> = &cats
+            .iter()
+            .find(|(n, _)| n == "General")
+            .expect("General section must exist")
+            .1;
+        let has_navigate = general_rows
+            .iter()
+            .any(|(k, d)| k == "Ctrl+L" && d == "Navigate WebView pane to URL");
+        let has_spawn = general_rows
+            .iter()
+            .any(|(k, d)| k == "Ctrl+Shift+B" && d == "Spawn new WebView pane from URL");
+        assert!(
+            has_navigate,
+            "expected Ctrl+L NavigateWebView row in General, got {general_rows:?}"
+        );
+        assert!(
+            has_spawn,
+            "expected Ctrl+Shift+B SpawnWebViewPane row in General, got {general_rows:?}"
+        );
+    }
+
     /// Sections appear in the documented order.
     #[test]
     fn default_keybindings_section_order() {

@@ -88,6 +88,8 @@ All live at `C:\Users\marci\Desktop\` (accessible from WSL at `/mnt/c/Users/marc
 
 **Typical dev cycle**: edit in WSL2 → double-click `build-therminal-windows.cmd` → `kill-therminal.cmd` → double-click `therminal.lnk` (or `reset-and-trace-therminal.cmd` for debugging).
 
+**Stale-build symptom (tn-22l4)**: if a recently added feature is visibly missing on Windows — e.g. a new keybinding not appearing in the `Ctrl+Shift+?` help overlay, a new menu entry absent, a config field apparently ignored — suspect a stale Windows binary first. `therminal.exe` / `therminal-daemon.exe` are **not** rebuilt automatically on source edits. Always rerun `build-therminal-windows.cmd` after touching keybindings, config defaults, chrome, or any compile-time data, then `kill-therminal.cmd` before relaunching so the old daemon exits. Cross-check against a fresh `cargo test -p therminal-app help_overlay` (or the equivalent crate) on Linux — if the test passes, the Windows build is stale.
+
 ### Platform Notes
 
 - **IPC on Windows**: `socket_path()` returns `\\.\pipe\therminal-<name>` (named pipe) instead of Unix sockets.
