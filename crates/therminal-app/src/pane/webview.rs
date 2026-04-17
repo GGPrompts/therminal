@@ -51,13 +51,25 @@ const WEBVIEW_INIT_SCRIPT: &str = r#"
 })();
 "#;
 
+/// Per-pane state owned by [`WebViewManager`]. Wraps the wry `WebView`
+/// alongside therminal-specific metadata that isn't part of the browser
+/// back-stack (tn-eq9g).
+struct WebViewEntry {
+    /// Platform-native wry webview.
+    view: WebView,
+    /// The URL the pane was spawned with. Preserved across navigations
+    /// so `navigate_home` can route back to the origin even after the
+    /// user has followed links deep into the back-stack.
+    origin_url: String,
+}
+
 /// Manages all wry `WebView` instances across the application.
 ///
 /// Each WebView pane maps to one wry `WebView`. The manager handles
 /// creation, destruction, repositioning, and visibility toggling.
 pub struct WebViewManager {
-    /// Map of pane ID to its wry webview.
-    views: HashMap<PaneId, WebView>,
+    /// Map of pane ID to its wry webview entry (view + origin URL).
+    views: HashMap<PaneId, WebViewEntry>,
 }
 
 impl WebViewManager {
@@ -126,7 +138,13 @@ impl WebViewManager {
             .map_err(|e| format!("wry WebView creation failed: {e}"))?;
 
         info!(pane_id, url, "created webview pane");
-        self.views.insert(pane_id, webview);
+        self.views.insert(
+            pane_id,
+            WebViewEntry {
+                view: webview,
+                origin_url: url.to_string(),
+            },
+        );
         Ok(())
     }
 
@@ -139,8 +157,8 @@ impl WebViewManager {
 
     /// Reposition and resize a webview to match an updated pane rect.
     pub fn set_bounds(&mut self, pane_id: PaneId, content_rect: Rect) {
-        if let Some(wv) = self.views.get(&pane_id)
-            && let Err(e) = wv.set_bounds(rect_to_wry_rect(content_rect))
+        if let Some(entry) = self.views.get(&pane_id)
+            && let Err(e) = entry.view.set_bounds(rect_to_wry_rect(content_rect))
         {
             warn!(pane_id, error = %e, "failed to set webview bounds");
         }
@@ -148,8 +166,8 @@ impl WebViewManager {
 
     /// Show or hide a webview (e.g. on workspace switch).
     pub fn set_visible(&mut self, pane_id: PaneId, visible: bool) {
-        if let Some(wv) = self.views.get(&pane_id)
-            && let Err(e) = wv.set_visible(visible)
+        if let Some(entry) = self.views.get(&pane_id)
+            && let Err(e) = entry.view.set_visible(visible)
         {
             warn!(pane_id, visible, error = %e, "failed to set webview visibility");
         }
@@ -158,8 +176,8 @@ impl WebViewManager {
     /// Focus a webview (e.g. when user clicks on the webview pane).
     #[allow(dead_code)]
     pub fn focus(&mut self, pane_id: PaneId) {
-        if let Some(wv) = self.views.get(&pane_id)
-            && let Err(e) = wv.focus()
+        if let Some(entry) = self.views.get(&pane_id)
+            && let Err(e) = entry.view.focus()
         {
             debug!(pane_id, error = %e, "failed to focus webview");
         }
@@ -168,8 +186,8 @@ impl WebViewManager {
     /// Navigate a webview to a new URL.
     #[allow(dead_code)]
     pub fn navigate(&mut self, pane_id: PaneId, url: &str) {
-        if let Some(wv) = self.views.get(&pane_id)
-            && let Err(e) = wv.load_url(url)
+        if let Some(entry) = self.views.get(&pane_id)
+            && let Err(e) = entry.view.load_url(url)
         {
             warn!(pane_id, url, error = %e, "failed to navigate webview");
         }
@@ -178,7 +196,34 @@ impl WebViewManager {
     /// Get the current URL of a webview (returns the last navigated URL).
     #[allow(dead_code)]
     pub fn url(&self, pane_id: PaneId) -> Option<String> {
-        self.views.get(&pane_id).and_then(|wv| wv.url().ok())
+        self.views
+            .get(&pane_id)
+            .and_then(|entry| entry.view.url().ok())
+    }
+
+    /// Returns the origin URL — the URL the pane was spawned with (tn-eq9g).
+    /// Preserved across navigations so `navigate_home` can always route
+    /// back to it.
+    #[allow(dead_code)]
+    pub fn origin_url(&self, pane_id: PaneId) -> Option<&str> {
+        self.views
+            .get(&pane_id)
+            .map(|entry| entry.origin_url.as_str())
+    }
+
+    /// Return the WebView pane to its spawn URL (tn-eq9g). The browser's
+    /// back-stack only remembers what the user visited; this method is the
+    /// one-shot path back to the URL therminal opened the pane with.
+    /// No-op if the pane doesn't exist in the manager.
+    pub fn navigate_home(&mut self, pane_id: PaneId) {
+        let Some(entry) = self.views.get(&pane_id) else {
+            debug!(pane_id, "navigate_home: no webview for pane");
+            return;
+        };
+        let origin = entry.origin_url.clone();
+        if let Err(e) = entry.view.load_url(&origin) {
+            warn!(pane_id, url = %origin, error = %e, "failed to navigate webview home");
+        }
     }
 
     /// Returns true if a webview exists for this pane.
@@ -188,16 +233,16 @@ impl WebViewManager {
 
     /// Hide all webviews (e.g. for focus mode or overlay).
     pub fn hide_all(&mut self) {
-        for wv in self.views.values() {
-            let _ = wv.set_visible(false);
+        for entry in self.views.values() {
+            let _ = entry.view.set_visible(false);
         }
     }
 
     /// Show all webviews that should be visible.
     #[allow(dead_code)]
     pub fn show_all(&mut self) {
-        for wv in self.views.values() {
-            let _ = wv.set_visible(true);
+        for entry in self.views.values() {
+            let _ = entry.view.set_visible(true);
         }
     }
 

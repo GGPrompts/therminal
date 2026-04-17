@@ -136,6 +136,15 @@ pub enum KeyAction {
     /// (tn-ojy9). The new pane splits off the currently focused pane; the
     /// layout auto-picks the split direction. Default binding: `Ctrl+Shift+B`.
     SpawnWebViewPane,
+    /// Return the focused WebView pane to the URL it was spawned with
+    /// (tn-eq9g). The browser back-stack only remembers what the user
+    /// visited — therminal's concept of "origin URL" (the URL from
+    /// `tn pane create --url ...` or `Ctrl+Shift+B`) is stored per-pane
+    /// so Home is always a one-shot path back. Dispatcher must guard this
+    /// so it only fires on WebView panes; on terminal panes the binding
+    /// falls through so the shell still receives Alt+Home normally.
+    /// Default binding: `Alt+Home`.
+    WebViewHome,
 }
 
 impl KeyAction {
@@ -193,6 +202,7 @@ impl KeyAction {
             KeyAction::HotspotOpenUrlInPane(_) => "Open URL in new pane",
             KeyAction::NavigateWebView => "Navigate WebView pane to URL",
             KeyAction::SpawnWebViewPane => "Spawn new WebView pane from URL",
+            KeyAction::WebViewHome => "Return WebView to spawn URL",
         }
     }
 
@@ -239,7 +249,8 @@ impl KeyAction {
             | KeyAction::ShowLauncher
             | KeyAction::FocusMode
             | KeyAction::NavigateWebView
-            | KeyAction::SpawnWebViewPane => "General",
+            | KeyAction::SpawnWebViewPane
+            | KeyAction::WebViewHome => "General",
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
@@ -395,6 +406,14 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+b".to_string(),
                     action: KeyAction::SpawnWebViewPane,
+                },
+                // WebView Home (tn-eq9g): return to the URL the pane was
+                // spawned with, regardless of where the user has navigated.
+                // Guarded to WebView panes only — terminal panes fall
+                // through so shells keep receiving Alt+Home normally.
+                Keybinding {
+                    key: "alt+home".to_string(),
+                    action: KeyAction::WebViewHome,
                 },
                 // Batch pane operations
                 Keybinding {

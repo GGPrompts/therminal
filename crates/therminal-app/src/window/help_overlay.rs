@@ -948,10 +948,11 @@ mod tests {
         }
     }
 
-    /// Regression for tn-22l4: the WebView keybindings (`Ctrl+L`
-    /// NavigateWebView, tn-wvll; `Ctrl+Shift+B` SpawnWebViewPane, tn-ojy9)
-    /// must surface in the `Ctrl+Shift+?` help overlay under the "General"
-    /// section so users can discover them. A bug where either row was
+    /// Regression for tn-22l4 (extended for tn-eq9g): the WebView
+    /// keybindings (`Ctrl+L` NavigateWebView, tn-wvll; `Ctrl+Shift+B`
+    /// SpawnWebViewPane, tn-ojy9; `Alt+Home` WebViewHome, tn-eq9g) must
+    /// surface in the `Ctrl+Shift+?` help overlay under the "General"
+    /// section so users can discover them. A bug where any row was
     /// elided (e.g. via dedup, numeric-group collapse, or a mis-sectioned
     /// action) would make the bindings feel invisible.
     #[test]
@@ -974,6 +975,9 @@ mod tests {
         let has_spawn = general_rows
             .iter()
             .any(|(k, d)| k == "Ctrl+Shift+B" && d == "Spawn new WebView pane from URL");
+        let has_home = general_rows
+            .iter()
+            .any(|(k, d)| k == "Alt+Home" && d == "Return WebView to spawn URL");
         assert!(
             has_navigate,
             "expected Ctrl+L NavigateWebView row in General, got {general_rows:?}"
@@ -981,6 +985,10 @@ mod tests {
         assert!(
             has_spawn,
             "expected Ctrl+Shift+B SpawnWebViewPane row in General, got {general_rows:?}"
+        );
+        assert!(
+            has_home,
+            "expected Alt+Home WebViewHome row in General, got {general_rows:?}"
         );
     }
 

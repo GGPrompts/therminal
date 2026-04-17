@@ -204,6 +204,16 @@ pub(crate) fn build_webview_pane_menu(
                     action: KeyAction::NavigateWebView,
                     enabled: true,
                 },
+                // tn-eq9g: one-shot return to the URL the pane was spawned
+                // with. Back / Forward / Reload are deliberately NOT
+                // added — the native webview context menu already binds
+                // Alt+Left, Alt+Right, and Ctrl+R with the correct hints.
+                MenuItem {
+                    label: "Home".into(),
+                    hotkey_hint: hint(&KeyAction::WebViewHome),
+                    action: KeyAction::WebViewHome,
+                    enabled: true,
+                },
                 MenuItem {
                     label: "Open in browser".into(),
                     hotkey_hint: None,

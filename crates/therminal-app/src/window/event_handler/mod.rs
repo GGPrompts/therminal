@@ -82,6 +82,26 @@ impl App {
             return true;
         }
 
+        // tn-eq9g: WebViewHome is WebView-pane-only. Falling through when
+        // the focused pane isn't a WebView lets terminal panes pass
+        // Alt+Home to the shell as usual (readline beginning-of-line etc.).
+        if matches!(action, KeyAction::WebViewHome) {
+            let pane_id = match self.focused_pane() {
+                Some(id) => id,
+                None => return false,
+            };
+            let is_webview = self
+                .get_layout()
+                .and_then(|l| l.find_pane(pane_id))
+                .map(|p| p.is_webview())
+                .unwrap_or(false);
+            if !is_webview {
+                return false;
+            }
+            self.webview_manager.navigate_home(pane_id);
+            return true;
+        }
+
         match action {
             KeyAction::SplitHorizontal => self.split_focused_pane(SplitDirection::Horizontal),
             KeyAction::SplitVertical => self.split_focused_pane(SplitDirection::Vertical),
@@ -240,6 +260,9 @@ impl App {
             // tn-ojy9: SpawnWebViewPane is handled above by an early-return
             // guard. Unreachable in practice.
             KeyAction::SpawnWebViewPane => {}
+            // tn-eq9g: WebViewHome is handled above by an early-return
+            // guard so terminal panes fall through. Unreachable here.
+            KeyAction::WebViewHome => {}
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
@@ -510,6 +533,23 @@ impl App {
                         .unwrap_or(false);
                     if is_webview {
                         self.start_navigate_webview(id);
+                    }
+                }
+            }
+            KeyAction::WebViewHome => {
+                // tn-eq9g: menu route uses the menu's pane context;
+                // keybinding route uses the focused pane. Either way
+                // `WebViewManager::navigate_home` loads the pane's
+                // stored origin URL (the URL it was spawned with).
+                let pane_id = menu_pane_id.or_else(|| self.focused_pane());
+                if let Some(id) = pane_id {
+                    let is_webview = self
+                        .get_layout()
+                        .and_then(|l| l.find_pane(id))
+                        .map(|p| p.is_webview())
+                        .unwrap_or(false);
+                    if is_webview {
+                        self.webview_manager.navigate_home(id);
                     }
                 }
             }
