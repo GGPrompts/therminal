@@ -668,10 +668,18 @@ async fn dispatch_ipc(
             let mgr = session_mgr.lock().await;
             match mgr.capture_pane(*pane_id) {
                 Ok(snap) => {
+                    // tn-p846: trim trailing whitespace per row, matching the
+                    // MCP `get_content` default (tn-sp3n). Without this,
+                    // callers like the TUI preview panel receive `cols`-wide
+                    // padded rows and box-art frames render as wall-of-
+                    // whitespace blocks.
                     let lines: Vec<String> = snap
                         .grid
                         .iter()
-                        .map(|row| row.iter().map(|(ch, _)| ch).collect())
+                        .map(|row| {
+                            let raw: String = row.iter().map(|(ch, _)| ch).collect();
+                            raw.trim_end().to_string()
+                        })
                         .collect();
                     IpcResponse::PaneCaptured {
                         pane_id: snap.pane_id,

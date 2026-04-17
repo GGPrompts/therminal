@@ -114,6 +114,11 @@ struct App {
     should_quit: bool,
     /// Connection status displayed in the tab bar title.
     daemon_status: String,
+    /// Dedupe window for tab-bar click handling (tn-p846): some terminals
+    /// deliver `Moved` + `Down` in rapid succession or repeat a click as
+    /// the cursor drifts a single cell, which previously flipped tabs on
+    /// every hover. We drop a second click on the same tab within 100 ms.
+    last_tab_click: Option<(usize, Instant)>,
 }
 
 impl App {
@@ -142,6 +147,7 @@ impl App {
             active_tab: 0,
             should_quit: false,
             daemon_status,
+            last_tab_click: None,
         }
     }
 
@@ -345,13 +351,31 @@ pub fn run(socket_path: PathBuf) -> Result<()> {
                         continue;
                     }
                     dirty = true;
-                    // Tab bar occupies rows 0..3.
+                    // Tab bar occupies rows 0..3 (top border = row 0, tab
+                    // labels = row 1, bottom border = row 2). Only row 1
+                    // carries the actual tab text; the border rows used
+                    // to trigger hits too, which combined with some
+                    // terminals' tendency to re-emit clicks on drift to
+                    // produce rapid tab-flipping on hover (tn-p846).
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                        && mouse.row < 3
+                        && mouse.row == 1
                     {
                         let titles: Vec<&str> = app.pages.iter().map(|p| p.title()).collect();
                         if let Some(idx) = tab_hit_index(&titles, mouse.column) {
-                            app.set_tab(idx);
+                            // Dedupe: ignore a repeated click on the same
+                            // tab within 100 ms.
+                            let now = Instant::now();
+                            let is_dup = matches!(
+                                app.last_tab_click,
+                                Some((prev_idx, prev_at))
+                                    if prev_idx == idx
+                                        && now.duration_since(prev_at)
+                                            < Duration::from_millis(100)
+                            );
+                            if !is_dup {
+                                app.set_tab(idx);
+                            }
+                            app.last_tab_click = Some((idx, now));
                         }
                     } else if mouse.row >= 3 {
                         if let Some(page) = app.pages.get_mut(app.active_tab) {

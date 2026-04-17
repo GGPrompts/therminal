@@ -65,6 +65,11 @@ pub struct SessionsPage {
     /// Preview content for the selected session's panes.
     preview_lines: Vec<Line<'static>>,
     preview_scroll: usize,
+    /// Session id the current preview was built for (tn-p846). Used to
+    /// preserve `preview_scroll` across refreshes when the selection
+    /// hasn't changed — otherwise every 2 s tick snapped the user back
+    /// to the top.
+    preview_for: Option<SessionId>,
 
     /// Last tick time for throttling IPC calls.
     last_refresh: Instant,
@@ -83,6 +88,7 @@ impl SessionsPage {
             focused_panel: FocusedPanel::SessionList,
             preview_lines: Vec::new(),
             preview_scroll: 0,
+            preview_for: None,
             last_refresh: Instant::now() - std::time::Duration::from_secs(10),
             status_msg: None,
         }
@@ -159,6 +165,11 @@ impl SessionsPage {
                     "No session selected",
                     Style::default().fg(TEXT_MUTED),
                 ))];
+                // No session selected — reset scroll on next selection.
+                if self.preview_for.is_some() {
+                    self.preview_scroll = 0;
+                }
+                self.preview_for = None;
                 return;
             }
         };
@@ -341,7 +352,13 @@ impl SessionsPage {
         }
 
         self.preview_lines = lines;
-        self.preview_scroll = 0;
+        // tn-p846: only reset scroll when the selected session actually
+        // changed. Otherwise the 2 s refresh tick would snap the user back
+        // to the top while they were mid-scroll in a long preview.
+        if self.preview_for != Some(sid) {
+            self.preview_scroll = 0;
+            self.preview_for = Some(sid);
+        }
     }
 
     fn nav_down(&mut self) {
