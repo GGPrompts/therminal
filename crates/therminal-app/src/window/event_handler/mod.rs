@@ -20,7 +20,7 @@ use therminal_core::config::KeyAction;
 use super::keybindings::lookup_binding;
 use super::mouse::HeaderAction;
 use super::render_driver::JumpDirection;
-use super::{App, OverlayMode, chrome, help_overlay};
+use super::{App, NavigateState, OverlayMode, chrome, help_overlay};
 use crate::pane::SplitDirection;
 
 impl App {
@@ -48,6 +48,26 @@ impl App {
             Some(a) => a,
             None => return false,
         };
+
+        // tn-wvll: NavigateWebView is WebView-pane-only. Falling through
+        // (returning false) when the focused pane isn't a WebView lets
+        // terminal panes still bind ctrl+l to readline clear-screen.
+        if matches!(action, KeyAction::NavigateWebView) {
+            let pane_id = match self.focused_pane() {
+                Some(id) => id,
+                None => return false,
+            };
+            let is_webview = self
+                .get_layout()
+                .and_then(|l| l.find_pane(pane_id))
+                .map(|p| p.is_webview())
+                .unwrap_or(false);
+            if !is_webview {
+                return false;
+            }
+            self.start_navigate_webview(pane_id);
+            return true;
+        }
 
         match action {
             KeyAction::SplitHorizontal => self.split_focused_pane(SplitDirection::Horizontal),
@@ -199,6 +219,11 @@ impl App {
             KeyAction::ScrollBottom => {
                 self.scroll_focused_pane(alacritty_terminal::grid::Scroll::Bottom);
             }
+            // NavigateWebView is handled above by the early-return guard
+            // so it can fall through when the focused pane isn't a
+            // WebView. If we reach this match arm it means the guard
+            // approved the action; the arm is unreachable in practice.
+            KeyAction::NavigateWebView => {}
             // Hotspot actions are menu-only; they shouldn't reach keybinding dispatch.
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
@@ -409,6 +434,23 @@ impl App {
                 if let Err(e) = open::that(url) {
                     warn!("failed to open URL in browser {url}: {e}");
                     self.show_toast(format!("Failed to open in browser: {e}"));
+                }
+            }
+            KeyAction::NavigateWebView => {
+                // tn-wvll: menu route uses the menu's pane context; the
+                // keybinding route uses the focused pane (via
+                // handle_keybinding's early-return). Either way we open
+                // the inline input over the targeted WebView pane.
+                let pane_id = menu_pane_id.or_else(|| self.focused_pane());
+                if let Some(id) = pane_id {
+                    let is_webview = self
+                        .get_layout()
+                        .and_then(|l| l.find_pane(id))
+                        .map(|p| p.is_webview())
+                        .unwrap_or(false);
+                    if is_webview {
+                        self.start_navigate_webview(id);
+                    }
                 }
             }
             KeyAction::NewWorkspace => self.create_new_workspace(),
@@ -660,6 +702,14 @@ impl App {
         // (click-outside semantics). The click then proceeds normally.
         if self.rename_state.is_some() && state == ElementState::Pressed {
             self.commit_rename();
+        }
+
+        // tn-wvll: any mouse press while the WebView navigate input is
+        // active cancels it. Unlike rename, we cancel rather than commit
+        // — an accidental click shouldn't navigate the page to a partial
+        // URL the user is still typing.
+        if self.navigate_state.is_some() && state == ElementState::Pressed {
+            self.cancel_navigate();
         }
 
         // Overlay mouse interaction: click inside the settings panel is
@@ -1138,10 +1188,116 @@ impl App {
         }
     }
 
+    // ── WebView Navigate input (tn-wvll) ─────────────────────────────────
+
+    /// Open the inline URL input over the given WebView pane, pre-filled
+    /// with the pane's current URL so the user can edit rather than
+    /// retype. No-op when the pane is not a WebView.
+    pub(super) fn start_navigate_webview(&mut self, pane_id: crate::pane::PaneId) {
+        let is_webview = self
+            .get_layout()
+            .and_then(|l| l.find_pane(pane_id))
+            .map(|p| p.is_webview())
+            .unwrap_or(false);
+        if !is_webview {
+            return;
+        }
+        // Prefer the runtime URL from the wry view (reflects post-navigate
+        // state); fall back to the backend's stored URL (set at create()
+        // time and updated by `commit_navigate`).
+        let initial = self
+            .webview_manager
+            .url(pane_id)
+            .or_else(|| {
+                self.get_layout()
+                    .and_then(|l| l.find_pane(pane_id))
+                    .and_then(|p| p.webview_url().map(|u| u.to_string()))
+            })
+            .unwrap_or_default();
+        self.navigate_state = Some(NavigateState::new(pane_id, initial));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Commit the navigate buffer: route the URL through the WebViewManager
+    /// and update the pane backend's stored URL so subsequent reads (menu
+    /// "Copy URL", header label, future pre-fill) see the new value.
+    /// Empty submit cancels (treated identically to Esc).
+    pub(super) fn commit_navigate(&mut self) {
+        let Some(state) = self.navigate_state.take() else {
+            return;
+        };
+        let url = state.buffer.trim().to_string();
+        if url.is_empty() {
+            // Empty submit → cancel without navigating.
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
+        self.webview_manager.navigate(state.pane_id, &url);
+        if let Some(layout) = self.get_layout_mut()
+            && let Some(pane) = layout.find_pane_mut(state.pane_id)
+        {
+            pane.set_webview_url(url);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Cancel the in-progress navigation without applying changes.
+    pub(super) fn cancel_navigate(&mut self) {
+        self.navigate_state = None;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Handle a keyboard event while inline navigate mode is active.
+    /// Esc cancels, Enter commits, Backspace deletes, character keys insert.
+    fn handle_navigate_key(&mut self, key_event: &KeyEvent) {
+        match &key_event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.cancel_navigate();
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.commit_navigate();
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(state) = self.navigate_state.as_mut() {
+                    state.backspace();
+                }
+            }
+            Key::Character(s) => {
+                if let Some(state) = self.navigate_state.as_mut() {
+                    for c in s.chars() {
+                        if !c.is_control() {
+                            state.insert_char(c);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     pub(super) fn handle_keyboard_input_event(&mut self, key_event: &KeyEvent) {
         // ── Inline workspace rename input ──────────────────────
         if self.rename_state.is_some() {
             self.handle_rename_key(key_event);
+            return;
+        }
+
+        // ── Inline WebView navigate input (tn-wvll) ────────────
+        if self.navigate_state.is_some() {
+            self.handle_navigate_key(key_event);
             return;
         }
 

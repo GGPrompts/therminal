@@ -260,6 +260,7 @@ impl App {
             active_menu: None,
             tab_menu_workspace_id: None,
             rename_state: None,
+            navigate_state: None,
             separator_drag: None,
             separator_cursor_active: false,
             hyperlink_cursor_active: false,

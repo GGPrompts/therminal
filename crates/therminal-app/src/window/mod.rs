@@ -428,6 +428,11 @@ pub struct App {
     /// In-progress inline workspace rename, if any.
     pub(crate) rename_state: Option<RenameState>,
 
+    /// In-progress inline WebView pane URL navigation, if any (tn-wvll).
+    /// Mutually exclusive with `rename_state` in practice — both are
+    /// driven by the same key handler precedence in `event_handler`.
+    pub(crate) navigate_state: Option<NavigateState>,
+
     /// Active separator drag state (path to split node, direction, parent rect).
     separator_drag: Option<SeparatorDrag>,
 
@@ -770,6 +775,51 @@ impl RenameState {
         let cursor = initial.len();
         Self {
             workspace_id,
+            buffer: initial,
+            cursor,
+        }
+    }
+
+    /// Insert a character at the cursor and advance the cursor.
+    pub fn insert_char(&mut self, c: char) {
+        self.buffer.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Delete the character before the cursor (backspace).
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        // Find prev char boundary.
+        let mut idx = self.cursor - 1;
+        while idx > 0 && !self.buffer.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        self.buffer.replace_range(idx..self.cursor, "");
+        self.cursor = idx;
+    }
+}
+
+/// State for an in-progress inline WebView pane URL navigation (tn-wvll).
+///
+/// Mirrors [`RenameState`] for the "type a string then commit" UX, but
+/// targets a [`PaneId`] (a WebView pane) instead of a workspace tab.
+#[derive(Debug, Clone)]
+pub(crate) struct NavigateState {
+    /// WebView pane being navigated.
+    pub pane_id: PaneId,
+    /// Current edit buffer (the URL the user is typing).
+    pub buffer: String,
+    /// Cursor position as a byte offset into `buffer` (always at a char boundary).
+    pub cursor: usize,
+}
+
+impl NavigateState {
+    pub fn new(pane_id: PaneId, initial: String) -> Self {
+        let cursor = initial.len();
+        Self {
+            pane_id,
             buffer: initial,
             cursor,
         }
@@ -1884,6 +1934,65 @@ mod rename_state_tests {
         s.backspace();
         assert_eq!(s.buffer, "a");
         assert_eq!(s.cursor, 1);
+    }
+
+    // ── NavigateState (tn-wvll) ────────────────────────────────────────
+
+    #[test]
+    fn navigate_state_new_seeds_buffer_and_cursor_at_end() {
+        use super::NavigateState;
+        let s = NavigateState::new(7, "https://example.com".to_string());
+        assert_eq!(s.pane_id, 7);
+        assert_eq!(s.buffer, "https://example.com");
+        assert_eq!(s.cursor, "https://example.com".len());
+    }
+
+    #[test]
+    fn navigate_state_insert_char_appends_at_cursor() {
+        use super::NavigateState;
+        let mut s = NavigateState::new(1, "ht".to_string());
+        s.insert_char('t');
+        s.insert_char('p');
+        assert_eq!(s.buffer, "http");
+        assert_eq!(s.cursor, 4);
+    }
+
+    #[test]
+    fn navigate_state_backspace_removes_prev_char() {
+        use super::NavigateState;
+        let mut s = NavigateState::new(1, "abc".to_string());
+        s.backspace();
+        assert_eq!(s.buffer, "ab");
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn navigate_state_backspace_at_start_is_noop() {
+        use super::NavigateState;
+        let mut s = NavigateState::new(1, String::new());
+        s.backspace();
+        assert_eq!(s.buffer, "");
+        assert_eq!(s.cursor, 0);
+    }
+
+    #[test]
+    fn navigate_state_backspace_handles_multibyte() {
+        use super::NavigateState;
+        // German sharp-s is 2 bytes (UTF-8) — verify cursor lands on a
+        // char boundary after backspacing across it.
+        let mut s = NavigateState::new(1, "aß".to_string());
+        s.backspace();
+        assert_eq!(s.buffer, "a");
+        assert_eq!(s.cursor, 1);
+    }
+
+    #[test]
+    fn navigate_state_initial_empty_string_starts_at_zero_cursor() {
+        use super::NavigateState;
+        let s = NavigateState::new(3, String::new());
+        assert_eq!(s.pane_id, 3);
+        assert_eq!(s.buffer, "");
+        assert_eq!(s.cursor, 0);
     }
 
     // ── Claude session title → tab label (tn-lxq9) ─────────────────────

@@ -24,6 +24,7 @@ use therminal_terminal::semantic_patterns::PatternEngine;
 use crate::claude_cwd::ClaudeCwdTracker;
 use crate::widgets::pattern_widget::PatternWidgetMatch;
 
+use super::NavigateState;
 use super::chrome::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -234,6 +235,7 @@ pub(crate) fn render_panes_recursive(
     agent_registry: &std::sync::Mutex<AgentRegistry>,
     claude_cwd: &ClaudeCwdTracker,
     pattern_engine: Option<&PatternEngine>,
+    navigate_state: Option<&NavigateState>,
 ) {
     match node {
         LayoutNode::Leaf(pane) => {
@@ -257,6 +259,7 @@ pub(crate) fn render_panes_recursive(
                 agent_registry,
                 claude_cwd,
                 pattern_engine,
+                navigate_state,
             );
             queue.submit(std::iter::once(encoder.finish()));
         }
@@ -283,6 +286,7 @@ pub(crate) fn render_panes_recursive(
                 agent_registry,
                 claude_cwd,
                 pattern_engine,
+                navigate_state,
             );
             render_panes_recursive(
                 second,
@@ -301,6 +305,7 @@ pub(crate) fn render_panes_recursive(
                 agent_registry,
                 claude_cwd,
                 pattern_engine,
+                navigate_state,
             );
 
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -344,6 +349,7 @@ fn render_single_pane(
     agent_registry: &std::sync::Mutex<AgentRegistry>,
     claude_cwd: &ClaudeCwdTracker,
     pattern_engine: Option<&PatternEngine>,
+    navigate_state: Option<&NavigateState>,
 ) {
     // Look up the Claude agent cwd and header title for this pane once
     // per frame (tn-ykxb, tn-5wrx). Two layers of Option because the
@@ -407,18 +413,27 @@ fn render_single_pane(
     if pane.is_webview() {
         renderer.set_current_pane(pane.id);
         let header_h = crate::pane::effective_header_height(pane_count, show_pane_headers);
-        // Show a short domain label in the pane header instead of "pane N".
-        let webview_title = pane.webview_url().map(|u| {
-            // Extract host from URL without pulling in the url crate.
-            // "http://localhost:8080/path" -> "localhost:8080"
-            let host = u
-                .strip_prefix("https://")
-                .or_else(|| u.strip_prefix("http://"))
-                .unwrap_or(u)
-                .split('/')
-                .next()
-                .unwrap_or(u);
-            format!("[web] {host}")
+        // tn-wvll: when the inline navigate input targets this pane,
+        // surface the live edit buffer with a trailing cursor glyph
+        // instead of the usual "[web] <host>" label. Matches the
+        // rename-in-tab-label rendering pattern in build_tab_labels.
+        let navigate_override = navigate_state
+            .filter(|ns| ns.pane_id == pane.id)
+            .map(|ns| format!("\u{2192} {}_", ns.buffer));
+        // Default: show a short domain label in the pane header instead of "pane N".
+        let webview_title = navigate_override.or_else(|| {
+            pane.webview_url().map(|u| {
+                // Extract host from URL without pulling in the url crate.
+                // "http://localhost:8080/path" -> "localhost:8080"
+                let host = u
+                    .strip_prefix("https://")
+                    .or_else(|| u.strip_prefix("http://"))
+                    .unwrap_or(u)
+                    .split('/')
+                    .next()
+                    .unwrap_or(u);
+                format!("[web] {host}")
+            })
         });
         if show_pane_headers {
             draw_pane_header(

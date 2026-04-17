@@ -197,12 +197,20 @@ pub(crate) fn build_webview_pane_menu(
 
     ContextMenu {
         sections: vec![
-            MenuSection(vec![MenuItem {
-                label: "Open in browser".into(),
-                hotkey_hint: None,
-                action: KeyAction::OpenInBrowser(url.to_string()),
-                enabled: true,
-            }]),
+            MenuSection(vec![
+                MenuItem {
+                    label: "Navigate\u{2026}".into(),
+                    hotkey_hint: hint(&KeyAction::NavigateWebView),
+                    action: KeyAction::NavigateWebView,
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Open in browser".into(),
+                    hotkey_hint: None,
+                    action: KeyAction::OpenInBrowser(url.to_string()),
+                    enabled: true,
+                },
+            ]),
             MenuSection(vec![
                 MenuItem {
                     label: "Split Horizontal".into(),

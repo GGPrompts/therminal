@@ -129,6 +129,16 @@ impl PaneState {
         }
     }
 
+    /// Update the stored URL for a WebView pane (tn-wvll). No-op for other
+    /// backend types. Called after `WebViewManager::navigate` so that
+    /// later reads of `webview_url()` (right-click menu "Copy URL", header
+    /// label, pre-fill) see the just-navigated URL.
+    pub fn set_webview_url(&mut self, new_url: String) {
+        if let PaneBackendKind::WebView { url, .. } = &mut self.backend {
+            *url = new_url;
+        }
+    }
+
     /// Returns `true` if this pane is a WebView backend.
     pub fn is_webview(&self) -> bool {
         matches!(&self.backend, PaneBackendKind::WebView { .. })

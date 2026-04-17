@@ -121,6 +121,12 @@ pub enum KeyAction {
     /// Open a URL in the system default browser (tn-s5vj).
     /// Used by the WebView pane context menu "Open in browser" action.
     OpenInBrowser(String),
+    /// Open the inline URL input over the focused WebView pane (tn-wvll).
+    /// No payload — the URL comes from the input overlay. The keybinding
+    /// dispatcher must guard this so it only fires when the focused pane
+    /// is a WebView; on terminal panes the binding falls through to the
+    /// shell so e.g. readline `Ctrl+L` (clear-screen) keeps working.
+    NavigateWebView,
 }
 
 impl KeyAction {
@@ -175,6 +181,7 @@ impl KeyAction {
             KeyAction::HotspotOpenFolderInFileManager(_) => "Open folder in file manager",
             KeyAction::HotspotShowGitRef { .. } => "Show git commit in TUI tool",
             KeyAction::OpenInBrowser(_) => "Open URL in browser",
+            KeyAction::NavigateWebView => "Navigate WebView pane to URL",
         }
     }
 
@@ -219,7 +226,8 @@ impl KeyAction {
             | KeyAction::ShowHelp
             | KeyAction::ShowSettings
             | KeyAction::ShowLauncher
-            | KeyAction::FocusMode => "General",
+            | KeyAction::FocusMode
+            | KeyAction::NavigateWebView => "General",
             KeyAction::HotspotCopy(_)
             | KeyAction::HotspotOpenInEditor(_)
             | KeyAction::HotspotOpenExternal(_)
@@ -358,6 +366,14 @@ impl Default for KeybindingsConfig {
                 Keybinding {
                     key: "ctrl+shift+l".to_string(),
                     action: KeyAction::ShowLauncher,
+                },
+                // WebView navigate (browser-style address bar; tn-wvll).
+                // Only fires when the focused pane is a WebView — on
+                // terminal panes the dispatcher falls through so the
+                // shell's own ctrl+l (readline clear-screen) still works.
+                Keybinding {
+                    key: "ctrl+l".to_string(),
+                    action: KeyAction::NavigateWebView,
                 },
                 // Batch pane operations
                 Keybinding {

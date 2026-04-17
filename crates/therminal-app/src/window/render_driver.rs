@@ -178,6 +178,7 @@ impl App {
             &self.agent_registry,
             &self.claude_cwd,
             self.pattern_engine.as_ref(),
+            self.navigate_state.as_ref(),
         );
 
         // ── Sync WebView positions and visibility (tn-s5vj) ────────────
