@@ -520,6 +520,26 @@ impl TherminalConfig {
                     "profile has both `url` and shell fields set; `url` takes priority (webview tile)"
                 );
             }
+            // Validate the `url` field itself (tn-2775). An empty/whitespace
+            // `url` hands wry a blank string and produces a silent blank
+            // webview; a non-http(s) scheme (`javascript:`, `file:`, `data:`)
+            // is accepted silently with platform-dependent behavior. Warn on
+            // both so the silent-fail becomes visible.
+            if let Some(ref url) = profile.url {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    warn!(
+                        profile = %name,
+                        "profile `url` is empty; the launcher tile will be skipped"
+                    );
+                } else if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+                    warn!(
+                        profile = %name,
+                        url = %url,
+                        "profile `url` does not start with http:// or https://; the webview may refuse to load it"
+                    );
+                }
+            }
             // Warn if `color` is present but not a valid hex string.
             if let Some(ref color) = profile.color
                 && ColorsConfig::parse_hex(color).is_none()
@@ -3460,6 +3480,47 @@ url = "https://linear.app"
             },
         );
         // Should not warn or panic.
+        config.validate_paths();
+    }
+
+    /// validate_paths warns when `url` conflicts with shell_args only (tn-2775).
+    /// The url+shell branch already checks `!shell_args.is_empty()`, but the
+    /// shell_args-only path had no coverage — this pins it down.
+    #[test]
+    fn validate_paths_profile_url_and_shell_args_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "mixed-args".to_string(),
+            ProfileConfig {
+                url: Some("https://example.com".to_string()),
+                shell: None,
+                shell_args: vec!["--login".to_string()],
+                ..Default::default()
+            },
+        );
+        // Should warn but not panic.
+        config.validate_paths();
+    }
+
+    /// validate_paths warns on empty or whitespace-only `url` (tn-2775).
+    #[test]
+    fn validate_paths_profile_url_empty_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "empty-url".to_string(),
+            ProfileConfig {
+                url: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert(
+            "whitespace-url".to_string(),
+            ProfileConfig {
+                url: Some("   ".to_string()),
+                ..Default::default()
+            },
+        );
+        // Should warn but not panic.
         config.validate_paths();
     }
 

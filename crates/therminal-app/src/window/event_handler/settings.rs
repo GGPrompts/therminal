@@ -127,13 +127,26 @@ impl App {
         // for MCP/CLI callers and still bounces back through
         // `SpawnWebViewPaneRequested`.)
         if let Some(url) = entry.url {
+            // tn-2775: defense-in-depth — reject empty/whitespace URLs before
+            // handing them to wry, which would silently produce a blank
+            // webview. Trim so a trailing newline from copy-paste doesn't
+            // leak into `with_url()` either.
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                warn!(
+                    profile = ?profile_name,
+                    "launcher: profile url is empty; not spawning webview"
+                );
+                self.show_toast("WebView profile has empty url".to_string());
+                return;
+            }
             info!(
                 profile = ?profile_name,
-                url = %url,
+                url = %trimmed,
                 "launcher: spawning webview pane"
             );
-            if let Err(e) = self.create_webview_pane(&url) {
-                warn!(url = %url, error = %e, "launcher: webview spawn failed");
+            if let Err(e) = self.create_webview_pane(trimmed) {
+                warn!(url = %trimmed, error = %e, "launcher: webview spawn failed");
                 self.show_toast(format!("WebView spawn failed: {e}"));
             }
             return;
