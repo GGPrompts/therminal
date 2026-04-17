@@ -105,6 +105,10 @@ impl WebViewManager {
         // main thread.
         let ipc_pane_id = pane_id;
         let ipc_proxy = proxy;
+        // tn-93p1: clone before moving `ipc_proxy` into the ipc_handler so
+        // the new-window handler below gets its own copy.
+        let new_window_proxy = ipc_proxy.clone();
+        let new_window_pane_id = ipc_pane_id;
         let ipc_handler = move |request: wry::http::Request<String>| {
             let body = request.body().as_str();
             if body == "focus" {
@@ -125,13 +129,27 @@ impl WebViewManager {
             }
         };
 
+        // tn-93p1: new-window handler. Without this, wry silently drops
+        // `target="_blank"` link clicks and `window.open()` calls — very
+        // common on GitHub, search engines, docs sites. Forward the URL
+        // to the main thread so it can spawn a sibling WebView pane split
+        // from the source pane. We return `Deny` so wry doesn't try to
+        // open its own surface (which would also silently drop).
+
         // Build the webview as a child of the winit window.
         let builder = WebViewBuilder::new()
             .with_url(url)
             .with_bounds(bounds)
             .with_focused(false)
             .with_initialization_script(WEBVIEW_INIT_SCRIPT)
-            .with_ipc_handler(ipc_handler);
+            .with_ipc_handler(ipc_handler)
+            .with_new_window_req_handler(move |url, _features| {
+                let _ = new_window_proxy.send_event(UserEvent::WebViewNewWindowRequest {
+                    source_pane_id: new_window_pane_id,
+                    url,
+                });
+                wry::NewWindowResponse::Deny
+            });
 
         let webview = builder
             .build_as_child(window.as_ref())

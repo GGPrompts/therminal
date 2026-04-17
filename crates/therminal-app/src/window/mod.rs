@@ -217,6 +217,15 @@ pub(crate) enum UserEvent {
         client_x: f64,
         client_y: f64,
     },
+    /// A WebView pane made a new-window request (tn-93p1) — either a
+    /// `target="_blank"` link click or a `window.open(url)` call. wry
+    /// forwards the URL through the builder's `with_new_window_req_handler`
+    /// closure; we spawn a new WebView pane split off the source pane
+    /// rather than trying to open an external browser.
+    WebViewNewWindowRequest {
+        source_pane_id: crate::pane::PaneId,
+        url: String,
+    },
 }
 
 /// Origin of a desktop notification request, used to apply per-source
@@ -1617,6 +1626,30 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
+                }
+            }
+            UserEvent::WebViewNewWindowRequest {
+                source_pane_id,
+                url,
+            } => {
+                // tn-93p1: a WebView pane's content requested a new window
+                // via `target="_blank"` link click or `window.open()`. wry
+                // returns `NewWindowResponse::Deny` so it doesn't try to
+                // open its own surface; we spawn a sibling WebView pane
+                // instead, splitting off the source pane.
+                //
+                // `create_webview_pane` uses the focused pane as the split
+                // source, so focus the originator first. The tn-7mvn fix
+                // in `split_pane_remote` handles the daemon-mode case where
+                // the source WebView has no daemon mapping.
+                info!(source_pane_id, %url, "webview requested new window");
+                self.set_focused_pane(Some(source_pane_id));
+                if let Err(e) = self.create_webview_pane(&url) {
+                    warn!(%url, error = %e, "failed to spawn webview pane from new-window request");
+                    self.show_toast(format!("WebView spawn failed: {e}"));
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
                 }
             }
             UserEvent::SwarmWatcherTick => {
