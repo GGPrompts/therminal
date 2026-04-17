@@ -64,6 +64,10 @@ pub(crate) struct LauncherEntry {
     pub color: [f32; 4],
     /// Profile name key (None = default shell).
     pub profile_name: Option<String>,
+    /// Optional URL (tn-khmo): when `Some`, activating this tile spawns a
+    /// WebView pane instead of a shell pane via `create_webview_pane`.
+    /// Sourced from `ProfileConfig.url`.
+    pub url: Option<String>,
 }
 
 /// Launcher overlay state persisted across frames.
@@ -88,6 +92,7 @@ impl LauncherState {
             icon: DEFAULT_ICON.to_string(),
             color: DEFAULT_TILE_COLOR,
             profile_name: None,
+            url: None,
         });
 
         // Sorted profile entries for deterministic ordering.
@@ -110,6 +115,11 @@ impl LauncherState {
                 icon,
                 color,
                 profile_name: Some(name.clone()),
+                // tn-khmo: carry the URL through so the launcher dispatcher
+                // can branch on webview-vs-shell at activation time. `url`
+                // wins over `shell`/`command` when both are set (config
+                // validation also warns in that case).
+                url: profile.url.clone(),
             });
         }
 
@@ -562,6 +572,38 @@ mod tests {
         assert_eq!(state.entries.len(), 1);
         assert_eq!(state.entries[0].name, "Default Shell");
         assert!(state.entries[0].profile_name.is_none());
+    }
+
+    #[test]
+    fn build_entries_propagates_url_field() {
+        let mut state = LauncherState::default();
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "linear".to_string(),
+            ProfileConfig {
+                url: Some("https://linear.app".to_string()),
+                icon: Some("\u{e62a}".to_string()),
+                color: Some("#5e6ad2".to_string()),
+                ..Default::default()
+            },
+        );
+        profiles.insert(
+            "bash".to_string(),
+            ProfileConfig {
+                shell: Some("/bin/bash".to_string()),
+                ..Default::default()
+            },
+        );
+        state.build_entries(&profiles);
+        assert_eq!(state.entries.len(), 3);
+        // Default shell tile: no url.
+        assert!(state.entries[0].url.is_none());
+        // "bash" (shell profile): no url.
+        let bash = state.entries.iter().find(|e| e.name == "bash").unwrap();
+        assert!(bash.url.is_none());
+        // "linear" (webview profile): url present.
+        let linear = state.entries.iter().find(|e| e.name == "linear").unwrap();
+        assert_eq!(linear.url.as_deref(), Some("https://linear.app"));
     }
 
     #[test]

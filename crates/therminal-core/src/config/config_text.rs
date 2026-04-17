@@ -251,6 +251,8 @@ pub(super) fn default_config_text() -> String {
     out.push_str("# `shell_integration` auto-detects: true for shell, false for command.\n");
     out.push_str("# `icon` is a Nerd Font glyph for the launcher tile.\n");
     out.push_str("# `color` is a hex background for the launcher tile (#RRGGBB or #RGB).\n");
+    out.push_str("# `url` (tn-khmo) turns a profile tile into a WebView bookmark instead of\n");
+    out.push_str("# a shell launcher — mutually exclusive with shell/command fields.\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("# [profiles.dev]\n");
     out.push_str("# shell = \"/bin/zsh\"\n");
@@ -279,6 +281,11 @@ pub(super) fn default_config_text() -> String {
     out.push_str("# shell_integration = true\n");
     out.push_str("# icon = \"\\uebc7\"  # Nerd Font: nf-cod-terminal_powershell\n");
     out.push_str("# color = \"#012456\"\n");
+    out.push_str("#\n");
+    out.push_str("# [profiles.linear]  # tn-khmo webview bookmark tile\n");
+    out.push_str("# url = \"https://linear.app\"\n");
+    out.push_str("# icon = \"\\uf0ac\"  # Nerd Font: nf-fa-globe\n");
+    out.push_str("# color = \"#5e6ad2\"\n");
     out.push('\n');
 
     // ── [mcp] ────────────────────────────────────────────────────────────

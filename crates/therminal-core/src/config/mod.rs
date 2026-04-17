@@ -506,6 +506,20 @@ impl TherminalConfig {
                     "profile has both `shell` and `command` set; `command` takes priority"
                 );
             }
+            // Warn if `url` is combined with a shell-launcher field (tn-khmo).
+            // A profile tile can spawn either a WebView (url) or a shell
+            // (shell/command) but not both; `url` wins when mixed so the
+            // bookmark behavior is predictable.
+            if profile.url.is_some()
+                && (profile.shell.is_some()
+                    || profile.command.is_some()
+                    || !profile.shell_args.is_empty())
+            {
+                warn!(
+                    profile = %name,
+                    "profile has both `url` and shell fields set; `url` takes priority (webview tile)"
+                );
+            }
             // Warn if `color` is present but not a valid hex string.
             if let Some(ref color) = profile.color
                 && ColorsConfig::parse_hex(color).is_none()
@@ -1114,6 +1128,14 @@ pub struct ProfileConfig {
     pub icon: Option<String>,
     /// Hex color for the launcher overlay tile background (`#RRGGBB` or `#RGB`).
     pub color: Option<String>,
+    /// Optional URL: when set, the launcher tile spawns a WebView pane
+    /// instead of a shell pane (tn-khmo).
+    ///
+    /// Mutually exclusive with `shell` / `shell_args` / `command` —
+    /// a profile that sets `url` is a bookmark tile, not a shell launcher.
+    /// If both `url` and a shell field are set, `url` wins and a
+    /// validation warning is emitted.
+    pub url: Option<String>,
 }
 
 // ── Section: Bookmarks ───────────────────────────────────────────────────
@@ -3370,6 +3392,75 @@ color = "#d4443e"
         assert!(p.shell_integration.is_none());
         assert!(p.icon.is_none());
         assert!(p.color.is_none());
+        assert!(p.url.is_none());
+    }
+
+    /// Profile with `url` set deserializes cleanly (tn-khmo).
+    #[test]
+    fn profiles_url_field_deserializes() {
+        let toml_str = r##"
+[profiles.linear]
+icon = ""
+color = "#5e6ad2"
+url = "https://linear.app"
+"##;
+        let config: TherminalConfig = toml::from_str(toml_str).unwrap();
+        let linear = &config.profiles["linear"];
+        assert_eq!(linear.url.as_deref(), Some("https://linear.app"));
+        assert!(linear.command.is_none());
+        assert!(linear.shell.is_none());
+    }
+
+    /// Profile with `url` round-trips through TOML (tn-khmo).
+    #[test]
+    fn profiles_url_field_round_trip() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "issues".to_string(),
+            ProfileConfig {
+                url: Some("https://github.com/issues".to_string()),
+                icon: Some("\u{f408}".to_string()),
+                color: Some("#24292e".to_string()),
+                ..Default::default()
+            },
+        );
+        let s = toml::to_string(&config).unwrap();
+        let loaded: TherminalConfig = toml::from_str(&s).unwrap();
+        let issues = &loaded.profiles["issues"];
+        assert_eq!(issues.url.as_deref(), Some("https://github.com/issues"));
+    }
+
+    /// validate_paths warns when `url` conflicts with shell/command (tn-khmo).
+    #[test]
+    fn validate_paths_profile_url_and_shell_warns() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "mixed".to_string(),
+            ProfileConfig {
+                url: Some("https://example.com".to_string()),
+                shell: Some("/bin/bash".to_string()),
+                ..Default::default()
+            },
+        );
+        // Should warn but not panic.
+        config.validate_paths();
+    }
+
+    /// validate_paths accepts a url-only profile (tn-khmo).
+    #[test]
+    fn validate_paths_profile_url_only_ok() {
+        let mut config = TherminalConfig::default();
+        config.profiles.insert(
+            "bookmark".to_string(),
+            ProfileConfig {
+                url: Some("https://example.com".to_string()),
+                icon: Some("\u{f0ac}".to_string()),
+                color: Some("#2563eb".to_string()),
+                ..Default::default()
+            },
+        );
+        // Should not warn or panic.
+        config.validate_paths();
     }
 
     // ── Delegate profile tests ────────────────────────────────────────────

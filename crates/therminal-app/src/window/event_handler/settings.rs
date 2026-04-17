@@ -118,6 +118,27 @@ impl App {
         self.close_overlay();
 
         let profile_name = entry.profile_name;
+
+        // tn-khmo: URL-bearing tiles spawn a WebView pane instead of a
+        // shell pane. We follow the tn-ojy9 / tn-t0gp precedent and call
+        // `create_webview_pane()` directly on the main thread — no daemon
+        // round-trip needed for GUI-originated spawns. (The
+        // `IpcRequest::SpawnWebViewPane` route remains the stable contract
+        // for MCP/CLI callers and still bounces back through
+        // `SpawnWebViewPaneRequested`.)
+        if let Some(url) = entry.url {
+            info!(
+                profile = ?profile_name,
+                url = %url,
+                "launcher: spawning webview pane"
+            );
+            if let Err(e) = self.create_webview_pane(&url) {
+                warn!(url = %url, error = %e, "launcher: webview spawn failed");
+                self.show_toast(format!("WebView spawn failed: {e}"));
+            }
+            return;
+        }
+
         info!(
             profile = ?profile_name,
             "launcher: spawning pane"
