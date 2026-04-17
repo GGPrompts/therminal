@@ -1589,6 +1589,33 @@ pub struct HotspotsConfig {
     /// Unknown tool names are silently ignored. To disable git-tool
     /// menu entries entirely, set this to `[]`.
     pub git_tools: Vec<String>,
+
+    /// Default action when a URL hotspot is clicked (tn-t0gp).
+    ///
+    /// - `"webview"` (default): split the clicked pane and load the URL in
+    ///   a new platform-native WebView pane. Matches the tiling thesis —
+    ///   "one terminal, everything visible". Shift+click falls back to
+    ///   the system default browser.
+    /// - `"browser"` (legacy): open the URL in the system default browser.
+    ///   Shift+click spawns a WebView pane instead.
+    ///
+    /// Either way, the right-click context menu exposes both actions
+    /// explicitly as "Open in new pane" / "Open in browser".
+    pub url_action: UrlHotspotAction,
+}
+
+/// Default action for URL hotspot clicks (tn-t0gp). Serialised as a
+/// lowercase string (`"webview"` / `"browser"`) in the `[hotspots]`
+/// config section.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UrlHotspotAction {
+    /// Split the clicked pane and open the URL in a new WebView pane.
+    /// This is the default — matches the "tile everything" philosophy.
+    #[default]
+    Webview,
+    /// Open the URL in the system default browser (legacy behavior).
+    Browser,
 }
 
 // ── Section: Patterns ───────────────────────────────────────────────────
@@ -1901,6 +1928,7 @@ impl Default for HotspotsConfig {
                 "gitlogue".to_string(),
                 "tig".to_string(),
             ],
+            url_action: UrlHotspotAction::default(),
         }
     }
 }
@@ -2034,6 +2062,29 @@ mod tests {
             decoded.hotspots.git_tools,
             vec!["tig".to_string(), "lazygit".to_string()]
         );
+    }
+
+    #[test]
+    fn hotspots_default_url_action_is_webview() {
+        // tn-t0gp: URL hotspots open as a WebView pane by default to match
+        // the tiling thesis. Shift+click still opens the system browser.
+        let d = HotspotsConfig::default();
+        assert_eq!(d.url_action, UrlHotspotAction::Webview);
+    }
+
+    #[test]
+    fn hotspots_url_action_round_trips_as_lowercase_string() {
+        // tn-t0gp: `[hotspots] url_action = "browser"` flips the click
+        // default back to the legacy external-browser behaviour.
+        let mut config = TherminalConfig::default();
+        config.hotspots.url_action = UrlHotspotAction::Browser;
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            toml_str.contains("url_action = \"browser\""),
+            "url_action must serialise as a lowercase bare string, got:\n{toml_str}"
+        );
+        let decoded: TherminalConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(decoded.hotspots.url_action, UrlHotspotAction::Browser);
     }
 
     #[test]

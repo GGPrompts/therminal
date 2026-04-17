@@ -377,6 +377,13 @@ pub(super) fn default_config_text() -> String {
     out.push_str("#   gitlogue -> `gitlogue -c <hash>`\n");
     out.push_str("#   tig      -> `tig show <hash>`\n");
     out.push_str("# Set to [] to disable git-tool menu entries (tn-fzr0).\n");
+    out.push_str("#\n");
+    out.push_str("# url_action: what happens when a URL hotspot is left-clicked (tn-t0gp).\n");
+    out.push_str("#   \"webview\" (default) — split the clicked pane and load the URL in a\n");
+    out.push_str("#     platform-native WebView pane. Shift+click falls back to the browser.\n");
+    out.push_str("#   \"browser\" — open in the system default browser (legacy behaviour).\n");
+    out.push_str("#     Shift+click spawns a WebView pane instead.\n");
+    out.push_str("# The right-click menu always exposes both actions explicitly.\n");
     out.push_str("# ─────────────────────────────────────────────────────────────────────────\n");
     out.push_str("[hotspots]\n");
     let chain_toml = d
@@ -411,6 +418,11 @@ pub(super) fn default_config_text() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("# git_tools = [{git_tools_toml}]\n"));
+    let url_action_str = match d.hotspots.url_action {
+        crate::config::UrlHotspotAction::Webview => "webview",
+        crate::config::UrlHotspotAction::Browser => "browser",
+    };
+    out.push_str(&format!("# url_action = \"{url_action_str}\"\n"));
     out.push('\n');
 
     // ── [patterns] ──────────────────────────────────────────────────────

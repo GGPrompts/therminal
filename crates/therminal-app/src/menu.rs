@@ -546,13 +546,32 @@ pub(crate) fn build_hotspot_palette(
             ])]
         }
         HotspotKind::Url => {
-            // URLs are handled by hyperlink click, but included for completeness.
-            vec![MenuSection(vec![MenuItem {
-                label: "Open URL".into(),
-                hotkey_hint: None,
-                action: KeyAction::HotspotOpenExternal(text.clone()),
-                enabled: true,
-            }])]
+            // tn-t0gp: URL hotspots expose both "open in new pane" (WebView
+            // default, matches the tiling thesis) and "open in browser"
+            // (system default browser, escape hatch for cookie-gated sites
+            // or reader-mode). Order is "in pane" first so it's the
+            // primary-gesture default on mouse-driven menus that hover-
+            // select the first row.
+            vec![MenuSection(vec![
+                MenuItem {
+                    label: "Open URL in new pane".into(),
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotOpenUrlInPane(text.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Open URL in browser".into(),
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotOpenExternal(text.clone()),
+                    enabled: true,
+                },
+                MenuItem {
+                    label: "Copy URL".into(),
+                    hotkey_hint: None,
+                    action: KeyAction::HotspotCopy(text.clone()),
+                    enabled: true,
+                },
+            ])]
         }
     };
 
@@ -1244,5 +1263,33 @@ mod tests {
         );
         let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(labels, vec!["Copy hash"]);
+    }
+
+    #[test]
+    fn url_palette_exposes_pane_browser_and_copy_in_that_order() {
+        // tn-t0gp: URL right-click menu must expose both "open in new
+        // pane" (webview-tile, matches the tiling thesis) and "open in
+        // browser" (system default, cookie-gated sites). Pane action is
+        // first so the hover default matches the plain-click default.
+        use therminal_terminal::hotspot_detection::HotspotKind;
+        let menu = build_hotspot_palette(
+            HotspotKind::Url,
+            "https://example.com/path?q=1".to_string(),
+            false,
+            &[],
+            (0.0, 0.0),
+        );
+        let items = menu.flat_items();
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(
+            labels,
+            vec!["Open URL in new pane", "Open URL in browser", "Copy URL"]
+        );
+        assert!(matches!(
+            items[0].action,
+            KeyAction::HotspotOpenUrlInPane(_)
+        ));
+        assert!(matches!(items[1].action, KeyAction::HotspotOpenExternal(_)));
+        assert!(matches!(items[2].action, KeyAction::HotspotCopy(_)));
     }
 }

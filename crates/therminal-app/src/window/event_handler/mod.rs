@@ -247,6 +247,7 @@ impl App {
             | KeyAction::HotspotOpenFolderInPane(_)
             | KeyAction::HotspotOpenFolderInFileManager(_)
             | KeyAction::HotspotShowGitRef { .. }
+            | KeyAction::HotspotOpenUrlInPane(_)
             | KeyAction::OpenInBrowser(_) => {}
         }
         true
@@ -351,27 +352,54 @@ impl App {
         // If a hotspot sits under the cursor, prepend hotspot-specific
         // action sections so both the hotspot actions and the generic pane
         // actions are available in a single merged menu.
+        //
+        // URL hyperlinks are a special case (tn-t0gp): regex-detected
+        // URLs carry the hyperlink bit but are intentionally excluded
+        // from `hotspot_map` in `process_hotspots` so they don't render a
+        // second dotted underline on top of the existing colored one. So
+        // we fall back to `hyperlink_map` and synthesise a URL hotspot
+        // palette when the cell holds an `http(s)://` hyperlink.
         if !has_selection
             && let Some((col, row)) = self.pixel_to_grid_for_pane(px as f64, py as f64, pane_id)
-            && let Some((kind, text, is_dir, resolved)) = self
+        {
+            let hotspot_entry = self
                 .grid_renderer
                 .as_ref()
-                .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned())
-        {
-            // Prefer the harness-resolved absolute path when present
-            // (tn-gidy) so right-click menu actions also survive agent
-            // worktree hops.
-            let effective = resolved.unwrap_or(text);
-            let hotspot_menu = crate::menu::build_hotspot_palette(
-                kind,
-                effective.to_string(),
-                is_dir,
-                &self.discovered_git_tools,
-                (px, py),
-            );
-            let mut merged = hotspot_menu.sections;
-            merged.append(&mut menu.sections);
-            menu.sections = merged;
+                .and_then(|r| r.hotspot_map.get(&(pane_id, row, col)).cloned());
+
+            let hotspot_menu = if let Some((kind, text, is_dir, resolved)) = hotspot_entry {
+                // Prefer the harness-resolved absolute path when present
+                // (tn-gidy) so right-click menu actions also survive agent
+                // worktree hops.
+                let effective = resolved.unwrap_or(text);
+                Some(crate::menu::build_hotspot_palette(
+                    kind,
+                    effective.to_string(),
+                    is_dir,
+                    &self.discovered_git_tools,
+                    (px, py),
+                ))
+            } else {
+                self.grid_renderer
+                    .as_ref()
+                    .and_then(|r| r.hyperlink_map.get(&(pane_id, row, col)).cloned())
+                    .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+                    .map(|url| {
+                        crate::menu::build_hotspot_palette(
+                            therminal_terminal::hotspot_detection::HotspotKind::Url,
+                            url.to_string(),
+                            false,
+                            &self.discovered_git_tools,
+                            (px, py),
+                        )
+                    })
+            };
+
+            if let Some(hotspot_menu) = hotspot_menu {
+                let mut merged = hotspot_menu.sections;
+                merged.append(&mut menu.sections);
+                menu.sections = merged;
+            }
         }
 
         self.active_menu = Some(menu);
@@ -450,6 +478,22 @@ impl App {
                 if let Err(e) = open::that(url) {
                     warn!("failed to open URL in browser {url}: {e}");
                     self.show_toast(format!("Failed to open in browser: {e}"));
+                }
+            }
+            KeyAction::HotspotOpenUrlInPane(ref url) => {
+                // tn-t0gp: open URL in a new WebView pane split off the
+                // menu's pane context (right-click originator) or the
+                // currently focused pane. `create_webview_pane` splits
+                // from the focused pane, so ensure focus is on the
+                // originator first. Runs on the main thread — no IPC
+                // round-trip (tn-ojy9 precedent).
+                let source_pane = menu_pane_id.or_else(|| self.focused_pane());
+                if let Some(id) = source_pane {
+                    self.set_focused_pane(Some(id));
+                }
+                if let Err(e) = self.create_webview_pane(url) {
+                    warn!(url = %url, error = %e, "failed to spawn webview pane for URL hotspot");
+                    self.show_toast(format!("WebView spawn failed: {e}"));
                 }
             }
             KeyAction::NavigateWebView => {

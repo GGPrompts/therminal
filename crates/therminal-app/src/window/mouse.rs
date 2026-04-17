@@ -474,7 +474,12 @@ impl App {
                 let is_click = self.click_count == 1 && (pixel_close || same_cell);
                 if is_click {
                     if let Some(url) = self.hyperlink_at(target_pane, row, col) {
-                        self.open_hyperlink(&url);
+                        // tn-t0gp: route URL clicks through the config +
+                        // modifier matrix. Default is "webview" — open the
+                        // URL in a new tiled pane. Shift flips the action
+                        // so users always have a shortcut to the other
+                        // option without diving into the right-click menu.
+                        self.open_url_click(target_pane, &url, shift_held);
                     } else {
                         self.handle_hotspot_click(target_pane, row, col);
                     }
@@ -856,9 +861,65 @@ impl App {
     }
 
     /// Open a hyperlink URL using the platform default handler.
+    ///
+    /// Used for `file://` hyperlinks (OSC 8) where opening-in-pane makes
+    /// no sense. For http(s) URLs, callers use [`open_url_click`] instead
+    /// so the tn-t0gp webview/browser routing applies.
     fn open_hyperlink(&self, url: &str) {
         if let Err(e) = open::that(url) {
             warn!("Failed to open hyperlink {url}: {e}");
+        }
+    }
+
+    /// Route a URL hotspot click through the tn-t0gp decision matrix.
+    ///
+    /// The default action (set via `[hotspots] url_action` in config) is
+    /// used when no modifier is held; holding `Shift` flips to the other
+    /// action so power users always have a one-gesture escape hatch
+    /// regardless of how their config is set.
+    ///
+    /// - `url_action = "webview"` (default):
+    ///   - plain click    → tile a new WebView pane with the URL
+    ///   - Shift+click    → open in the system browser
+    /// - `url_action = "browser"`:
+    ///   - plain click    → open in the system browser
+    ///   - Shift+click    → tile a new WebView pane with the URL
+    ///
+    /// Non-`http(s)` hyperlinks (e.g. OSC 8 `file://`) always fall through
+    /// to the platform default handler — opening a local file path in a
+    /// WebView pane is not a useful default.
+    fn open_url_click(&mut self, source_pane: PaneId, url: &str, shift_held: bool) {
+        use therminal_core::config::UrlHotspotAction;
+
+        // WebView panes only make sense for http(s) URLs. `file://` and
+        // other schemes always go through `open::that` like before.
+        let is_http_url = url.starts_with("http://") || url.starts_with("https://");
+        if !is_http_url {
+            self.open_hyperlink(url);
+            return;
+        }
+
+        let default_action = self.config.hotspots.url_action;
+        let use_webview = match (default_action, shift_held) {
+            (UrlHotspotAction::Webview, false) => true,
+            (UrlHotspotAction::Webview, true) => false,
+            (UrlHotspotAction::Browser, false) => false,
+            (UrlHotspotAction::Browser, true) => true,
+        };
+
+        if use_webview {
+            // `create_webview_pane` splits from the focused pane. Switch
+            // focus to the clicked pane first so the split lands adjacent
+            // to where the user clicked, matching the mental model
+            // "this URL opens next to this pane".
+            self.set_focused_pane(Some(source_pane));
+            if let Err(e) = self.create_webview_pane(url) {
+                warn!(url, error = %e, "URL hotspot click: webview spawn failed");
+                self.show_toast(format!("WebView spawn failed: {e}"));
+            }
+        } else if let Err(e) = open::that(url) {
+            warn!("Failed to open URL {url} in browser: {e}");
+            self.show_toast(format!("Failed to open in browser: {e}"));
         }
     }
 

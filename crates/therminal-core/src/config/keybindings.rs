@@ -121,6 +121,11 @@ pub enum KeyAction {
     /// Open a URL in the system default browser (tn-s5vj).
     /// Used by the WebView pane context menu "Open in browser" action.
     OpenInBrowser(String),
+    /// Open a URL in a new WebView pane, split from the currently focused
+    /// pane (tn-t0gp). Used by URL hotspot clicks when
+    /// `[hotspots] url_action = "webview"` (the default) and by the
+    /// right-click "Open URL in new pane" menu entry.
+    HotspotOpenUrlInPane(String),
     /// Open the inline URL input over the focused WebView pane (tn-wvll).
     /// No payload — the URL comes from the input overlay. The keybinding
     /// dispatcher must guard this so it only fires when the focused pane
@@ -185,6 +190,7 @@ impl KeyAction {
             KeyAction::HotspotOpenFolderInFileManager(_) => "Open folder in file manager",
             KeyAction::HotspotShowGitRef { .. } => "Show git commit in TUI tool",
             KeyAction::OpenInBrowser(_) => "Open URL in browser",
+            KeyAction::HotspotOpenUrlInPane(_) => "Open URL in new pane",
             KeyAction::NavigateWebView => "Navigate WebView pane to URL",
             KeyAction::SpawnWebViewPane => "Spawn new WebView pane from URL",
         }
@@ -240,6 +246,7 @@ impl KeyAction {
             | KeyAction::HotspotOpenFolderInPane(_)
             | KeyAction::HotspotOpenFolderInFileManager(_)
             | KeyAction::HotspotShowGitRef { .. }
+            | KeyAction::HotspotOpenUrlInPane(_)
             | KeyAction::OpenInBrowser(_) => "Hotspot",
         }
     }
