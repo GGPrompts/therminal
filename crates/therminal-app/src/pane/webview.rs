@@ -297,3 +297,105 @@ pub fn webview_content_rect(viewport: Rect, header_h: f32) -> Rect {
         (viewport.height() - header_h).max(1.0),
     )
 }
+
+/// Normalize a user-entered URL into something WebView2 / WebKitGTK / WKWebView
+/// will actually load.
+///
+/// wry passes the string straight through to the platform engine, which
+/// rejects bare hostnames (`ggprompts.com`) with malformed-URL errors — on
+/// Windows WebView2 surfaces HRESULT 0x80070057. Shell users habitually type
+/// bare domains, so we prepend `https://` unless the input already carries
+/// a scheme.
+///
+/// Preserved as-is:
+/// - Anything containing `://` (http, https, file, ftp, ws, …)
+/// - Schemeless URIs that don't use `//` (`about:blank`, `data:...`,
+///   `javascript:...`, `mailto:...`, `tel:...`)
+///
+/// Empty input returns an empty string; callers must treat that as a cancel.
+pub fn normalize_webview_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    const SCHEMELESS: &[&str] = &["about:", "data:", "javascript:", "mailto:", "tel:"];
+    for prefix in SCHEMELESS {
+        if trimmed.starts_with(prefix) {
+            return trimmed.to_string();
+        }
+    }
+    format!("https://{trimmed}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_webview_url;
+
+    #[test]
+    fn bare_domain_gets_https_scheme() {
+        assert_eq!(
+            normalize_webview_url("ggprompts.com"),
+            "https://ggprompts.com"
+        );
+        assert_eq!(
+            normalize_webview_url("example.com/path?q=1"),
+            "https://example.com/path?q=1"
+        );
+    }
+
+    #[test]
+    fn existing_http_scheme_is_preserved() {
+        assert_eq!(
+            normalize_webview_url("http://localhost:3000"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            normalize_webview_url("https://example.com"),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalize_webview_url("file:///tmp/x.html"),
+            "file:///tmp/x.html"
+        );
+        assert_eq!(
+            normalize_webview_url("ws://localhost:8080/sock"),
+            "ws://localhost:8080/sock"
+        );
+    }
+
+    #[test]
+    fn schemeless_uri_forms_are_preserved() {
+        assert_eq!(normalize_webview_url("about:blank"), "about:blank");
+        assert_eq!(
+            normalize_webview_url("data:text/html,hi"),
+            "data:text/html,hi"
+        );
+        assert_eq!(
+            normalize_webview_url("javascript:void(0)"),
+            "javascript:void(0)"
+        );
+    }
+
+    #[test]
+    fn whitespace_is_trimmed() {
+        assert_eq!(
+            normalize_webview_url("   ggprompts.com   "),
+            "https://ggprompts.com"
+        );
+        assert_eq!(normalize_webview_url(""), "");
+        assert_eq!(normalize_webview_url("   "), "");
+    }
+
+    #[test]
+    fn localhost_without_scheme_defaults_to_https() {
+        // Pragmatic default: user on localhost hitting http has to type the
+        // scheme explicitly; bare `localhost:3000` is a hostport, not a URI.
+        assert_eq!(
+            normalize_webview_url("localhost:3000"),
+            "https://localhost:3000"
+        );
+    }
+}

@@ -429,7 +429,16 @@ impl App {
             })
             .unwrap_or(crate::pane::SplitDirection::Horizontal);
 
-        let url_owned = url.to_string();
+        // Normalize the URL before anything else touches it (tn-jju2). wry
+        // rejects bare hostnames like `ggprompts.com` with a malformed-URL
+        // error — on Windows WebView2 it's HRESULT 0x80070057 — so shell
+        // users who type domains without `https://` end up with a stranded
+        // blank pane. Normalization happens here rather than at the call
+        // sites so every entry point (inline prompt, MCP, CLI) benefits.
+        let url_owned = crate::pane::webview::normalize_webview_url(url);
+        if url_owned.is_empty() {
+            return Err("url is empty".to_string());
+        }
 
         // Step 1: Insert the WebView PaneState into the layout tree.
         let layout = self
@@ -462,6 +471,11 @@ impl App {
                     if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
                         layout.remove_pane(new_id);
                     }
+                    // Without these the half-created pane lingers visually
+                    // and the daemon's workspace snapshot diverges from the
+                    // GUI layout (tn-jju2).
+                    self.relayout_and_redraw();
+                    self.publish_workspace_state();
                     return Err("no active window to attach webview to".to_string());
                 }
             };
@@ -481,6 +495,12 @@ impl App {
                 if let Some(layout) = self.workspaces.as_mut().map(|wm| wm.layout_mut()) {
                     layout.remove_pane(new_id);
                 }
+                // Re-layout + republish so the GUI repaints without the ghost
+                // pane and the daemon's workspace snapshot stays in sync. The
+                // prior code left both stale and stranded the user with an
+                // unclosable blank pane (tn-jju2).
+                self.relayout_and_redraw();
+                self.publish_workspace_state();
                 self.show_toast(format!("WebView failed: {e}"));
                 return Err(format!("failed to create native webview: {e}"));
             }
@@ -499,7 +519,7 @@ impl App {
             crate::window::App::schedule_webview_focus_retries(self.event_proxy.clone());
         }
 
-        info!(pane_id = new_id, url, "created webview pane");
+        info!(pane_id = new_id, url = %url_owned, "created webview pane");
         self.last_split_direction = direction;
         // tn-2wco: do NOT auto-focus the new WebView pane. Keystrokes to
         // WebView panes are silently dropped by `handle_key_input`

@@ -1387,6 +1387,19 @@ impl App {
         }
         match state.mode {
             NavigateMode::Navigate => {
+                // tn-jju2: bare hostnames (`ggprompts.com`) otherwise make
+                // the platform webview reject the load with a malformed-URL
+                // error. Spawn path normalizes inside `create_webview_pane`;
+                // navigate path has to normalize here because the pane's
+                // stored URL ends up persisted and surfaced in the menu's
+                // "Copy URL" entry.
+                let url = crate::pane::webview::normalize_webview_url(&url);
+                if url.is_empty() {
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 self.webview_manager.navigate(state.pane_id, &url);
                 if let Some(layout) = self.get_layout_mut()
                     && let Some(pane) = layout.find_pane_mut(state.pane_id)
