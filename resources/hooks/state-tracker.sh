@@ -24,6 +24,22 @@ mkdir -p "$STATE_DIR" "$DEBUG_DIR" "$SUBAGENT_DIR"
 _THERMINAL_HOOK_WARNED=0
 _THERMINAL_WARN_FILE="$STATE_DIR/.therminal-hook-warned"
 
+# Fire-and-forget invocation of the therminal binary. On WSL, route through
+# `cmd.exe /c start /B ""` so therminal.exe attaches to cmd.exe's inherited
+# ConPTY instead of allocating a fresh Windows console window — otherwise
+# every subagent event pops an empty console titled "therminal" when the
+# hook runs detached from the WSL shell's terminal (tn-ax49).
+_invoke_therminal_async() {
+    local bin="$1"; shift
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        local winbin
+        winbin=$(wslpath -w "$bin" 2>/dev/null) || winbin="$bin"
+        cmd.exe /c start /B "" "$winbin" "$@" </dev/null >/dev/null 2>&1 &
+    else
+        "$bin" "$@" </dev/null >/dev/null 2>&1 &
+    fi
+}
+
 _resolve_therminal_bin() {
     # 1. Explicit override
     if [[ -n "${THERMINAL_WINDOWS_BIN:-}" ]]; then
@@ -273,13 +289,12 @@ case "$HOOK_TYPE" in
         # Push to therminal daemon for fast auto-tile (fire-and-forget)
         _tn=$(_resolve_therminal_bin)
         if [[ -n "$_tn" && -x "$_tn" ]]; then
-            "$_tn" agent-event push \
+            _invoke_therminal_async "$_tn" agent-event push \
                 --event subagent_start \
                 --session-id "${CLAUDE_SESSION_ID:-}" \
                 --parent-session-id "${CLAUDE_SESSION_ID:-}" \
                 --agent-id "$AGENT_ID" \
-                --agent-type "$AGENT_TYPE" \
-                2>/dev/null &
+                --agent-type "$AGENT_TYPE"
         fi
         ;;
     subagent-stop)
@@ -299,12 +314,11 @@ case "$HOOK_TYPE" in
         # Push to therminal daemon for fast pane reclaim (fire-and-forget)
         _tn=$(_resolve_therminal_bin)
         if [[ -n "$_tn" && -x "$_tn" ]]; then
-            "$_tn" agent-event push \
+            _invoke_therminal_async "$_tn" agent-event push \
                 --event subagent_stop \
                 --session-id "${CLAUDE_SESSION_ID:-}" \
                 --parent-session-id "${CLAUDE_SESSION_ID:-}" \
-                --agent-id "$AGENT_ID" \
-                2>/dev/null &
+                --agent-id "$AGENT_ID"
         fi
         ;;
     notification)
