@@ -367,7 +367,9 @@ CLAUDE_SESSION_ID=$(cat "$SID_FILE" 2>/dev/null || echo "")
 # If we have claude_session_id, try to read context data
 if [[ -n "$CLAUDE_SESSION_ID" ]]; then
     CONTEXT_FILE="$STATE_DIR/${CLAUDE_SESSION_ID}-context.json"
-    if [[ -f "$CONTEXT_FILE" ]]; then
+    # Require -s (non-empty): jq on an empty file exits 0 with empty stdout,
+    # which then feeds "" into --argjson below and blows up the whole hook.
+    if [[ -s "$CONTEXT_FILE" ]]; then
         # Check if context file is fresh (within 60 seconds)
         CONTEXT_AGE=$(($(date +%s) - $(file_mtime "$CONTEXT_FILE")))
         if [[ $CONTEXT_AGE -lt 60 ]]; then
@@ -375,6 +377,12 @@ if [[ -n "$CLAUDE_SESSION_ID" ]]; then
             CONTEXT_WINDOW_SIZE=$(jq -r '.context_window.context_window_size // "null"' "$CONTEXT_FILE" 2>/dev/null || echo "null")
             TOTAL_INPUT_TOKENS=$(jq -r '.context_window.total_input_tokens // "null"' "$CONTEXT_FILE" 2>/dev/null || echo "null")
             TOTAL_OUTPUT_TOKENS=$(jq -r '.context_window.total_output_tokens // "null"' "$CONTEXT_FILE" 2>/dev/null || echo "null")
+            # Belt-and-suspenders: normalize any empty captures to the literal
+            # JSON null so --argjson never sees "".
+            [[ -z "$CONTEXT_PERCENT"      ]] && CONTEXT_PERCENT="null"
+            [[ -z "$CONTEXT_WINDOW_SIZE"  ]] && CONTEXT_WINDOW_SIZE="null"
+            [[ -z "$TOTAL_INPUT_TOKENS"   ]] && TOTAL_INPUT_TOKENS="null"
+            [[ -z "$TOTAL_OUTPUT_TOKENS"  ]] && TOTAL_OUTPUT_TOKENS="null"
         fi
     fi
 fi
