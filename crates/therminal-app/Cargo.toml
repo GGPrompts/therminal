@@ -49,7 +49,10 @@ libc = { workspace = true }
 # tn-shgq: Win32 SetFocus/GetFocus to move keyboard focus from a wry
 # WebView2 child HWND back to our main HWND. winit's focus_window() uses
 # SetForegroundWindow, which doesn't change child-HWND keyboard focus.
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse"] }
+# tn-8lyq: Win32_System_Console for AttachConsole(ATTACH_PARENT_PROCESS) —
+# the GUI subsystem binary re-attaches to the parent console when launched
+# from CMD/PowerShell/WT so CLI subcommand output still reaches the user.
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Console"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

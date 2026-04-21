@@ -24,20 +24,18 @@ mkdir -p "$STATE_DIR" "$DEBUG_DIR" "$SUBAGENT_DIR"
 _THERMINAL_HOOK_WARNED=0
 _THERMINAL_WARN_FILE="$STATE_DIR/.therminal-hook-warned"
 
-# Fire-and-forget invocation of the therminal binary. On WSL, route through
-# `cmd.exe /c start /B ""` so therminal.exe attaches to cmd.exe's inherited
-# ConPTY instead of allocating a fresh Windows console window — otherwise
-# every subagent event pops an empty console titled "therminal" when the
-# hook runs detached from the WSL shell's terminal (tn-ax49).
+# Fire-and-forget invocation of the therminal binary.
+#
+# tn-8lyq: therminal.exe release builds are compiled with
+# `#![windows_subsystem = "windows"]`, so Windows never allocates a console
+# for them at startup — we can invoke therminal.exe directly from WSL
+# without flashing a conhost window. The earlier `cmd.exe /c start /B ""`
+# wrapper is deliberately gone: cmd.exe itself is a CONSOLE subsystem
+# binary, so wrapping through it re-introduced the exact flash we were
+# trying to hide.
 _invoke_therminal_async() {
     local bin="$1"; shift
-    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
-        local winbin
-        winbin=$(wslpath -w "$bin" 2>/dev/null) || winbin="$bin"
-        cmd.exe /c start /B "" "$winbin" "$@" </dev/null >/dev/null 2>&1 &
-    else
-        "$bin" "$@" </dev/null >/dev/null 2>&1 &
-    fi
+    "$bin" "$@" </dev/null >/dev/null 2>&1 &
 }
 
 _resolve_therminal_bin() {

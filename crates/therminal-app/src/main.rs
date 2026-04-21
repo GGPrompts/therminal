@@ -1,3 +1,13 @@
+// tn-8lyq: On Windows release builds, compile as a GUI subsystem binary so
+// Windows never allocates a console — this is what prevents the conhost
+// flash when WSL Claude-Code hooks fire `therminal agent-event push` as
+// a detached background process. Debug builds keep the default CONSOLE
+// subsystem so `cargo run` behaves normally.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod claude_cwd;
 mod cli;
 mod clipboard;
@@ -112,7 +122,39 @@ enum Command {
     },
 }
 
+/// Attach to the parent process's console on Windows release builds.
+///
+/// Pairs with the `windows_subsystem = "windows"` attribute above: with the
+/// GUI subsystem flag, Windows never allocates a console for us at startup
+/// (no conhost flash), but CLI subcommands like `therminal pane list` still
+/// need to write to the invoking shell. `AttachConsole(ATTACH_PARENT_PROCESS)`
+/// inherits the parent console when launched from CMD / PowerShell / Windows
+/// Terminal, and is a no-op when launched from a non-console parent (GUI
+/// shortcut, WSL hook, Explorer double-click). Rust's stdio handles are
+/// resolved lazily, so this must run before any `println!` / `eprintln!`.
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: AttachConsole is a pure Win32 entry point with no Rust-side
+    // aliasing or lifetime requirements. It runs single-threaded at process
+    // startup before any worker threads exist. Return value is ignored —
+    // failure just means "no console to attach to" which is the GUI / hook
+    // path we explicitly want to support silently.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+fn attach_parent_console() {}
+
 fn main() -> Result<()> {
+    // tn-8lyq: pair with `windows_subsystem = "windows"` — attach to the
+    // invoking console so CLI subcommand output still reaches the user.
+    // Must run before any stdout/stderr write (clipboard::init, Cli::parse,
+    // tracing-subscriber), because Rust stdio handles are cached on first use.
+    attach_parent_console();
+
     // Initialize clipboard before any threads exist. On WSL2 this performs
     // a transient WAYLAND_DISPLAY env mutation to force arboard onto the
     // X11 backend; it is only sound while we are still single-threaded.
