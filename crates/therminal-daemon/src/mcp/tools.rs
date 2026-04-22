@@ -226,6 +226,7 @@ impl TherminalMcpServer {
                         env: resolved.env,
                         cwd: resolved.cwd,
                         skip_shell_integration: resolved.skip_shell_integration,
+                        advertise_kitty_graphics: false,
                     },
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -323,6 +324,7 @@ impl TherminalMcpServer {
                         env: resolved.env,
                         cwd: resolved.cwd,
                         skip_shell_integration: resolved.skip_shell_integration,
+                        advertise_kitty_graphics: false,
                     },
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(

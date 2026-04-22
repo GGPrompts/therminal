@@ -308,18 +308,22 @@ fn next_kitty_window_id() -> String {
 /// - `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` — Ghostty-style harness detection.
 /// - `THERMINAL_RESOURCES_DIR` — absolute path to bundled resources.
 /// - `KITTY_WINDOW_ID` — non-empty marker that advertises Kitty graphics
-///   support to clients that sniff the environment before probing
-///   (tn-xnsv). Paired with the graphics feature-query APC response path
-///   in `crate::graphics` (tn-7xme). `TERM` is deliberately left alone —
-///   the terminfo story is tracked separately.
-fn set_common_env(cmd: &mut CommandBuilder) {
+///   support (tn-xnsv). Only exported when `advertise_kitty_graphics` is
+///   true; gated behind `[terminal].kitty_graphics` config (default false)
+///   until tn-m4ix visual verification confirms clients (TFE, viu) don't
+///   regress. Paired with the graphics feature-query APC response path in
+///   `crate::graphics` (tn-7xme). `TERM` is deliberately left alone — the
+///   terminfo story is tracked separately.
+fn set_common_env(cmd: &mut CommandBuilder, advertise_kitty_graphics: bool) {
     cmd.env("TERM_PROGRAM", "therminal");
     cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     cmd.env(
         "THERMINAL_RESOURCES_DIR",
         therminal_runtime::paths::resources_dir(),
     );
-    cmd.env("KITTY_WINDOW_ID", next_kitty_window_id());
+    if advertise_kitty_graphics {
+        cmd.env("KITTY_WINDOW_ID", next_kitty_window_id());
+    }
 }
 
 /// Build a `CommandBuilder` for the given shell with integration auto-sourcing.
@@ -336,6 +340,7 @@ fn build_shell_command(
     shell: &str,
     shell_type: ShellType,
     initial_cwd: Option<&str>,
+    advertise_kitty_graphics: bool,
 ) -> Result<CommandBuilder, PtyError> {
     let integration_dir = shell_integration_dir();
 
@@ -349,7 +354,7 @@ fn build_shell_command(
             // but --rcfile is only honored for non-login interactive shells.
             // So we DON'T pass --login; the wrapper sources .bashrc explicitly.
             cmd.args(["--rcfile", &rcfile.to_string_lossy()]);
-            set_common_env(&mut cmd);
+            set_common_env(&mut cmd, advertise_kitty_graphics);
             // BASH_ENV is read by non-interactive bash (scripts, subshells).
             cmd.env("BASH_ENV", &integration_script);
             debug!(
@@ -364,7 +369,7 @@ fn build_shell_command(
             let mut cmd = CommandBuilder::new(shell);
             // Spawn as login shell for zsh.
             cmd.args(["--login"]);
-            set_common_env(&mut cmd);
+            set_common_env(&mut cmd, advertise_kitty_graphics);
             // Save original ZDOTDIR so our wrapper can restore it.
             if let Ok(orig) = std::env::var("ZDOTDIR") {
                 cmd.env("_THERMINAL_ORIG_ZDOTDIR", &orig);
@@ -383,7 +388,7 @@ fn build_shell_command(
             let mut cmd = CommandBuilder::new(shell);
             // --login for login behavior, --init-command to source integration.
             cmd.args(["--login", "--init-command", &source_cmd]);
-            set_common_env(&mut cmd);
+            set_common_env(&mut cmd, advertise_kitty_graphics);
             debug!(shell = shell, "fish: using --init-command for integration");
             Ok(cmd)
         }
@@ -392,7 +397,7 @@ fn build_shell_command(
             let dot_source = format!(". '{}'", integration_script.display());
             let mut cmd = CommandBuilder::new(shell);
             cmd.args(["-NoExit", "-Command", &dot_source]);
-            set_common_env(&mut cmd);
+            set_common_env(&mut cmd, advertise_kitty_graphics);
             debug!(
                 shell = shell,
                 "powershell: using -NoExit -Command for integration"
@@ -410,10 +415,13 @@ fn build_shell_command(
             cmd.arg(initial_cwd.unwrap_or("~"));
             cmd.env("TERM_PROGRAM", "therminal");
             cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-            // Advertise Kitty graphics support (tn-xnsv). Not routed
-            // through `set_common_env` because the WSL path handles
-            // THERMINAL_RESOURCES_DIR separately (Windows→WSL rewrite).
-            cmd.env("KITTY_WINDOW_ID", next_kitty_window_id());
+            // Advertise Kitty graphics support (tn-xnsv) — gated by config
+            // (tn-m4ix). Not routed through `set_common_env` because the WSL
+            // path handles THERMINAL_RESOURCES_DIR separately (Windows→WSL
+            // rewrite).
+            if advertise_kitty_graphics {
+                cmd.env("KITTY_WINDOW_ID", next_kitty_window_id());
+            }
 
             // Convert Windows resources path to WSL path for the Linux shell.
             let resources = therminal_runtime::paths::resources_dir();
@@ -445,7 +453,7 @@ fn build_shell_command(
             // but nothing breaks.
             let integration_script = integration_dir.join("therminal.bash");
             let mut cmd = CommandBuilder::new(shell);
-            set_common_env(&mut cmd);
+            set_common_env(&mut cmd, advertise_kitty_graphics);
             if integration_script.exists() {
                 cmd.env("ENV", &integration_script);
                 cmd.env("BASH_ENV", &integration_script);
@@ -476,6 +484,12 @@ pub struct SpawnOptions {
     /// mode where the target is unlikely to benefit from shell integration
     /// (e.g. `docker exec`, `ssh`, `htop`).
     pub skip_shell_integration: bool,
+    /// When `true`, export `KITTY_WINDOW_ID` so clients that sniff the env
+    /// (TFE, viu, chafa) route images through the Kitty graphics protocol
+    /// instead of half-block fallbacks. Populated from
+    /// `[terminal].kitty_graphics` in `TherminalConfig`. Default `false` —
+    /// gated until tn-m4ix visual verification lands.
+    pub advertise_kitty_graphics: bool,
 }
 
 /// Spawn the user's default shell in a new PTY of the given size.
@@ -542,7 +556,7 @@ pub fn spawn_shell_with_options(
     let mut cmd = if options.skip_shell_integration {
         // Direct execution: no rcfile wrappers or integration injection.
         let mut c = CommandBuilder::new(&shell);
-        set_common_env(&mut c);
+        set_common_env(&mut c, options.advertise_kitty_graphics);
         c
     } else {
         let cwd_for_cmd = if options.cwd.is_empty() {
@@ -550,7 +564,12 @@ pub fn spawn_shell_with_options(
         } else {
             Some(options.cwd.as_str())
         };
-        build_shell_command(&shell, shell_type, cwd_for_cmd)?
+        build_shell_command(
+            &shell,
+            shell_type,
+            cwd_for_cmd,
+            options.advertise_kitty_graphics,
+        )?
     };
 
     // Append user-configured shell args after shell-integration args.
@@ -723,7 +742,7 @@ mod tests {
 
     #[test]
     fn build_shell_command_bash() {
-        let cmd = build_shell_command("/bin/bash", ShellType::Bash, None)
+        let cmd = build_shell_command("/bin/bash", ShellType::Bash, None, false)
             .expect("failed to build bash command");
         // The command should not be a default_prog (it has explicit args).
         assert!(
@@ -740,8 +759,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn build_shell_command_wsl_uses_provided_cwd() {
-        let cmd = build_shell_command("wsl.exe", ShellType::Wsl, Some("/home/marci/projects"))
-            .expect("failed to build wsl command");
+        let cmd = build_shell_command(
+            "wsl.exe",
+            ShellType::Wsl,
+            Some("/home/marci/projects"),
+            false,
+        )
+        .expect("failed to build wsl command");
         let argv: Vec<String> = cmd
             .get_argv()
             .iter()
@@ -762,7 +786,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn build_shell_command_wsl_falls_back_to_home_when_no_cwd() {
-        let cmd = build_shell_command("wsl.exe", ShellType::Wsl, None)
+        let cmd = build_shell_command("wsl.exe", ShellType::Wsl, None, false)
             .expect("failed to build wsl command");
         let argv: Vec<String> = cmd
             .get_argv()
@@ -782,7 +806,7 @@ mod tests {
 
     #[test]
     fn build_shell_command_unknown_uses_configured_shell() {
-        let cmd = build_shell_command("/bin/sh", ShellType::Unknown, None)
+        let cmd = build_shell_command("/bin/sh", ShellType::Unknown, None, false)
             .expect("failed to build unknown shell command");
         // Unknown shell should use the configured shell path, not default_prog.
         assert!(
@@ -940,12 +964,13 @@ mod tests {
     fn set_common_env_exports_non_empty_kitty_window_id() {
         // tn-xnsv: clients like TFE / viu / chafa sniff `KITTY_WINDOW_ID`
         // to decide whether to speak the Kitty graphics protocol. The
-        // value itself is cosmetic; it just has to be non-empty.
+        // value itself is cosmetic; it just has to be non-empty. tn-m4ix
+        // gates the advertise behind a bool so this test opts in.
         let mut cmd = CommandBuilder::new("/bin/sh");
-        set_common_env(&mut cmd);
+        set_common_env(&mut cmd, true);
         let raw = cmd
             .get_env("KITTY_WINDOW_ID")
-            .expect("KITTY_WINDOW_ID must be set by set_common_env");
+            .expect("KITTY_WINDOW_ID must be set by set_common_env when advertise=true");
         let value = raw.to_string_lossy();
         assert!(
             !value.is_empty(),
@@ -959,13 +984,26 @@ mod tests {
     }
 
     #[test]
+    fn set_common_env_skips_kitty_window_id_when_disabled() {
+        // tn-m4ix: with the config gate off (the default), clients that
+        // sniff the env must not see a KITTY_WINDOW_ID so they stay on
+        // their half-block fallback path.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        set_common_env(&mut cmd, false);
+        assert!(
+            cmd.get_env("KITTY_WINDOW_ID").is_none(),
+            "KITTY_WINDOW_ID must not be exported when advertise=false",
+        );
+    }
+
+    #[test]
     fn set_common_env_issues_unique_kitty_window_ids() {
         // Two successive spawns in the same process get distinct ids so
         // downstream tooling that caches on the id doesn't collide.
         let mut a = CommandBuilder::new("/bin/sh");
         let mut b = CommandBuilder::new("/bin/sh");
-        set_common_env(&mut a);
-        set_common_env(&mut b);
+        set_common_env(&mut a, true);
+        set_common_env(&mut b, true);
         let va = a.get_env("KITTY_WINDOW_ID").unwrap().to_owned();
         let vb = b.get_env("KITTY_WINDOW_ID").unwrap().to_owned();
         assert_ne!(
@@ -979,7 +1017,7 @@ mod tests {
         // Guard against a future regression that drops the Ghostty-style
         // detection vars while adding new ones.
         let mut cmd = CommandBuilder::new("/bin/sh");
-        set_common_env(&mut cmd);
+        set_common_env(&mut cmd, true);
         assert_eq!(
             cmd.get_env("TERM_PROGRAM")
                 .map(|s| s.to_string_lossy().into_owned()),
@@ -987,7 +1025,7 @@ mod tests {
         );
         assert!(cmd.get_env("TERM_PROGRAM_VERSION").is_some());
         assert!(cmd.get_env("THERMINAL_RESOURCES_DIR").is_some());
-        // And the new one.
+        // And the gated one.
         assert!(cmd.get_env("KITTY_WINDOW_ID").is_some());
         // We deliberately do NOT set TERM in set_common_env — terminfo
         // story is a separate issue. We can't assert TERM is unset here

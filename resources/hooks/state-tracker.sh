@@ -284,15 +284,21 @@ case "$HOOK_TYPE" in
         AGENT_TYPE=$(echo "$STDIN_DATA" | jq -r '.agent_type // "unknown"' 2>/dev/null || echo "unknown")
         AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // ""' 2>/dev/null || echo "")
         DETAILS=$(jq -n --arg type "$AGENT_TYPE" --arg count "$SUBAGENT_COUNT" '{event:"subagent_started",agent_type:$type,active_subagents:($count|tonumber)}')
-        # Push to therminal daemon for fast auto-tile (fire-and-forget)
-        _tn=$(_resolve_therminal_bin)
-        if [[ -n "$_tn" && -x "$_tn" ]]; then
-            _invoke_therminal_async "$_tn" agent-event push \
-                --event subagent_start \
-                --session-id "${CLAUDE_SESSION_ID:-}" \
-                --parent-session-id "${CLAUDE_SESSION_ID:-}" \
-                --agent-id "$AGENT_ID" \
-                --agent-type "$AGENT_TYPE"
+        # Push to therminal daemon for fast auto-tile (fire-and-forget).
+        # Gated on TERM_PROGRAM=therminal so Claude Code sessions running in
+        # other terminals (Windows Terminal, tmux, kitty, etc.) don't cause
+        # therminal to spawn phantom subagent panes for agents that have no
+        # PTY in therminal.
+        if [[ "${TERM_PROGRAM:-}" == "therminal" ]]; then
+            _tn=$(_resolve_therminal_bin)
+            if [[ -n "$_tn" && -x "$_tn" ]]; then
+                _invoke_therminal_async "$_tn" agent-event push \
+                    --event subagent_start \
+                    --session-id "${CLAUDE_SESSION_ID:-}" \
+                    --parent-session-id "${CLAUDE_SESSION_ID:-}" \
+                    --agent-id "$AGENT_ID" \
+                    --agent-type "$AGENT_TYPE"
+            fi
         fi
         ;;
     subagent-stop)
@@ -309,14 +315,16 @@ case "$HOOK_TYPE" in
             STATUS="processing"
             DETAILS=$(jq -n --arg count "$SUBAGENT_COUNT" '{event:"subagent_stopped",remaining_subagents:($count|tonumber)}')
         fi
-        # Push to therminal daemon for fast pane reclaim (fire-and-forget)
-        _tn=$(_resolve_therminal_bin)
-        if [[ -n "$_tn" && -x "$_tn" ]]; then
-            _invoke_therminal_async "$_tn" agent-event push \
-                --event subagent_stop \
-                --session-id "${CLAUDE_SESSION_ID:-}" \
-                --parent-session-id "${CLAUDE_SESSION_ID:-}" \
-                --agent-id "$AGENT_ID"
+        # Gate matches subagent-start — see note above.
+        if [[ "${TERM_PROGRAM:-}" == "therminal" ]]; then
+            _tn=$(_resolve_therminal_bin)
+            if [[ -n "$_tn" && -x "$_tn" ]]; then
+                _invoke_therminal_async "$_tn" agent-event push \
+                    --event subagent_stop \
+                    --session-id "${CLAUDE_SESSION_ID:-}" \
+                    --parent-session-id "${CLAUDE_SESSION_ID:-}" \
+                    --agent-id "$AGENT_ID"
+            fi
         fi
         ;;
     notification)

@@ -163,6 +163,7 @@ fn split_spawn_options(
         shell_args: base.shell_args.clone(),
         env: base.env.clone(),
         cwd,
+        advertise_kitty_graphics: base.advertise_kitty_graphics,
         ..Default::default()
     }
 }

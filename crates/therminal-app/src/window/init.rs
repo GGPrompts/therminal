@@ -1095,6 +1095,7 @@ impl App {
             shell: self.config.general.shell.clone(),
             shell_args: self.config.general.shell_args.clone(),
             env: self.config.general.env.clone(),
+            advertise_kitty_graphics: self.config.terminal.kitty_graphics,
             ..Default::default()
         }
     }

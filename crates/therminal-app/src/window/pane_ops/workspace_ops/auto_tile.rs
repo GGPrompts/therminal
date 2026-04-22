@@ -81,6 +81,7 @@ impl App {
                     let base_spawn_options = therminal_terminal::pty::SpawnOptions {
                         shell: self.config.general.shell.clone(),
                         env: self.config.general.env.clone(),
+                        advertise_kitty_graphics: self.config.terminal.kitty_graphics,
                         ..Default::default()
                     };
                     let proxy = self.event_proxy.clone();

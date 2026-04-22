@@ -780,6 +780,7 @@ async fn dispatch_ipc(
                 shell_args: profile_args,
                 env: profile_env,
                 skip_shell_integration: profile_skip_si,
+                advertise_kitty_graphics: false,
             };
             match mgr.split_pane_with_options(
                 *pane_id,

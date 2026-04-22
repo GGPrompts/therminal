@@ -1206,6 +1206,16 @@ pub struct TerminalConfig {
     pub osc_7777: bool,
     /// Intercept OSC 7337 sequences (shell PID reporting).
     pub osc_7337: bool,
+    /// Advertise Kitty graphics protocol support to child processes by
+    /// exporting `KITTY_WINDOW_ID`. Clients like TFE, viu, and chafa sniff
+    /// this env var to decide whether to send images via the Kitty protocol
+    /// instead of falling back to Unicode half-blocks.
+    ///
+    /// **Default `false`** until tn-m4ix visual verification confirms the
+    /// end-to-end protocol works cleanly with real-world clients. Enable
+    /// manually once you've verified `kitty +kitten icat`, `viu`, and TFE
+    /// render correctly without regressions.
+    pub kitty_graphics: bool,
 }
 
 impl Default for TerminalConfig {
@@ -1218,6 +1228,7 @@ impl Default for TerminalConfig {
             osc_1337: true,
             osc_7777: true,
             osc_7337: true,
+            kitty_graphics: false,
         }
     }
 }
