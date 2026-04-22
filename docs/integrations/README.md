@@ -41,3 +41,5 @@ Current high-value CLI surfaces include:
 - [Streaming Pane Output](streaming-pane-output.md) — Subscribe to live PTY output via
   `terminal://pane/{id}/output`; comparison with conductor-mcp `watch_pane`.
 - [WSL2](wsl2.md) — Running therminal under WSL2: quirks, GPU, clipboard.
+- [Kitty Graphics Clients](kitty-graphics-clients.md) — How image-preview tools
+  auto-detect therminal via `KITTY_WINDOW_ID` + the feature-query APC (tn-xnsv).

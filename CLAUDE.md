@@ -46,11 +46,12 @@ plugins/                   # Pattern packs (TOML config, see plugins/CLAUDE.md)
 
 ## Shell Integration
 
-Therminal uses Ghostty-style `TERM_PROGRAM` detection. When spawning a PTY, three env vars are set:
+Therminal uses Ghostty-style `TERM_PROGRAM` detection. When spawning a PTY, four env vars are set:
 
 - `TERM_PROGRAM=therminal` -- shells use this to detect the terminal and auto-source integration scripts
 - `TERM_PROGRAM_VERSION` -- the crate version from `Cargo.toml`
 - `THERMINAL_RESOURCES_DIR` -- absolute path to the resources directory containing shell scripts
+- `KITTY_WINDOW_ID` -- monotonically-incrementing decimal id (tn-xnsv). The value itself is cosmetic; it only has to be non-empty so image-preview clients (TFE, viu, chafa) advertise the Kitty graphics protocol without user config. Paired with the graphics feature-query APC (`\x1b_Gi=1,a=q;\x1b\\`) which therminal answers with `OK` (tn-7xme). `TERM` is deliberately left alone — terminfo story is a separate issue.
 
 Shell integration scripts live in `resources/shell-integration/` (bash, zsh, fish, PowerShell). Each script emits OSC 133 marks (A=PromptStart, B=PromptEnd, C=PreExec, D=CommandFinished) and OSC 7 for current directory. All scripts guard against double-sourcing via `__THERMINAL_SHELL_INTEGRATION`.
 

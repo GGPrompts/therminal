@@ -287,7 +287,31 @@ unset _therminal_real_zdotdir
     Ok(zdotdir)
 }
 
+/// Monotonically increasing counter used to generate a unique
+/// `KITTY_WINDOW_ID` per spawned PTY. The exact value is cosmetic —
+/// clients (TFE, viu, chafa) only check that it's *non-empty* to decide
+/// whether to probe for Kitty-graphics support (tn-xnsv). We hand out a
+/// fresh positive integer so panes within the same process don't collide
+/// if downstream tooling ever caches on the id.
+static KITTY_WINDOW_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate the next `KITTY_WINDOW_ID` value as a decimal string.
+fn next_kitty_window_id() -> String {
+    KITTY_WINDOW_ID_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .to_string()
+}
+
 /// Set common env vars on a command builder.
+///
+/// Exports:
+/// - `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` — Ghostty-style harness detection.
+/// - `THERMINAL_RESOURCES_DIR` — absolute path to bundled resources.
+/// - `KITTY_WINDOW_ID` — non-empty marker that advertises Kitty graphics
+///   support to clients that sniff the environment before probing
+///   (tn-xnsv). Paired with the graphics feature-query APC response path
+///   in `crate::graphics` (tn-7xme). `TERM` is deliberately left alone —
+///   the terminfo story is tracked separately.
 fn set_common_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM_PROGRAM", "therminal");
     cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
@@ -295,6 +319,7 @@ fn set_common_env(cmd: &mut CommandBuilder) {
         "THERMINAL_RESOURCES_DIR",
         therminal_runtime::paths::resources_dir(),
     );
+    cmd.env("KITTY_WINDOW_ID", next_kitty_window_id());
 }
 
 /// Build a `CommandBuilder` for the given shell with integration auto-sourcing.
@@ -385,6 +410,10 @@ fn build_shell_command(
             cmd.arg(initial_cwd.unwrap_or("~"));
             cmd.env("TERM_PROGRAM", "therminal");
             cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+            // Advertise Kitty graphics support (tn-xnsv). Not routed
+            // through `set_common_env` because the WSL path handles
+            // THERMINAL_RESOURCES_DIR separately (Windows→WSL rewrite).
+            cmd.env("KITTY_WINDOW_ID", next_kitty_window_id());
 
             // Convert Windows resources path to WSL path for the Linux shell.
             let resources = therminal_runtime::paths::resources_dir();
@@ -903,6 +932,69 @@ mod tests {
     fn wsl_path_conversion_unix_passthrough() {
         let result = windows_to_wsl_path(Path::new("/usr/local/bin"));
         assert_eq!(result, "/usr/local/bin");
+    }
+
+    // ── Kitty graphics auto-detect (tn-xnsv) ────────────────────────────
+
+    #[test]
+    fn set_common_env_exports_non_empty_kitty_window_id() {
+        // tn-xnsv: clients like TFE / viu / chafa sniff `KITTY_WINDOW_ID`
+        // to decide whether to speak the Kitty graphics protocol. The
+        // value itself is cosmetic; it just has to be non-empty.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        set_common_env(&mut cmd);
+        let raw = cmd
+            .get_env("KITTY_WINDOW_ID")
+            .expect("KITTY_WINDOW_ID must be set by set_common_env");
+        let value = raw.to_string_lossy();
+        assert!(
+            !value.is_empty(),
+            "KITTY_WINDOW_ID must be non-empty so clients auto-detect Kitty graphics support",
+        );
+        // Sanity: we hand out decimal integers.
+        assert!(
+            value.chars().all(|c| c.is_ascii_digit()),
+            "KITTY_WINDOW_ID should be a decimal string, got {value:?}"
+        );
+    }
+
+    #[test]
+    fn set_common_env_issues_unique_kitty_window_ids() {
+        // Two successive spawns in the same process get distinct ids so
+        // downstream tooling that caches on the id doesn't collide.
+        let mut a = CommandBuilder::new("/bin/sh");
+        let mut b = CommandBuilder::new("/bin/sh");
+        set_common_env(&mut a);
+        set_common_env(&mut b);
+        let va = a.get_env("KITTY_WINDOW_ID").unwrap().to_owned();
+        let vb = b.get_env("KITTY_WINDOW_ID").unwrap().to_owned();
+        assert_ne!(
+            va, vb,
+            "consecutive set_common_env calls must hand out unique KITTY_WINDOW_ID values"
+        );
+    }
+
+    #[test]
+    fn set_common_env_keeps_existing_env_contract() {
+        // Guard against a future regression that drops the Ghostty-style
+        // detection vars while adding new ones.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        set_common_env(&mut cmd);
+        assert_eq!(
+            cmd.get_env("TERM_PROGRAM")
+                .map(|s| s.to_string_lossy().into_owned()),
+            Some("therminal".to_owned())
+        );
+        assert!(cmd.get_env("TERM_PROGRAM_VERSION").is_some());
+        assert!(cmd.get_env("THERMINAL_RESOURCES_DIR").is_some());
+        // And the new one.
+        assert!(cmd.get_env("KITTY_WINDOW_ID").is_some());
+        // We deliberately do NOT set TERM in set_common_env — terminfo
+        // story is a separate issue. We can't assert TERM is unset here
+        // because `CommandBuilder::new` inherits the host process env
+        // (and the test harness shell usually has TERM set). The guard
+        // against regression is the source itself: `grep -n 'TERM"' pty.rs`
+        // should only hit TERM_PROGRAM / TERM_PROGRAM_VERSION.
     }
 
     #[test]
