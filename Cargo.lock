@@ -4770,6 +4770,9 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64",
+ "flate2",
+ "image",
  "libc",
  "portable-pty",
  "regex",

@@ -74,6 +74,10 @@ anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
 
+# Kitty graphics decoding (tn-0htm)
+image = { version = "0.25", default-features = false, features = ["png"] }
+flate2 = "1"
+
 # Process inspection
 sysinfo = { version = "0.38", default-features = false, features = ["system", "multithread"] }
 

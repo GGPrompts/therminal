@@ -29,10 +29,15 @@
 //!   (`OK`, `ENOENT`, etc.) used by the `q=` flag.
 
 pub mod chunk_buffer;
+pub mod store;
 
 use std::collections::HashMap;
 
 pub use chunk_buffer::{CHUNK_BUFFER_HARD_CAP, ChunkBuffer, ChunkError, ChunkKey, CompletedChunk};
+pub use store::{
+    DEFAULT_BUDGET_BYTES, DecodedImage, FileMediumSandbox, ImageId, ImageStore, StoreError,
+    TextureId, TransmitCommand,
+};
 
 use crate::terminal::GraphicsEvent;
 
@@ -621,6 +626,73 @@ impl KittyGraphicsParser {
     }
 }
 
+/// Feed a [`GraphicsEvent`] into an [`ImageStore`].
+///
+/// The event consumer side of the Kitty graphics pipeline (tn-0htm). The
+/// APC parser produces events; this function translates them into cache
+/// mutations:
+///
+/// - `GraphicsTransmit` → decode payload + insert. The `display` flag is
+///   preserved by the caller — it's used by the renderer (tn-0m3i,
+///   tn-wdn1) to decide whether to immediately paint the image at the
+///   cursor, not by the store.
+/// - `GraphicsDelete` with `DeleteScope::All` → [`ImageStore::delete_all`].
+/// - `GraphicsDelete` with `DeleteScope::ById` → [`ImageStore::delete_by_id`].
+///   Matches the parser's coarse-grained view: either of `i=` / `p=` set
+///   ⇒ targeted delete, neither ⇒ delete-all.
+/// - `GraphicsDisplay` and `GraphicsQuery` → no-op here. Display decisions
+///   live in the renderer task; queries are answered by the parser's
+///   response machinery.
+///
+/// Returns a `Result` so the caller (interceptor glue) can emit the
+/// store's typed error as an APC error envelope. `Ok(None)` means the
+/// event was handled without producing a new cache entry (delete,
+/// display, query).
+pub fn apply_event(
+    store: &mut ImageStore,
+    event: &GraphicsEvent,
+) -> Result<Option<std::sync::Arc<DecodedImage>>, StoreError> {
+    match event {
+        GraphicsEvent::GraphicsTransmit {
+            image_id,
+            placement_id,
+            format,
+            medium,
+            width_px,
+            height_px,
+            payload,
+            command,
+            display: _,
+        } => {
+            let cmd = TransmitCommand::from_parts(
+                *image_id,
+                *placement_id,
+                *format,
+                *medium,
+                *width_px,
+                *height_px,
+                payload.clone(),
+                command,
+            );
+            let arc = store.ingest_transmit(cmd)?;
+            Ok(Some(arc))
+        }
+        GraphicsEvent::GraphicsDelete { scope, .. } => {
+            match scope {
+                DeleteScope::All => store.delete_all(),
+                DeleteScope::ById {
+                    image_id,
+                    placement_id,
+                } => {
+                    store.delete_by_id(ImageId::new(*image_id, *placement_id));
+                }
+            }
+            Ok(None)
+        }
+        GraphicsEvent::GraphicsDisplay { .. } | GraphicsEvent::GraphicsQuery { .. } => Ok(None),
+    }
+}
+
 /// Build the APC envelope bytes: `ESC _ G <header> ; <message> ESC \`.
 ///
 /// Used for protocol responses. `header` is the key=value header (e.g.
@@ -959,5 +1031,112 @@ mod tests {
             }
             other => panic!("unexpected {:?}", other),
         }
+    }
+
+    // -- apply_event wiring --------------------------------------------------
+
+    /// Helper: produce a base64 payload for a 2×1 RGBA image.
+    fn tiny_rgba_payload() -> Vec<u8> {
+        use base64::Engine;
+        let bytes = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xff];
+        base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes()
+    }
+
+    #[test]
+    fn apply_event_transmit_ingests_into_store() {
+        let event = GraphicsEvent::GraphicsTransmit {
+            image_id: Some(10),
+            placement_id: None,
+            format: GraphicsFormat::Rgba,
+            medium: GraphicsMedium::Direct,
+            width_px: Some(2),
+            height_px: Some(1),
+            payload: tiny_rgba_payload(),
+            display: false,
+            command: RawGraphicsCommand::empty(),
+        };
+        let mut store = ImageStore::default();
+        let arc = apply_event(&mut store, &event).unwrap().unwrap();
+        assert_eq!(arc.width, 2);
+        assert_eq!(arc.height, 1);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn apply_event_delete_by_id_removes_entry() {
+        let transmit = GraphicsEvent::GraphicsTransmit {
+            image_id: Some(10),
+            placement_id: None,
+            format: GraphicsFormat::Rgba,
+            medium: GraphicsMedium::Direct,
+            width_px: Some(2),
+            height_px: Some(1),
+            payload: tiny_rgba_payload(),
+            display: false,
+            command: RawGraphicsCommand::empty(),
+        };
+        let mut store = ImageStore::default();
+        apply_event(&mut store, &transmit).unwrap();
+        assert_eq!(store.len(), 1);
+
+        let delete = GraphicsEvent::GraphicsDelete {
+            scope: DeleteScope::ById {
+                image_id: Some(10),
+                placement_id: None,
+            },
+            command: RawGraphicsCommand::empty(),
+        };
+        let result = apply_event(&mut store, &delete).unwrap();
+        assert!(result.is_none());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn apply_event_delete_all_clears_store() {
+        let mut store = ImageStore::default();
+        for id in [1u32, 2, 3] {
+            let event = GraphicsEvent::GraphicsTransmit {
+                image_id: Some(id),
+                placement_id: None,
+                format: GraphicsFormat::Rgba,
+                medium: GraphicsMedium::Direct,
+                width_px: Some(2),
+                height_px: Some(1),
+                payload: tiny_rgba_payload(),
+                display: false,
+                command: RawGraphicsCommand::empty(),
+            };
+            apply_event(&mut store, &event).unwrap();
+        }
+        assert_eq!(store.len(), 3);
+
+        let delete_all = GraphicsEvent::GraphicsDelete {
+            scope: DeleteScope::All,
+            command: RawGraphicsCommand::empty(),
+        };
+        apply_event(&mut store, &delete_all).unwrap();
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn apply_event_display_and_query_are_noops() {
+        let mut store = ImageStore::default();
+        let display = GraphicsEvent::GraphicsDisplay {
+            image_id: Some(1),
+            placement_id: None,
+            rows: None,
+            cols: None,
+            z_index: None,
+            command: RawGraphicsCommand::empty(),
+        };
+        assert!(apply_event(&mut store, &display).unwrap().is_none());
+        let query = GraphicsEvent::GraphicsQuery {
+            image_id: Some(1),
+            command: RawGraphicsCommand::empty(),
+        };
+        assert!(apply_event(&mut store, &query).unwrap().is_none());
+        assert_eq!(store.len(), 0);
     }
 }
