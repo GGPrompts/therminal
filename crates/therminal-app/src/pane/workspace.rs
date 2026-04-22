@@ -700,6 +700,10 @@ mod tests {
                 scrollback_lines: 1000,
             },
             pinned: false,
+            image_store: Arc::new(Mutex::new(
+                therminal_terminal::graphics::ImageStore::default(),
+            )),
+            placements: Arc::new(Mutex::new(therminal_terminal::graphics::PlacementSet::new())),
         }
     }
 
@@ -736,6 +740,10 @@ mod tests {
                 scrollback_lines: 1000,
             },
             pinned: false,
+            image_store: Arc::new(Mutex::new(
+                therminal_terminal::graphics::ImageStore::default(),
+            )),
+            placements: Arc::new(Mutex::new(therminal_terminal::graphics::PlacementSet::new())),
         })
     }
 

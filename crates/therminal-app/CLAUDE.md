@@ -141,6 +141,24 @@ Each frame is composited in two GPU passes, both writing to the same swapchain t
 
 2. **Overlay pass** — semi-transparent chrome backgrounds, widget quads, and modal scrims composited via `OverlayLayer` (`overlay.rs`). Quads are collected per-frame, sorted by depth tier, batched into a single vertex buffer, and rendered in one draw call against the existing alpha-blended `rect_pipeline`.
 
+### Per-pane grid sub-pass order (tn-wdn1)
+
+Inside the grid pass, each pane's `GridRenderer::render` call emits five sub-passes in the order below so Kitty graphics image placements composite correctly against the cell backgrounds, glyphs, cursor, and underlines. All passes use `LoadOp::Load` on the shared swapchain view:
+
+1. **Cell background rect pass** — solid cell-bg quads from `collect_cell_bg_rects`. Vertex range `0..bg_vertex_count` of the persistent `rect_buf`.
+2. **Kitty "under text" image pass** (`z < 0`) — textured quads sampled from per-image GPU textures owned by `image_renderer::ImageRenderer`. One draw call per placement; placements are filtered by bucket and iterated in `(z, created_at)` order via `PlacementSet::iter_draw_order`.
+3. **Text pass** — glyphon renders the atlas-mapped cell glyphs.
+4. **Kitty "over text" image pass** (`z >= 0`).
+5. **Overlay rect pass** — cursor, selection highlight, and hyperlink/hotspot underlines. Vertex range `bg_vertex_count..(bg+overlay)_vertex_count` of the same persistent buffer (a single upload split into two draws so the image passes can slot in between).
+
+The image passes are skipped when the pane has no Kitty placements or no image data — the renderer threads `Option<GraphicsRenderInput>` through `render()` / `render_cached()` and the caller at `window/render.rs` supplies a tuple of `(image_store, placements)` pulled off `PaneState`.
+
+### Kitty image texture caching and eviction
+
+`ImageRenderer` (`image_renderer.rs`) holds a `HashMap<u64, CachedTextureSlot>` keyed by an opaque `TextureId.0` it mints and stashes in `DecodedImage::gpu_texture` (`OnceLock<TextureId>`). On first draw the renderer uploads the pixels as a `Rgba8UnormSrgb` texture and binds a sampler (linear, no mipmaps). Every subsequent frame reuses the handle.
+
+Eviction is weak-reference driven: each slot holds a `Weak<DecodedImage>` and `evict_stale()` at the top of each image pass drops entries whose `strong_count()` is zero. When the CPU-side `ImageStore` LRU drops an image, the GPU texture is freed on the next frame — no explicit channel is required.
+
 ### `OverlayLayer`
 
 `OverlayLayer` is the per-frame collector for the overlay pass. It exposes `push_rect()` and `push_quad()` to add geometry, then `render()` to flush. Quads carry an `OverlayTier`:

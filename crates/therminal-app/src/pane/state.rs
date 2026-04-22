@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions;
 use therminal_core::geometry::Rect;
+use therminal_terminal::graphics::{ImageStore, PlacementSet};
 use therminal_terminal::region_index::RegionIndex;
 
 use super::PaneId;
@@ -96,6 +97,17 @@ pub struct PaneState {
     /// When `true`, the pane is excluded from workspace swap serialization
     /// and remains in its layout slot during workspace transitions.
     pub pinned: bool,
+    /// Kitty graphics image store (tn-wdn1). Decoded-pixel cache for
+    /// images transmitted over APC. Shared with the PTY reader thread
+    /// (which ingests `GraphicsTransmit` events) and the main thread
+    /// (which the renderer reads for GPU upload). `Arc<Mutex>` so both
+    /// sides coordinate without moving the store.
+    pub image_store: Arc<Mutex<ImageStore>>,
+    /// Kitty graphics placement set (tn-wdn1). Live on-screen image
+    /// instances, updated from `GraphicsDisplay` / `GraphicsDelete`
+    /// events on the PTY reader thread and read by the renderer for
+    /// draw-order iteration.
+    pub placements: Arc<Mutex<PlacementSet>>,
 }
 
 impl PaneState {

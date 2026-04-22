@@ -258,6 +258,12 @@ impl App {
                             watcher,
                         },
                         pinned: false,
+                        image_store: std::sync::Arc::new(std::sync::Mutex::new(
+                            therminal_terminal::graphics::ImageStore::default(),
+                        )),
+                        placements: std::sync::Arc::new(std::sync::Mutex::new(
+                            therminal_terminal::graphics::PlacementSet::new(),
+                        )),
                     })
                 }
                 Err(e) => {

@@ -373,6 +373,19 @@ fn rect_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+/// Per-frame Kitty graphics input handed to [`GridRenderer::render`] /
+/// [`GridRenderer::render_cached`] (tn-wdn1).
+///
+/// Both halves live on the owning pane. The store is taken mutably so
+/// first-draw GPU uploads can bump the LRU ordering via
+/// [`therminal_terminal::graphics::ImageStore::get`] — without the
+/// bump, an image held by only a placement would age out even when
+/// visibly on-screen.
+pub struct GraphicsRenderInput<'a> {
+    pub store: &'a std::sync::Mutex<therminal_terminal::graphics::ImageStore>,
+    pub placements: &'a std::sync::Mutex<therminal_terminal::graphics::PlacementSet>,
+}
+
 // ── GridRenderer ───────────────────────────────────────────────────────────
 
 /// GPU-accelerated terminal grid renderer.
@@ -410,6 +423,11 @@ pub struct GridRenderer {
     rect_buf: wgpu::Buffer,
     /// Maximum number of **vertices** the persistent rect buffer can hold.
     rect_buf_capacity: u64,
+
+    /// Kitty graphics image renderer (tn-wdn1). Owns the textured-quad
+    /// pipeline + per-image GPU texture cache. Fed per-frame by
+    /// `render()` with the pane's `ImageStore` + `PlacementSet`.
+    pub(crate) image_renderer: crate::image_renderer::ImageRenderer,
 
     // Cell metrics (computed from font at init)
     pub cell_width: f32,
@@ -667,6 +685,9 @@ impl GridRenderer {
             mapped_at_creation: false,
         });
 
+        // ── Kitty graphics image renderer (tn-wdn1) ─────────────────────
+        let image_renderer = crate::image_renderer::ImageRenderer::new(device, surface_format);
+
         Self {
             font_config,
             font_system,
@@ -680,6 +701,7 @@ impl GridRenderer {
             rect_pipeline,
             rect_buf,
             rect_buf_capacity,
+            image_renderer,
             cell_width,
             cell_height,
             base_padding_x: padding_x,
@@ -1094,6 +1116,10 @@ impl GridRenderer {
     /// Takes pre-collected `RenderCell` snapshots (only from damaged rows when
     /// partial damage is available) and cursor info.
     /// `damaged_rows`: None means full redraw; Some(slice) means only rows marked `true` changed.
+    /// `graphics`: Optional Kitty graphics state (tn-wdn1). When `Some`,
+    /// the renderer emits two extra passes — "under text" (z<0) before
+    /// the glyphon text pass and "over text" (z>=0) between the text
+    /// and cursor/overlay rect passes.
     pub fn render(
         &mut self,
         cells: &[RenderCell],
@@ -1103,6 +1129,7 @@ impl GridRenderer {
         selection: Option<&SelectionRange>,
         display_offset: usize,
         damaged_rows: Option<&[bool]>,
+        graphics: Option<GraphicsRenderInput<'_>>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -1156,6 +1183,7 @@ impl GridRenderer {
             selection,
             display_offset,
             damaged_rows,
+            graphics,
             device,
             queue,
             encoder,
@@ -1173,6 +1201,7 @@ impl GridRenderer {
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
+        graphics: Option<GraphicsRenderInput<'_>>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -1188,6 +1217,7 @@ impl GridRenderer {
             selection,
             display_offset,
             Some(&empty),
+            graphics,
             device,
             queue,
             encoder,
@@ -1206,6 +1236,7 @@ impl GridRenderer {
         selection: Option<&SelectionRange>,
         display_offset: usize,
         damaged_rows: Option<&[bool]>,
+        graphics: Option<GraphicsRenderInput<'_>>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -1230,19 +1261,28 @@ impl GridRenderer {
             .unwrap_or_default();
         let prev_cursor = self.pane_last_cursor_pos.get(&pane_id).copied();
 
-        // ── 1. Collect background, cursor, selection rects ──────────────
+        // ── 1a. Collect cell-background rects (rendered first, below
+        // Kitty "under text" images if any) ─────────────────────────────
         let mut bg_rects: Vec<([f32; 4], [f32; 4])> = Vec::new();
         self.collect_cell_bg_rects(&row_cache, &mut bg_rects);
-        self.add_cursor_rects(cursor, screen_lines, &mut bg_rects);
-        self.add_selection_rects(selection, display_offset, &row_cache, &mut bg_rects);
 
-        // ── 2. Hyperlink + hotspot underlines (and map updates) ─────────
+        // ── 1b. Collect cursor + selection + underline rects (rendered
+        // last, above Kitty "over text" images and on top of glyphs).
+        // Splitting these out lets the Kitty image passes slot cleanly
+        // in between (tn-wdn1).
+        let mut overlay_rects: Vec<([f32; 4], [f32; 4])> = Vec::new();
+        self.add_cursor_rects(cursor, screen_lines, &mut overlay_rects);
+        self.add_selection_rects(selection, display_offset, &row_cache, &mut overlay_rects);
         let map_pane_id = self.current_pane_id.unwrap_or(0);
-        self.process_hyperlinks(map_pane_id, &row_cache, &mut bg_rects);
-        self.process_hotspots(map_pane_id, &row_cache, damaged_rows, &mut bg_rects);
+        self.process_hyperlinks(map_pane_id, &row_cache, &mut overlay_rects);
+        self.process_hotspots(map_pane_id, &row_cache, damaged_rows, &mut overlay_rects);
 
-        // ── 3. Upload rect vertices into the persistent GPU buffer ──────
-        let rect_vertex_count = self.upload_rect_buffer(&bg_rects, sw, sh, device, queue);
+        // ── 2. Upload both rect ranges into the persistent GPU buffer as
+        // a single contiguous allocation: bg_rects first, then overlay
+        // rects. We draw each range separately so the Kitty image
+        // passes can be interleaved.
+        let (bg_vertex_count, overlay_vertex_count) =
+            self.upload_rect_buffer_split(&bg_rects, &overlay_rects, sw, sh, device, queue);
 
         // ── 4. Rebuild damaged per-cell glyphon buffers ─────────────────
         let cursor_line = cursor.point.line.0;
@@ -1318,7 +1358,20 @@ impl GridRenderer {
         {
             tracing::warn!("glyphon prepare failed: {}", e);
         }
-        self.flush_grid_render_passes(rect_vertex_count, has_text, encoder, target_view);
+        self.flush_grid_render_passes(
+            bg_vertex_count,
+            overlay_vertex_count,
+            has_text,
+            graphics,
+            screen_lines,
+            display_offset,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_width,
+            surface_height,
+        );
 
         // ── 7. Atlas trim + frame timing housekeeping ───────────────────
         self.frame_count += 1;
@@ -1587,10 +1640,61 @@ impl GridRenderer {
         }
     }
 
-    /// Flatten the collected `bg_rects` into the CPU vertex buffer, grow
-    /// the persistent GPU buffer if needed, and queue a `write_buffer` to
-    /// upload the new data. Returns the vertex count for the subsequent
-    /// draw call.
+    /// Flatten two logical rect ranges (cell backgrounds + overlays)
+    /// into the single persistent CPU vertex buffer, grow the GPU
+    /// buffer if needed, and queue a `write_buffer` upload. Returns
+    /// `(bg_vertex_count, overlay_vertex_count)` — the grid flush
+    /// draws them as two separate ranges so the Kitty image passes
+    /// can be interleaved between them (tn-wdn1).
+    fn upload_rect_buffer_split(
+        &mut self,
+        bg_rects: &[([f32; 4], [f32; 4])],
+        overlay_rects: &[([f32; 4], [f32; 4])],
+        sw: f32,
+        sh: f32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> (u32, u32) {
+        self.rect_verts_cpu.clear();
+        for (xywh, color) in bg_rects {
+            let verts = pixel_rect_to_ndc(xywh[0], xywh[1], xywh[2], xywh[3], sw, sh, *color);
+            self.rect_verts_cpu.extend_from_slice(&verts);
+        }
+        let bg_vertex_count = self.rect_verts_cpu.len() as u32;
+        for (xywh, color) in overlay_rects {
+            let verts = pixel_rect_to_ndc(xywh[0], xywh[1], xywh[2], xywh[3], sw, sh, *color);
+            self.rect_verts_cpu.extend_from_slice(&verts);
+        }
+        let overlay_vertex_count = self.rect_verts_cpu.len() as u32 - bg_vertex_count;
+
+        if self.rect_verts_cpu.is_empty() {
+            return (0, 0);
+        }
+
+        let needed = self.rect_verts_cpu.len() as u64;
+        if needed > self.rect_buf_capacity {
+            let new_capacity = needed * 2;
+            let buf_size = new_capacity * std::mem::size_of::<ColorVertex>() as u64;
+            self.rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("grid_rect_vbuf_persistent"),
+                size: buf_size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.rect_buf_capacity = new_capacity;
+        }
+
+        let data = bytemuck::cast_slice::<ColorVertex, u8>(&self.rect_verts_cpu);
+        queue.write_buffer(&self.rect_buf, 0, data);
+
+        (bg_vertex_count, overlay_vertex_count)
+    }
+
+    /// Legacy single-range uploader, kept for any call sites that don't
+    /// need the bg/overlay split. Currently unused (split path is
+    /// preferred) but retained so tests and future codepaths can still
+    /// address the persistent buffer with one call.
+    #[allow(dead_code)]
     fn upload_rect_buffer(
         &mut self,
         bg_rects: &[([f32; 4], [f32; 4])],
@@ -1837,20 +1941,39 @@ impl GridRenderer {
         cell_shape_keys[row_idx].truncate(max_col);
     }
 
-    /// Emit the two render passes that paint the grid: a rect pass for
-    /// backgrounds / cursor / underlines, then (optionally) a glyphon text
-    /// pass for the cell glyphs on top. Both load the existing swapchain
-    /// contents so prior pane render passes are preserved.
+    /// Emit the grid's render passes in the interleaved order that
+    /// makes Kitty image placements composite correctly (tn-wdn1):
+    ///
+    /// 1. cell backgrounds (rect pass — `bg_vertex_count` vertices)
+    /// 2. **Kitty under-text images** (`z < 0`, only if `graphics` set)
+    /// 3. glyphon text pass
+    /// 4. **Kitty over-text images** (`z >= 0`, only if `graphics` set)
+    /// 5. cursor + selection + hotspot/hyperlink underlines (rect pass —
+    ///    `overlay_vertex_count` vertices)
+    ///
+    /// Every pass uses `LoadOp::Load` so it stacks on top of prior
+    /// per-pane draws (the outer render loop leaves the swapchain
+    /// contents intact between panes).
+    #[allow(clippy::too_many_arguments)]
     fn flush_grid_render_passes(
-        &self,
-        rect_vertex_count: u32,
+        &mut self,
+        bg_vertex_count: u32,
+        overlay_vertex_count: u32,
         has_text: bool,
+        graphics: Option<GraphicsRenderInput<'_>>,
+        screen_lines: usize,
+        display_offset: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
     ) {
-        {
+        // ── 1. Cell background rect pass ───────────────────────────────
+        if bg_vertex_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("grid_rect_pass"),
+                label: Some("grid_bg_rect_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target_view,
                     resolve_target: None,
@@ -1865,15 +1988,100 @@ impl GridRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-
-            if rect_vertex_count > 0 {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, self.rect_buf.slice(..));
-                pass.draw(0..rect_vertex_count, 0..1);
-            }
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, self.rect_buf.slice(..));
+            pass.draw(0..bg_vertex_count, 0..1);
         }
 
-        if has_text {
+        // ── 2. Kitty under-text image pass (z < 0) ────────────────────
+        // Lock + draw both image buckets through the same captured
+        // `graphics` reference so the lock guards stay alive across
+        // both sub-passes. A second snapshot after the text pass would
+        // risk a race on `placements` vs a concurrent PTY ingest.
+        if let Some(ref g) = graphics {
+            let (mut store_guard, placements_guard) = match (g.store.lock(), g.placements.lock()) {
+                (Ok(s), Ok(p)) => (s, p),
+                _ => {
+                    // If either lock is poisoned, skip the image
+                    // passes rather than propagate — a poisoned
+                    // mutex shouldn't take the pane down.
+                    tracing::debug!("kitty graphics: skipping image passes (mutex poisoned)");
+                    self.emit_text_and_overlay(
+                        overlay_vertex_count,
+                        bg_vertex_count,
+                        has_text,
+                        encoder,
+                        target_view,
+                    );
+                    return;
+                }
+            };
+
+            self.image_renderer.draw_bucket(
+                device,
+                queue,
+                encoder,
+                target_view,
+                surface_width,
+                surface_height,
+                self.padding_x,
+                self.padding_y,
+                self.cell_width,
+                self.cell_height,
+                screen_lines,
+                display_offset,
+                &mut store_guard,
+                &placements_guard,
+                crate::image_renderer::DrawBucket::UnderText,
+            );
+
+            // ── 3. Text pass (glyphon) ─────────────────────────────────
+            if has_text {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("grid_text_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                if let Err(e) = self
+                    .text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                {
+                    tracing::warn!("glyphon render failed: {}", e);
+                }
+            }
+
+            // ── 4. Kitty over-text image pass (z >= 0) ────────────────
+            self.image_renderer.draw_bucket(
+                device,
+                queue,
+                encoder,
+                target_view,
+                surface_width,
+                surface_height,
+                self.padding_x,
+                self.padding_y,
+                self.cell_width,
+                self.cell_height,
+                screen_lines,
+                display_offset,
+                &mut store_guard,
+                &placements_guard,
+                crate::image_renderer::DrawBucket::OverText,
+            );
+        } else if has_text {
+            // No Kitty graphics data — just emit the text pass normally.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("grid_text_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1897,6 +2105,93 @@ impl GridRenderer {
             {
                 tracing::warn!("glyphon render failed: {}", e);
             }
+        }
+
+        // ── 5. Cursor / selection / underline rect pass ────────────────
+        if overlay_vertex_count > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("grid_overlay_rect_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, self.rect_buf.slice(..));
+            pass.draw(
+                bg_vertex_count..bg_vertex_count + overlay_vertex_count,
+                0..1,
+            );
+        }
+    }
+
+    /// Fallback flush for the poisoned-mutex case — emits text +
+    /// cursor/overlay without the Kitty image passes. Isolated so the
+    /// main `flush_grid_render_passes` stays readable.
+    fn emit_text_and_overlay(
+        &self,
+        overlay_vertex_count: u32,
+        bg_vertex_count: u32,
+        has_text: bool,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) {
+        if has_text {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("grid_text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Err(e) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
+                tracing::warn!("glyphon render failed: {}", e);
+            }
+        }
+        if overlay_vertex_count > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("grid_overlay_rect_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, self.rect_buf.slice(..));
+            pass.draw(
+                bg_vertex_count..bg_vertex_count + overlay_vertex_count,
+                0..1,
+            );
         }
     }
 

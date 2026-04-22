@@ -585,12 +585,17 @@ fn render_single_pane(
         let internal_pad_y = renderer.padding_y();
         renderer.set_viewport_offset(vp.x() + internal_pad_x, vp.y() + internal_pad_y + header_h);
 
+        let graphics_input = crate::grid_renderer::GraphicsRenderInput {
+            store: &pane.image_store,
+            placements: &pane.placements,
+        };
         renderer.render_cached(
             &cursor,
             columns,
             screen_lines,
             selection_range.as_ref(),
             display_offset,
+            Some(graphics_input),
             device,
             queue,
             encoder,
@@ -788,6 +793,10 @@ fn render_single_pane(
     let internal_pad_y = renderer.padding_y();
     renderer.set_viewport_offset(vp.x() + internal_pad_x, vp.y() + internal_pad_y + header_h);
 
+    let graphics_input = crate::grid_renderer::GraphicsRenderInput {
+        store: &pane.image_store,
+        placements: &pane.placements,
+    };
     renderer.render(
         &cells,
         &cursor,
@@ -796,6 +805,7 @@ fn render_single_pane(
         selection_range.as_ref(),
         display_offset,
         damaged_rows_for_render,
+        Some(graphics_input),
         device,
         queue,
         encoder,

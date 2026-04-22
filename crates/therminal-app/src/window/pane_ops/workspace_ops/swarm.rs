@@ -144,6 +144,12 @@ impl App {
                                     watcher,
                                 },
                                 pinned: false,
+                                image_store: Arc::new(Mutex::new(
+                                    therminal_terminal::graphics::ImageStore::default(),
+                                )),
+                                placements: Arc::new(Mutex::new(
+                                    therminal_terminal::graphics::PlacementSet::new(),
+                                )),
                             })
                         }
                         Err(e) => {

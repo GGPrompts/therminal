@@ -7,6 +7,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi;
 use therminal_core::geometry::Rect;
+use therminal_terminal::graphics::{ImageStore, PlacementSet};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler};
 use therminal_terminal::region_index::RegionIndex;
 use tracing::info;
@@ -67,6 +68,10 @@ struct AppPtyHandler {
     on_bell: Box<dyn Fn() + Send + 'static>,
     /// Callback to fire for desktop notifications (OSC 9).
     on_notification: Box<dyn Fn(String) + Send + 'static>,
+    /// Kitty graphics image store (tn-wdn1). Shared with the renderer.
+    image_store: Arc<Mutex<ImageStore>>,
+    /// Kitty graphics placement set (tn-wdn1). Shared with the renderer.
+    placements: Arc<Mutex<PlacementSet>>,
     /// Lazily initialised on the reader thread.
     reader_state: Option<ReaderState>,
 }
@@ -112,14 +117,17 @@ impl PtyReaderHandler for AppPtyHandler {
             return;
         };
 
-        let current_line = {
+        let (current_line, cursor_row, cursor_col) = {
             let mut term_guard = term.lock();
             processor.advance_with_interceptor(&mut *term_guard, &mut state.interceptor, data);
             // Compute absolute line for region indexing: scrollback history +
             // cursor row within the visible viewport.
             use alacritty_terminal::grid::Dimensions;
             let grid = term_guard.grid();
-            grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+            let history = grid.history_size();
+            let row_in_viewport = grid.cursor.point.line.0.max(0) as usize;
+            let col = grid.cursor.point.column.0;
+            (history + row_in_viewport, row_in_viewport, col)
         };
         if let Ok(mut idx) = self.region_index.lock() {
             idx.set_current_line(current_line);
@@ -177,6 +185,32 @@ impl PtyReaderHandler for AppPtyHandler {
                         if let Some(m) = model {
                             s.agent_model = Some(m);
                         }
+                    }
+                }
+                // tn-wdn1: Kitty graphics — route GraphicsEvents into the
+                // per-pane image store + placement set so the renderer can
+                // upload textures + iterate placements in draw order.
+                // Uses the cursor position captured just above (after the
+                // VTE advance) so `a=T` (transmit-and-display) anchors the
+                // placement at the right cell. Errors are logged at debug
+                // — a malformed transmit shouldn't take the pane down.
+                InterceptedEvent::Graphics(ev) => {
+                    let store_result = {
+                        match (self.image_store.lock(), self.placements.lock()) {
+                            (Ok(mut store), Ok(mut placements)) => {
+                                therminal_terminal::graphics::apply_event_with_placements(
+                                    &mut store,
+                                    &mut placements,
+                                    &ev,
+                                    cursor_row,
+                                    cursor_col,
+                                )
+                            }
+                            _ => Ok(None),
+                        }
+                    };
+                    if let Err(e) = store_result {
+                        tracing::debug!(error = %e, "kitty graphics ingest failed");
                     }
                 }
                 _ => {}
@@ -279,6 +313,9 @@ where
     let status = Arc::new(Mutex::new(PaneStatus::default()));
     // Shared semantic region index, populated from intercepted events.
     let region_index = Arc::new(Mutex::new(RegionIndex::new()));
+    // Kitty graphics image store + placement set (tn-wdn1).
+    let image_store = Arc::new(Mutex::new(ImageStore::default()));
+    let placements = Arc::new(Mutex::new(PlacementSet::new()));
 
     let callbacks = callback_fn(id);
 
@@ -298,6 +335,8 @@ where
         bell_flag,
         on_bell: callbacks.on_bell,
         on_notification: callbacks.on_notification,
+        image_store: Arc::clone(&image_store),
+        placements: Arc::clone(&placements),
         reader_state: None,
     };
 
@@ -329,6 +368,8 @@ where
             scrollback_lines,
         },
         pinned: false,
+        image_store,
+        placements,
     })
 }
 
@@ -353,5 +394,7 @@ pub fn spawn_webview_pane(viewport: Rect, url: &str) -> PaneState {
             content: String::new(),
         },
         pinned: false,
+        image_store: Arc::new(Mutex::new(ImageStore::default())),
+        placements: Arc::new(Mutex::new(PlacementSet::new())),
     }
 }
