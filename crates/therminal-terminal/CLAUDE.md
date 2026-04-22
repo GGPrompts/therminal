@@ -29,7 +29,9 @@ src/
 ├── osc633.rs            # OSC 633 shell integration parser + CommandTracker
 ├── graphics/
 │   ├── mod.rs           # Kitty graphics APC parser, key=value header, response envelope
-│   └── chunk_buffer.rs  # (image_id, placement_id) accumulator with 64 MB hard cap
+│   ├── chunk_buffer.rs  # (image_id, placement_id) accumulator with 64 MB hard cap
+│   ├── store.rs         # Decoded image cache (tn-0htm)
+│   └── placements.rs    # CPU-side placement set with scroll/erase lifecycle (tn-0m3i)
 └── hotspot_detection.rs # File paths, URLs, git refs, issue refs, error locations
 ```
 
@@ -102,6 +104,27 @@ Parsing is **protocol-only** — the parser does **not** base64-decode the paylo
 Multi-chunk transmits (`m=1` continuation flag) are accumulated by `chunk_buffer::ChunkBuffer`, keyed on `(image_id, placement_id)`. A **64 MB hard cap** per entry (`CHUNK_BUFFER_HARD_CAP`) guards against a runaway client: on overflow the entry is dropped and the parser emits an `ENOMEM` APC response envelope instead of an event.
 
 Response bytes (`OK` / `EINVAL` / `ENOMEM`) flow out of the interceptor through an optional `mpsc::Sender<Vec<u8>>` set via `TherminalInterceptor::set_graphics_response_sink(...)`. The daemon / app wires this channel to the PTY writer so the producing program sees the reply. The `q=` flag on the incoming command gates emission: `q=0` sends every response, `q=1` sends only errors, `q=2` stays silent.
+
+### Grid-owned image placements (tn-0m3i)
+
+`graphics/placements.rs` adds `PlacementSet`, the CPU-side collection of displayed image instances. The grid (via the downstream `Term` wrapper) owns placements alongside cells and semantic region marks so images:
+
+- Scroll with content (`PlacementSet::scroll_by(delta)` decrements anchor rows; placements whose new row would go negative are dropped).
+- Drop off the top of scrollback (`trim_scrollback_below(min_row)`).
+- Are cleared when the underlying cells are erased (`clear_rows(start, end)` for CSI J / 2J variants; `clear_cell(row, col)` for single-cell overwrites).
+- Stack deterministically — v1 uses a simple **under-text / over-text split**: `z < 0` renders before terminal cells, `z >= 0` after. Within each bucket placements order by `(z_index, created_at)` ascending, so a later `a=p` at the same z paints over an earlier one. Kitty's ultra-low "under-background" tier (`z < -1_073_741_824`) is deliberately **not** implemented in v1.
+
+Pixel-valued `s=` / `v=` / `X=` / `Y=` fields are stored **as-is** on `Placement` (`px_x_offset`, `px_y_offset`). The cell-pixel conversion happens on the render side, which reads `GridRenderer::cell_px()` on `therminal-app`. Keeping conversion out of `therminal-terminal` keeps this crate free of a rendering dependency.
+
+**Delete filter support** (the `d=` refinement on `a=d`):
+
+- `d=a` — delete all placements.
+- `d=i` — delete all placements of `image_id`.
+- `d=i,p=` — delete a specific `(image_id, placement_id)`.
+- `d=C` — delete the newest placement anchored at the cursor cell.
+- **TODO** (`tracing::debug` stubs, no mutation): `d=r` (row match), `d=c` (column match), `d=x`/`d=y` (pixel match), `d=z` (z-index match), `d=n` (count-limited delete).
+
+Wiring: `graphics::apply_event_with_placements(store, placements, event, cursor_row, cursor_col)` is the companion to `apply_event()` for callers that own both halves of the pipeline. It routes pixel mutations into `ImageStore` and placement mutations into `PlacementSet` in a single call; `a=T` (transmit-and-display) inserts a placement at the cursor as well as ingesting the pixels.
 
 ## Hotspot Detection
 

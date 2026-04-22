@@ -718,6 +718,18 @@ impl GridRenderer {
         self.ui_text_scale = scale.clamp(0.5, 3.0);
     }
 
+    /// Cell size in pixels as `(width, height)`.
+    ///
+    /// Used by the Kitty graphics placement layer (tn-0m3i) to convert
+    /// pixel-valued `s=` / `v=` / `X=` / `Y=` fields into cell-space
+    /// rows and columns. The placement set in `therminal-terminal` stays
+    /// free of any rendering dependency, so conversion happens on the
+    /// render side using these metrics. Returns the current metrics
+    /// (which update when the font or DPI changes).
+    pub fn cell_px(&self) -> (f32, f32) {
+        (self.cell_width, self.cell_height)
+    }
+
     /// Return a font size scaled by `ui_text_scale` for chrome text rendering.
     ///
     /// Chrome renderers (status bar, pane headers, tab bar) should call this

@@ -29,11 +29,13 @@
 //!   (`OK`, `ENOENT`, etc.) used by the `q=` flag.
 
 pub mod chunk_buffer;
+pub mod placements;
 pub mod store;
 
 use std::collections::HashMap;
 
 pub use chunk_buffer::{CHUNK_BUFFER_HARD_CAP, ChunkBuffer, ChunkError, ChunkKey, CompletedChunk};
+pub use placements::{Placement, PlacementSet};
 pub use store::{
     DEFAULT_BUDGET_BYTES, DecodedImage, FileMediumSandbox, ImageId, ImageStore, StoreError,
     TextureId, TransmitCommand,
@@ -624,6 +626,70 @@ impl KittyGraphicsParser {
     pub fn in_flight(&self) -> usize {
         self.chunk_buffer.in_flight()
     }
+}
+
+/// Feed a [`GraphicsEvent`] into both an [`ImageStore`] and a
+/// [`PlacementSet`].
+///
+/// Companion to [`apply_event`] for callers that own both halves of the
+/// graphics pipeline: the pixel store (tn-0htm) and the grid placement
+/// set (tn-0m3i). This is the entry point the downstream `Term` wrapper
+/// calls from its event listener so both halves stay in sync.
+///
+/// Semantics:
+/// - `GraphicsTransmit` → delegates to [`apply_event`] for the pixel
+///   side. If the transmit was `a=T` (i.e. `display == true`), the
+///   placement set also inserts a placement anchored at the cursor.
+/// - `GraphicsDisplay` → placement set inserts / upserts; store is a
+///   no-op.
+/// - `GraphicsDelete` → both sides handle the delete: the placement set
+///   applies the refined `d=` filter (via [`PlacementSet::apply_event`])
+///   and the store handles the coarse-grained `DeleteScope`. When the
+///   scope is `All` the store clears everything; when it's `ById` the
+///   store drops that pixel entry. Other delete filters (`d=C`, `d=r`,
+///   `d=c`, ...) affect placements only — the underlying pixels stay in
+///   the store for reuse by future placements.
+/// - `GraphicsQuery` → no-op.
+pub fn apply_event_with_placements(
+    store: &mut ImageStore,
+    placements: &mut PlacementSet,
+    event: &GraphicsEvent,
+    cursor_row: usize,
+    cursor_col: usize,
+) -> Result<Option<std::sync::Arc<DecodedImage>>, StoreError> {
+    let store_result = apply_event(store, event)?;
+
+    match event {
+        GraphicsEvent::GraphicsTransmit {
+            image_id,
+            placement_id,
+            display,
+            command,
+            ..
+        } => {
+            if *display {
+                // `a=T` — transmit-and-display. Insert a placement at
+                // the cursor with the default 1x1 sizing; a follow-up
+                // `a=p` from the client can upsert richer dimensions.
+                placements.insert_display_at_cursor(
+                    *image_id,
+                    *placement_id,
+                    command.rows,
+                    command.cols,
+                    command.z_index,
+                    command,
+                    cursor_row,
+                    cursor_col,
+                );
+            }
+        }
+        GraphicsEvent::GraphicsDisplay { .. } | GraphicsEvent::GraphicsDelete { .. } => {
+            placements.apply_event(event, cursor_row, cursor_col);
+        }
+        GraphicsEvent::GraphicsQuery { .. } => {}
+    }
+
+    Ok(store_result)
 }
 
 /// Feed a [`GraphicsEvent`] into an [`ImageStore`].
