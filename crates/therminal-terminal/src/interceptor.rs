@@ -27,12 +27,14 @@
 
 use std::sync::{Arc, Mutex, mpsc};
 
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
+use crate::graphics::KittyGraphicsParser;
 use crate::osc_registry::{
     HarnessOscHandler, OscHandlerRegistry, OscRegistrationError, TaggedHarnessEvent,
 };
 use crate::osc633::{CommandTracker, Osc633Mark};
+use crate::terminal::GraphicsEvent;
 
 /// Events produced by the interceptor for consumption by the terminal or daemon.
 #[derive(Debug, Clone)]
@@ -79,6 +81,10 @@ pub enum InterceptedEvent {
         /// Model name the agent is using (optional). E.g. "opus-4", "gpt-4o".
         model: Option<String>,
     },
+    /// A Kitty graphics APC string was fully parsed. See
+    /// [`crate::terminal::GraphicsEvent`] and [`crate::graphics`] for the
+    /// protocol surface.
+    Graphics(GraphicsEvent),
 }
 
 /// Configuration for which sequence families to intercept.
@@ -147,6 +153,16 @@ pub struct TherminalInterceptor {
     /// Pane ID stamped onto every `TaggedHarnessEvent` before forwarding.
     /// Set via [`Self::set_pane_id`]; `None` by default (tests, standalone).
     pane_id: Option<u64>,
+    /// Kitty graphics APC parser. Owns the chunk buffer so multi-chunk
+    /// transmissions accumulate across APC strings.
+    graphics_parser: KittyGraphicsParser,
+    /// Optional sink for APC response bytes to write back through the PTY.
+    /// Used for Kitty graphics replies (feature query, OK acks, error
+    /// codes) and gated by the `q=` quiet level during parse.
+    ///
+    /// `None` by default — tests and harness-less sites silently drop
+    /// responses, matching the existing pattern for harness events.
+    graphics_response_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 impl TherminalInterceptor {
@@ -163,6 +179,8 @@ impl TherminalInterceptor {
                 osc_registry: Arc::new(OscHandlerRegistry::new()),
                 harness_event_tx: None,
                 pane_id: None,
+                graphics_parser: KittyGraphicsParser::new(),
+                graphics_response_tx: None,
             },
             rx,
         )
@@ -183,6 +201,8 @@ impl TherminalInterceptor {
                 osc_registry: Arc::new(OscHandlerRegistry::new()),
                 harness_event_tx: None,
                 pane_id: None,
+                graphics_parser: KittyGraphicsParser::new(),
+                graphics_response_tx: None,
             },
             rx,
         )
@@ -231,6 +251,30 @@ impl TherminalInterceptor {
     /// data into the correct `PaneCapacityCache` entry.
     pub fn set_pane_id(&mut self, pane_id: u64) {
         self.pane_id = Some(pane_id);
+    }
+
+    /// Install a channel sink for Kitty graphics APC response bytes.
+    ///
+    /// The parser emits response envelopes (see [`crate::graphics`]) for
+    /// protocol replies that have to travel back through the PTY to the
+    /// client (feature query, OK acks, error codes). Daemon / app wiring
+    /// feeds these bytes into the PTY writer so the producing program sees
+    /// the reply. Without a sink the responses are silently dropped — this
+    /// is correct for tests and stand-alone callers that do not run a PTY.
+    pub fn set_graphics_response_sink(&mut self, tx: mpsc::Sender<Vec<u8>>) {
+        self.graphics_response_tx = Some(tx);
+    }
+
+    /// Emit APC response bytes via the optional `graphics_response_tx` sink.
+    fn emit_graphics_response(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.graphics_response_tx
+            && tx.send(bytes).is_err()
+        {
+            trace!("interceptor graphics response receiver dropped");
+        }
     }
 
     /// Claim an OSC code on this interceptor's shared handler registry.
@@ -673,6 +717,35 @@ impl alacritty_terminal::vte::SequenceInterceptor for TherminalInterceptor {
         }
 
         false
+    }
+
+    fn intercept_apc_byte(&mut self, byte: u8) {
+        // The APC state machine in VTE is shared by SOS, PM, and APC strings,
+        // so the parser itself validates the Kitty prefix (`G`) before
+        // interpreting the body. See `graphics::KittyGraphicsParser`.
+        self.graphics_parser.push_byte(byte);
+    }
+
+    fn intercept_apc_end(&mut self) -> bool {
+        let out = self.graphics_parser.finalize();
+
+        if let Some(event) = out.event {
+            debug!(?event, "kitty graphics APC parsed");
+            self.emit(InterceptedEvent::Graphics(event));
+        } else if !out.response.is_empty() {
+            // Parser produced an error-only response (malformed command).
+            warn!("kitty graphics APC: malformed, replying with error envelope");
+        }
+
+        if !out.response.is_empty() {
+            self.emit_graphics_response(out.response);
+        }
+
+        // Consume whenever the APC body started with the Kitty prefix, even
+        // if it was a mid-chunk that produced neither an event nor a
+        // response. Non-Kitty APCs fall through for other interceptors (or
+        // the vte default-drop behaviour).
+        out.consumed
     }
 }
 
@@ -1769,5 +1842,208 @@ mod tests {
         );
         // When disabled, falls through to registry → not consumed.
         assert!(!consumed);
+    }
+
+    // -- Kitty graphics APC tests (tn-7xme) --------------------------------------
+
+    /// Feed an APC body byte-by-byte and call `intercept_apc_end`.
+    fn drive_apc(interceptor: &mut TherminalInterceptor, body: &str) -> bool {
+        use alacritty_terminal::vte::SequenceInterceptor as _;
+        for b in body.as_bytes() {
+            interceptor.intercept_apc_byte(*b);
+        }
+        interceptor.intercept_apc_end()
+    }
+
+    #[test]
+    fn intercept_apc_feature_query_emits_ok() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let (resp_tx, resp_rx) = mpsc::channel::<Vec<u8>>();
+        interceptor.set_graphics_response_sink(resp_tx);
+
+        // Canonical Kitty feature query: `\x1b_Gi=1,a=q;\x1b\\`.
+        let consumed = drive_apc(&mut interceptor, "Gi=1,a=q;");
+        assert!(consumed, "APC should be consumed");
+
+        // Event: GraphicsQuery
+        let event = rx.try_recv().expect("event expected");
+        match event {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsQuery {
+                image_id: Some(1), ..
+            }) => {}
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        // Response: `\x1b_Gi=1;OK\x1b\\` — the required reply to the probe.
+        let bytes = resp_rx.try_recv().expect("response expected");
+        assert!(bytes.starts_with(b"\x1b_G"));
+        assert!(bytes.ends_with(b"\x1b\\"));
+        assert!(bytes.windows(2).any(|w| w == b"OK"));
+    }
+
+    #[test]
+    fn intercept_apc_transmit_single_chunk() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+
+        let consumed = drive_apc(&mut interceptor, "Ga=t,f=100,i=42;ZmFrZQ==");
+        assert!(consumed);
+
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsTransmit {
+                image_id,
+                payload,
+                display,
+                ..
+            }) => {
+                assert_eq!(image_id, Some(42));
+                assert!(!display);
+                assert_eq!(payload, b"ZmFrZQ==");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn intercept_apc_transmit_multi_chunk_reassembles() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+
+        assert!(drive_apc(&mut interceptor, "Ga=t,f=100,i=7,m=1;AAAA",));
+        // Intermediate chunks don't emit an event.
+        assert!(rx.try_recv().is_err());
+
+        assert!(drive_apc(&mut interceptor, "Ga=t,i=7,m=1;BBBB"));
+        assert!(rx.try_recv().is_err());
+
+        assert!(drive_apc(&mut interceptor, "Ga=t,i=7,m=0;CCCC"));
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsTransmit { payload, .. }) => {
+                assert_eq!(payload, b"AAAABBBBCCCC");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn intercept_apc_display_emits_event() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        assert!(drive_apc(&mut interceptor, "Ga=p,i=3,r=5,c=10,z=1"));
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsDisplay {
+                image_id: Some(3),
+                rows: Some(5),
+                cols: Some(10),
+                z_index: Some(1),
+                ..
+            }) => {}
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn intercept_apc_delete_by_id_and_all() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+
+        // a=d,i=N — delete by id.
+        assert!(drive_apc(&mut interceptor, "Ga=d,i=8"));
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsDelete { scope, .. }) => {
+                use crate::graphics::DeleteScope;
+                match scope {
+                    DeleteScope::ById { image_id, .. } => assert_eq!(image_id, Some(8)),
+                    other => panic!("expected ById, got {:?}", other),
+                }
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        // a=d — delete all.
+        assert!(drive_apc(&mut interceptor, "Ga=d"));
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsDelete { scope, .. }) => {
+                use crate::graphics::DeleteScope;
+                assert_eq!(scope, DeleteScope::All);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn intercept_apc_quiet_level_2_suppresses_response() {
+        let (mut interceptor, _event_rx) = TherminalInterceptor::with_defaults();
+        let (resp_tx, resp_rx) = mpsc::channel::<Vec<u8>>();
+        interceptor.set_graphics_response_sink(resp_tx);
+
+        assert!(drive_apc(&mut interceptor, "Ga=t,f=100,i=5,q=2;Zg=="));
+        assert!(
+            resp_rx.try_recv().is_err(),
+            "q=2 should suppress all responses"
+        );
+    }
+
+    #[test]
+    fn intercept_apc_quiet_level_0_emits_response() {
+        let (mut interceptor, _event_rx) = TherminalInterceptor::with_defaults();
+        let (resp_tx, resp_rx) = mpsc::channel::<Vec<u8>>();
+        interceptor.set_graphics_response_sink(resp_tx);
+
+        assert!(drive_apc(&mut interceptor, "Ga=t,f=100,i=5,q=0;Zg=="));
+        let bytes = resp_rx.try_recv().expect("q=0 should emit response");
+        assert!(bytes.windows(2).any(|w| w == b"OK"));
+    }
+
+    #[test]
+    fn intercept_apc_malformed_does_not_panic_and_no_event() {
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        // Not a kitty APC at all (prefix mismatch).
+        let _ = drive_apc(&mut interceptor, "NotKittyAtAll");
+        assert!(rx.try_recv().is_err());
+
+        // Malformed body with Kitty prefix — no event, but the parser still
+        // flags the APC as handled (it emitted an error response envelope).
+        let _ = drive_apc(&mut interceptor, "Ga=nope");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn intercept_apc_kitten_icat_fixture() {
+        // Synthetic approximation of a `kitty +kitten icat` session:
+        //   1. feature probe (q=0) → event Query, response OK
+        //   2. multi-chunk PNG transmit-and-display
+        //   3. implicit end triggers a single Transmit event with display=true
+        let (mut interceptor, rx) = TherminalInterceptor::with_defaults();
+        let (resp_tx, resp_rx) = mpsc::channel::<Vec<u8>>();
+        interceptor.set_graphics_response_sink(resp_tx);
+
+        // 1. Probe
+        assert!(drive_apc(&mut interceptor, "Gi=1,a=q;"));
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsQuery { .. }) => {}
+            other => panic!("probe: unexpected {:?}", other),
+        }
+        assert!(resp_rx.try_recv().unwrap().windows(2).any(|w| w == b"OK"));
+
+        // 2. Chunks (icat uses a=T for inline display).
+        assert!(drive_apc(
+            &mut interceptor,
+            "Ga=T,f=100,i=1,s=32,v=32,m=1;AAAA",
+        ));
+        assert!(rx.try_recv().is_err()); // mid-chunk, no event
+        assert!(drive_apc(&mut interceptor, "Ga=T,i=1,m=1;BBBB"));
+        assert!(drive_apc(&mut interceptor, "Ga=T,i=1,m=0;CCCC"));
+
+        // 3. Terminal sees one final GraphicsTransmit with display=true.
+        match rx.try_recv().unwrap() {
+            InterceptedEvent::Graphics(GraphicsEvent::GraphicsTransmit {
+                image_id: Some(1),
+                display: true,
+                width_px: Some(32),
+                height_px: Some(32),
+                payload,
+                ..
+            }) => {
+                assert_eq!(payload, b"AAAABBBBCCCC");
+            }
+            other => panic!("icat: unexpected final event {:?}", other),
+        }
     }
 }

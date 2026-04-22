@@ -41,6 +41,7 @@ plugins/                   # Pattern packs (TOML config, see plugins/CLAUDE.md)
 - **Agent detection**: sysinfo (process tree), cadence analysis (output stream timing)
 - **IPC**: interprocess crate (Unix sockets / named pipes)
 - **Wire protocol**: MessagePack framing
+- **Graphics**: Kitty graphics APC is a first-class event source (tn-7xme) — `therminal-terminal::graphics` parses `a=t/T/p/d/q/f` commands with `m=` chunk reassembly and emits `GraphicsEvent`s through the interceptor channel, honoring `q=0/1/2` on the APC response envelope written back to the PTY.
 - **Language**: Rust
 
 ## Shell Integration

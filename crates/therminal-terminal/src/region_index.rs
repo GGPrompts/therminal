@@ -161,6 +161,11 @@ impl RegionIndex {
                 // Skipped here to avoid duplicate cwd annotations (tn-5o34);
                 // the OSC 7 arm above already records the Linux-shaped cwd.
             }
+            InterceptedEvent::Graphics(_) => {
+                // Kitty graphics APC events are consumed by the renderer, not
+                // the semantic region index. Pixel data does not map to a
+                // scrollback line annotation.
+            }
         }
     }
 

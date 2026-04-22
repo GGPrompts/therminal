@@ -24,9 +24,12 @@ src/
 ├── region_index.rs      # Semantic region tagging
 ├── agent_registry.rs    # AgentRegistry, AgentEntry, AgentEvent, AgentStatus
 ├── event_log.rs         # Per-session JSONL event logging with truncate rotation
-├── terminal.rs          # TerminalSize shared type, DEFAULT_COLS/DEFAULT_ROWS
+├── terminal.rs          # TerminalSize shared type, GraphicsEvent variants
 ├── input.rs             # KeyCode, Modifiers, encode_key() / encode_key_kitty()
 ├── osc633.rs            # OSC 633 shell integration parser + CommandTracker
+├── graphics/
+│   ├── mod.rs           # Kitty graphics APC parser, key=value header, response envelope
+│   └── chunk_buffer.rs  # (image_id, placement_id) accumulator with 64 MB hard cap
 └── hotspot_detection.rs # File paths, URLs, git refs, issue refs, error locations
 ```
 
@@ -78,6 +81,27 @@ Uses a simple truncate-on-overflow rotation: when entry count exceeds `max_entri
 Parsed marks: `A` (PromptStart), `B` (PromptEnd), `C` (PreExec), `D` (CommandFinished with exit code), `E` (CommandLine text).
 
 `CommandTracker` consumes parsed marks and builds a list of `CommandBlock`s representing discrete command executions in the scrollback, each with start/end line, command text, exit code, and lifecycle state.
+
+## Kitty Graphics (tn-7xme)
+
+`graphics/` is the protocol layer for the Kitty graphics APC format:
+
+```text
+ESC _ G <key>=<value>(,<key>=<value>)* ; <base64-payload> ESC \
+```
+
+`KittyGraphicsParser` is installed as the APC byte sink on `TherminalInterceptor` — the VTE machine calls `intercept_apc_byte` for each payload byte and `intercept_apc_end` on `ST`/`CAN`/`SUB`. On `apc_end` the parser splits header/payload, resolves the action (`a=t/T/p/d/q/f`), and emits a `crate::terminal::GraphicsEvent`:
+
+- `GraphicsTransmit` — `a=t` / `a=T` / `a=f`, carries the (reassembled) base64 payload plus format/medium/pixel-size metadata. `display=true` when the action was `T` (transmit-and-display).
+- `GraphicsDisplay` — `a=p`, with rows/cols/z-index.
+- `GraphicsDelete` — `a=d`, with a `DeleteScope::{All, ById}` coarse-grained view (full `d=` subflags stay on the `RawGraphicsCommand` the variant carries).
+- `GraphicsQuery` — `a=q`, terminal replies `OK` through the APC response envelope. The canonical feature probe `\x1b_Gi=1,a=q;\x1b\\` gets `\x1b_Gi=1;OK\x1b\\`.
+
+Parsing is **protocol-only** — the parser does **not** base64-decode the payload nor touch pixel bytes. It hands the raw (base64-encoded) bytes plus the `GraphicsFormat` flag to downstream decoders (tn-0htm).
+
+Multi-chunk transmits (`m=1` continuation flag) are accumulated by `chunk_buffer::ChunkBuffer`, keyed on `(image_id, placement_id)`. A **64 MB hard cap** per entry (`CHUNK_BUFFER_HARD_CAP`) guards against a runaway client: on overflow the entry is dropped and the parser emits an `ENOMEM` APC response envelope instead of an event.
+
+Response bytes (`OK` / `EINVAL` / `ENOMEM`) flow out of the interceptor through an optional `mpsc::Sender<Vec<u8>>` set via `TherminalInterceptor::set_graphics_response_sink(...)`. The daemon / app wires this channel to the PTY writer so the producing program sees the reply. The `q=` flag on the incoming command gates emission: `q=0` sends every response, `q=1` sends only errors, `q=2` stays silent.
 
 ## Hotspot Detection
 
