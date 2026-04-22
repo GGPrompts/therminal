@@ -1476,6 +1476,16 @@ where
     }
 
     #[inline]
+    fn apc_put(&mut self, byte: u8) {
+        self.interceptor.intercept_apc_byte(byte);
+    }
+
+    #[inline]
+    fn apc_end(&mut self) -> bool {
+        self.interceptor.intercept_apc_end()
+    }
+
+    #[inline]
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         // Let the interceptor consume the OSC if it wants to.
         if self.interceptor.intercept_osc(params, bell_terminated) {

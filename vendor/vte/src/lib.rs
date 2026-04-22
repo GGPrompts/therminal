@@ -179,7 +179,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::Escape => self.advance_esc(performer, byte),
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
-            State::SosPmApcString => self.anywhere(performer, byte),
+            State::SosPmApcString => self.advance_apc_string(performer, byte),
             State::Ground => unreachable!(),
         }
     }
@@ -431,6 +431,40 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.action_osc_put_param()
             },
             _ => self.action_osc_put(byte),
+        }
+    }
+
+    /// Parser path for `State::SosPmApcString`.
+    ///
+    /// The Williams VT state machine merges SOS (`ESC X`), PM (`ESC ^`), and
+    /// APC (`ESC _`) into one state and drops all payload bytes. Therminal
+    /// needs the APC payload (e.g. Kitty graphics) to reach a
+    /// [`SequenceInterceptor`], so we route each payload byte through
+    /// [`Perform::apc_put`] and signal termination via [`Perform::apc_end`].
+    ///
+    /// Terminators:
+    /// - `ST` as `ESC \` — handled by transitioning to `State::Escape` so the
+    ///   trailing `\` dispatches via `esc_dispatch`.
+    /// - `ST` as `0x9C` — single-byte C1 terminator.
+    /// - `CAN` (`0x18`) / `SUB` (`0x1A`) — cancel; also executed per spec.
+    #[inline(always)]
+    fn advance_apc_string<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        match byte {
+            0x18 | 0x1A => {
+                performer.apc_end();
+                performer.execute(byte);
+                self.state = State::Ground
+            },
+            0x1B => {
+                performer.apc_end();
+                self.reset_params();
+                self.state = State::Escape
+            },
+            0x9C => {
+                performer.apc_end();
+                self.state = State::Ground
+            },
+            _ => performer.apc_put(byte),
         }
     }
 
@@ -811,6 +845,23 @@ pub trait Perform {
     /// subsequent characters were ignored.
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
 
+    /// Pass a byte that is part of an APC (Application Program Command,
+    /// `ESC _ ... ST`) — or the closely related SOS/PM strings, which share a
+    /// parser state in the Williams VT state machine.
+    ///
+    /// Called once per payload byte while the parser is in the APC/SOS/PM
+    /// state. The default impl drops the byte, matching legacy VTE behavior.
+    fn apc_put(&mut self, _byte: u8) {}
+
+    /// Signal that an APC/SOS/PM string terminated (by `ST`, `CAN`, or `SUB`).
+    ///
+    /// Called exactly once per string that reached [`Self::apc_put`] at least
+    /// zero times. Return value is currently informational (reserved for
+    /// future use; downstream interceptors may indicate consumption).
+    fn apc_end(&mut self) -> bool {
+        false
+    }
+
     /// Whether the parser should terminate prematurely.
     ///
     /// This can be used in conjunction with
@@ -854,21 +905,20 @@ pub trait SequenceInterceptor {
 
     /// Called when APC data bytes are received.
     ///
-    /// VTE normally drops APC strings (SosPmApcString state). This hook
-    /// allows interceptors to accumulate APC data. Called once per byte
-    /// while in the APC state; call `intercept_apc_end` when the string
-    /// terminates.
+    /// Vanilla VTE drops APC strings (SosPmApcString state); therminal wires
+    /// per-byte and terminator hooks so interceptors can accumulate APC
+    /// payloads (e.g. Kitty graphics). Called once per payload byte while the
+    /// parser is in the APC state. [`intercept_apc_end`](Self::intercept_apc_end)
+    /// fires on `ST` (ESC `\` or `0x9C`), `CAN`, or `SUB`.
     ///
-    /// **Note:** These APC hooks are defined but not yet wired into the VTE
-    /// state machine (`SosPmApcString` currently dispatches to `anywhere()`).
-    /// They will be connected when APC support is added to the parser.
+    /// The state machine shares this state with SOS and PM strings, so
+    /// implementations that only care about APC should validate the payload
+    /// shape (APC payloads typically start with a recognizable prefix such as
+    /// `G` for Kitty graphics).
     fn intercept_apc_byte(&mut self, _byte: u8) {}
 
-    /// Called when an APC string is terminated (by ST or a cancel character).
+    /// Called when an APC string terminates (by `ST`, `CAN`, or `SUB`).
     /// Return `true` to signal that the APC was handled.
-    ///
-    /// **Note:** Not yet wired into the VTE state machine — see
-    /// [`intercept_apc_byte`](Self::intercept_apc_byte) for details.
     fn intercept_apc_end(&mut self) -> bool {
         false
     }
@@ -909,6 +959,8 @@ mod tests {
         Print(char),
         Execute(u8),
         DcsUnhook,
+        ApcPut(u8),
+        ApcEnd,
     }
 
     impl Perform for Dispatcher {
@@ -948,6 +1000,15 @@ mod tests {
 
         fn execute(&mut self, byte: u8) {
             self.dispatched.push(Sequence::Execute(byte));
+        }
+
+        fn apc_put(&mut self, byte: u8) {
+            self.dispatched.push(Sequence::ApcPut(byte));
+        }
+
+        fn apc_end(&mut self) -> bool {
+            self.dispatched.push(Sequence::ApcEnd);
+            true
         }
     }
 
@@ -1030,6 +1091,105 @@ mod tests {
             Sequence::Osc(_, false) => (),
             _ => panic!("expected osc with ST terminator"),
         }
+    }
+
+    #[test]
+    fn parse_apc_kitty_graphics() {
+        // APC payload "GKitty=data" terminated by ST (ESC \).
+        // This is the shape used by the Kitty graphics protocol and is the
+        // foundation of the Kitty-graphics epic — every payload byte must
+        // reach `apc_put`, and `apc_end` must fire exactly once on ST.
+        const INPUT: &[u8] = b"\x1b_GKitty=data\x1b\\";
+        const PAYLOAD: &[u8] = b"GKitty=data";
+
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, INPUT);
+
+        // Expect: 11 ApcPut bytes + 1 ApcEnd + 1 Esc dispatch for the
+        // trailing `\` (which the state machine emits once ESC transitions
+        // us into `State::Escape` on the terminator).
+        let apc_puts: Vec<u8> = dispatcher
+            .dispatched
+            .iter()
+            .filter_map(|s| match s {
+                Sequence::ApcPut(b) => Some(*b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(apc_puts, PAYLOAD, "every APC payload byte should reach apc_put");
+
+        let apc_end_count = dispatcher
+            .dispatched
+            .iter()
+            .filter(|s| matches!(s, Sequence::ApcEnd))
+            .count();
+        assert_eq!(apc_end_count, 1, "apc_end should fire exactly once");
+
+        // The ST's trailing `\` must still dispatch as an ESC sequence so
+        // downstream handlers see a well-formed ST terminator.
+        assert!(
+            dispatcher
+                .dispatched
+                .iter()
+                .any(|s| matches!(s, Sequence::Esc(_, _, b'\\'))),
+            "ST terminator should produce an esc_dispatch for `\\`",
+        );
+
+        // Order sanity: all ApcPut come before ApcEnd.
+        let last_put = dispatcher
+            .dispatched
+            .iter()
+            .rposition(|s| matches!(s, Sequence::ApcPut(_)))
+            .unwrap();
+        let apc_end = dispatcher
+            .dispatched
+            .iter()
+            .position(|s| matches!(s, Sequence::ApcEnd))
+            .unwrap();
+        assert!(last_put < apc_end, "apc_end must follow the last apc_put");
+    }
+
+    #[test]
+    fn parse_apc_c1_st_terminated() {
+        // APC terminated by the single-byte C1 ST (0x9C).
+        const INPUT: &[u8] = b"\x1b_Gpayload\x9c";
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, INPUT);
+
+        let apc_puts: Vec<u8> = dispatcher
+            .dispatched
+            .iter()
+            .filter_map(|s| match s {
+                Sequence::ApcPut(b) => Some(*b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(apc_puts, b"Gpayload");
+
+        assert_eq!(
+            dispatcher
+                .dispatched
+                .iter()
+                .filter(|s| matches!(s, Sequence::ApcEnd))
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn parse_apc_default_perform_drops_bytes() {
+        // The default `Perform` impl (and therefore the `()` interceptor)
+        // must silently drop APC bytes — no panics, no observable side
+        // effects. Regression guard for legacy behavior.
+        struct Noop;
+        impl Perform for Noop {}
+
+        let mut parser = Parser::new();
+        parser.advance(&mut Noop, b"\x1b_GKitty=data\x1b\\");
     }
 
     #[test]
