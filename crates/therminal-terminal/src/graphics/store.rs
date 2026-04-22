@@ -60,6 +60,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use flate2::read::ZlibDecoder;
 
+use super::chunk_buffer::CHUNK_BUFFER_HARD_CAP;
 use super::{GraphicsFormat, GraphicsMedium, RawGraphicsCommand};
 
 /// Default byte budget for the cache (128 MB). An agent session that
@@ -140,6 +141,11 @@ pub enum StoreError {
     /// `o=z` was set but the zlib stream was corrupt / truncated.
     #[error("graphics store: zlib inflate failed: {0}")]
     ZlibInflate(String),
+    /// `o=z` decompressed output exceeded the per-payload hard cap. Guards
+    /// against a decompression bomb where a tiny compressed payload
+    /// expands into gigabytes of plaintext and exhausts memory.
+    #[error("graphics store: zlib decompressed output exceeded cap ({cap} bytes)")]
+    ZlibOutputTooLarge { cap: usize },
     /// `f=24` / `f=32` payload was not the expected `width * height * N`
     /// bytes.
     #[error(
@@ -174,6 +180,11 @@ pub enum StoreError {
     /// unreadable.
     #[error("graphics store: file not found or unreadable: {path}")]
     FileNotFound { path: String },
+    /// The file pointed at by `t=f` / `t=t` exceeded the per-payload
+    /// hard cap. Prevents an oversized on-disk payload from bypassing
+    /// the in-memory chunk buffer cap.
+    #[error("graphics store: file {path} exceeds cap ({cap} bytes)")]
+    FileTooLarge { path: String, cap: usize },
     /// The file path escaped the `t=f` sandbox.
     #[error(
         "graphics store: file path {path} is outside the allowed sandbox \
@@ -386,6 +397,11 @@ pub struct ImageStore {
     bytes_used: usize,
     budget_bytes: usize,
     sandbox: FileMediumSandbox,
+    /// Per-payload hard cap for `t=f` / `t=t` file reads. Defaults to
+    /// [`CHUNK_BUFFER_HARD_CAP`]. Tests can override via
+    /// [`Self::with_file_medium_cap`] so they can exercise the
+    /// overflow path without writing a 64 MB fixture.
+    file_medium_cap: usize,
 }
 
 impl std::fmt::Debug for ImageStore {
@@ -414,6 +430,7 @@ impl ImageStore {
             bytes_used: 0,
             budget_bytes,
             sandbox: FileMediumSandbox::default(),
+            file_medium_cap: CHUNK_BUFFER_HARD_CAP,
         }
     }
 
@@ -421,6 +438,15 @@ impl ImageStore {
     /// whitelist a `tempfile::tempdir()`.
     pub fn with_sandbox(mut self, sandbox: FileMediumSandbox) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    /// Override the per-payload hard cap for `t=f` / `t=t` reads. Intended
+    /// for tests that want to assert rejection of oversized files without
+    /// writing a full-sized fixture to disk.
+    #[cfg(test)]
+    pub fn with_file_medium_cap(mut self, cap: usize) -> Self {
+        self.file_medium_cap = cap;
         self
     }
 
@@ -543,12 +569,34 @@ impl ImageStore {
                     .trim()
                     .trim_end_matches('\0');
                 let canonical = self.sandbox.resolve(raw_path)?;
-                let bytes = std::fs::read(&canonical).map_err(|e| match e.kind() {
+                let cap = self.file_medium_cap;
+                // Read through a `take`-limited reader so an oversized
+                // file on disk cannot bypass the in-memory chunk-buffer
+                // cap. The limit is cap + 1 so a file that is exactly
+                // `cap` bytes succeeds while anything larger trips the
+                // overflow guard below.
+                let file = std::fs::File::open(&canonical).map_err(|e| match e.kind() {
                     std::io::ErrorKind::NotFound => StoreError::FileNotFound {
                         path: raw_path.to_string(),
                     },
                     _ => StoreError::Io(e.to_string()),
                 })?;
+                let mut limited = file.take((cap as u64).saturating_add(1));
+                let mut bytes = Vec::new();
+                limited
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| match e.kind() {
+                        std::io::ErrorKind::NotFound => StoreError::FileNotFound {
+                            path: raw_path.to_string(),
+                        },
+                        _ => StoreError::Io(e.to_string()),
+                    })?;
+                if bytes.len() > cap {
+                    return Err(StoreError::FileTooLarge {
+                        path: raw_path.to_string(),
+                        cap,
+                    });
+                }
                 if matches!(cmd.medium, GraphicsMedium::TempFile) {
                     // Best-effort cleanup — a failed unlink here is
                     // not fatal, the caller already has the bytes.
@@ -590,12 +638,24 @@ impl ImageStore {
 }
 
 /// Inflate a zlib stream. Used when the command carries `o=z`.
+///
+/// Caps the decompressed output at [`CHUNK_BUFFER_HARD_CAP`] so a small
+/// compressed payload cannot balloon into a multi-gigabyte decompression
+/// bomb that exhausts process memory. The `take` limit is cap + 1 so a
+/// stream that produces exactly `cap` bytes succeeds while anything
+/// larger trips the overflow guard below.
 fn zlib_inflate(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut decoder = ZlibDecoder::new(bytes);
-    decoder
+    let mut out = Vec::with_capacity(bytes.len().min(CHUNK_BUFFER_HARD_CAP));
+    let decoder = ZlibDecoder::new(bytes);
+    let mut limited = decoder.take((CHUNK_BUFFER_HARD_CAP as u64).saturating_add(1));
+    limited
         .read_to_end(&mut out)
         .map_err(|e| StoreError::ZlibInflate(e.to_string()))?;
+    if out.len() > CHUNK_BUFFER_HARD_CAP {
+        return Err(StoreError::ZlibOutputTooLarge {
+            cap: CHUNK_BUFFER_HARD_CAP,
+        });
+    }
     Ok(out)
 }
 
@@ -904,6 +964,35 @@ mod tests {
         assert!(matches!(err, StoreError::ZlibInflate(_)));
     }
 
+    #[test]
+    fn zlib_output_larger_than_cap_is_typed_error() {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+
+        // A highly-compressible payload: (CHUNK_BUFFER_HARD_CAP + 1) zeros
+        // shrinks to a tiny compressed stream but would blow past the cap
+        // on inflate.  Asserts the bomb guard.
+        let raw = vec![0u8; CHUNK_BUFFER_HARD_CAP + 1];
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let payload = base64_encode(&compressed);
+
+        let mut store = ImageStore::default();
+        let err = store
+            .ingest_transmit(TransmitCommand {
+                image_id: ImageId::new(Some(1), None),
+                format: GraphicsFormat::Rgba,
+                medium: GraphicsMedium::Direct,
+                width_px: Some(1),
+                height_px: Some(1),
+                payload,
+                compression: true,
+            })
+            .unwrap_err();
+        assert!(matches!(err, StoreError::ZlibOutputTooLarge { .. }));
+    }
+
     // -- t=f sandbox ----------------------------------------------------
 
     #[test]
@@ -988,6 +1077,31 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, StoreError::FileOutsideSandbox { .. }));
+    }
+
+    #[test]
+    fn t_f_rejects_oversized_file() {
+        // Use a tiny per-instance cap so the test can stay small in CI.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.bin");
+        std::fs::write(&path, vec![0u8; 1024]).unwrap();
+        let sandbox = FileMediumSandbox::with_extra_root(tmp.path());
+        let mut store = ImageStore::default()
+            .with_sandbox(sandbox)
+            .with_file_medium_cap(256);
+
+        let err = store
+            .ingest_transmit(TransmitCommand {
+                image_id: ImageId::new(Some(1), None),
+                format: GraphicsFormat::Rgba,
+                medium: GraphicsMedium::File,
+                width_px: Some(1),
+                height_px: Some(1),
+                payload: path.to_string_lossy().into_owned().into_bytes(),
+                compression: false,
+            })
+            .unwrap_err();
+        assert!(matches!(err, StoreError::FileTooLarge { .. }));
     }
 
     #[test]

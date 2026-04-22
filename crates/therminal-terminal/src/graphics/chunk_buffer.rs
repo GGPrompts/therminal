@@ -91,6 +91,14 @@ impl ChunkBuffer {
         self.entries.len()
     }
 
+    /// Look up the action captured on the first chunk of an in-flight
+    /// transmission. Continuation chunks (`m=1`) in the Kitty protocol
+    /// are not required to repeat `a=`, so the parser uses this to
+    /// inherit the action when it sees a header with only `m=`/`i=`/`p=`.
+    pub fn action_for(&self, key: ChunkKey) -> Option<super::GraphicsAction> {
+        self.entries.get(&key).map(|entry| entry.header.action)
+    }
+
     /// Append one chunk. Returns `Ok(Some(completed))` when `more == false`
     /// (the transmission is complete and the caller should consume the
     /// reassembled buffer), `Ok(None)` when more chunks are expected, or
@@ -103,7 +111,17 @@ impl ChunkBuffer {
         more: bool,
     ) -> Result<Option<CompletedChunk>, ChunkError> {
         // Fast path: single-shot transmission (no existing entry, no more).
+        // Still enforce the per-entry cap here — a single `m=0` chunk with
+        // a giant payload must not bypass the in-memory safety bound.
         if !more && !self.entries.contains_key(&key) {
+            if payload.len() > CHUNK_BUFFER_HARD_CAP {
+                return Err(ChunkError::Overflow {
+                    image_id: key.image_id,
+                    placement_id: key.placement_id,
+                    attempted: payload.len(),
+                    cap: CHUNK_BUFFER_HARD_CAP,
+                });
+            }
             return Ok(Some(CompletedChunk {
                 key,
                 header: command,
@@ -133,7 +151,12 @@ impl ChunkBuffer {
         if more {
             Ok(None)
         } else {
-            let entry = self.entries.remove(&key).expect("just inserted");
+            // Invariant: the `or_insert_with` above guarantees a present
+            // entry. Fall back to a defensive no-op rather than panic if
+            // a future refactor breaks that invariant.
+            let Some(entry) = self.entries.remove(&key) else {
+                return Ok(None);
+            };
             Ok(Some(CompletedChunk {
                 key,
                 header: entry.header,

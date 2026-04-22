@@ -273,9 +273,10 @@ impl ImageRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    // Premultiplied-alpha blending matches how glyphon's
-                    // text atlas composes and how the rect pipeline's
-                    // existing ALPHA_BLENDING mode treats rect colors.
+                    // Straight-alpha blending: Kitty delivers raw RGBA,
+                    // not premultiplied. Matches how glyphon's text atlas
+                    // composes and how the rect pipeline's existing
+                    // ALPHA_BLENDING mode treats rect colors.
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -347,6 +348,11 @@ impl ImageRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
+            // TODO(beads): separate pipelines for linear-raw (`f=24`/`f=32`)
+            // vs sRGB-PNG (`f=100`) textures. Raw pixels are linear but are
+            // currently uploaded as sRGB, which applies gamma twice.
+            // Fixing this requires threading `GraphicsFormat` to the
+            // uploader and minting a matching pipeline variant.
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -482,9 +488,18 @@ impl ImageRenderer {
                 // placement is outside the visible strip, skip it.
                 let viewport_row =
                     placement_viewport_row(p.anchor_row, display_offset, screen_lines)?;
+                // The pixel data is keyed by the **transmit command**'s
+                // `(image_id, placement_id)` pair — which for most
+                // transmits is `(N, 0)` because clients rarely set `p=`
+                // on `a=t/T`. Placements created via `a=p i=N p=M` reuse
+                // the same pixels; looking up with the placement's
+                // `placement_id` would miss. See tn-6005 review.
+                // TODO: if a future transmit binds pixels per placement,
+                // add a second lookup here that falls back to the
+                // placement-specific key.
                 let image = store.get(therminal_terminal::graphics::ImageId::new(
                     Some(p.image_id),
-                    Some(p.placement_id),
+                    None,
                 ))?;
                 let texture_id = self.ensure_uploaded(device, queue, &image)?;
                 let (px, py, pw, ph) = placement_pixel_rect(
@@ -676,6 +691,63 @@ mod tests {
         assert_eq!(placement_viewport_row(10, 5, 24), Some(5));
         // Anchor row 3, display offset 5 → scrolled above viewport.
         assert_eq!(placement_viewport_row(3, 5, 24), None);
+    }
+
+    /// Regression guard for tn-6005 review finding: the pixel data is
+    /// keyed by the transmit command's `(image_id, placement_id)` pair,
+    /// which is typically `(N, 0)` because `a=t` / `a=T` rarely sets
+    /// `p=`. A placement created via `a=p i=N p=M` gets a non-zero
+    /// `placement_id`, but the pixels still live under `(N, 0)` in the
+    /// store. The renderer's lookup must therefore use `placement_id =
+    /// None` (→ 0), not the placement's own `placement_id`, or images
+    /// silently fail to render.
+    #[test]
+    fn store_lookup_for_placement_uses_transmit_key() {
+        use std::sync::OnceLock;
+        use therminal_terminal::graphics::{
+            DecodedImage, ImageId, ImageStore, PlacementSet, RawGraphicsCommand,
+        };
+
+        let mut store = ImageStore::default();
+        // Insert the pixel data under `(image_id = 7, placement_id = 0)`
+        // — the normal transmit-side key.
+        store.insert(
+            ImageId::new(Some(7), None),
+            DecodedImage {
+                width: 1,
+                height: 1,
+                pixels: vec![0xff, 0x00, 0x00, 0xff],
+                gpu_texture: OnceLock::new(),
+            },
+        );
+
+        let mut set = PlacementSet::new();
+        let cmd = RawGraphicsCommand::empty();
+        // Create a placement via `a=p i=7 p=5` at the cursor.
+        set.insert_display_at_cursor(Some(7), Some(5), Some(1), Some(1), Some(0), &cmd, 0, 0);
+
+        // Simulate the renderer's lookup: image_id from placement,
+        // placement_id = None.
+        let placement = set.iter_draw_order().next().expect("placement present");
+        assert_eq!(placement.image_id, 7);
+        assert_eq!(placement.placement_id, 5);
+
+        let img = store.get(ImageId::new(Some(placement.image_id), None));
+        assert!(
+            img.is_some(),
+            "lookup via (image_id, None) must resolve the transmit-side pixels"
+        );
+
+        // Counter-check: the erroneous lookup via the placement's own
+        // `placement_id` misses the transmit key.
+        let missing = store.get(ImageId::new(
+            Some(placement.image_id),
+            Some(placement.placement_id),
+        ));
+        assert!(
+            missing.is_none(),
+            "lookup via (image_id, placement_id) must NOT hit the transmit-side key"
+        );
     }
 
     /// Verify that creating a placement set, applying a display event,

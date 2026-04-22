@@ -35,6 +35,15 @@ pub mod store;
 use std::collections::HashMap;
 
 pub use chunk_buffer::{CHUNK_BUFFER_HARD_CAP, ChunkBuffer, ChunkError, ChunkKey, CompletedChunk};
+
+/// Hard cap on a single APC string's raw accumulator, in bytes.
+///
+/// This guards the parser's inner `buf: Vec<u8>` against a client that
+/// never terminates the APC (`ST`). The cap is
+/// `CHUNK_BUFFER_HARD_CAP + 1 KiB` so a maximum-size chunk (up to the
+/// chunk-buffer cap) plus its header / trailing key=value overhead
+/// still fits in a single APC; anything larger is a protocol abuse.
+pub const APC_BUF_HARD_CAP: usize = CHUNK_BUFFER_HARD_CAP + 1024;
 pub use placements::{Placement, PlacementSet};
 pub use store::{
     DEFAULT_BUDGET_BYTES, DecodedImage, FileMediumSandbox, ImageId, ImageStore, StoreError,
@@ -243,7 +252,31 @@ pub enum GraphicsParseError {
 /// `body` is the bytes **after** the leading `G` prefix, up to but not
 /// including the `;` that separates header from payload. When the APC
 /// string is pure-header (e.g. `a=q`), pass the full tail.
+///
+/// Continuation chunks (`m=1`) in a multi-chunk transmission are allowed
+/// to omit `a=` — the protocol only requires the action on the first
+/// chunk. Callers that need to tolerate that pattern must detect the
+/// missing-action case via [`GraphicsParseError::UnknownAction`] and
+/// retry with the cached action from their chunk buffer (see
+/// [`parse_header_with_default_action`]).
 pub fn parse_header(body: &[u8]) -> Result<RawGraphicsCommand, GraphicsParseError> {
+    parse_header_inner(body, None)
+}
+
+/// Variant of [`parse_header`] that accepts a default action to apply when
+/// the header omits `a=`. Used by the APC reassembly path for
+/// continuation chunks that carry only `m=`, `i=`, `p=`.
+pub fn parse_header_with_default_action(
+    body: &[u8],
+    default_action: GraphicsAction,
+) -> Result<RawGraphicsCommand, GraphicsParseError> {
+    parse_header_inner(body, Some(default_action))
+}
+
+fn parse_header_inner(
+    body: &[u8],
+    default_action: Option<GraphicsAction>,
+) -> Result<RawGraphicsCommand, GraphicsParseError> {
     let s = std::str::from_utf8(body).map_err(|_| GraphicsParseError::MalformedPair {
         pair: format!("{:?}", body),
     })?;
@@ -403,7 +436,10 @@ pub fn parse_header(body: &[u8]) -> Result<RawGraphicsCommand, GraphicsParseErro
     }
 
     if !action_seen {
-        return Err(GraphicsParseError::UnknownAction);
+        match default_action {
+            Some(action) => cmd.action = action,
+            None => return Err(GraphicsParseError::UnknownAction),
+        }
     }
 
     Ok(cmd)
@@ -445,6 +481,12 @@ impl ParseOutput {
 #[derive(Debug, Default)]
 pub struct KittyGraphicsParser {
     buf: Vec<u8>,
+    /// Set when a `push_byte` would push `buf.len()` past
+    /// [`CHUNK_BUFFER_HARD_CAP`]. Further bytes are dropped silently
+    /// and `finalize()` translates the flag into an `ENOMEM` APC
+    /// error response so a runaway APC cannot balloon the parser's
+    /// internal buffer without bound.
+    overflow: bool,
     chunk_buffer: ChunkBuffer,
 }
 
@@ -456,7 +498,19 @@ impl KittyGraphicsParser {
     /// Feed one byte of the APC body. The caller must not include the APC
     /// introducer (`ESC _`) or terminator (`ESC \`) — those are the
     /// interceptor's responsibility.
+    ///
+    /// Stops accumulating once the buffer exceeds the per-APC cap
+    /// ([`APC_BUF_HARD_CAP`]).  Subsequent bytes for the same APC string
+    /// are dropped on the floor and `finalize()` returns an
+    /// `ENOMEM`-flavoured parse error.
     pub fn push_byte(&mut self, byte: u8) {
+        if self.overflow {
+            return;
+        }
+        if self.buf.len() >= APC_BUF_HARD_CAP {
+            self.overflow = true;
+            return;
+        }
         self.buf.push(byte);
     }
 
@@ -467,7 +521,24 @@ impl KittyGraphicsParser {
     /// (no event, no response) so a bad client cannot steer the terminal
     /// off a cliff.
     pub fn finalize(&mut self) -> ParseOutput {
+        let overflowed = std::mem::take(&mut self.overflow);
         let body = std::mem::take(&mut self.buf);
+        if overflowed {
+            // Translate the accumulator overflow into an `ENOMEM`-flavoured
+            // APC error response. The `consumed` flag stays `true` so the
+            // vte layer doesn't also log this as an unhandled APC.
+            let err = GraphicsParseError::Chunk(ChunkError::Overflow {
+                image_id: 0,
+                placement_id: 0,
+                attempted: body.len().saturating_add(1),
+                cap: APC_BUF_HARD_CAP,
+            });
+            return ParseOutput {
+                event: None,
+                response: response_for_parse_error(&err, None, QuietLevel::Normal),
+                consumed: true,
+            };
+        }
         self.finalize_body(&body)
     }
 
@@ -487,6 +558,54 @@ impl KittyGraphicsParser {
 
         let command = match parse_header(header_bytes) {
             Ok(c) => c,
+            Err(GraphicsParseError::UnknownAction) => {
+                // The Kitty protocol only requires `a=` on the first chunk
+                // of a multi-chunk transmit. Continuation chunks carry just
+                // `m=1`/`m=0` (and optionally `i=`/`p=`). If we have an
+                // in-flight buffer for this key, inherit its action.
+                let peek = parse_header_with_default_action(header_bytes, GraphicsAction::Transmit);
+                match peek {
+                    Ok(probe) => {
+                        let key = ChunkKey::from_command(&probe);
+                        match self.chunk_buffer.action_for(key) {
+                            Some(action) => {
+                                match parse_header_with_default_action(header_bytes, action) {
+                                    Ok(c) => c,
+                                    Err(err) => {
+                                        return ParseOutput {
+                                            event: None,
+                                            response: response_for_parse_error(
+                                                &err,
+                                                None,
+                                                QuietLevel::Normal,
+                                            ),
+                                            consumed: true,
+                                        };
+                                    }
+                                }
+                            }
+                            None => {
+                                return ParseOutput {
+                                    event: None,
+                                    response: response_for_parse_error(
+                                        &GraphicsParseError::UnknownAction,
+                                        None,
+                                        QuietLevel::Normal,
+                                    ),
+                                    consumed: true,
+                                };
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        return ParseOutput {
+                            event: None,
+                            response: response_for_parse_error(&err, None, QuietLevel::Normal),
+                            consumed: true,
+                        };
+                    }
+                }
+            }
             Err(err) => {
                 return ParseOutput {
                     event: None,
@@ -528,7 +647,11 @@ impl KittyGraphicsParser {
             .append(key, command.clone(), payload, more)
         {
             Ok(Some(done)) => {
-                let display = matches!(command.action, GraphicsAction::TransmitAndDisplay);
+                // Derive `display` from the **first** chunk's header (captured
+                // in `done.header`). For a single-chunk transmit that's also
+                // the final chunk's header; for a multi-chunk transmit only
+                // the first chunk carries the `a=T` flag.
+                let display = matches!(done.header.action, GraphicsAction::TransmitAndDisplay);
                 let event = GraphicsEvent::GraphicsTransmit {
                     image_id: done.header.image_id,
                     placement_id: done.header.placement_id,
@@ -1049,13 +1172,87 @@ mod tests {
         assert!(out.event.is_none());
     }
 
+    // -- multi-chunk continuation without `a=` -------------------------------
+
+    #[test]
+    fn multi_chunk_continuation_without_action_inherits_from_first() {
+        // The Kitty protocol spec says continuation chunks in a multi-chunk
+        // transmission only carry `m=` (and optionally `i=`/`p=`) — they
+        // do NOT repeat `a=`. Real `kitty +kitten icat` emits chunks like
+        // this, so the parser must accept them.
+        let mut p = KittyGraphicsParser::new();
+
+        let out1 = drive(&mut p, "Ga=t,f=100,i=1,m=1;AAAA");
+        assert!(out1.event.is_none(), "no event until final chunk");
+
+        // Continuation chunk: `m=1` with NO `a=`. Action must be inherited
+        // from the buffered first chunk.
+        let out2 = drive(&mut p, "Gm=1,i=1;BBBB");
+        assert!(out2.event.is_none());
+
+        // Final chunk: `m=0` with NO `a=`.
+        let out3 = drive(&mut p, "Gm=0,i=1;CCCC");
+        let event = out3.event.expect("final chunk should emit");
+        match event {
+            GraphicsEvent::GraphicsTransmit { payload, .. } => {
+                assert_eq!(payload, b"AAAABBBBCCCC");
+            }
+            other => panic!("unexpected event {:?}", other),
+        }
+        assert_eq!(p.in_flight(), 0);
+    }
+
+    #[test]
+    fn multi_chunk_transmit_and_display_sets_display_from_first_chunk() {
+        // Only the first chunk carries `a=T`. If `display` were derived
+        // from the final chunk's header it would always be false and
+        // transmit-and-display would silently misbehave.
+        let mut p = KittyGraphicsParser::new();
+
+        let out1 = drive(&mut p, "Ga=T,f=100,i=2,m=1;AAAA");
+        assert!(out1.event.is_none());
+
+        let out2 = drive(&mut p, "Gm=0,i=2;BBBB");
+        let event = out2.event.expect("final chunk should emit");
+        match event {
+            GraphicsEvent::GraphicsTransmit {
+                display, payload, ..
+            } => {
+                assert!(display, "display must inherit from first chunk's a=T");
+                assert_eq!(payload, b"AAAABBBB");
+            }
+            other => panic!("unexpected event {:?}", other),
+        }
+    }
+
+    // -- apc accumulator size cap --------------------------------------------
+
+    #[test]
+    fn push_byte_accumulator_cap_translates_to_error_response() {
+        // Push more than APC_BUF_HARD_CAP bytes through `push_byte`
+        // without terminating. The parser must stop accumulating and
+        // `finalize()` must produce an error response with no event.
+        let mut p = KittyGraphicsParser::new();
+        for _ in 0..(APC_BUF_HARD_CAP + 10) {
+            p.push_byte(b'A');
+        }
+        let out = p.finalize();
+        assert!(out.event.is_none(), "overflow ⇒ no event");
+        assert!(!out.response.is_empty(), "overflow ⇒ error response");
+        assert!(out.consumed);
+    }
+
     // -- overflow ------------------------------------------------------------
 
     #[test]
     fn chunk_buffer_overflow_drops_and_errors() {
         let mut p = KittyGraphicsParser::new();
 
-        // Prime with a large first chunk just under the cap.
+        // Prime with a large first chunk just under the chunk-buffer
+        // cap. The parser's own per-APC accumulator cap
+        // (`APC_BUF_HARD_CAP`) is larger than `CHUNK_BUFFER_HARD_CAP` so
+        // a single chunk carrying `CHUNK_BUFFER_HARD_CAP - 1` payload
+        // bytes still fits.
         let big = vec![b'A'; CHUNK_BUFFER_HARD_CAP - 1];
         let mut head = b"Ga=t,i=99,m=1;".to_vec();
         head.extend_from_slice(&big);
@@ -1068,7 +1265,8 @@ mod tests {
         assert!(out1.event.is_none());
         assert_eq!(p.in_flight(), 1);
 
-        // Second chunk tips us past the cap — must drop + error.
+        // Second chunk tips us past the chunk-buffer cap — must drop
+        // the entry and emit an error response.
         let out2 = drive(&mut p, "Ga=t,i=99,m=1;BB");
         assert!(out2.event.is_none());
         assert!(!out2.response.is_empty(), "overflow ⇒ error response");

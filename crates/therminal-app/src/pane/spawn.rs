@@ -1,5 +1,6 @@
 //! Pane spawning: PTY creation via shared PtyPaneCore, reader thread, and lifecycle callbacks.
 
+use std::io::Write as IoWrite;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -11,6 +12,45 @@ use therminal_terminal::graphics::{ImageStore, PlacementSet};
 use therminal_terminal::pty_runtime::{PtyPaneCore, PtyReaderHandler};
 use therminal_terminal::region_index::RegionIndex;
 use tracing::info;
+
+/// Thin shared wrapper around the raw PTY writer so both the main
+/// thread (keyboard input) and the Kitty-graphics response drain
+/// thread can push bytes to the same PTY without racing each other.
+///
+/// Owns an `Arc<Mutex<Box<dyn IoWrite + Send>>>` so the backend's
+/// `pty_writer: Box<dyn IoWrite + Send>` slot can keep its existing
+/// type while a second cloneable handle gets passed into the
+/// response-drain thread. Keeps the Mutex guard short-lived — one
+/// `write_all` + `flush` per call — so keyboard input latency is
+/// unaffected by the graphics-response path.
+#[derive(Clone)]
+struct SharedPtyWriter {
+    inner: Arc<Mutex<Box<dyn IoWrite + Send>>>,
+}
+
+impl SharedPtyWriter {
+    fn new(writer: Box<dyn IoWrite + Send>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(writer)),
+        }
+    }
+}
+
+impl IoWrite for SharedPtyWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.write(data),
+            Err(_) => Err(std::io::Error::other("shared pty writer mutex poisoned")),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.flush(),
+            Err(_) => Err(std::io::Error::other("shared pty writer mutex poisoned")),
+        }
+    }
+}
 
 use super::PaneId;
 use super::PaneListener;
@@ -72,6 +112,12 @@ struct AppPtyHandler {
     image_store: Arc<Mutex<ImageStore>>,
     /// Kitty graphics placement set (tn-wdn1). Shared with the renderer.
     placements: Arc<Mutex<PlacementSet>>,
+    /// Sender end of the Kitty graphics APC response channel. Installed
+    /// on the interceptor during `ensure_init`. The receiving end is
+    /// drained by a dedicated thread spawned in [`spawn_pane`] that
+    /// writes the bytes back to the PTY so clients (image-preview tools,
+    /// feature-query probes) see their `OK` / error replies.
+    graphics_response_tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     /// Lazily initialised on the reader thread.
     reader_state: Option<ReaderState>,
 }
@@ -85,7 +131,17 @@ impl AppPtyHandler {
         use therminal_terminal::interceptor::TherminalInterceptor;
         use therminal_terminal::process_detector::ProcessDetector;
 
-        let (interceptor, event_rx) = TherminalInterceptor::new(self.interceptor_config.clone());
+        let (mut interceptor, event_rx) =
+            TherminalInterceptor::new(self.interceptor_config.clone());
+
+        // Wire the Kitty graphics APC response sink (tn-6005). The parser
+        // emits `OK` / error envelopes for feature queries, transmit acks,
+        // etc.; without this the replies would be silently dropped and
+        // clients like TFE / viu / chafa never learn the terminal
+        // supports the protocol.
+        if let Some(tx) = self.graphics_response_tx.take() {
+            interceptor.set_graphics_response_sink(tx);
+        }
 
         let scan_interval = if self.scan_interval_secs == 0 {
             None
@@ -322,6 +378,13 @@ where
     let listener = PaneListener::new();
     let bell_flag = Arc::clone(&listener.bell_pending);
 
+    // Kitty graphics APC response channel (tn-6005). The interceptor
+    // pushes `OK` / error envelopes into `graphics_tx`; a dedicated
+    // drain thread (spawned below, after we own the PTY writer) reads
+    // `graphics_rx` and writes each envelope back through the PTY so
+    // the producing client sees its reply.
+    let (graphics_tx, graphics_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
     let handler = AppPtyHandler {
         pane_id: id,
         wake: callbacks.wake,
@@ -337,6 +400,7 @@ where
         on_notification: callbacks.on_notification,
         image_store: Arc::clone(&image_store),
         placements: Arc::clone(&placements),
+        graphics_response_tx: Some(graphics_tx),
         reader_state: None,
     };
 
@@ -353,8 +417,35 @@ where
     info!(pane_id = id, cols, rows, "Pane spawned");
 
     let term = Arc::clone(core.term());
-    let pty_writer = core.take_writer();
+    let raw_pty_writer = core.take_writer();
     let pty_master = core.take_pty_master();
+
+    // Wrap the single PTY writer in a shared handle so the backend
+    // (keyboard input) and the graphics response drain thread can both
+    // push bytes without racing. Keep the backend slot a
+    // `Box<dyn IoWrite + Send>` so PaneBackendKind stays untouched.
+    let shared_writer = SharedPtyWriter::new(raw_pty_writer);
+    let drain_writer = shared_writer.clone();
+
+    std::thread::Builder::new()
+        .name(format!("graphics-response-drain-{id}"))
+        .spawn(move || {
+            let mut writer = drain_writer;
+            while let Ok(bytes) = graphics_rx.recv() {
+                if bytes.is_empty() {
+                    continue;
+                }
+                if let Err(e) = writer.write_all(&bytes) {
+                    tracing::debug!(error = %e, pane_id = id, "graphics response PTY write failed");
+                    break;
+                }
+                if let Err(e) = writer.flush() {
+                    tracing::debug!(error = %e, pane_id = id, "graphics response PTY flush failed");
+                    break;
+                }
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("failed to spawn graphics response drain: {e}"))?;
 
     Ok(PaneState {
         id,
@@ -363,7 +454,7 @@ where
         region_index,
         backend: PaneBackendKind::Terminal {
             term,
-            pty_writer,
+            pty_writer: Box::new(shared_writer),
             pty_master,
             scrollback_lines,
         },
