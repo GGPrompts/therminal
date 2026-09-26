@@ -93,17 +93,50 @@ _resolve_therminal_bin() {
 
 # Get tmux pane ID if running in tmux
 TMUX_PANE="${TMUX_PANE:-none}"
+# The tmux pane id is unique only within one tmux server. A session on a
+# private server (tmux -L <name>) is also pane %0, so key the state by the
+# socket name too, leaving the default server's keys unchanged. Hooks do not
+# receive $TMUX (only $TMUX_PANE), so when it is absent the socket is found by
+# asking each server on this user's socket directory whether its pane of that
+# id owns an ancestor of this process.
+tmux_socket_name() {
+    local name sock pane_pid pid
+    if [[ -n "${TMUX:-}" ]]; then
+        name="${TMUX%%,*}"; name="${name##*/}"
+        echo "${name:-default}"; return
+    fi
+    if [[ -z "${TMUX_PANE:-}" || "${TMUX_PANE:-none}" == "none" ]]; then echo default; return; fi
+    for sock in "/tmp/tmux-$(id -u)"/*; do
+        [[ -S "$sock" ]] || continue
+        pane_pid=$(tmux -S "$sock" display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null) || continue
+        [[ -n "$pane_pid" ]] || continue
+        pid=$$
+        while [[ -n "$pid" && "$pid" -gt 1 ]]; do
+            if [[ "$pid" == "$pane_pid" ]]; then basename "$sock"; return; fi
+            pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        done
+    done
+    echo default
+}
+tmux_socket_prefix() {
+    local sock
+    sock=$(tmux_socket_name)
+    if [[ -n "$sock" && "$sock" != "default" ]]; then
+        echo "$(echo "$sock" | sed 's/[^a-zA-Z0-9_-]/_/g')_"
+    fi
+}
 
 # Read stdin if available (contains hook data from Claude)
 # Explicit timeout prevents hanging if Claude keeps stdin open
 STDIN_DATA=$(timeout 1 cat 2>/dev/null || echo "")
 
+TMUX_SOCKET=$(tmux_socket_name)
 # Get session identifier - UNIFIED STRATEGY for both projects
 # Priority: 1. CLAUDE_SESSION_ID env var, 2. TMUX_PANE (for tmuxplexer), 3. Working directory hash (for terminal-tabs)
 if [[ -n "${CLAUDE_SESSION_ID:-}" ]]; then
     SESSION_ID="$CLAUDE_SESSION_ID"
 elif [[ "$TMUX_PANE" != "none" && -n "$TMUX_PANE" ]]; then
-    SESSION_ID=$(echo "$TMUX_PANE" | sed 's/[^a-zA-Z0-9_-]/_/g')
+    SESSION_ID="$(tmux_socket_prefix)$(echo "$TMUX_PANE" | sed 's/[^a-zA-Z0-9_-]/_/g')"
 elif [[ -n "$PWD" ]]; then
     SESSION_ID=$(portable_md5 "$PWD" | head -c 12)
 else
@@ -432,6 +465,7 @@ STATE_JSON=$(jq -n \
     --arg working_dir "$PWD" \
     --arg last_updated "$TIMESTAMP" \
     --arg tmux_pane "$TMUX_PANE" \
+    --arg tmux_socket "$TMUX_SOCKET" \
     --argjson pid "${_HOOK_PID}" \
     --arg hook_type "$HOOK_TYPE" \
     --arg session_title "$SESSION_TITLE" \
@@ -451,6 +485,7 @@ STATE_JSON=$(jq -n \
         working_dir: $working_dir,
         last_updated: $last_updated,
         tmux_pane: $tmux_pane,
+        tmux_socket: $tmux_socket,
         pid: $pid,
         hook_type: $hook_type,
         session_title: (if $session_title == "" then null else $session_title end),
@@ -583,6 +618,7 @@ _ledger_append() (
             context_window,
             working_dir,
             tmux_pane,
+            tmux_socket,
             last_updated,
             tool_name: null,
             tool_use_id: null,
