@@ -1,0 +1,6 @@
+# Windows-native Therminal bridge, matching this project's .mcp.json.
+# Start the Windows Therminal app (or daemon) before connecting Codex.
+[mcp_servers.therminal]
+command = "/mnt/c/Users/marci/Desktop/therminal.exe"
+args = ["mcp"]
+enabled = true
