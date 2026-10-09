@@ -91,6 +91,8 @@ pub fn snapshot(mgr: &SessionManager) -> PersistedState {
                     rows: pane.rows(),
                     tags,
                     pinned,
+                    launch_identity: pane.launch_identity().clone(),
+                    current_identity: pane.current_identity().clone(),
                 });
             }
         }
@@ -189,6 +191,8 @@ mod tests {
                         rows: 40,
                         tags: Default::default(),
                         pinned: false,
+                        launch_identity: Default::default(),
+                        current_identity: Default::default(),
                     },
                     PersistedPane {
                         cwd: "/tmp".into(),
@@ -197,6 +201,8 @@ mod tests {
                         rows: 24,
                         tags: Default::default(),
                         pinned: false,
+                        launch_identity: Default::default(),
+                        current_identity: Default::default(),
                     },
                 ],
                 workspaces: vec![],
@@ -237,6 +243,8 @@ mod tests {
                     rows: 24,
                     tags: Default::default(),
                     pinned: false,
+                    launch_identity: Default::default(),
+                    current_identity: Default::default(),
                 }],
                 workspaces: vec![],
                 active_workspace: 1,
@@ -279,6 +287,8 @@ mod tests {
                     rows: 24,
                     tags: Default::default(),
                     pinned: false,
+                    launch_identity: Default::default(),
+                    current_identity: Default::default(),
                 }],
                 workspaces: vec![],
                 active_workspace: 1,
@@ -317,6 +327,8 @@ mod tests {
                         rows: 24,
                         tags: Default::default(),
                         pinned: false,
+                        launch_identity: Default::default(),
+                        current_identity: Default::default(),
                     },
                     PersistedPane {
                         cwd: "/var".into(),
@@ -325,6 +337,8 @@ mod tests {
                         rows: 40,
                         tags: Default::default(),
                         pinned: false,
+                        launch_identity: Default::default(),
+                        current_identity: Default::default(),
                     },
                 ],
                 workspaces: vec![],

@@ -6,6 +6,7 @@ use glyphon::{
 use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::{ColorVertex, GridRenderer};
+use crate::pane::TabBarGeometry;
 
 use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
@@ -17,10 +18,14 @@ pub(crate) struct TabBarInfo {
     pub tab_labels: Vec<String>,
 }
 
-const TAB_MIN_WIDTH: f32 = 48.0;
-const TAB_MAX_WIDTH: f32 = 200.0;
 const TAB_PADDING: f32 = 16.0;
 pub(crate) const TAB_ELLIPSIS: char = '…';
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabBarHit {
+    Workspace(usize),
+    NewTab,
+}
 
 /// Draw the workspace tab bar at the top of the window.
 ///
@@ -41,6 +46,7 @@ pub(crate) fn draw_tab_bar(
     bar_h: f32,
     show_tabs: bool,
     csd_reserved: f32,
+    new_tab_hovered: bool,
 ) {
     use crate::color_mapping::pixel_rect_to_ndc;
 
@@ -78,24 +84,16 @@ pub(crate) fn draw_tab_bar(
         return;
     }
 
-    let available_w = (sw - csd_reserved).max(0.0);
-    let slot_w = slot_width(available_w, info.tab_labels.len());
-    let tab_widths: Vec<f32> = info.tab_labels.iter().map(|_| slot_w).collect();
-
-    let tab_offsets: Vec<f32> = tab_widths
-        .iter()
-        .scan(0.0f32, |acc, &w| {
-            let x = *acc;
-            *acc += w;
-            Some(x)
-        })
+    let geometry = TabBarGeometry::new(sw, bar_h, info.tab_labels.len(), csd_reserved);
+    let tab_rects: Vec<_> = (0..info.tab_labels.len())
+        .filter_map(|index| geometry.tab_rect(index))
         .collect();
 
     // ── Active tab backgrounds ──
     let mut tab_verts: Vec<ColorVertex> = Vec::new();
     for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
-        let tab_x = tab_offsets[i];
-        let tab_w = tab_widths[i];
+        let tab_x = tab_rects[i].x();
+        let tab_w = tab_rects[i].width();
         if ws_id == info.active_workspace {
             tab_verts.extend_from_slice(&pixel_rect_to_ndc(
                 tab_x,
@@ -116,6 +114,18 @@ pub(crate) fn draw_tab_bar(
                 tab_active_underline,
             ));
         }
+    }
+    if new_tab_hovered {
+        let rect = geometry.plus_button;
+        tab_verts.extend_from_slice(&pixel_rect_to_ndc(
+            rect.x(),
+            rect.y(),
+            rect.width(),
+            rect.height(),
+            sw,
+            sh,
+            renderer.chrome_palette.csd_button_hover,
+        ));
     }
 
     if !tab_verts.is_empty() {
@@ -150,8 +160,8 @@ pub(crate) fn draw_tab_bar(
     let family = renderer.font_config.chrome_font_family().to_string();
     let mut tab_slots: Vec<(String, f32, f32, GlyphColor)> = Vec::new();
     for (i, &ws_id) in info.workspace_ids.iter().enumerate() {
-        let tab_x = tab_offsets[i];
-        let tab_w = tab_widths[i];
+        let tab_x = tab_rects[i].x();
+        let tab_w = tab_rects[i].width();
         let is_active = ws_id == info.active_workspace;
         let color = if is_active {
             active_color
@@ -230,6 +240,27 @@ pub(crate) fn draw_tab_bar(
 
         tab_slots.push((slot, tab_x, tab_w, color));
     }
+
+    let plus_slot = "tab_new_button".to_string();
+    ensure_shaped(
+        &plus_slot,
+        "+",
+        metrics,
+        sw,
+        bar_h,
+        "+",
+        Attrs::new()
+            .family(Family::Name(&family))
+            .color(active_color),
+        &mut renderer.font_system,
+        &mut renderer.overlay_cache,
+    );
+    tab_slots.push((
+        plus_slot,
+        geometry.plus_button.x(),
+        geometry.plus_button.width(),
+        active_color,
+    ));
 
     // Phase 2: immutable borrow. Missing slots are skipped.
     // (buf, centered_x, tab_x, tab_w, color) — tab_x/tab_w retained for per-tab bounds clipping.
@@ -311,59 +342,39 @@ pub(crate) fn tab_bar_hit_test(
     bar_width: f32,
     csd_reserved: f32,
 ) -> Option<usize> {
+    match tab_bar_hit_target(px, workspace_ids, tab_labels, bar_width, 1.0, csd_reserved) {
+        Some(TabBarHit::Workspace(id)) => Some(id),
+        Some(TabBarHit::NewTab) | None => None,
+    }
+}
+
+/// Return the interactive target under `px` using the same geometry as draw.
+pub(crate) fn tab_bar_hit_target(
+    px: f32,
+    workspace_ids: &[usize],
+    tab_labels: &[String],
+    bar_width: f32,
+    bar_height: f32,
+    csd_reserved: f32,
+) -> Option<TabBarHit> {
     if workspace_ids.is_empty() {
         return None;
     }
-    let available_w = (bar_width - csd_reserved).max(0.0);
-    let slot_w = slot_width(available_w, tab_labels.len());
-    if slot_w <= 0.0 {
-        return None;
+    let geometry = TabBarGeometry::new(bar_width, bar_height, tab_labels.len(), csd_reserved);
+    if geometry.plus_contains_x(px) {
+        return Some(TabBarHit::NewTab);
     }
-    // Clicks inside the CSD reserved zone are not tab clicks.
-    if px >= available_w {
-        return None;
-    }
-    if px < 0.0 {
-        return workspace_ids.first().copied();
-    }
-    let idx = (px / slot_w).floor() as usize;
-    workspace_ids.get(idx).copied()
-}
-
-/// Per-tab slot width: divides the bar evenly, capped at TAB_MAX_WIDTH and
-/// floored at TAB_MIN_WIDTH. Tabs always share width — no overflow allowed.
-fn slot_width(bar_width: f32, tab_count: usize) -> f32 {
-    if tab_count == 0 {
-        return 0.0;
-    }
-    let even = bar_width / tab_count as f32;
-    even.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+    let index = geometry.tab_index_at_x(px)?;
+    workspace_ids.get(index).copied().map(TabBarHit::Workspace)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::TAB_MAX_WIDTH;
 
     fn labels(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn slot_width_divides_evenly_under_max() {
-        // 4 tabs in 600 px → 150 each, below TAB_MAX_WIDTH.
-        assert_eq!(slot_width(600.0, 4), 150.0);
-    }
-
-    #[test]
-    fn slot_width_caps_at_max() {
-        // 1 tab in 1000 px → would be 1000, capped to TAB_MAX_WIDTH.
-        assert_eq!(slot_width(1000.0, 1), TAB_MAX_WIDTH);
-    }
-
-    #[test]
-    fn slot_width_floors_at_min() {
-        // 100 tabs in 100 px → 1 each, raised to TAB_MIN_WIDTH.
-        assert_eq!(slot_width(100.0, 100), TAB_MIN_WIDTH);
     }
 
     #[test]
@@ -374,13 +385,14 @@ mod tests {
 
     #[test]
     fn tab_bar_hit_test_uses_clamped_slot() {
-        // 4 tabs in 800 px → slot_w = 200.
+        // The 32 px plus button is reserved first: (800 - 32) / 4 = 192.
         let ids = vec![1usize, 2, 3, 4];
         let ls = labels(&["a", "b", "c", "d"]);
         assert_eq!(tab_bar_hit_test(0.0, &ids, &ls, 800.0, 0.0), Some(1));
-        assert_eq!(tab_bar_hit_test(199.9, &ids, &ls, 800.0, 0.0), Some(1));
-        assert_eq!(tab_bar_hit_test(200.0, &ids, &ls, 800.0, 0.0), Some(2));
-        assert_eq!(tab_bar_hit_test(599.9, &ids, &ls, 800.0, 0.0), Some(3));
+        assert_eq!(tab_bar_hit_test(191.9, &ids, &ls, 800.0, 0.0), Some(1));
+        assert_eq!(tab_bar_hit_test(192.0, &ids, &ls, 800.0, 0.0), Some(2));
+        assert_eq!(tab_bar_hit_test(575.9, &ids, &ls, 800.0, 0.0), Some(3));
+        assert_eq!(tab_bar_hit_test(576.0, &ids, &ls, 800.0, 0.0), Some(4));
         assert_eq!(tab_bar_hit_test(700.0, &ids, &ls, 800.0, 0.0), Some(4));
     }
 
@@ -405,7 +417,7 @@ mod tests {
         let ids = vec![1usize, 2, 3, 4];
         let ls = labels(&["a", "b", "c", "d"]);
         let available = 800.0 - csd;
-        let slot_w = available / 4.0;
+        let slot_w = (available - crate::pane::NEW_TAB_BUTTON_WIDTH) / 4.0;
         assert_eq!(tab_bar_hit_test(0.0, &ids, &ls, 800.0, csd), Some(1));
         assert_eq!(
             tab_bar_hit_test(slot_w - 0.1, &ids, &ls, 800.0, csd),
@@ -413,6 +425,17 @@ mod tests {
         );
         assert_eq!(tab_bar_hit_test(slot_w, &ids, &ls, 800.0, csd), Some(2));
         assert!(tab_bar_hit_test(available + 1.0, &ids, &ls, 800.0, csd).is_none());
+    }
+
+    #[test]
+    fn hit_target_distinguishes_plus_from_empty_space() {
+        let ids = vec![1usize, 2];
+        let ls = labels(&["a", "b"]);
+        assert_eq!(
+            tab_bar_hit_target(400.0, &ids, &ls, 800.0, 24.0, 0.0),
+            Some(TabBarHit::NewTab)
+        );
+        assert_eq!(tab_bar_hit_target(500.0, &ids, &ls, 800.0, 24.0, 0.0), None);
     }
 
     #[test]

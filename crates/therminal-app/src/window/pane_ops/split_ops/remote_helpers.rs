@@ -19,6 +19,45 @@ use super::super::make_pane_callbacks;
 use crate::window::App;
 
 impl App {
+    fn kill_unused_workspace_pane(
+        &self,
+        daemon_pane_id: therminal_protocol::PaneId,
+        reason: &'static str,
+    ) {
+        let (Some(client), Some(handle)) =
+            (self.daemon_client.as_ref(), self.daemon_runtime.as_ref())
+        else {
+            warn!(
+                daemon_pane_id,
+                reason, "unable to clean up unused daemon pane"
+            );
+            return;
+        };
+        let client = Arc::clone(client);
+        handle.spawn(async move {
+            match client
+                .send_request(IpcRequest::KillPane {
+                    pane_id: daemon_pane_id,
+                })
+                .await
+            {
+                Ok(IpcResponse::PaneKilled { .. }) => {}
+                Ok(other) => warn!(
+                    daemon_pane_id,
+                    reason,
+                    ?other,
+                    "unused workspace pane cleanup returned unexpected response"
+                ),
+                Err(error) => warn!(
+                    daemon_pane_id,
+                    reason,
+                    %error,
+                    "unused workspace pane cleanup failed"
+                ),
+            }
+        });
+    }
+
     /// Handle the `NewWorkspace` completion: build a pane state for the full
     /// viewport and insert it as the sole leaf in a new workspace tab.
     pub(super) fn finish_new_workspace_remote(
@@ -26,9 +65,24 @@ impl App {
         new_daemon_pane_id: therminal_protocol::PaneId,
         workspace_id: u8,
     ) {
-        let full_rect = match self.compute_layout_rect() {
-            Some(r) => r,
-            None => return,
+        // Be defensive when called outside the standard completion path and
+        // clear any reservation here as well.
+        self.pending_workspace_creations.remove(&workspace_id);
+        let target_exists = self
+            .workspaces
+            .as_ref()
+            .is_some_and(|wm| wm.workspace_ids().contains(&(workspace_id as usize)));
+        if target_exists {
+            warn!(
+                workspace_id,
+                new_daemon_pane_id, "new workspace target appeared before split completion"
+            );
+            self.kill_unused_workspace_pane(new_daemon_pane_id, "workspace target already exists");
+            return;
+        }
+        let Some(full_rect) = self.compute_layout_rect() else {
+            self.kill_unused_workspace_pane(new_daemon_pane_id, "layout unavailable");
+            return;
         };
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -40,20 +94,20 @@ impl App {
             osc_7777: self.config.terminal.osc_7777,
             osc_7337: self.config.terminal.osc_7337,
         };
-        let renderer = match self.grid_renderer.as_ref() {
-            Some(r) => r,
-            None => return,
+        let Some(renderer) = self.grid_renderer.as_ref() else {
+            self.kill_unused_workspace_pane(new_daemon_pane_id, "renderer unavailable");
+            return;
         };
         let (cols, rows) = crate::pane::grid_size_for_rect(full_rect, renderer);
         let cols = cols.max(2);
         let rows = rows.max(1);
-        let dc = match self.daemon_client.as_ref() {
-            Some(c) => Arc::clone(c),
-            None => return,
+        let Some(dc) = self.daemon_client.as_ref().map(Arc::clone) else {
+            self.kill_unused_workspace_pane(new_daemon_pane_id, "daemon client unavailable");
+            return;
         };
-        let handle = match self.daemon_runtime.as_ref() {
-            Some(h) => h.clone(),
-            None => return,
+        let Some(handle) = self.daemon_runtime.as_ref().cloned() else {
+            self.kill_unused_workspace_pane(new_daemon_pane_id, "daemon runtime unavailable");
+            return;
         };
         let socket = dc.socket_path().to_path_buf();
         let local_id = crate::pane::next_pane_id();
@@ -84,18 +138,10 @@ impl App {
                     new_daemon_pane_id,
                     "finish_new_workspace_remote: build_remote_pane_state failed — best-effort cleanup"
                 );
-                if let (Some(client), Some(handle)) =
-                    (self.daemon_client.as_ref(), self.daemon_runtime.as_ref())
-                {
-                    let client = Arc::clone(client);
-                    handle.spawn(async move {
-                        let _ = client
-                            .send_request(IpcRequest::KillPane {
-                                pane_id: new_daemon_pane_id,
-                            })
-                            .await;
-                    });
-                }
+                self.kill_unused_workspace_pane(
+                    new_daemon_pane_id,
+                    "failed to build local pane state",
+                );
                 self.show_toast("new tab failed");
                 return;
             }
@@ -121,6 +167,13 @@ impl App {
             );
             self.relayout_and_redraw();
             self.publish_workspace_state();
+        } else {
+            self.pane_id_map.remove_by_local(local_id);
+            self.kill_unused_workspace_pane(
+                new_daemon_pane_id,
+                "workspace target unavailable during mount",
+            );
+            self.show_toast("new tab failed");
         }
     }
 
@@ -273,6 +326,16 @@ impl App {
         &mut self,
         viewport: Rect,
     ) -> Option<crate::pane::PaneState> {
+        self.spawn_remote_pane_fresh_session_with_profile(viewport, None)
+    }
+
+    /// Fresh-session variant that asks the daemon to resolve a configured
+    /// profile for the session's first pane.
+    pub(crate) fn spawn_remote_pane_fresh_session_with_profile(
+        &mut self,
+        viewport: Rect,
+        profile: Option<String>,
+    ) -> Option<crate::pane::PaneState> {
         let renderer = self.grid_renderer.as_ref()?;
         let scrollback = self.config.general.scrollback_lines;
         let interceptor_cfg = InterceptorConfig {
@@ -290,7 +353,7 @@ impl App {
         let local_id = crate::pane::next_pane_id();
         let callbacks = make_pane_callbacks(&self.event_proxy, local_id);
 
-        match crate::pane::remote_spawn::spawn_remote_pane(
+        match crate::pane::remote_spawn::spawn_remote_pane_with_profile(
             local_id,
             viewport,
             renderer,
@@ -302,6 +365,7 @@ impl App {
             callbacks,
             None,
             Some(Arc::clone(&self.agent_registry)),
+            profile,
         ) {
             Ok((state, session_id, daemon_pane_id)) => {
                 self.pane_id_map.insert(local_id, daemon_pane_id);

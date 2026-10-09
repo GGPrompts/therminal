@@ -131,6 +131,31 @@ impl Pane {
         &self.shell
     }
 
+    pub fn launch_identity(&self) -> &therminal_protocol::daemon::PaneIdentity {
+        &self.launch_identity
+    }
+
+    pub fn current_identity(&self) -> &therminal_protocol::daemon::ObservedPaneIdentity {
+        &self.current_identity
+    }
+
+    pub fn set_current_identity(
+        &mut self,
+        identity: therminal_protocol::daemon::ObservedPaneIdentity,
+    ) {
+        self.current_identity = identity;
+    }
+
+    pub fn restore_identity(
+        &mut self,
+        launch: therminal_protocol::daemon::PaneIdentity,
+        mut current: therminal_protocol::daemon::ObservedPaneIdentity,
+    ) {
+        current.mark_stale();
+        self.launch_identity = launch;
+        self.current_identity = current;
+    }
+
     /// PID of the spawned shell child, if known. Used by the daemon-side
     /// `ProcessDetector` ticker (tn-pehl) to walk the process tree below
     /// the shell. Returns `None` for handoff-restored panes.
@@ -297,6 +322,8 @@ impl Pane {
             cursor_line: (cursor_point.line.0.max(0) as usize).min(rows.saturating_sub(1)) as u16,
             grid_chars,
             tags: self.tags.clone(),
+            launch_identity: self.launch_identity.clone(),
+            current_identity: self.current_identity.clone(),
         }
     }
 

@@ -92,6 +92,48 @@ pub fn spawn_remote_pane(
     ),
     anyhow::Error,
 > {
+    spawn_remote_pane_with_profile(
+        local_id,
+        viewport,
+        renderer,
+        scrollback_lines,
+        interceptor_config,
+        daemon_client,
+        tokio_handle,
+        daemon_socket,
+        callbacks,
+        reuse_session_id,
+        agent_registry,
+        None,
+    )
+}
+
+/// Profile-aware fresh-session spawn. This is used when a workspace has no
+/// existing daemon pane that could serve as a `SplitPane` anchor.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_remote_pane_with_profile(
+    local_id: PaneId,
+    viewport: Rect,
+    renderer: &GridRenderer,
+    scrollback_lines: usize,
+    interceptor_config: InterceptorConfig,
+    daemon_client: Arc<DaemonClient>,
+    tokio_handle: tokio::runtime::Handle,
+    daemon_socket: std::path::PathBuf,
+    callbacks: PaneCallbacks,
+    reuse_session_id: Option<therminal_protocol::SessionId>,
+    agent_registry: Option<
+        Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
+    >,
+    profile: Option<String>,
+) -> Result<
+    (
+        PaneState,
+        therminal_protocol::SessionId,
+        therminal_protocol::PaneId,
+    ),
+    anyhow::Error,
+> {
     let (cols, rows) = grid_size_for_rect(viewport, renderer);
     let cols = cols.max(2);
     let rows = rows.max(1);
@@ -141,6 +183,7 @@ pub fn spawn_remote_pane(
                     cols: Some(cols as u16),
                     rows: Some(rows as u16),
                     shell: None,
+                    profile: profile.clone(),
                 }),
             )
             .await
@@ -455,6 +498,7 @@ pub(crate) fn build_remote_pane_state(
                 EventKind::PaneExited,
                 EventKind::PaneResized,
                 EventKind::AgentChanged,
+                EventKind::PaneIdentityChanged,
                 EventKind::SubagentStarted,
                 EventKind::SubagentStopped,
             ]),
@@ -681,6 +725,17 @@ pub(crate) fn build_remote_pane_state(
                         }
                     }
                 }
+                Some(DaemonEvent::PaneIdentityChanged {
+                    pane_id,
+                    ref current_identity,
+                }) if pane_id == remote_pane_id => {
+                    if let Ok(mut s) = status_for_forwarder.lock() {
+                        s.current_identity = current_identity.clone();
+                    }
+                    if let Some(ref wake) = swarm_wake_for_forwarder {
+                        wake();
+                    }
+                }
                 // tn-s8w3: hook-driven subagent lifecycle events. Forward
                 // them into the swarm debouncer channel so auto-tile reacts
                 // without waiting for the JSONL file scanner.
@@ -788,10 +843,10 @@ pub(crate) fn build_remote_pane_state(
                 }
                 // tn-166y: copy tags from the snapshot into PaneStatus so
                 // the GUI can render tag badges in pane headers immediately.
-                if !snap.tags.is_empty()
-                    && let Ok(mut s) = status.lock()
-                {
+                if let Ok(mut s) = status.lock() {
                     s.tags = snap.tags;
+                    s.launch_identity = snap.launch_identity;
+                    s.current_identity = snap.current_identity;
                 }
             }
             Ok(Err(e)) => {

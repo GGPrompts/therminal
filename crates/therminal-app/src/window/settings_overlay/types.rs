@@ -298,6 +298,8 @@ pub(crate) enum ProfileField {
     Program,
     Arguments,
     Directory,
+    Environment,
+    ShellLabel,
     Icon,
     Color,
 }

@@ -148,6 +148,8 @@ mod tests {
             rows: 24,
             tags: tags.clone(),
             pinned: false,
+            launch_identity: Default::default(),
+            current_identity: Default::default(),
         };
         let json = serde_json::to_string(&pp).unwrap();
         let parsed: PersistedPane = serde_json::from_str(&json).unwrap();
@@ -224,6 +226,8 @@ mod tests {
             cursor_line: (cursor_point.line.0.max(0) as u16).min(rows as u16 - 1),
             grid_chars,
             tags: std::collections::HashMap::new(),
+            launch_identity: Default::default(),
+            current_identity: Default::default(),
         };
 
         // Sanity: our captured snapshot shows the relevant flags set.

@@ -440,7 +440,7 @@ impl App {
 
     /// Execute the currently selected menu action and close the menu.
     pub(super) fn execute_menu_action(&mut self) {
-        let (action, menu_pane_id) = match self.active_menu.as_ref() {
+        let (action, menu_pane_id, new_tab_profile) = match self.active_menu.as_ref() {
             Some(m) => {
                 let action = match m.selected_action() {
                     Some(a) => a,
@@ -449,17 +449,31 @@ impl App {
                         return;
                     }
                 };
-                let pane_id = match m.context {
-                    crate::menu::MenuContext::Pane { pane_id } => Some(pane_id),
+                let pane_id = match &m.context {
+                    crate::menu::MenuContext::Pane { pane_id } => Some(*pane_id),
                     _ => None,
                 };
-                (action, pane_id)
+                let new_tab_profile = match (&m.context, m.selected_index) {
+                    (crate::menu::MenuContext::NewTabProfiles { profiles }, Some(index)) => {
+                        profiles.get(index).cloned()
+                    }
+                    _ => None,
+                };
+                (action, pane_id, new_tab_profile)
             }
             None => {
                 return;
             }
         };
         self.active_menu = None;
+
+        if let Some(profile) = new_tab_profile {
+            self.create_new_workspace_with_profile(profile);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
 
         match action {
             KeyAction::SplitHorizontal => self.split_focused_pane(SplitDirection::Horizontal),
@@ -576,6 +590,7 @@ impl App {
     // ── window_event sub-handlers ───────────────────────────────────────
 
     pub(super) fn handle_resized(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        self.pane_picker = None;
         info!(
             width = new_size.width,
             height = new_size.height,
@@ -777,6 +792,9 @@ impl App {
     }
 
     pub(super) fn handle_mouse_wheel_event(&mut self, delta: MouseScrollDelta) {
+        if self.scroll_pane_picker(delta) {
+            return;
+        }
         // Ignore scroll when context menu is open.
         if self.active_menu.is_some() {
             return;
@@ -841,6 +859,14 @@ impl App {
             self.cancel_navigate();
         }
 
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some((px, py)) = self.cursor_position
+            && self.click_pane_picker(px as f32, py as f32)
+        {
+            return;
+        }
+
         // Overlay mouse interaction: click inside the settings panel is
         // consumed (don't pass to terminal), click outside closes overlay.
         // Help overlay still uses dismiss-on-any-click.
@@ -868,11 +894,16 @@ impl App {
                     self.gpu.as_ref(),
                 ) {
                     let geo = menu.geometry(gpu.config.width as f32, gpu.config.height as f32);
-                    let inside = menu.contains_point(px as f32, py as f32, geo.width, geo.height);
+                    let px = px as f32;
+                    let py = py as f32;
+                    let inside = px >= geo.x
+                        && px <= geo.x + geo.width
+                        && py >= geo.y
+                        && py <= geo.y + geo.height;
                     let idx = if inside {
                         menu.item_at_position(
-                            px as f32,
-                            py as f32,
+                            px,
+                            py,
                             geo.x,
                             geo.y,
                             geo.width,
@@ -949,17 +980,32 @@ impl App {
                 } else {
                     0.0
                 };
-                if let Some(ws_id) = chrome::tab_bar_hit_test(
+                match chrome::tab_bar_hit_target(
                     px as f32,
                     &workspace_ids,
                     &tab_labels,
                     surface_w,
+                    tab_bar_h,
                     csd_reserved,
                 ) {
-                    let bindings = &self.config.keybindings.bindings;
-                    let menu = crate::menu::build_tab_menu(ws_id, bindings, (px as f32, py as f32));
-                    self.active_menu = Some(menu);
-                    self.tab_menu_workspace_id = Some(ws_id);
+                    Some(chrome::TabBarHit::Workspace(ws_id)) => {
+                        let bindings = &self.config.keybindings.bindings;
+                        let menu =
+                            crate::menu::build_tab_menu(ws_id, bindings, (px as f32, py as f32));
+                        self.pane_picker = None;
+                        self.active_menu = Some(menu);
+                        self.tab_menu_workspace_id = Some(ws_id);
+                    }
+                    Some(chrome::TabBarHit::NewTab) => {
+                        self.pane_picker = None;
+                        self.tab_menu_workspace_id = None;
+                        self.active_menu = Some(crate::menu::build_new_tab_profile_menu(
+                            &self.config.profiles,
+                            (px as f32, py as f32),
+                        ));
+                        self.webview_manager.hide_all();
+                    }
+                    None => {}
                 }
             } else {
                 let force_show = self.modifiers.state().shift_key();
@@ -1048,18 +1094,27 @@ impl App {
                     } else {
                         0.0
                     };
-                    if let Some(ws_id) = chrome::tab_bar_hit_test(
+                    match chrome::tab_bar_hit_target(
                         px as f32,
                         &workspace_ids,
                         &tab_labels,
                         surface_w,
+                        tab_bar_h,
                         csd_reserved2,
                     ) {
-                        self.switch_workspace(ws_id as u8);
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
+                        Some(chrome::TabBarHit::Workspace(ws_id)) => {
+                            self.switch_workspace(ws_id as u8);
+                            if let Some(w) = self.window.as_ref() {
+                                w.request_redraw();
+                            }
+                            return;
                         }
-                        return;
+                        Some(chrome::TabBarHit::NewTab) => {
+                            self.pane_picker = None;
+                            self.create_new_workspace();
+                            return;
+                        }
+                        None => {}
                     }
                 }
 
@@ -1466,6 +1521,12 @@ impl App {
     }
 
     pub(super) fn handle_keyboard_input_event(&mut self, key_event: &KeyEvent) {
+        if key_event.state == ElementState::Pressed && self.pane_picker.take().is_some() {
+            self.request_redraw();
+            if key_event.logical_key == Key::Named(NamedKey::Escape) {
+                return;
+            }
+        }
         // ── Inline workspace rename input ──────────────────────
         if self.rename_state.is_some() {
             self.handle_rename_key(key_event);

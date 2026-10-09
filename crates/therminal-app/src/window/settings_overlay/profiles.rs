@@ -81,6 +81,16 @@ impl SettingsOverlayState {
                     profile.working_directory.clone().unwrap_or_default(),
                 ),
                 (
+                    "Environment (e.g. Windows or WSL Ubuntu)",
+                    ProfileField::Environment,
+                    profile.environment.clone().unwrap_or_default(),
+                ),
+                (
+                    "Shell label (e.g. PowerShell or Bash)",
+                    ProfileField::ShellLabel,
+                    profile.shell_label.clone().unwrap_or_default(),
+                ),
+                (
                     "Icon",
                     ProfileField::Icon,
                     profile.icon.clone().unwrap_or_default(),
@@ -187,6 +197,8 @@ pub(crate) fn apply_profile_command(
                         Err(e) => return Some(Err(e)),
                     },
                     ProfileField::Directory => profile.working_directory = optional,
+                    ProfileField::Environment => profile.environment = optional,
+                    ProfileField::ShellLabel => profile.shell_label = optional,
                     ProfileField::Icon => profile.icon = optional,
                     ProfileField::Color => {
                         let valid = value.is_empty()
@@ -308,5 +320,32 @@ mod tests {
             .is_err()
         );
         assert_eq!(profiles["new"].shell_args, before);
+    }
+    #[test]
+    fn identity_labels_do_not_change_the_program_or_arguments() {
+        let original = ProfileConfig {
+            shell: Some("pwsh".into()),
+            shell_args: vec!["-NoLogo".into()],
+            ..Default::default()
+        };
+        let mut profiles = HashMap::from([("PowerShell on Ubuntu".into(), original)]);
+        let mut selected = Some("PowerShell on Ubuntu".into());
+        for (field, value) in [
+            (ProfileField::Environment, "WSL Ubuntu"),
+            (ProfileField::ShellLabel, "PowerShell"),
+        ] {
+            apply_profile_command(
+                &mut profiles,
+                &mut selected,
+                &SettingsCommand::SetProfileText(field, value.into()),
+            )
+            .unwrap()
+            .unwrap();
+        }
+        let profile = &profiles["PowerShell on Ubuntu"];
+        assert_eq!(profile.shell.as_deref(), Some("pwsh"));
+        assert_eq!(profile.shell_args, ["-NoLogo"]);
+        assert_eq!(profile.environment.as_deref(), Some("WSL Ubuntu"));
+        assert_eq!(profile.shell_label.as_deref(), Some("PowerShell"));
     }
 }

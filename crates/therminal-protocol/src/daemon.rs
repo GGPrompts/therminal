@@ -20,7 +20,131 @@ pub type BuildHash = String;
 /// Bump this constant when the IPC wire format or daemon behaviour changes
 /// in a way that requires restarting the daemon. Normal rebuilds (UI, renderer,
 /// app-side code) do **not** need a bump — the running daemon will be reused.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
+
+// ── Pane identity ────────────────────────────────────────────────────────
+
+/// User-facing identity for a pane. Launch metadata and live observations
+/// share this shape so clients can merge individual observed fields over the
+/// configured fallback without conflating environment, shell, and program.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PaneIdentity {
+    /// Execution environment, for example `Windows`, `Linux`, or `WSL Ubuntu`.
+    pub environment: Option<String>,
+    /// Interactive shell, for example `Bash`, `PowerShell`, or `Fish`.
+    pub shell: Option<String>,
+    /// Foreground user application, for example `Codex`, `Claude`, or `vim`.
+    pub application: Option<String>,
+    /// Optional Nerd Font glyph supplied by the launch profile.
+    pub icon: Option<String>,
+}
+
+impl PaneIdentity {
+    /// Overlay non-empty fields from `observed` onto this launch fallback.
+    pub fn merged_with(&self, observed: &Self) -> Self {
+        let crossed_environment = observed.environment.is_some()
+            && self.environment.is_some()
+            && observed.environment != self.environment;
+        Self {
+            environment: observed
+                .environment
+                .clone()
+                .or_else(|| self.environment.clone()),
+            shell: observed
+                .shell
+                .clone()
+                .or_else(|| (!crossed_environment).then(|| self.shell.clone()).flatten()),
+            application: observed.application.clone().or_else(|| {
+                (!crossed_environment)
+                    .then(|| self.application.clone())
+                    .flatten()
+            }),
+            icon: observed.icon.clone().or_else(|| self.icon.clone()),
+        }
+    }
+}
+
+/// Freshness of a live process observation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityObservationStatus {
+    /// A bounded process scan completed and the identity is current.
+    Live,
+    /// A previous live observation exists, but the latest scan failed or timed out.
+    Stale,
+    /// No safely scoped observation is available.
+    #[default]
+    Unknown,
+}
+
+/// Live identity plus freshness metadata. Stale data remains available for
+/// diagnostics, while [`ObservedPaneIdentity::effective`] deliberately falls
+/// back to launch metadata so an exited app is not shown indefinitely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObservedPaneIdentity {
+    pub identity: PaneIdentity,
+    pub status: IdentityObservationStatus,
+    /// Unix epoch seconds of the most recent successful scan.
+    pub observed_at_secs: Option<u64>,
+}
+
+impl ObservedPaneIdentity {
+    /// Freshness after applying the standard 15 second expiry horizon.
+    pub fn freshness(&self) -> IdentityObservationStatus {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.freshness_at(now, 15)
+    }
+
+    pub fn freshness_at(&self, now_secs: u64, max_age_secs: u64) -> IdentityObservationStatus {
+        if self.status != IdentityObservationStatus::Live {
+            return self.status;
+        }
+        match self.observed_at_secs {
+            Some(seen) if now_secs.saturating_sub(seen) <= max_age_secs => {
+                IdentityObservationStatus::Live
+            }
+            Some(_) => IdentityObservationStatus::Stale,
+            None => IdentityObservationStatus::Unknown,
+        }
+    }
+
+    pub fn effective(&self, launch: &PaneIdentity) -> PaneIdentity {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.effective_at(launch, now, 15)
+    }
+
+    /// Merge live fields only while the observation remains fresh. The
+    /// default UI path uses a 15 second horizon (five normal 3s scans), so a
+    /// disconnected daemon cannot leave an exited app looking live forever.
+    pub fn effective_at(
+        &self,
+        launch: &PaneIdentity,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> PaneIdentity {
+        if self.freshness_at(now_secs, max_age_secs) == IdentityObservationStatus::Live {
+            launch.merged_with(&self.identity)
+        } else {
+            launch.clone()
+        }
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.status = if self.observed_at_secs.is_some() {
+            IdentityObservationStatus::Stale
+        } else {
+            IdentityObservationStatus::Unknown
+        };
+    }
+}
 
 // ── Daemon state machine ──────────────────────────────────────────────────
 
@@ -111,6 +235,11 @@ pub enum IpcRequest {
         /// Shell binary to spawn instead of the global default. When `None`,
         /// the daemon falls back to `general.shell` from config.
         shell: Option<String>,
+        /// Named profile resolved by the daemon. When set, it supplies the
+        /// complete shell/cwd/env/launch identity and takes precedence over
+        /// `shell`.
+        #[serde(default)]
+        profile: Option<String>,
     },
     /// Destroy a session.
     DestroySession { session_id: SessionId },
@@ -341,6 +470,7 @@ pub enum IpcRequest {
 }
 
 /// Typed IPC responses.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "resp")]
 pub enum IpcResponse {
@@ -522,6 +652,12 @@ pub struct PaneSummary {
     /// Whether the pane is pinned (sticky across workspace switches, tn-n5jk).
     #[serde(default)]
     pub pinned: bool,
+    /// Configured identity retained even when process observation is unavailable.
+    #[serde(default)]
+    pub launch_identity: PaneIdentity,
+    /// Latest bounded process observation and its freshness state.
+    #[serde(default)]
+    pub current_identity: ObservedPaneIdentity,
 }
 
 /// Lightweight agent summary returned by `IpcRequest::ListAgents`.
@@ -570,8 +706,16 @@ pub struct PaneStateSnapshot {
     /// Opaque key/value tags attached to this pane (tn-bbvf).
     /// Included in the snapshot so the GUI can display tag badges in
     /// pane headers immediately on attach without a separate RPC.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    // Wire structs use positional MessagePack encoding. This field is no
+    // longer last, so it must retain its array slot even when empty.
+    #[serde(default)]
     pub tags: HashMap<String, String>,
+    /// Configured launch identity for immediate attach rendering.
+    #[serde(default)]
+    pub launch_identity: PaneIdentity,
+    /// Last live process observation. Attach clients preserve its freshness.
+    #[serde(default)]
+    pub current_identity: ObservedPaneIdentity,
 }
 
 /// DEC private mode flags captured from the daemon-side alacritty `Term`.
@@ -689,6 +833,11 @@ pub enum DaemonEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+    /// A pane's live application/environment/shell observation changed.
+    PaneIdentityChanged {
+        pane_id: PaneId,
+        current_identity: ObservedPaneIdentity,
+    },
     /// tn-s8w3: a Claude Code subagent started on a pane (hook-driven).
     ///
     /// Broadcast by the daemon when a `subagent_start` hook signal arrives
@@ -746,6 +895,8 @@ pub enum EventKind {
     TrustEscalation,
     /// tn-alpb: agent detected or unregistered on a pane.
     AgentChanged,
+    /// Live pane identity observation changed or became stale/unknown.
+    PaneIdentityChanged,
     /// tn-s8w3: subagent started (hook-driven auto-tile signal).
     SubagentStarted,
     /// tn-s8w3: subagent stopped (hook-driven auto-tile signal).
@@ -769,6 +920,7 @@ impl DaemonEvent {
             DaemonEvent::PaneResized { .. } => EventKind::PaneResized,
             DaemonEvent::TrustEscalation { .. } => EventKind::TrustEscalation,
             DaemonEvent::AgentChanged { .. } => EventKind::AgentChanged,
+            DaemonEvent::PaneIdentityChanged { .. } => EventKind::PaneIdentityChanged,
             DaemonEvent::SubagentStarted { .. } => EventKind::SubagentStarted,
             DaemonEvent::SubagentStopped { .. } => EventKind::SubagentStopped,
             DaemonEvent::ToggleTimeline { .. } => EventKind::ToggleTimeline,
@@ -889,6 +1041,12 @@ pub struct PersistedPane {
     /// Defaults to `false` for legacy data. See tn-n5jk.
     #[serde(default)]
     pub pinned: bool,
+    /// Configured identity survives daemon restart as the reliable fallback.
+    #[serde(default)]
+    pub launch_identity: PaneIdentity,
+    /// Last observation is restored as stale, never as confirmed live state.
+    #[serde(default)]
+    pub current_identity: ObservedPaneIdentity,
 }
 
 /// Persisted metadata for a session.
@@ -915,7 +1073,7 @@ pub struct PersistedState {
 
 impl PaneStateSnapshot {
     /// Current snapshot schema version.
-    pub const CURRENT_VERSION: u32 = 1;
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Synthesize a stream of VT escape sequences that, when fed through
     /// an alacritty `Term`, recreates the captured state: mode flags,
@@ -1391,6 +1549,8 @@ mod tests {
             cursor_line: 5,
             grid_chars: vec!["hello".into(); 24],
             tags: HashMap::new(),
+            launch_identity: PaneIdentity::default(),
+            current_identity: ObservedPaneIdentity::default(),
         };
         let msg = IpcMessage::Response {
             request_id: 42,
@@ -1419,6 +1579,8 @@ mod tests {
             cursor_line: 0,
             grid_chars: vec!["hello".into(), "world".into()],
             tags: HashMap::new(),
+            launch_identity: PaneIdentity::default(),
+            current_identity: ObservedPaneIdentity::default(),
         };
         let bytes = snap.to_replay_bytes();
         // Hide cursor.
@@ -1497,6 +1659,8 @@ mod tests {
             rows: 24,
             tags,
             pinned: false,
+            launch_identity: PaneIdentity::default(),
+            current_identity: ObservedPaneIdentity::default(),
         };
         let json = serde_json::to_string(&pane).unwrap();
         let parsed: PersistedPane = serde_json::from_str(&json).unwrap();
@@ -1585,6 +1749,8 @@ mod tests {
                 agent_name: Some("claude".to_string()),
                 tags: tags.clone(),
                 pinned: false,
+                launch_identity: PaneIdentity::default(),
+                current_identity: ObservedPaneIdentity::default(),
             },
             PaneSummary {
                 pane_id: 2,
@@ -1596,6 +1762,8 @@ mod tests {
                 agent_name: None,
                 tags: HashMap::new(),
                 pinned: false,
+                launch_identity: PaneIdentity::default(),
+                current_identity: ObservedPaneIdentity::default(),
             },
         ];
         let msg = IpcMessage::Response {
@@ -1755,5 +1923,87 @@ mod tests {
         let encoded = encode_ipc(&msg).unwrap();
         let decoded = decode_ipc(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn observed_identity_expires_and_falls_back_to_launch() {
+        let launch = PaneIdentity {
+            environment: Some("Windows".into()),
+            shell: Some("PowerShell".into()),
+            icon: Some("P".into()),
+            ..Default::default()
+        };
+        let observed = ObservedPaneIdentity {
+            identity: PaneIdentity {
+                application: Some("Codex".into()),
+                ..Default::default()
+            },
+            status: IdentityObservationStatus::Live,
+            observed_at_secs: Some(100),
+        };
+        assert_eq!(
+            observed.freshness_at(110, 15),
+            IdentityObservationStatus::Live
+        );
+        assert_eq!(
+            observed
+                .effective_at(&launch, 110, 15)
+                .application
+                .as_deref(),
+            Some("Codex")
+        );
+        assert_eq!(
+            observed.freshness_at(116, 15),
+            IdentityObservationStatus::Stale
+        );
+        assert_eq!(observed.effective_at(&launch, 116, 15), launch);
+    }
+
+    #[test]
+    fn environment_transition_does_not_reuse_old_shell() {
+        let launch = PaneIdentity {
+            environment: Some("Windows".into()),
+            shell: Some("PowerShell".into()),
+            ..Default::default()
+        };
+        let observed = PaneIdentity {
+            environment: Some("WSL Ubuntu".into()),
+            ..Default::default()
+        };
+        let merged = launch.merged_with(&observed);
+        assert_eq!(merged.environment.as_deref(), Some("WSL Ubuntu"));
+        assert_eq!(merged.shell, None);
+    }
+
+    #[test]
+    fn create_session_profile_round_trip() {
+        let msg = IpcMessage::Request {
+            request_id: 400,
+            payload: IpcRequest::CreateSession {
+                name: Some("dev".into()),
+                cols: Some(100),
+                rows: Some(30),
+                shell: None,
+                profile: Some("ubuntu".into()),
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        assert_eq!(decode_ipc(&encoded[4..]).unwrap(), msg);
+    }
+
+    #[test]
+    fn pane_identity_changed_empty_fields_msgpack_round_trip() {
+        let msg = IpcMessage::Event {
+            payload: DaemonEvent::PaneIdentityChanged {
+                pane_id: 7,
+                current_identity: ObservedPaneIdentity {
+                    identity: PaneIdentity::default(),
+                    status: IdentityObservationStatus::Unknown,
+                    observed_at_secs: None,
+                },
+            },
+        };
+        let encoded = encode_ipc(&msg).unwrap();
+        assert_eq!(decode_ipc(&encoded[4..]).unwrap(), msg);
     }
 }

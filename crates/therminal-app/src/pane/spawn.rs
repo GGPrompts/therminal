@@ -120,6 +120,8 @@ struct AppPtyHandler {
     graphics_response_tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     /// Lazily initialised on the reader thread.
     reader_state: Option<ReaderState>,
+    /// Published by the spawn path once portable-pty returns the child PID.
+    shell_pid: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AppPtyHandler {
@@ -274,11 +276,28 @@ impl PtyReaderHandler for AppPtyHandler {
         }
 
         // Run process-tree scan if enabled and interval has elapsed.
-        if let Some(ref mut detector) = state.process_detector
-            && let Some(agents) = detector.scan_if_due()
-        {
+        if let Some(ref mut detector) = state.process_detector {
+            let shell_pid = self.shell_pid.load(Ordering::Acquire);
+            if shell_pid != 0 {
+                detector.set_shell_pid(shell_pid);
+            }
+            let Some(observation) = detector.scan_observation_if_due() else {
+                (self.wake)();
+                return;
+            };
+            let agents = observation.agents;
             if let Ok(mut s) = self.status.lock() {
                 s.agent_name = agents.first().map(|a| a.name.clone());
+                s.current_identity = therminal_protocol::daemon::ObservedPaneIdentity {
+                    identity: observation.identity,
+                    status: therminal_protocol::daemon::IdentityObservationStatus::Live,
+                    observed_at_secs: Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    ),
+                };
             }
             if !agents.is_empty() {
                 tracing::debug!("detected agents: {:?}", agents);
@@ -366,7 +385,10 @@ where
     let rows = rows.max(1);
 
     // Shared status for status bar rendering.
-    let status = Arc::new(Mutex::new(PaneStatus::default()));
+    let status = Arc::new(Mutex::new(PaneStatus {
+        launch_identity: therminal_terminal::pty::resolve_launch_identity(spawn_options),
+        ..Default::default()
+    }));
     // Shared semantic region index, populated from intercepted events.
     let region_index = Arc::new(Mutex::new(RegionIndex::new()));
     // Kitty graphics image store + placement set (tn-wdn1).
@@ -374,6 +396,7 @@ where
     let placements = Arc::new(Mutex::new(PlacementSet::new()));
 
     let callbacks = callback_fn(id);
+    let shell_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let listener = PaneListener::new();
     let bell_flag = Arc::clone(&listener.bell_pending);
@@ -402,6 +425,7 @@ where
         placements: Arc::clone(&placements),
         graphics_response_tx: Some(graphics_tx),
         reader_state: None,
+        shell_pid: Arc::clone(&shell_pid),
     };
 
     let mut core = PtyPaneCore::spawn(
@@ -413,6 +437,10 @@ where
         handler,
     )
     .map_err(|e| anyhow::anyhow!("failed to spawn shell for pane: {e}"))?;
+
+    if let Some(pid) = core.child_pid() {
+        shell_pid.store(pid, Ordering::Release);
+    }
 
     info!(pane_id = id, cols, rows, "Pane spawned");
 
@@ -470,7 +498,22 @@ where
 #[allow(dead_code)]
 pub fn spawn_webview_pane(viewport: Rect, url: &str) -> PaneState {
     let id = next_pane_id();
-    let status = Arc::new(Mutex::new(PaneStatus::default()));
+    let host = url
+        .split_once("://")
+        .map(|(_, tail)| tail)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .filter(|host| !host.is_empty())
+        .map(str::to_string);
+    let status = Arc::new(Mutex::new(PaneStatus {
+        launch_identity: therminal_protocol::daemon::PaneIdentity {
+            environment: Some("Web".into()),
+            application: host.or_else(|| Some("Browser".into())),
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
     let region_index = Arc::new(Mutex::new(RegionIndex::new()));
 
     info!(pane_id = id, url, "WebView pane created");

@@ -52,6 +52,37 @@ impl App {
         // regardless of whether the status bar is actually shown.
         let delegate_summary_text = self.scan_and_update_delegate_summary();
 
+        let tab_identity_rows: std::collections::HashMap<_, _> = self
+            .workspaces
+            .as_ref()
+            .map(|wm| wm.workspace_ids())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| (id, self.workspace_pane_rows(id)))
+            .collect();
+        if self.focus_mode
+            || self.overlay_mode.is_some()
+            || self.active_menu.is_some()
+            || self.rename_state.is_some()
+        {
+            self.pane_picker = None;
+        }
+        if let Some(picker) = self.pane_picker.as_mut() {
+            if let Some(rows) = tab_identity_rows.get(&picker.workspace_id) {
+                if picker.rows != *rows {
+                    picker.rows = rows.clone();
+                    picker.offset = picker
+                        .offset
+                        .min(picker.rows.len().saturating_sub(picker.page_size));
+                    if let Some(gpu) = self.gpu.as_ref() {
+                        picker.rebuild(gpu.config.width as f32);
+                    }
+                }
+            } else {
+                self.pane_picker = None;
+            }
+        }
+
         let gpu = match self.gpu.as_ref() {
             Some(g) => g,
             None => return,
@@ -188,7 +219,9 @@ impl App {
             // Hide webviews for all overlays (focus mode keeps headers hidden
             // but webviews should still show; however, modal overlays like
             // help/settings should hide webviews so they don't occlude).
-            let modal_active = self.overlay_mode.is_some() || self.active_menu.is_some();
+            let modal_active = self.overlay_mode.is_some()
+                || self.active_menu.is_some()
+                || self.pane_picker.is_some();
             for wv_pane_id in self.webview_manager.pane_ids() {
                 let in_layout = visible_ids.contains(&wv_pane_id);
                 if in_layout && !modal_active {
@@ -387,12 +420,25 @@ impl App {
                 Some(&claude_tab_titles)
             };
 
-            let tab_labels = super::build_tab_labels(
+            let mut tab_labels = super::build_tab_labels(
                 &workspace_ids,
                 self.workspaces.as_ref(),
                 self.rename_state.as_ref(),
                 claude_titles_ref,
             );
+
+            for (id, label) in workspace_ids.iter().zip(tab_labels.iter_mut()) {
+                if self
+                    .rename_state
+                    .as_ref()
+                    .is_some_and(|r| r.workspace_id == *id)
+                {
+                    continue;
+                }
+                if let Some(rows) = tab_identity_rows.get(id) {
+                    *label = super::tab_identity::decorate_label(*id, label, rows);
+                }
+            }
 
             let tab_info = chrome::TabBarInfo {
                 workspace_ids,
@@ -416,14 +462,20 @@ impl App {
             } else {
                 0.0
             };
-            // tn-t2yd.4: when the CSD strip is reserved (use_csd = true) we
-            // normally render the tab labels even with a single workspace so
-            // the tab is clickable and has a right-click menu. Without CSD
-            // we keep the tn-t2yd.3 behavior of auto-hiding tabs for a lone
-            // workspace.
-            // tn-t2yd.2: focus mode strips the tab labels even under CSD
-            // — the CSD window control buttons still render on top so the
-            // user keeps the ability to close/move the window.
+            let tab_geometry = crate::pane::TabBarGeometry::new(
+                gpu.config.width as f32,
+                bar_h,
+                tab_info.workspace_ids.len(),
+                csd_reserved,
+            );
+            let new_tab_hovered = self.active_menu.is_none()
+                && self.overlay_mode.is_none()
+                && self.pane_picker.is_none()
+                && self.cursor_position.is_some_and(|(px, py)| {
+                    py >= 0.0 && (py as f32) < bar_h && tab_geometry.plus_contains_x(px as f32)
+                });
+            // The single tab stays visible outside focus mode so its adjacent
+            // new-tab button is always reachable with the mouse.
             let draw_tabs = chrome_visible && (tab_bar_visible || use_csd);
             chrome::draw_tab_bar(
                 &tab_info,
@@ -437,6 +489,7 @@ impl App {
                 bar_h,
                 draw_tabs,
                 csd_reserved,
+                new_tab_hovered,
             );
 
             // Submit tab bar before CSD buttons — both use the shared
@@ -467,6 +520,24 @@ impl App {
                     hover_x,
                 );
                 gpu.queue.submit(std::iter::once(encoder.finish()));
+            }
+
+            if new_tab_hovered {
+                let tooltip = crate::menu::build_new_tab_tooltip(
+                    &self.config.keybindings.bindings,
+                    (tab_geometry.plus_button.x(), bar_h + 4.0),
+                );
+                let tooltip_palette = renderer.chrome_palette;
+                crate::menu::render_context_menu(
+                    &tooltip,
+                    renderer,
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    gpu.config.width,
+                    gpu.config.height,
+                    &tooltip_palette,
+                );
             }
         }
 
@@ -543,6 +614,18 @@ impl App {
             let menu_palette = renderer.chrome_palette;
             crate::menu::render_context_menu(
                 menu,
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+                &menu_palette,
+            );
+        } else if let Some(ref picker) = self.pane_picker {
+            let menu_palette = renderer.chrome_palette;
+            crate::menu::render_context_menu(
+                &picker.menu,
                 renderer,
                 &gpu.device,
                 &gpu.queue,

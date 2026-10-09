@@ -352,6 +352,7 @@ fn find_seed_pane(ctx: &CliCtx, session: Option<u64>, shell: Option<&str>) -> Re
         cols: None,
         rows: None,
         shell: shell.map(str::to_string),
+        profile: None,
     })?;
     let session_id = match resp {
         IpcResponse::SessionCreated { session_id } => session_id,

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions;
 use therminal_core::geometry::Rect;
+use therminal_protocol::daemon::{ObservedPaneIdentity, PaneIdentity};
 use therminal_terminal::graphics::{ImageStore, PlacementSet};
 use therminal_terminal::region_index::RegionIndex;
 
@@ -77,6 +78,18 @@ pub struct PaneStatus {
     /// path when PID-based `chrome_meta_for_pid` fails (Windows+WSL PID
     /// mismatch).
     pub claude_session_id: Option<String>,
+    /// Configured/profile identity retained across detector outages.
+    pub launch_identity: PaneIdentity,
+    /// Latest bounded live-process observation and freshness state.
+    pub current_identity: ObservedPaneIdentity,
+}
+
+impl PaneStatus {
+    /// Identity suitable for rendering. Live fields override launch metadata;
+    /// stale/unknown observations fall back to the launch identity.
+    pub fn effective_identity(&self) -> PaneIdentity {
+        self.current_identity.effective(&self.launch_identity)
+    }
 }
 
 // ── Per-pane state ──────────────────────────────────────────────────────

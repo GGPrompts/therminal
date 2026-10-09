@@ -56,6 +56,19 @@ impl App {
         direction: SplitDirection,
         on_complete: DaemonSplitOnComplete,
     ) {
+        self.split_pane_remote_with_profile(source_local, direction, on_complete, None);
+    }
+
+    /// Remote split variant used by the tab profile picker. `profile` is
+    /// resolved by the daemon and creates a full pane; the completion action
+    /// decides whether that pane is inserted as a split or a new workspace.
+    pub(crate) fn split_pane_remote_with_profile(
+        &mut self,
+        source_local: PaneId,
+        direction: SplitDirection,
+        on_complete: DaemonSplitOnComplete,
+        profile: Option<String>,
+    ) {
         let daemon_source = match self.pane_id_map.daemon_for_local(source_local) {
             Some(d) => d,
             None => {
@@ -116,7 +129,7 @@ impl App {
                     ratio: None,
                     shell: None,
                     worktree: None,
-                    profile: None,
+                    profile,
                 }),
             )
             .await
@@ -147,6 +160,14 @@ impl App {
             inherited_cwd,
             on_complete,
         } = result;
+
+        // New-workspace requests reserve their target slot before the async
+        // RPC starts. Release that reservation regardless of the RPC result;
+        // any successful pane is either mounted or explicitly cleaned up by
+        // `finish_new_workspace_remote` below.
+        if let DaemonSplitOnComplete::NewWorkspace { workspace_id } = &on_complete {
+            self.pending_workspace_creations.remove(workspace_id);
+        }
 
         let new_daemon_pane_id = match rpc_result {
             Ok(id) => id,

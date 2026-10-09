@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use therminal_protocol::daemon::PaneIdentity;
 use thiserror::Error;
 use tracing::warn;
 
@@ -41,6 +42,8 @@ pub struct ResolvedProfile {
     /// etc.).  `true` for `command`-mode profiles unless the profile
     /// explicitly opts in via `shell_integration = true`.
     pub skip_shell_integration: bool,
+    /// Structured launch identity retained as a fallback for the pane.
+    pub launch_identity: PaneIdentity,
 }
 
 /// Resolve a named profile from the config map into PTY spawn parameters.
@@ -100,12 +103,85 @@ pub fn resolve_profile(
         .clone()
         .unwrap_or_else(|| inherit_cwd.to_owned());
 
+    let launch_identity = PaneIdentity {
+        environment: profile
+            .environment
+            .clone()
+            .or_else(|| infer_environment(&shell, &shell_args)),
+        shell: profile
+            .shell_label
+            .clone()
+            .or_else(|| (!auto_skip).then(|| display_program_name(&shell)).flatten()),
+        application: auto_skip.then(|| display_program_name(&shell)).flatten(),
+        icon: profile.icon.clone(),
+    };
+
     Ok(ResolvedProfile {
         shell,
         shell_args,
         env: profile.env.clone(),
         cwd,
         skip_shell_integration,
+        launch_identity,
+    })
+}
+
+fn infer_environment(shell: &str, args: &[String]) -> Option<String> {
+    let program = shell
+        .split_whitespace()
+        .next()
+        .unwrap_or(shell)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    if program == "wsl" || program == "wsl.exe" {
+        let distro = args
+            .windows(2)
+            .find(|pair| matches!(pair[0].as_str(), "-d" | "--distribution"))
+            .map(|pair| pair[1].trim())
+            .filter(|value| !value.is_empty());
+        return Some(match distro {
+            Some(distro) => format!("WSL {distro}"),
+            None => "WSL".to_string(),
+        });
+    }
+    Some(
+        match std::env::consts::OS {
+            "windows" => "Windows",
+            "macos" => "macOS",
+            "linux" => "Linux",
+            other => other,
+        }
+        .to_string(),
+    )
+}
+
+fn display_program_name(command: &str) -> Option<String> {
+    let basename = command
+        .split_whitespace()
+        .next()?
+        .trim_matches(['\'', '"'])
+        .rsplit(['/', '\\'])
+        .next()?
+        .trim_end_matches(".exe");
+    if basename.is_empty() {
+        return None;
+    }
+    let lower = basename.to_ascii_lowercase();
+    Some(match lower.as_str() {
+        "bash" => "Bash".into(),
+        "zsh" => "Zsh".into(),
+        "fish" => "Fish".into(),
+        "pwsh" => "PowerShell".into(),
+        "powershell" => "Windows PowerShell".into(),
+        "cmd" => "Command Prompt".into(),
+        "wsl" => "WSL".into(),
+        "claude" => "Claude".into(),
+        "codex" => "Codex".into(),
+        "aider" => "Aider".into(),
+        "copilot" => "Copilot".into(),
+        _ => basename.to_string(),
     })
 }
 

@@ -514,10 +514,18 @@ impl App {
         let (px, py) = (position.x, position.y);
         self.cursor_position = Some((px, py));
 
-        // ── CSD button hover: request redraw for hover highlights ─────────
-        // tn-sfn9: skip CSD hover highlights in focus mode (the bar is hidden).
-        if self.config.general.use_csd && !self.focus_mode {
-            let bar_h = crate::pane::effective_tab_bar_height_csd(1, true, false);
+        if self.update_tab_hover(px as f32, py as f32) {
+            return;
+        }
+
+        // ── Tab/CSD hover: request redraw for hover highlights + tooltip ──
+        if !self.focus_mode {
+            let workspace_count = self.workspaces.as_ref().map(|wm| wm.len()).unwrap_or(1);
+            let bar_h = crate::pane::effective_tab_bar_height_csd(
+                workspace_count,
+                self.config.general.use_csd,
+                false,
+            );
             let in_header = (py as f32) < bar_h;
             if in_header || self.cursor_was_in_csd_header {
                 // Redraw when entering, moving within, or leaving the header

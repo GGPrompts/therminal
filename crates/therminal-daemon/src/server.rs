@@ -608,6 +608,7 @@ async fn dispatch_ipc(
             cols,
             rows,
             shell,
+            profile,
         } => {
             let mut mgr = session_mgr.lock().await;
             // Apply caller-supplied PTY dimensions before spawn so the
@@ -626,9 +627,28 @@ async fn dispatch_ipc(
                 req_shell = ?shell,
                 "CreateSession: PTY dimensions"
             );
-            let spawn_options = therminal_terminal::pty::SpawnOptions {
-                shell: shell.clone().unwrap_or_default(),
-                ..Default::default()
+            let spawn_options = if let Some(profile) = profile {
+                match profiles.resolve(profile, "") {
+                    Ok(resolved) => therminal_terminal::pty::SpawnOptions {
+                        shell: resolved.shell,
+                        shell_args: resolved.shell_args,
+                        env: resolved.env,
+                        cwd: resolved.cwd,
+                        skip_shell_integration: resolved.skip_shell_integration,
+                        launch_identity: resolved.launch_identity,
+                        ..Default::default()
+                    },
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            message: format!("profile resolve failed: {e}"),
+                        };
+                    }
+                }
+            } else {
+                therminal_terminal::pty::SpawnOptions {
+                    shell: shell.clone().unwrap_or_default(),
+                    ..Default::default()
+                }
             };
             match mgr.create_session_with_options(name.clone(), &spawn_options) {
                 Ok(session_id) => {
@@ -703,32 +723,40 @@ async fn dispatch_ipc(
             let mut mgr = session_mgr.lock().await;
 
             // tn-ar79: resolve profile if set — profile wins over shell/cwd.
-            let (profile_shell, profile_cwd, profile_env, profile_args, profile_skip_si) =
-                if let Some(name) = profile {
-                    let inherit_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
-                    match profiles.resolve(name, &inherit_cwd) {
-                        Ok(resolved) => (
-                            Some(resolved.shell),
-                            Some(resolved.cwd),
-                            resolved.env,
-                            resolved.shell_args,
-                            resolved.skip_shell_integration,
-                        ),
-                        Err(e) => {
-                            return IpcResponse::Error {
-                                message: format!("profile resolve failed: {e}"),
-                            };
-                        }
+            let (
+                profile_shell,
+                profile_cwd,
+                profile_env,
+                profile_args,
+                profile_skip_si,
+                launch_identity,
+            ) = if let Some(name) = profile {
+                let inherit_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
+                match profiles.resolve(name, &inherit_cwd) {
+                    Ok(resolved) => (
+                        Some(resolved.shell),
+                        Some(resolved.cwd),
+                        resolved.env,
+                        resolved.shell_args,
+                        resolved.skip_shell_integration,
+                        resolved.launch_identity,
+                    ),
+                    Err(e) => {
+                        return IpcResponse::Error {
+                            message: format!("profile resolve failed: {e}"),
+                        };
                     }
-                } else {
-                    (
-                        None,
-                        None,
-                        std::collections::HashMap::new(),
-                        Vec::new(),
-                        false,
-                    )
-                };
+                }
+            } else {
+                (
+                    None,
+                    None,
+                    std::collections::HashMap::new(),
+                    Vec::new(),
+                    false,
+                    Default::default(),
+                )
+            };
 
             // tn-h7tq: when --worktree is set, resolve it against the
             // source pane's cwd before spawning. The resolution shells
@@ -774,6 +802,7 @@ async fn dispatch_ipc(
                 env: profile_env,
                 skip_shell_integration: profile_skip_si,
                 advertise_kitty_graphics: false,
+                launch_identity,
             };
             match mgr.split_pane_with_options(
                 *pane_id,
@@ -911,6 +940,8 @@ async fn dispatch_ipc(
                             agent_name,
                             tags,
                             pinned,
+                            launch_identity: pane.launch_identity().clone(),
+                            current_identity: pane.current_identity().clone(),
                         });
                     }
                 }

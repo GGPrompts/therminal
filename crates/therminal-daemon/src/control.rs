@@ -397,6 +397,17 @@ pub fn format_notification(event: &DaemonEvent) -> String {
             let name = agent_name.as_deref().unwrap_or("none");
             format!("%agent-changed {pane_id} {name}\n")
         }
+        DaemonEvent::PaneIdentityChanged {
+            pane_id,
+            current_identity,
+        } => format!(
+            "%pane-identity-changed {pane_id} {}\n",
+            match current_identity.freshness() {
+                therminal_protocol::daemon::IdentityObservationStatus::Live => "live",
+                therminal_protocol::daemon::IdentityObservationStatus::Stale => "stale",
+                therminal_protocol::daemon::IdentityObservationStatus::Unknown => "unknown",
+            }
+        ),
         DaemonEvent::SubagentStarted {
             pane_id, agent_id, ..
         } => {

@@ -7,17 +7,27 @@
 
 use super::DetectedAgent;
 use super::classifier::classify_wsl_process;
+use std::io::{Read, Seek};
+use therminal_protocol::daemon::PaneIdentity;
 
 /// Shell out to `wsl.exe -d <distro> -e ps -eo pid=,ppid=,comm=,args=`
 /// and return the raw stdout as a String, or `None` on failure.
 /// Used internally by `scan_wsl` and exposed for the daemon's
 /// stdout-caching path (tn-ttie).
 pub(super) fn fetch_wsl_ps_stdout(distro: &str) -> Option<String> {
-    let output = match therminal_runtime::process::background_command("wsl.exe")
-        .args(["-d", distro, "-e", "ps", "-eo", "pid=,ppid=,comm=,args="])
-        .output()
-    {
-        Ok(o) => o,
+    let mut command = therminal_runtime::process::background_command("wsl.exe");
+    let mut stdout_file = tempfile::tempfile().ok()?;
+    let mut stderr_file = tempfile::tempfile().ok()?;
+    if distro.is_empty() {
+        command.args(["-e", "ps", "-eo", "pid=,ppid=,comm=,args="]);
+    } else {
+        command.args(["-d", distro, "-e", "ps", "-eo", "pid=,ppid=,comm=,args="]);
+    }
+    command
+        .stdout(std::process::Stdio::from(stdout_file.try_clone().ok()?))
+        .stderr(std::process::Stdio::from(stderr_file.try_clone().ok()?));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
         Err(e) => {
             tracing::debug!(
                 distro,
@@ -27,21 +37,62 @@ pub(super) fn fetch_wsl_ps_stdout(distro: &str) -> Option<String> {
             return None;
         }
     };
-    if !output.status.success() {
+    // File-backed output cannot fill a pipe, and killing wsl.exe never leaves
+    // us waiting on a descendant-held pipe handle. Oversized output is
+    // rejected instead of parsed as a truncated live process table.
+    const MAX_CAPTURE: usize = therminal_protocol::daemon::MAX_FRAME_SIZE;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::debug!(
+                    distro,
+                    "process_detector: wsl.exe ps timed out (probe stale this tick)"
+                );
+                return None;
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::debug!(distro, error = %e, "process_detector: wsl.exe ps wait failed");
+                return None;
+            }
+        }
+    };
+    let stdout = read_capture(&mut stdout_file, MAX_CAPTURE)?;
+    let stderr = read_capture(&mut stderr_file, MAX_CAPTURE).unwrap_or_default();
+    if !status.is_some_and(|status| status.success()) {
         tracing::debug!(
             distro,
-            status = ?output.status,
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            status = ?status,
+            stderr = %String::from_utf8_lossy(&stderr).trim(),
             "process_detector: wsl.exe ps non-zero exit"
         );
         return None;
     }
-    let cleaned: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
+    let cleaned: Vec<u8> = stdout.into_iter().filter(|&b| b != 0).collect();
     Some(String::from_utf8_lossy(&cleaned).into_owned())
 }
 
+fn read_capture(file: &mut std::fs::File, max: usize) -> Option<Vec<u8>> {
+    if file.metadata().ok()?.len() > max as u64 {
+        return None;
+    }
+    file.rewind().ok()?;
+    let mut bytes = Vec::new();
+    file.take((max + 1) as u64).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= max).then_some(bytes)
+}
+
 /// Parse the output of `ps -eo pid=,ppid=,comm=,args=` and return any
-/// rows that classify as a known agent. Pure function so it can be
+/// rows that classify as a known agent. This distro-wide helper is retained
+/// for parser tests; pane observations use the scoped tree variant below.
 /// unit-tested without spawning `wsl.exe`.
 ///
 /// Each row has the layout `<pid> <ppid> <comm> <args...>` with at
@@ -49,6 +100,7 @@ pub(super) fn fetch_wsl_ps_stdout(distro: &str) -> Option<String> {
 /// pid/ppid (multiple leading spaces) and comm is a single token, so
 /// `split_whitespace().take(3)` gives us the leading three columns and
 /// we recover `args` by slicing the rest of the original line.
+#[cfg(test)]
 pub(super) fn parse_wsl_ps(stdout: &str) -> Vec<DetectedAgent> {
     let mut out = Vec::new();
     for line in stdout.lines() {
@@ -173,6 +225,89 @@ pub(super) fn parse_wsl_ps_tree(stdout: &str, root_pid: u32) -> Vec<DetectedAgen
     }
 
     agents
+}
+
+/// Derive shell/application identity from only the descendants of one WSL
+/// shell root. Distro-global fallback is intentionally forbidden because it
+/// can attribute another pane's foreground process to this pane.
+pub(super) fn parse_wsl_identity_tree(stdout: &str, root_pid: u32, distro: &str) -> PaneIdentity {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let mut procs: HashMap<u32, (u32, String, String)> = HashMap::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        let mut tokens = trimmed.split_whitespace();
+        let (Some(pid), Some(ppid), Some(comm)) = (tokens.next(), tokens.next(), tokens.next())
+        else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
+            continue;
+        };
+        procs.insert(
+            pid,
+            (
+                ppid,
+                comm.to_string(),
+                remainder_after_token(trimmed, comm).to_string(),
+            ),
+        );
+    }
+
+    if !procs.contains_key(&root_pid) {
+        return PaneIdentity::default();
+    }
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&pid, (ppid, _, _)) in &procs {
+        children.entry(*ppid).or_default().push(pid);
+    }
+
+    let mut queue = VecDeque::from([(root_pid, 0usize)]);
+    let mut visited = HashSet::new();
+    let mut shell: Option<(usize, String)> = None;
+    let mut application: Option<(usize, String)> = None;
+    while let Some((pid, depth)) = queue.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        let Some((_, comm, args)) = procs.get(&pid) else {
+            continue;
+        };
+        if let Some(label) = super::shell_label(comm) {
+            if shell.as_ref().is_none_or(|(best, _)| depth >= *best) {
+                shell = Some((depth, label));
+            }
+        } else if depth > 0 {
+            let agent = classify_wsl_process(comm, args);
+            // Known interactive agents outrank deeper transient tools.
+            let priority = if agent.is_some() {
+                usize::MAX.saturating_sub(depth)
+            } else {
+                depth
+            };
+            if application
+                .as_ref()
+                .is_none_or(|(best, _)| priority >= *best)
+            {
+                application = Some((priority, super::display_application(comm, agent)));
+            }
+        }
+        if let Some(kids) = children.get(&pid) {
+            queue.extend(kids.iter().map(|child| (*child, depth + 1)));
+        }
+    }
+
+    PaneIdentity {
+        environment: Some(if distro.is_empty() {
+            "WSL".to_string()
+        } else {
+            format!("WSL {distro}")
+        }),
+        shell: shell.map(|(_, label)| label),
+        application: application.map(|(_, label)| label),
+        icon: None,
+    }
 }
 
 /// Find `token` in `line` and return everything after it, with leading
@@ -758,5 +893,26 @@ mod tests {
         let types: Vec<_> = agents.iter().map(|a| a.agent_type).collect();
         assert!(types.contains(&AgentType::Claude));
         assert!(types.contains(&AgentType::Codex));
+    }
+
+    #[test]
+    fn scoped_identity_keeps_environment_shell_and_agent_separate() {
+        let stdout = concat!(
+            "  100   1 bash -bash\n",
+            "  200 100 codex codex\n",
+            "  201 200 rg rg needle\n",
+            "  300   1 bash -bash\n",
+            "  400 300 claude claude\n",
+        );
+        let identity = parse_wsl_identity_tree(stdout, 100, "Ubuntu");
+        assert_eq!(identity.environment.as_deref(), Some("WSL Ubuntu"));
+        assert_eq!(identity.shell.as_deref(), Some("Bash"));
+        assert_eq!(identity.application.as_deref(), Some("Codex"));
+    }
+
+    #[test]
+    fn scoped_identity_unknown_when_root_is_absent() {
+        let identity = parse_wsl_identity_tree("1 0 init /sbin/init\n", 999, "Ubuntu");
+        assert_eq!(identity, PaneIdentity::default());
     }
 }

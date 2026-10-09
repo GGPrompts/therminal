@@ -31,11 +31,12 @@ mod render_driver;
 #[cfg(test)]
 mod render_tests;
 mod settings_overlay;
+mod tab_identity;
 pub(crate) mod toast;
 pub(crate) mod trust_escalation_overlay;
 pub(crate) mod wsl_paths;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -343,6 +344,11 @@ pub struct App {
     /// Workspace manager holding all workspace layouts.
     workspaces: Option<WorkspaceManager>,
 
+    /// Workspace slots reserved by in-flight daemon splits. Keeping these
+    /// separate from the mounted workspace list prevents rapid new-tab
+    /// clicks from allocating the same slot more than once.
+    pending_workspace_creations: HashSet<u8>,
+
     /// Shared agent registry for auto-tiling (reader threads register/unregister agents).
     agent_registry: Arc<std::sync::Mutex<therminal_terminal::agent_registry::AgentRegistry>>,
 
@@ -365,8 +371,8 @@ pub struct App {
     /// Current cursor position in physical pixels.
     cursor_position: Option<(f64, f64)>,
 
-    /// Whether the cursor was in the CSD header area on the last motion event.
-    /// Used to trigger a redraw when the mouse exits the header, clearing hover.
+    /// Whether the cursor was in the tab/CSD header area on the last motion
+    /// event. Used to clear button hover and tooltip rendering on exit.
     cursor_was_in_csd_header: bool,
 
     /// Whether the left mouse button is currently held.
@@ -430,6 +436,9 @@ pub struct App {
 
     /// Active context menu, if one is open.
     active_menu: Option<ContextMenu>,
+
+    /// Hover card listing the panes represented by a workspace tab.
+    pane_picker: Option<tab_identity::PanePicker>,
 
     /// Workspace id whose tab the user right-clicked to open the active tab
     /// context menu. Used so menu actions like Rename know which tab to act on.
@@ -1742,6 +1751,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved_event(position);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor_position = None;
+                if self.pane_picker.take().is_some() {
+                    self.request_redraw();
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.handle_mouse_wheel_event(delta);

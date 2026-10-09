@@ -1163,6 +1163,14 @@ pub struct ProfileConfig {
     pub scrollback_lines: Option<usize>,
     /// Nerd Font glyph for the launcher overlay tile (e.g. "\u{f489}").
     pub icon: Option<String>,
+    /// User-facing execution environment identity (for example `Windows`,
+    /// `Linux`, or `WSL Ubuntu`). This is launch metadata and remains
+    /// available when live process observation is unavailable.
+    pub environment: Option<String>,
+    /// User-facing shell identity (for example `Bash`, `PowerShell`, or
+    /// `Windows PowerShell`). Kept separate from `shell`, which is the
+    /// executable used to launch the pane.
+    pub shell_label: Option<String>,
     /// Hex color for the launcher overlay tile background (`#RRGGBB` or `#RGB`).
     pub color: Option<String>,
     /// Optional URL: when set, the launcher tile spawns a WebView pane

@@ -37,6 +37,10 @@ pub struct Pane {
     pub(super) cwd: Arc<Mutex<String>>,
     /// Shell command used when this pane was spawned.
     pub(super) shell: String,
+    /// Profile/default launch identity retained as the observation fallback.
+    pub(super) launch_identity: therminal_protocol::daemon::PaneIdentity,
+    /// Latest process-tree observation, including explicit freshness.
+    pub(super) current_identity: therminal_protocol::daemon::ObservedPaneIdentity,
     /// Shared agent state inference engine. Cloned into the reader thread's
     /// `DaemonPtyHandler` so PTY bytes feed it; daemon-side accessors
     /// snapshot it for MCP `terminal.agents.get_details`.
@@ -166,6 +170,7 @@ impl Pane {
         // stored `""` here — silently defeating every downstream Claude
         // observability consumer on Windows + WSL panes.
         let resolved_shell = therminal_terminal::pty::resolve_shell(spawn_options);
+        let launch_identity = therminal_terminal::pty::resolve_launch_identity(spawn_options);
         // Debug-level: the process-detector-task emits an info-level
         // once-per-pane line when the WSL probe actually activates, which
         // is the signal operators care about in production. This line is
@@ -187,6 +192,8 @@ impl Pane {
             rows,
             cwd,
             shell: resolved_shell,
+            launch_identity,
+            current_identity: Default::default(),
             inference,
             command_tracker,
             event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),
@@ -305,6 +312,8 @@ impl Pane {
             rows,
             cwd,
             shell: String::new(), // Unknown for handoff panes
+            launch_identity: Default::default(),
+            current_identity: Default::default(),
             inference,
             command_tracker,
             event_log: Arc::new(Mutex::new(EventLog::in_memory(DEFAULT_MAX_ENTRIES))),

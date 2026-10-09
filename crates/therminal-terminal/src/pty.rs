@@ -490,6 +490,9 @@ pub struct SpawnOptions {
     /// `[terminal].kitty_graphics` in `TherminalConfig`. Default `false` —
     /// gated until tn-m4ix visual verification lands.
     pub advertise_kitty_graphics: bool,
+    /// Structured launch identity supplied by a profile. The daemon records
+    /// it independently from live process observation.
+    pub launch_identity: therminal_protocol::daemon::PaneIdentity,
 }
 
 /// Spawn the user's default shell in a new PTY of the given size.
@@ -515,6 +518,65 @@ pub fn resolve_shell(options: &SpawnOptions) -> String {
     } else {
         options.shell.clone()
     }
+}
+
+/// Complete profile-supplied launch metadata with conservative facts derived
+/// from the actual executable and host platform.
+pub fn resolve_launch_identity(options: &SpawnOptions) -> therminal_protocol::daemon::PaneIdentity {
+    let mut identity = options.launch_identity.clone();
+    let shell = resolve_shell(options);
+    let base = shell
+        .split_whitespace()
+        .next()
+        .unwrap_or(&shell)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&shell)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    let is_wsl = base == "wsl";
+
+    if identity.environment.is_none() {
+        identity.environment = Some(if is_wsl {
+            let distro = options
+                .shell_args
+                .windows(2)
+                .find(|pair| matches!(pair[0].as_str(), "-d" | "--distribution"))
+                .map(|pair| pair[1].as_str());
+            distro.map_or_else(|| "WSL".to_string(), |name| format!("WSL {name}"))
+        } else {
+            match std::env::consts::OS {
+                "windows" => "Windows",
+                "macos" => "macOS",
+                "linux" => "Linux",
+                other => other,
+            }
+            .to_string()
+        });
+    }
+
+    let label = match base.as_str() {
+        "bash" => "Bash",
+        "zsh" => "Zsh",
+        "fish" => "Fish",
+        "sh" | "dash" => "sh",
+        "pwsh" => "PowerShell",
+        "powershell" => "Windows PowerShell",
+        "cmd" => "Command Prompt",
+        "wsl" => "WSL",
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "aider" => "Aider",
+        "copilot" => "Copilot",
+        _ => base.as_str(),
+    }
+    .to_string();
+    if options.skip_shell_integration {
+        identity.application.get_or_insert(label);
+    } else if identity.shell.is_none() && !is_wsl {
+        identity.shell = Some(label);
+    }
+    identity
 }
 
 /// Spawn a shell in a new PTY with custom options (shell override, extra env vars).

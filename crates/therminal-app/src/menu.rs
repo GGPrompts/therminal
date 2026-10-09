@@ -30,6 +30,9 @@ pub(crate) enum MenuContext {
         #[allow(dead_code)]
         workspace_id: usize,
     },
+    /// Right-click on the new-tab button. The flat menu index maps to the
+    /// corresponding optional profile name (`None` means default shell).
+    NewTabProfiles { profiles: Vec<Option<String>> },
 }
 
 /// A single item in a context menu.
@@ -144,12 +147,6 @@ impl ContextMenu {
             }
         }
         None
-    }
-
-    /// Check if a pixel position is inside the menu bounds.
-    pub fn contains_point(&self, px: f32, py: f32, menu_width: f32, menu_height: f32) -> bool {
-        let (mx, my) = self.position;
-        px >= mx && px <= mx + menu_width && py >= my && py <= my + menu_height
     }
 }
 
@@ -415,6 +412,65 @@ pub(crate) fn build_tab_menu(
         position,
         selected_index: None,
         context: MenuContext::Tab { workspace_id },
+    }
+}
+
+/// Build the passive tooltip displayed while the new-tab button is hovered.
+/// The shortcut is omitted when NewWorkspace has no configured binding.
+pub(crate) fn build_new_tab_tooltip(
+    bindings: &[therminal_core::config::Keybinding],
+    position: (f32, f32),
+) -> ContextMenu {
+    ContextMenu {
+        sections: vec![MenuSection(vec![MenuItem {
+            label: "New tab".into(),
+            hotkey_hint: hotkey_for_action(bindings, &KeyAction::NewWorkspace),
+            action: KeyAction::NewWorkspace,
+            enabled: true,
+        }])],
+        position,
+        selected_index: None,
+        context: MenuContext::Tab { workspace_id: 0 },
+    }
+}
+
+/// Build the profile chooser opened by right-clicking the new-tab button.
+pub(crate) fn build_new_tab_profile_menu(
+    profiles: &std::collections::HashMap<String, therminal_core::config::ProfileConfig>,
+    position: (f32, f32),
+) -> ContextMenu {
+    let mut names: Vec<String> = profiles.keys().cloned().collect();
+    names.sort_by(|left, right| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut profile_values = Vec::with_capacity(names.len() + 1);
+    profile_values.push(None);
+    profile_values.extend(names.iter().cloned().map(Some));
+
+    let mut items = Vec::with_capacity(profile_values.len());
+    items.push(MenuItem {
+        label: "Default shell".into(),
+        hotkey_hint: None,
+        action: KeyAction::NewWorkspace,
+        enabled: true,
+    });
+    items.extend(names.into_iter().map(|name| MenuItem {
+        label: name.into(),
+        hotkey_hint: None,
+        action: KeyAction::NewWorkspace,
+        enabled: true,
+    }));
+
+    ContextMenu {
+        sections: vec![MenuSection(items)],
+        position,
+        selected_index: None,
+        context: MenuContext::NewTabProfiles {
+            profiles: profile_values,
+        },
     }
 }
 
@@ -1026,6 +1082,56 @@ pub(crate) fn render_context_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_tab_tooltip_uses_configured_binding_and_omits_missing_hint() {
+        let binding = therminal_core::config::Keybinding {
+            key: "ctrl+shift+t".to_string(),
+            action: KeyAction::NewWorkspace,
+        };
+        let with_binding = build_new_tab_tooltip(&[binding], (0.0, 0.0));
+        assert_eq!(with_binding.flat_items()[0].label.as_ref(), "New tab");
+        assert_eq!(
+            with_binding.flat_items()[0].hotkey_hint.as_deref(),
+            Some("Ctrl+Shift+T")
+        );
+
+        let without_binding = build_new_tab_tooltip(&[], (0.0, 0.0));
+        assert_eq!(without_binding.flat_items()[0].hotkey_hint, None);
+    }
+
+    #[test]
+    fn new_tab_profile_menu_includes_default_shell_and_url_profiles() {
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert(
+            "Ubuntu".to_string(),
+            therminal_core::config::ProfileConfig::default(),
+        );
+        let browser = therminal_core::config::ProfileConfig {
+            url: Some("https://example.com".to_string()),
+            ..Default::default()
+        };
+        profiles.insert("Browser".to_string(), browser);
+
+        let menu = build_new_tab_profile_menu(&profiles, (0.0, 0.0));
+        let labels: Vec<&str> = menu
+            .flat_items()
+            .iter()
+            .map(|item| item.label.as_ref())
+            .collect();
+        assert_eq!(labels, vec!["Default shell", "Browser", "Ubuntu"]);
+        match &menu.context {
+            MenuContext::NewTabProfiles { profiles } => assert_eq!(
+                profiles,
+                &vec![
+                    None,
+                    Some("Browser".to_string()),
+                    Some("Ubuntu".to_string())
+                ]
+            ),
+            other => panic!("expected new-tab profile context, got {other:?}"),
+        }
+    }
 
     #[test]
     fn merged_hotspot_and_pane_menu_prepends_hotspot_sections() {

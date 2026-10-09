@@ -43,6 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use therminal_protocol::PaneId;
+use therminal_protocol::daemon::{IdentityObservationStatus, ObservedPaneIdentity, PaneIdentity};
 use therminal_terminal::process_detector::ProcessDetector;
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info};
@@ -57,19 +58,29 @@ use crate::session::SessionManager;
 /// - the daemon is running on Windows native (`cfg!(windows)`), AND
 /// - the pane's shell command looks like `wsl.exe` (case-insensitive,
 ///   ignoring directory prefixes), AND
-/// - a default WSL distro can be detected via `wsl.exe -l -q`.
+/// - launch metadata may name the distro (`environment = "WSL Ubuntu"`).
 ///
 /// Returns `None` everywhere else, so the existing host sysinfo path
 /// keeps running unchanged on Linux daemons, WSL-hosted daemons, and
 /// pure-Windows panes (cmd, powershell, pwsh).
-pub(crate) fn wsl_distro_for_shell(shell_command: &str) -> Option<String> {
+pub(crate) fn wsl_distro_for_shell(
+    shell_command: &str,
+    launch_environment: Option<&str>,
+) -> Option<String> {
     if !cfg!(windows) {
         return None;
     }
     if !shell_command_is_wsl(shell_command) {
         return None;
     }
-    therminal_harness_claude::wsl_paths::detect_default_distro()
+    Some(
+        launch_environment
+            .and_then(|environment| environment.strip_prefix("WSL "))
+            .map(str::trim)
+            .filter(|distro| !distro.is_empty())
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 /// Pure heuristic for "is this shell command an invocation of `wsl.exe`?".
@@ -159,7 +170,8 @@ pub async fn tick_once(
     session_mgr: &Arc<Mutex<SessionManager>>,
     detectors: &mut HashMap<PaneId, ProcessDetector>,
 ) {
-    // Snapshot pane → (shell_pid, shell_command, wsl_shell_pid) tuples
+    // Snapshot pane → (shell_pid, shell_command, wsl_shell_pid,
+    // launch_environment) tuples
     // under the mutex, then drop it. The shell command is needed to
     // recognise WSL panes on Windows native (tn-966s) so we can route
     // them through the WSL probe path instead of the blind host sysinfo
@@ -170,101 +182,129 @@ pub async fn tick_once(
         mgr.pane_detector_specs()
     };
 
-    // Reconcile the detector cache against the live pane set.
-    let live_pane_ids: std::collections::HashSet<PaneId> =
-        specs.iter().map(|(pid, _, _, _)| *pid).collect();
-    detectors.retain(|pane_id, _| live_pane_ids.contains(pane_id));
-
-    // ── WSL scan coalescing (tn-alpb + tn-ttie) ─────────────────────
-    // `wsl.exe -d <distro> -e ps -eo …` returns ALL processes in the
-    // distro. Running it once per pane is redundant (N identical wsl.exe
-    // calls per tick). Fix: fetch the raw stdout ONCE per distro and
-    // share it across all WSL panes. Each pane then classifies its own
-    // subtree (if it has a wsl_shell_pid) or falls back to the global
-    // scan + dedup path (tn-alpb).
-    let mut wsl_stdout_cache: HashMap<String, Option<String>> = HashMap::new();
-
-    let mut results: Vec<(
-        PaneId,
-        Vec<therminal_terminal::process_detector::DetectedAgent>,
-    )> = Vec::new();
-
-    for (pane_id, shell_pid_opt, shell_command, wsl_shell_pid) in specs {
-        let wsl_distro = wsl_distro_for_shell(&shell_command);
-        if shell_pid_opt.is_none() && wsl_distro.is_none() {
-            // Handoff-restored panes don't carry a shell PID; skip
-            // them silently unless they're a WSL pane (where the
-            // probe ignores the shell PID anyway). They'll get
-            // re-detected on the next session restart when the daemon
-            // spawns a fresh shell.
-            continue;
-        }
-        let is_new_pane = !detectors.contains_key(&pane_id);
-        let detector = detectors.entry(pane_id).or_insert_with(|| {
-            let mut d = ProcessDetector::new(shell_pid_opt);
-            if let Some(distro) = wsl_distro.as_deref() {
-                d = d.with_wsl_distro(distro);
+    let owned_detectors = std::mem::take(detectors);
+    let stale_ids: Vec<PaneId> = specs.iter().map(|spec| spec.0).collect();
+    let scan = tokio::task::spawn_blocking(move || scan_specs(specs, owned_detectors)).await;
+    let (next_detectors, results, identity_results) = match scan {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(error = %error, "pane identity observation task failed");
+            let mut mgr = session_mgr.lock().await;
+            for pane_id in stale_ids {
+                mgr.mark_pane_identity_stale(pane_id);
             }
-            d
-        });
-
-        // tn-ttie: propagate the WSL-side shell PID (from OSC 7337)
-        // into the detector so scan_wsl can BFS-walk from the pane's
-        // root instead of scanning the entire distro. The PID may
-        // arrive after the first tick (the shell integration script
-        // fires after the shell starts), so we update it every tick.
-        if let Some(pid) = wsl_shell_pid {
-            detector.set_wsl_shell_pid(pid);
+            return;
         }
+    };
+    *detectors = next_detectors;
 
-        // tn-x1h9: log the detector-mode decision exactly once per pane
-        // (the first tick where we see it). Without this, silent failure
-        // modes like "Pane.shell is empty so WSL probe never activates"
-        // leave zero breadcrumbs in the logs. Keep it at INFO so it
-        // surfaces in the default tracing filter; it fires at most once
-        // per pane lifetime.
-        if is_new_pane {
-            let mode = if wsl_distro.is_some() {
-                "wsl_probe"
-            } else {
-                "host_sysinfo"
-            };
-            info!(
-                pane_id,
-                mode,
-                shell_command = %shell_command,
-                shell_pid = ?shell_pid_opt,
-                wsl_distro = ?wsl_distro,
-                wsl_shell_pid = ?wsl_shell_pid,
-                is_windows = cfg!(windows),
-                "process_detector_task: initialising detector for pane"
-            );
-        }
-
-        // For WSL panes: fetch stdout once per distro, then let each
-        // detector classify its own view (subtree or global).
-        if let Some(ref distro) = wsl_distro {
-            let stdout_opt = wsl_stdout_cache
-                .entry(distro.clone())
-                .or_insert_with(|| ProcessDetector::fetch_wsl_ps_stdout(distro));
-            let agents = match stdout_opt {
-                Some(stdout) => detector.classify_wsl_stdout(stdout),
-                None => Vec::new(),
-            };
-            results.push((pane_id, agents));
-        } else {
-            let agents = detector.scan();
-            results.push((pane_id, agents));
-        }
-    }
-
-    if results.is_empty() {
+    if results.is_empty() && identity_results.is_empty() {
         return;
     }
 
     // Re-acquire the lock and push results into the central registry.
     let mut mgr = session_mgr.lock().await;
     apply_scan_results(&mut mgr, results);
+    let observed_at_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for (pane_id, identity) in identity_results {
+        if let Some(identity) = identity {
+            mgr.update_pane_identity(
+                pane_id,
+                ObservedPaneIdentity {
+                    identity,
+                    status: IdentityObservationStatus::Live,
+                    observed_at_secs: Some(observed_at_secs),
+                },
+            );
+        } else {
+            mgr.mark_pane_identity_stale(pane_id);
+        }
+    }
+}
+
+type DetectorSpec = (PaneId, Option<u32>, String, Option<u32>, Option<String>);
+type AgentScanResults = Vec<(
+    PaneId,
+    Vec<therminal_terminal::process_detector::DetectedAgent>,
+)>;
+type IdentityScanResults = Vec<(PaneId, Option<PaneIdentity>)>;
+
+fn scan_specs(
+    specs: Vec<DetectorSpec>,
+    mut detectors: HashMap<PaneId, ProcessDetector>,
+) -> (
+    HashMap<PaneId, ProcessDetector>,
+    AgentScanResults,
+    IdentityScanResults,
+) {
+    let live_pane_ids: std::collections::HashSet<PaneId> =
+        specs.iter().map(|spec| spec.0).collect();
+    detectors.retain(|pane_id, _| live_pane_ids.contains(pane_id));
+
+    let mut wsl_stdout_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut results = AgentScanResults::new();
+    let mut identity_results = IdentityScanResults::new();
+
+    for (pane_id, shell_pid_opt, shell_command, wsl_shell_pid, launch_environment) in specs {
+        let wsl_distro = wsl_distro_for_shell(&shell_command, launch_environment.as_deref());
+        if shell_pid_opt.is_none() && wsl_distro.is_none() {
+            identity_results.push((pane_id, None));
+            continue;
+        }
+
+        let is_new_pane = !detectors.contains_key(&pane_id);
+        let detector = detectors.entry(pane_id).or_insert_with(|| {
+            let mut detector = ProcessDetector::new(shell_pid_opt);
+            if let Some(distro) = wsl_distro.as_deref() {
+                detector = detector.with_wsl_distro(distro);
+            }
+            detector
+        });
+        if let Some(pid) = wsl_shell_pid {
+            detector.set_wsl_shell_pid(pid);
+        }
+        if is_new_pane {
+            info!(
+                pane_id,
+                mode = if wsl_distro.is_some() { "wsl_probe" } else { "host_sysinfo" },
+                shell_command = %shell_command,
+                shell_pid = ?shell_pid_opt,
+                wsl_distro = ?wsl_distro,
+                wsl_shell_pid = ?wsl_shell_pid,
+                "process_detector_task: initialising detector for pane"
+            );
+        }
+
+        if let Some(ref distro) = wsl_distro {
+            let stdout = wsl_stdout_cache
+                .entry(distro.clone())
+                .or_insert_with(|| ProcessDetector::fetch_wsl_ps_stdout(distro));
+            match stdout
+                .as_deref()
+                .and_then(|stdout| detector.observe_wsl_stdout(stdout, distro))
+            {
+                Some(observation) => {
+                    identity_results.push((pane_id, Some(observation.identity)));
+                    results.push((pane_id, observation.agents));
+                }
+                None => {
+                    // A failed/timed-out probe or missing OSC 7337 root is
+                    // stale/unknown. Never use distro-global processes.
+                    identity_results.push((pane_id, None));
+                    results.push((pane_id, Vec::new()));
+                }
+            }
+        } else {
+            let observation = detector.scan_observation();
+            identity_results.push((pane_id, Some(observation.identity)));
+            results.push((pane_id, observation.agents));
+        }
+    }
+
+    (detectors, results, identity_results)
 }
 
 /// Apply a batch of scan results to the `SessionManager`'s central
@@ -588,9 +628,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn wsl_distro_for_shell_is_noop_on_unix() {
-        assert!(wsl_distro_for_shell("wsl.exe").is_none());
-        assert!(wsl_distro_for_shell(r"C:\Windows\System32\wsl.exe").is_none());
-        assert!(wsl_distro_for_shell("/bin/bash").is_none());
+        assert!(wsl_distro_for_shell("wsl.exe", Some("WSL Ubuntu")).is_none());
+        assert!(wsl_distro_for_shell(r"C:\Windows\System32\wsl.exe", Some("WSL Ubuntu")).is_none());
+        assert!(wsl_distro_for_shell("/bin/bash", Some("Linux")).is_none());
     }
 
     /// tn-x1h9 regression: the *resolved* shell from

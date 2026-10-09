@@ -22,6 +22,9 @@ use therminal_terminal::osc633::CommandBlock;
 use therminal_terminal::region_index::RegionIndex;
 use therminal_terminal::state_inference::{AgentCadenceSnapshot, AgentDetailsSnapshot};
 
+/// Owned process metadata needed for one daemon identity-observation pass.
+pub(crate) type PaneDetectorSpec = (PaneId, Option<u32>, String, Option<u32>, Option<String>);
+
 impl SessionManager {
     /// Test-only: get the shared command tracker `Arc` for a pane so
     /// tests can inject OSC 633 marks bypassing the PTY reader thread.
@@ -529,7 +532,7 @@ impl SessionManager {
     /// default login shell". `wsl_shell_pid` is the WSL-side PID
     /// captured via OSC 7337 (tn-ttie); `None` until the shell
     /// integration script fires.
-    pub fn pane_detector_specs(&self) -> Vec<(PaneId, Option<u32>, String, Option<u32>)> {
+    pub fn pane_detector_specs(&self) -> Vec<PaneDetectorSpec> {
         let mut out = Vec::new();
         for session in self.sessions.values() {
             for window in &session.windows {
@@ -539,11 +542,67 @@ impl SessionManager {
                         pane.shell_pid(),
                         pane.shell().to_string(),
                         pane.wsl_shell_pid(),
+                        pane.launch_identity().environment.clone(),
                     ));
                 }
             }
         }
         out
+    }
+
+    /// Store and broadcast a pane process identity observation. Returns false
+    /// if the pane vanished while the scan was running or the value is
+    /// unchanged.
+    pub(crate) fn update_pane_identity(
+        &mut self,
+        pane_id: PaneId,
+        identity: therminal_protocol::daemon::ObservedPaneIdentity,
+    ) -> bool {
+        let mut changed = false;
+        for session in self.sessions.values_mut() {
+            if let Some(pane) = session.find_pane_mut(pane_id) {
+                if pane.current_identity() != &identity {
+                    pane.set_current_identity(identity.clone());
+                    changed = true;
+                }
+                break;
+            }
+        }
+        if changed {
+            self.broadcast_event(DaemonEvent::PaneIdentityChanged {
+                pane_id,
+                current_identity: identity,
+            });
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    /// Mark the latest observation stale (or unknown when no successful scan
+    /// has ever completed) without discarding diagnostic details.
+    pub(crate) fn mark_pane_identity_stale(&mut self, pane_id: PaneId) -> bool {
+        let mut next = None;
+        for session in self.sessions.values_mut() {
+            if let Some(pane) = session.find_pane_mut(pane_id) {
+                let mut identity = pane.current_identity().clone();
+                identity.mark_stale();
+                if pane.current_identity() != &identity {
+                    pane.set_current_identity(identity.clone());
+                    next = Some(identity);
+                }
+                break;
+            }
+        }
+        if let Some(identity) = next {
+            self.broadcast_event(DaemonEvent::PaneIdentityChanged {
+                pane_id,
+                current_identity: identity,
+            });
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
     }
 
     // ── Agent registry ─────────────────────────────────────────────────
@@ -765,6 +824,7 @@ impl SessionManager {
             let spawn_opts = therminal_terminal::pty::SpawnOptions {
                 cwd: first_pane.cwd.clone(),
                 shell: first_pane.shell.clone(),
+                launch_identity: first_pane.launch_identity.clone(),
                 ..Default::default()
             };
 
@@ -790,11 +850,16 @@ impl SessionManager {
             }
 
             // Restore tags onto the freshly-spawned default pane.
-            if !first_pane.tags.is_empty()
-                && let Some(window) = session.windows.first_mut()
+            if let Some(window) = session.windows.first_mut()
                 && let Some(pane) = window.panes.first_mut()
             {
-                pane.set_tags(first_pane.tags.clone());
+                if !first_pane.tags.is_empty() {
+                    pane.set_tags(first_pane.tags.clone());
+                }
+                pane.restore_identity(
+                    first_pane.launch_identity.clone(),
+                    first_pane.current_identity.clone(),
+                );
             }
 
             let session_id = session.id;
@@ -804,6 +869,7 @@ impl SessionManager {
                 let opts = therminal_terminal::pty::SpawnOptions {
                     cwd: pane_meta.cwd.clone(),
                     shell: pane_meta.shell.clone(),
+                    launch_identity: pane_meta.launch_identity.clone(),
                     ..Default::default()
                 };
                 match super::pane::Pane::spawn(
@@ -820,6 +886,10 @@ impl SessionManager {
                         if !pane_meta.tags.is_empty() {
                             pane.set_tags(pane_meta.tags.clone());
                         }
+                        pane.restore_identity(
+                            pane_meta.launch_identity.clone(),
+                            pane_meta.current_identity.clone(),
+                        );
                         // Add to the first (default) window.
                         if let Some(window) = session.windows.first_mut() {
                             window.add_pane(pane);

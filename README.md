@@ -267,12 +267,30 @@ sudo apt-get install -y mesa-vulkan-drivers
 
 MIT
 
+### Workspace tabs
+
+Click **+** after the last tab to create a default-shell workspace. Right-click
+**+** to choose a launcher profile for a new workspace. The button's tooltip shows
+the configured new-tab shortcut; the existing nine-workspace limit still applies.
+Tabs stay visible with one workspace, except in focus mode.
+
+Each tab summarizes applications across its panes, grouping duplicates by app and
+environment. Hover a tab to see pane identities and working directories or website
+URLs; click a row to switch to that workspace and focus its pane. Scroll the pane
+list if it exceeds the window height. Profile identity is the fallback when live
+process metadata is unavailable; unknown or stale observations are labeled in the
+pane list. Merely detecting an agent does not imply that it is working or waiting.
+
 ### Launcher profiles
 
 Open Settings with **Ctrl+,**, select **Profiles**, and choose **Add profile**.
 Use Tab to move into the controls, arrows to select a field, and Enter to edit or
 confirm it. Profiles can launch a shell, a command, or a web page. Shell arguments
 accept quoted spaces (for example, `-d Ubuntu-24.04 --cd "/home/marci/my project"`).
+The **Environment** and **Shell label** fields describe the launch identity (for
+example, `WSL Ubuntu` and `Bash`, or `Windows` and `PowerShell`). They are separate
+from the executable and arguments, and do not change what gets launched. The icon
+provides a fallback when a current application cannot be identified.
 A blank shell uses the default. The launcher (**Ctrl+Shift+L**) always includes
 Default Shell, followed by named profiles. Removing a profile removes its launcher
 entry; it does not close running panes. Advanced profile fields, including environment

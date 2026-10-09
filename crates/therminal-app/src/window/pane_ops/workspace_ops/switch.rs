@@ -15,9 +15,20 @@ use super::super::make_pane_callbacks;
 use super::super::split_ops::DaemonSplitOnComplete;
 use crate::window::App;
 
+fn next_available_workspace_id(
+    existing: &[usize],
+    pending: &std::collections::HashSet<u8>,
+) -> Option<u8> {
+    (1..=9u8).find(|id| !existing.contains(&(*id as usize)) && !pending.contains(id))
+}
+
 impl App {
     /// Switch to workspace `n` (1-9).
     pub(crate) fn switch_workspace(&mut self, n: u8) {
+        self.switch_workspace_with_profile(n, None);
+    }
+
+    fn switch_workspace_with_profile(&mut self, n: u8, profile: Option<String>) {
         // Restore layout before switching so the saved tree goes back to the
         // current workspace, not the target.
         if self.zoomed_layout.is_some() {
@@ -51,6 +62,10 @@ impl App {
             if already_on_n || !(1..=9).contains(&n) {
                 return;
             }
+            if self.pending_workspace_creations.contains(&n) {
+                info!(workspace_id = n, "workspace creation is already pending");
+                return;
+            }
             if target_exists {
                 // Target workspace already exists with panes — no spawn needed,
                 // just route through switch_to with a no-op closure.
@@ -80,7 +95,9 @@ impl App {
                 warn!(
                     "switch_workspace: daemon mode but no daemon pane to anchor split — falling back to fresh session"
                 );
-                let Some(state) = self.spawn_remote_pane_fresh_session(full_rect) else {
+                let Some(state) =
+                    self.spawn_remote_pane_fresh_session_with_profile(full_rect, profile)
+                else {
                     return;
                 };
                 let new_pane_id = state.id;
@@ -107,10 +124,20 @@ impl App {
                 warn!("switch_workspace: anchor daemon pane {anchor} has no local mapping");
                 return;
             };
-            self.split_pane_remote(
+            // Reserve the slot only once every synchronous precondition has
+            // passed. The completion path clears it for both RPC success and
+            // failure, so subsequent new-tab clicks can safely choose another
+            // slot while this request is in flight.
+            if self.daemon_client.is_none() || self.daemon_runtime.is_none() {
+                warn!("switch_workspace: daemon split infrastructure unavailable");
+                return;
+            }
+            self.pending_workspace_creations.insert(n);
+            self.split_pane_remote_with_profile(
                 source_local,
                 SplitDirection::Horizontal,
                 DaemonSplitOnComplete::NewWorkspace { workspace_id: n },
+                profile,
             );
             return;
         }
@@ -136,12 +163,35 @@ impl App {
             osc_7337: self.config.terminal.osc_7337,
         };
         let scan_interval_secs = self.config.trust.agent_scan_interval;
-        let spawn_options = therminal_terminal::pty::SpawnOptions {
-            shell: self.config.general.shell.clone(),
-            shell_args: self.config.general.shell_args.clone(),
-            env: self.config.general.env.clone(),
-            advertise_kitty_graphics: self.config.terminal.kitty_graphics,
-            ..Default::default()
+        let spawn_options = if let Some(ref profile_name) = profile {
+            match therminal_core::config::profiles::resolve_profile(
+                &self.config.profiles,
+                profile_name,
+                "",
+            ) {
+                Ok(resolved) => therminal_terminal::pty::SpawnOptions {
+                    shell: resolved.shell,
+                    shell_args: resolved.shell_args,
+                    env: resolved.env,
+                    cwd: resolved.cwd,
+                    skip_shell_integration: resolved.skip_shell_integration,
+                    launch_identity: resolved.launch_identity,
+                    advertise_kitty_graphics: self.config.terminal.kitty_graphics,
+                },
+                Err(error) => {
+                    warn!(profile = profile_name, %error, "failed to resolve new-tab profile");
+                    self.show_toast(format!("profile not available: {profile_name}"));
+                    return;
+                }
+            }
+        } else {
+            therminal_terminal::pty::SpawnOptions {
+                shell: self.config.general.shell.clone(),
+                shell_args: self.config.general.shell_args.clone(),
+                env: self.config.general.env.clone(),
+                advertise_kitty_graphics: self.config.terminal.kitty_graphics,
+                ..Default::default()
+            }
         };
         let proxy = self.event_proxy.clone();
         let registry = Some(Arc::clone(&self.agent_registry));
@@ -179,19 +229,118 @@ impl App {
 
     /// Create a new workspace tab by finding the next unused slot (1-9).
     pub(crate) fn create_new_workspace(&mut self) {
+        self.create_new_workspace_with_profile(None);
+    }
+
+    /// Create and focus a new workspace whose first pane uses `profile`.
+    pub(crate) fn create_new_workspace_with_profile(&mut self, profile: Option<String>) {
+        if let Some((url, identity)) = profile
+            .as_ref()
+            .and_then(|name| self.config.profiles.get(name))
+            .and_then(|profile| {
+                profile.url.clone().map(|url| {
+                    (
+                        url,
+                        therminal_protocol::daemon::PaneIdentity {
+                            environment: profile.environment.clone(),
+                            shell: profile.shell_label.clone(),
+                            application: Some("Browser".to_string()),
+                            icon: profile.icon.clone(),
+                        },
+                    )
+                })
+            })
+        {
+            self.create_new_webview_workspace(&url, identity);
+            return;
+        }
         let existing = self
             .workspaces
             .as_ref()
             .map(|wm| wm.workspace_ids())
             .unwrap_or_default();
         // Find the lowest unused workspace ID in 1..=9.
-        let next_id = (1..=9u8).find(|n| !existing.contains(&(*n as usize)));
+        let next_id = next_available_workspace_id(&existing, &self.pending_workspace_creations);
         match next_id {
-            Some(n) => self.switch_workspace(n),
+            Some(n) => self.switch_workspace_with_profile(n, profile),
             None => {
                 info!("all workspace slots (1-9) are in use");
+                self.show_toast("all workspace slots (1-9) are in use");
             }
         }
+    }
+
+    fn create_new_webview_workspace(
+        &mut self,
+        url: &str,
+        identity: therminal_protocol::daemon::PaneIdentity,
+    ) {
+        let url = crate::pane::webview::normalize_webview_url(url);
+        if url.is_empty() {
+            self.show_toast("WebView profile has empty url");
+            return;
+        }
+        let existing = self
+            .workspaces
+            .as_ref()
+            .map(|wm| wm.workspace_ids())
+            .unwrap_or_default();
+        let Some(workspace_id) =
+            next_available_workspace_id(&existing, &self.pending_workspace_creations)
+                .map(usize::from)
+        else {
+            self.show_toast("all workspace slots (1-9) are in use");
+            return;
+        };
+        let Some(viewport) = self.compute_layout_rect() else {
+            return;
+        };
+        let pane = crate::pane::spawn_webview_pane(viewport, &url);
+        pane.status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .launch_identity = identity;
+        let pane_id = pane.id;
+        let switched = self.workspaces.as_mut().is_some_and(|wm| {
+            wm.switch_to(workspace_id, || Some((LayoutNode::Leaf(pane), pane_id)))
+        });
+        if !switched {
+            self.show_toast("failed to create WebView workspace");
+            return;
+        }
+
+        let Some(window) = self.window.as_ref().cloned() else {
+            if let Some(wm) = self.workspaces.as_mut() {
+                wm.remove_pane_any(pane_id);
+                wm.gc_empty_workspaces();
+            }
+            self.show_toast("no active window to attach WebView");
+            return;
+        };
+        let header_h = crate::pane::effective_header_height(1, !self.focus_mode);
+        let content_rect = crate::pane::webview::webview_content_rect(viewport, header_h);
+        if let Err(error) = self.webview_manager.create(
+            pane_id,
+            &url,
+            content_rect,
+            &window,
+            self.event_proxy.clone(),
+        ) {
+            if let Some(wm) = self.workspaces.as_mut() {
+                wm.remove_pane_any(pane_id);
+                wm.gc_empty_workspaces();
+            }
+            warn!(%error, "failed to create WebView profile workspace");
+            self.show_toast(format!("WebView failed: {error}"));
+            self.relayout_and_redraw();
+            return;
+        }
+
+        self.set_focused_pane(Some(pane_id));
+        self.webview_manager.focus(pane_id);
+        self.relayout_and_redraw();
+        self.publish_workspace_state();
+        info!(workspace_id, pane_id, url = %url, "created WebView profile workspace");
     }
 
     /// Send the focused pane to workspace `n` (1-9).
@@ -394,5 +543,31 @@ impl App {
             self.relayout_and_redraw();
             self.publish_workspace_state();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_available_workspace_id;
+    use std::collections::HashSet;
+
+    #[test]
+    fn rapid_new_tab_requests_reserve_distinct_workspace_slots() {
+        let existing = vec![1usize];
+        let mut pending = HashSet::new();
+
+        let first = next_available_workspace_id(&existing, &pending).unwrap();
+        pending.insert(first);
+        let second = next_available_workspace_id(&existing, &pending).unwrap();
+
+        assert_eq!(first, 2);
+        assert_eq!(second, 3);
+    }
+
+    #[test]
+    fn pending_slots_count_toward_the_workspace_limit() {
+        let existing = vec![1usize, 3, 5, 7, 9];
+        let pending = HashSet::from([2u8, 4, 6, 8]);
+        assert_eq!(next_available_workspace_id(&existing, &pending), None);
     }
 }

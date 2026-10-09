@@ -214,6 +214,7 @@ impl DaemonHarness {
                 cols: None,
                 rows: None,
                 shell: None,
+                profile: None,
             })
             .await?;
         let session_id = match resp {

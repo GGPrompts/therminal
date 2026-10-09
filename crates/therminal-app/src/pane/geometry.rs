@@ -40,6 +40,74 @@ pub const CSD_BUTTON_COUNT: u32 = 4;
 /// Total width reserved for all CSD window control buttons.
 pub const CSD_BUTTONS_TOTAL_WIDTH: f32 = CSD_BUTTON_WIDTH * CSD_BUTTON_COUNT as f32;
 
+/// Maximum width of one workspace tab.
+pub const TAB_MAX_WIDTH: f32 = 200.0;
+
+/// Width reserved for the new-tab button after the final workspace tab.
+pub const NEW_TAB_BUTTON_WIDTH: f32 = 32.0;
+
+/// Shared workspace-tab geometry used by rendering and mouse hit-testing.
+///
+/// The new-tab button is reserved before tab widths are calculated. Tabs may
+/// therefore become narrower than their preferred size in a crowded strip,
+/// but the creation affordance never gets pushed under the CSD controls or
+/// beyond the right edge of the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabBarGeometry {
+    pub tab_width: f32,
+    pub plus_button: Rect,
+    tab_count: usize,
+}
+
+impl TabBarGeometry {
+    pub fn new(surface_width: f32, bar_height: f32, tab_count: usize, csd_reserved: f32) -> Self {
+        let available_width = (surface_width - csd_reserved).max(0.0);
+        let plus_width = NEW_TAB_BUTTON_WIDTH.min(available_width);
+        let tabs_width = (available_width - plus_width).max(0.0);
+        let tab_width = if tab_count == 0 {
+            0.0
+        } else {
+            (tabs_width / tab_count as f32).min(TAB_MAX_WIDTH)
+        };
+        let plus_x = tab_width * tab_count as f32;
+
+        Self {
+            tab_width,
+            plus_button: Rect::new(plus_x, 0.0, plus_width, bar_height.max(0.0)),
+            tab_count,
+        }
+    }
+
+    pub fn tab_rect(self, index: usize) -> Option<Rect> {
+        (index < self.tab_count).then(|| {
+            Rect::new(
+                index as f32 * self.tab_width,
+                0.0,
+                self.tab_width,
+                self.plus_button.height(),
+            )
+        })
+    }
+
+    pub fn tab_index_at_x(self, x: f32) -> Option<usize> {
+        if self.tab_count == 0 || self.tab_width <= 0.0 {
+            return None;
+        }
+        if x < 0.0 {
+            return Some(0);
+        }
+        if x >= self.plus_button.x() {
+            return None;
+        }
+        let index = (x / self.tab_width).floor() as usize;
+        (index < self.tab_count).then_some(index)
+    }
+
+    pub fn plus_contains_x(self, x: f32) -> bool {
+        x >= self.plus_button.x() && x < self.plus_button.right()
+    }
+}
+
 /// Height of a CSD window control button.
 #[allow(dead_code)]
 pub const CSD_BUTTON_HEIGHT: f32 = 36.0;
@@ -51,16 +119,13 @@ pub fn effective_status_bar_height(show: bool) -> f32 {
 
 /// Decide whether the workspace tab bar should be visible.
 ///
-/// Single-workspace layouts hide the bar automatically — nobody needs a tab
-/// strip to "switch between one thing". A second workspace causes the bar to
-/// appear. This is the single predicate every call site funnels through so
-/// that future overrides (e.g. tn-t2yd.2 focus mode) can be added in one
-/// place.
+/// The strip remains visible for a single workspace so the new-tab button is
+/// always mouse-accessible. Focus mode is applied separately by callers.
 pub fn should_show_tab_bar(workspace_count: usize) -> bool {
-    workspace_count >= 2
+    workspace_count >= 1
 }
 
-/// Return the effective tab bar height: 0 when `workspace_count < 2`,
+/// Return the effective tab bar height: 0 with no workspaces,
 /// [`TAB_BAR_HEIGHT`] otherwise.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn effective_tab_bar_height(workspace_count: usize) -> f32 {
@@ -173,13 +238,13 @@ mod tests {
     // ── should_show_tab_bar ───────────────────────────────────────────
 
     #[test]
-    fn tab_bar_hidden_for_zero_or_one_workspace() {
+    fn tab_bar_hidden_only_without_workspaces() {
         assert!(!should_show_tab_bar(0));
-        assert!(!should_show_tab_bar(1));
     }
 
     #[test]
-    fn tab_bar_shown_for_two_or_more_workspaces() {
+    fn tab_bar_shown_for_one_or_more_workspaces() {
+        assert!(should_show_tab_bar(1));
         assert!(should_show_tab_bar(2));
         assert!(should_show_tab_bar(5));
         assert!(should_show_tab_bar(100));
@@ -188,13 +253,13 @@ mod tests {
     // ── effective_tab_bar_height ──────────────────────────────────────
 
     #[test]
-    fn tab_bar_height_zero_for_single_workspace() {
+    fn tab_bar_height_zero_without_workspaces() {
         assert_eq!(effective_tab_bar_height(0), 0.0);
-        assert_eq!(effective_tab_bar_height(1), 0.0);
     }
 
     #[test]
-    fn tab_bar_height_reserved_for_multi_workspace() {
+    fn tab_bar_height_reserved_with_workspaces() {
+        assert_eq!(effective_tab_bar_height(1), TAB_BAR_HEIGHT);
         assert_eq!(effective_tab_bar_height(2), TAB_BAR_HEIGHT);
         assert_eq!(effective_tab_bar_height(10), TAB_BAR_HEIGHT);
     }
@@ -216,13 +281,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_height_csd_hidden_without_csd_and_single_workspace() {
-        assert_eq!(effective_tab_bar_height_csd(1, false, false), 0.0);
+    fn tab_bar_height_csd_hidden_without_csd_and_no_workspaces() {
         assert_eq!(effective_tab_bar_height_csd(0, false, false), 0.0);
     }
 
     #[test]
-    fn tab_bar_height_csd_shown_without_csd_and_multi_workspace() {
+    fn tab_bar_height_csd_shown_without_csd_with_workspaces() {
+        assert_eq!(
+            effective_tab_bar_height_csd(1, false, false),
+            TAB_BAR_HEIGHT
+        );
         assert_eq!(
             effective_tab_bar_height_csd(2, false, false),
             TAB_BAR_HEIGHT
@@ -237,11 +305,36 @@ mod tests {
         assert_eq!(effective_tab_bar_height_csd(2, false, true), 0.0);
     }
 
+    #[test]
+    fn tab_bar_geometry_places_plus_after_last_tab() {
+        let geo = TabBarGeometry::new(800.0, TAB_BAR_HEIGHT, 2, 0.0);
+        assert_eq!(geo.tab_width, TAB_MAX_WIDTH);
+        assert_eq!(geo.tab_rect(1), Some(Rect::new(200.0, 0.0, 200.0, 24.0)));
+        assert_eq!(geo.plus_button, Rect::new(400.0, 0.0, 32.0, 24.0));
+    }
+
+    #[test]
+    fn tab_bar_geometry_reserves_plus_when_crowded() {
+        let geo = TabBarGeometry::new(132.0, TAB_BAR_HEIGHT, 10, 0.0);
+        assert_eq!(geo.tab_width, 10.0);
+        assert_eq!(geo.plus_button, Rect::new(100.0, 0.0, 32.0, 24.0));
+        assert_eq!(geo.tab_index_at_x(99.9), Some(9));
+        assert!(geo.plus_contains_x(100.0));
+        assert!(geo.plus_contains_x(131.9));
+    }
+
+    #[test]
+    fn tab_bar_geometry_keeps_plus_left_of_csd_controls() {
+        let geo = TabBarGeometry::new(800.0, CSD_TAB_BAR_HEIGHT, 4, CSD_BUTTONS_TOTAL_WIDTH);
+        assert!(geo.plus_button.right() <= 800.0 - CSD_BUTTONS_TOTAL_WIDTH);
+        assert!(!geo.plus_contains_x(799.0));
+    }
+
     // ── content_area_rect ────────────────────────────────────────────
 
     #[test]
     fn content_area_no_bars() {
-        let r = content_area_rect(800.0, 600.0, false, 1);
+        let r = content_area_rect(800.0, 600.0, false, 0);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), 0.0);
         assert_eq!(r.width(), 800.0);
@@ -250,7 +343,7 @@ mod tests {
 
     #[test]
     fn content_area_status_bar_only() {
-        let r = content_area_rect(800.0, 600.0, true, 1);
+        let r = content_area_rect(800.0, 600.0, true, 0);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), 0.0);
         assert_eq!(r.width(), 800.0);
@@ -297,7 +390,7 @@ mod tests {
 
     #[test]
     fn content_area_rect_origin_at_top_left_when_no_tab_bar() {
-        let r = content_area_rect(640.0, 480.0, true, 1);
+        let r = content_area_rect(640.0, 480.0, true, 0);
         assert_eq!(r.x(), 0.0);
         assert_eq!(r.y(), 0.0);
         assert_eq!(r.right(), 640.0);
