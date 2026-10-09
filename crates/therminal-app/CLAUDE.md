@@ -87,6 +87,7 @@ src/
 │   ├── backend.rs       # PaneBackend trait, PaneBackendKind (Terminal | WebView | JsonlTail)
 │   ├── webview.rs       # WebViewManager — wry-based platform-native webview embedding (tn-s5vj)
 │   ├── jsonl_tail.rs    # JsonlTailState — file watcher, JSONL parser, structured rendering (tn-14c0)
+│   ├── transcript_markdown.rs # Assistant Markdown → styled, cell-width-wrapped terminal rows
 │   └── auto_tile.rs     # AutoTileDebouncer for agent spawn/exit events
 ├── widgets/
 │   ├── mod.rs              # WidgetId, re-exports
@@ -242,10 +243,12 @@ Named workspaces (`WorkspaceManager` in `pane/workspace.rs`) let users group pan
 `PaneBackendKind` is the concrete enum stored in each `PaneState`:
 - **Terminal** — PTY-backed pane using alacritty_terminal `Term`. Holds `Arc<FairMutex<Term>>`, PTY writer, and PTY master.
 - **WebView** (tn-s5vj) — Platform-native webview via wry. Stores a URL and content buffer. The actual webview surface is owned by `WebViewManager` on App, not by the backend enum, because wry `WebView` instances must be created with a window handle that lives on the main thread. The render path draws only the pane header/focus border; content is rendered by the native webview child surface positioned on top of the wgpu surface. Input is routed to the native webview by the OS; PTY key encoding is skipped for WebView panes.
-- **JsonlTail** — Read-only JSONL file tail with structured rendering.
+- **JsonlTail** — Read-only JSONL file tail with transcript-first rendering. Assistant Markdown is rendered by `transcript_markdown.rs` using pulldown-cmark and Unicode cell widths; tools remain compact and expandable. Internal Claude bookkeeping is filtered from this pane, not from the daemon event stream. See the [watcher guide](../../docs/integrations/claude-code-watcher.md) for controls and limitations.
 - **RemotePty** — Daemon-hosted PTY with local shadow Term.
 
 The enum also provides `resize_to_viewport()` which computes grid dimensions from a pixel `Rect` and renderer metrics before delegating to `resize()`.
+
+**Transcript viewport**: `JsonlTailState` owns scrolling and follow state. Mouse-wheel handling in `window/mouse.rs` and scroll actions in `window/event_handler/scroll.rs` route through `PaneBackendKind::scroll_transcript()` before ordinary terminal scrollback. `formatted_content()` reserves one header row and one pinned footer row. Refreshing the shadow `Term` clears synthetic scrollback and disables wrapping during the write, so it cannot accumulate a second, conflicting scroll history. Reformatting while paused anchors the same event and row offset where retained; new content follows the bottom only when live-follow is enabled.
 
 ## WebView Pane Architecture (tn-s5vj)
 
@@ -282,6 +285,6 @@ If an agent spawns and exits within the debounce window, the two events cancel e
 
 1. **Hook path** (primary): The per-pane forwarder in `remote_spawn.rs` subscribes to `DaemonEvent::SubagentStarted` / `SubagentStopped`. When the daemon resolves a `subagent_start` hook signal to a pane, the forwarder converts it to `SwarmWatcherEvent::SpawnSubagent` / `ReclaimSubagent` and sends it through `App.swarm_debouncer_tx`. The `swarm_wake` callback sends `UserEvent::SwarmWatcherTick` to poll the debouncer on the main thread.
 
-2. **File scanner** (fallback): The `SwarmWatcher` thread (`pane/swarm_watcher.rs`) polls `~/.claude/projects/*/*/subagents/agent-*.jsonl` every 500ms and detects new/stale subagent files. Events are bridged to the debouncer via the watcher bridge thread. The `Current` scope filter uses **session-based ownership** (tn-twfg): it checks if a subagent's `parent_session_id` matches the pane's `claude_session_id` (from the capacity cache), rather than PID descendancy. When `session_id` is not yet available, falls back to scope `All` with a debug log.
+2. **File scanner** (fallback): The `SwarmWatcher` thread (`pane/swarm_watcher.rs`) polls `~/.claude/projects/*/*/subagents/agent-*.jsonl` every 500ms and detects new/stale subagent files. Events are bridged to the debouncer via the watcher bridge thread. The `Current` scope filter uses **session-based ownership** (tn-twfg): it checks if a subagent's `parent_session_id` matches the pane's `claude_session_id` (from the capacity cache), rather than PID descendancy. When session IDs are not yet available, queues discovery for a five-second grace period before falling back to scope `All` if ownership remains unknown.
 
 Dedup is naturally handled: `spawn_subagent_pane()` checks `swarm_panes.contains_key(&agent_id)` before creating a pane, so the faster hook path wins and the file scanner's later discovery is a no-op. Subagent panes without a JSONL path (hook-driven with no transcript file) spawn as regular terminal panes instead of JsonlTail panes (tn-y2yv).

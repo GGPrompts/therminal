@@ -31,6 +31,8 @@ Current high-value CLI surfaces include:
 
 ## Guides
 
+- [Claude Code Transcript Watcher](claude-code-watcher.md) — Auto-tiled subagent
+  transcripts, Markdown rendering, scrolling, follow mode, and detail controls.
 - [`../cli.md`](../cli.md) — `therminal pane|session|workspace|agents|events|semantic`
   cache-friendly CLI surface (tn-k13n).
 - `crates/therminal-daemon/CLAUDE.md` — daemon MCP tool and resource reference.

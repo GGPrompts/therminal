@@ -45,7 +45,8 @@ The AI-native terminal emulator. Cross-platform, GPU-accelerated, built for the 
 - Split panes with binary layout tree and keyboard/shortcut controls
 - Mouse-drag separator resize (click and drag pane borders)
 - Auto-tiling for agent swarms — panes spawn/reclaim as agents start and exit (debounced)
-- PaneBackend abstraction (Terminal | WebView — WebView stubbed for future hybrid panes)
+- Native Claude Code transcript panes with Markdown, compact expandable tool details, scrollback navigation, and pinned controls — see the [watcher guide](docs/integrations/claude-code-watcher.md)
+- PaneBackend abstraction (Terminal | WebView | JsonlTail | RemotePty); WebView panes embed platform-native browser surfaces
 - Per-pane headers showing the real daemon `PaneId`, plus Claude session title or cwd basename when available
 - Status bar pane identity and smarter workspace-tab labels based on the focused pane context
 - Workspace tabs (Alt+1..9 to switch, Alt+Shift+1..9 to send pane)

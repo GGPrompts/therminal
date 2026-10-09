@@ -77,7 +77,7 @@ waits, and structured responses that drive downstream tool calls.
 | Capture delegate result | MCP `terminal.panes.capture_result` | Transcript-first with grid fallback; no CLI peer |
 | Wait for output | MCP `terminal.panes.wait_for_output` | Blocking async; no CLI peer |
 | Pane event log | MCP `terminal.panes.query_events` | Structured ring-buffer; no CLI peer |
-| Create JSONL tail pane | MCP `terminal.panes.create_tail` | Specialized; no CLI peer |
+| Create JSONL tail pane | MCP `terminal.panes.create_tail` | Currently a PTY running `tail -F`; no CLI peer or native Markdown viewer |
 | **Workspaces** | | |
 | List workspaces | `tn workspace list` | Simple read |
 | Create workspace | `tn workspace create --session N` | Fire-and-forget |
