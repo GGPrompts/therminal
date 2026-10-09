@@ -720,7 +720,9 @@ async fn start_daemon(
     // Start MCP server alongside the IPC server
     let mcp_shutdown = Arc::new(tokio::sync::Notify::new());
     let mcp_config = app_config.mcp.clone();
-    let profiles = Arc::new(app_config.profiles.clone());
+    let profiles = Arc::new(therminal_core::config::profiles::ProfileSource::from_path(
+        therminal_core::config::config_path(),
+    ));
     server.set_profiles(Arc::clone(&profiles));
     let mcp_session_mgr = server.session_manager();
     let mcp_shutdown_clone = Arc::clone(&mcp_shutdown);

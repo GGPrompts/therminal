@@ -41,6 +41,11 @@ impl ThemePreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlBinding {
     ApplyThemePreset(ThemePreset),
+    ProfileSelect,
+    ProfileMode,
+    ProfileAdd,
+    ProfileRemove,
+    ProfileText(ProfileField),
     // Hotspot controls (tn-avjv.5)
     EditorChainEntry(usize),
     AddEditorChainEntry,
@@ -77,6 +82,11 @@ pub(crate) enum ControlBinding {
 #[allow(dead_code)] // MoveUp/MoveDown wired in future keyboard shortcut pass.
 pub(crate) enum SettingsCommand {
     ApplyThemePreset(ThemePreset),
+    SelectProfile(usize),
+    SetProfileMode(usize),
+    AddProfile,
+    RemoveProfile,
+    SetProfileText(ProfileField, String),
     // Hotspot mutations (tn-avjv.5)
     EditorChainRemove(usize),
     EditorChainEdit(usize, String),
@@ -118,6 +128,11 @@ pub(crate) enum SettingsCommand {
 impl ControlBinding {
     pub(super) fn command(&self) -> SettingsCommand {
         match self {
+            Self::ProfileSelect => SettingsCommand::SelectProfile(0),
+            Self::ProfileMode => SettingsCommand::SetProfileMode(0),
+            Self::ProfileAdd => SettingsCommand::AddProfile,
+            Self::ProfileRemove => SettingsCommand::RemoveProfile,
+            Self::ProfileText(field) => SettingsCommand::SetProfileText(*field, String::new()),
             Self::ApplyThemePreset(preset) => SettingsCommand::ApplyThemePreset(*preset),
             Self::EditorChainEntry(idx) => SettingsCommand::EditorChainEdit(*idx, String::new()),
             Self::AddEditorChainEntry => SettingsCommand::EditorChainAdd(String::new()),
@@ -275,4 +290,14 @@ impl SettingsSection {
             controls,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileField {
+    Name,
+    Program,
+    Arguments,
+    Directory,
+    Icon,
+    Color,
 }

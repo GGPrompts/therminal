@@ -266,3 +266,22 @@ sudo apt-get install -y mesa-vulkan-drivers
 ## License
 
 MIT
+
+### Launcher profiles
+
+Open Settings with **Ctrl+,**, select **Profiles**, and choose **Add profile**.
+Use Tab to move into the controls, arrows to select a field, and Enter to edit or
+confirm it. Profiles can launch a shell, a command, or a web page. Shell arguments
+accept quoted spaces (for example, `-d Ubuntu-24.04 --cd "/home/marci/my project"`).
+A blank shell uses the default. The launcher (**Ctrl+Shift+L**) always includes
+Default Shell, followed by named profiles. Removing a profile removes its launcher
+entry; it does not close running panes. Advanced profile fields, including environment
+variables, remain editable in the configuration file and are preserved by Settings.
+
+The executable determines the configuration location: a Linux build in WSL reads
+`$XDG_CONFIG_HOME/therminal/therminal.toml` (normally `~/.config/therminal/therminal.toml`);
+a Windows `therminal.exe` reads `%APPDATA%\therminal\therminal.toml`, even when started
+from a WSL prompt. These are independent configurations. The launcher refreshes
+when opened, and the daemon reads saved profiles for each new profile launch, so
+profile edits do not require restarting the daemon or existing shells. Invalid saved
+configuration produces an error instead of launching an old profile definition.

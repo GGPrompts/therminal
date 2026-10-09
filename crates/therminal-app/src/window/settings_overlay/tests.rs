@@ -99,6 +99,7 @@ fn navigate_to_section(state: &mut SettingsOverlayState, section_id: &str) {
 
 fn test_render_values() -> SettingsRenderValues {
     SettingsRenderValues {
+        profiles: Default::default(),
         editor_chain: vec!["$VISUAL".into(), "$EDITOR".into(), "code".into()],
         folder_pane_command: vec!["tfe".into(), "{path}".into()],
         folder_opener: vec!["$FILE_MANAGER".into(), "xdg-open".into()],
@@ -1070,4 +1071,59 @@ fn font_select_expanded_state_survives_sync() {
             FONT_FAMILY_OPTIONS[1].to_string()
         ))
     );
+}
+
+#[test]
+fn profile_form_commits_text_and_persists_rename_removal() {
+    use super::profiles::apply_profile_command;
+    use super::types::ProfileField;
+    use therminal_core::config::{TherminalConfig, profiles::ProfileSource};
+    let mut state = SettingsOverlayState::new();
+    let mut values = test_render_values();
+    navigate_to_section(&mut state, "profiles");
+    state.sync_toggle_values(&values);
+    state.tab(false);
+    let command = state.enter().unwrap();
+    assert_eq!(command, SettingsCommand::AddProfile);
+    apply_profile_command(&mut values.profiles, &mut state.selected_profile, &command)
+        .unwrap()
+        .unwrap();
+    state.sync_toggle_values(&values);
+    state.arrow_down(); // profile selector
+    state.arrow_down(); // name
+    assert!(state.enter().is_none());
+    state.char_input('X');
+    // Rendering must not throw away an in-progress edit.
+    state.sync_toggle_values(&values);
+    let command = state.enter().unwrap();
+    assert_eq!(
+        command,
+        SettingsCommand::SetProfileText(ProfileField::Name, "Profile 1X".into())
+    );
+    apply_profile_command(&mut values.profiles, &mut state.selected_profile, &command)
+        .unwrap()
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("therminal.toml");
+    let mut config = TherminalConfig {
+        profiles: values.profiles,
+        ..Default::default()
+    };
+    config.profiles.get_mut("Profile 1X").unwrap().command = Some("old-command".into());
+    config.save_to(&path).unwrap();
+    let source = ProfileSource::from_path(path.clone());
+    let mut profile = config.profiles.remove("Profile 1X").unwrap();
+    profile.command = None;
+    profile.shell = Some("new-shell".into());
+    profile.shell_args = vec!["argument with spaces".into()];
+    config.profiles.insert("Renamed".into(), profile);
+    config.save_to(&path).unwrap();
+    assert!(source.resolve("Profile 1X", "").is_err());
+    let resolved = source.resolve("Renamed", "").unwrap();
+    assert_eq!(resolved.shell, "new-shell");
+    assert_eq!(resolved.shell_args, ["argument with spaces"]);
+    config.profiles.clear();
+    config.save_to(&path).unwrap();
+    assert!(source.resolve("Renamed", "").is_err());
 }

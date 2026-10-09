@@ -134,7 +134,7 @@ pub struct IpcServer {
     escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
     /// Named profiles from `[profiles.*]` config for profile-based pane
     /// spawning (tn-ar79).
-    profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
 }
 
 impl IpcServer {
@@ -171,7 +171,7 @@ impl IpcServer {
             session_mgr,
             hook_push_sink: None,
             escalation_responses: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            profiles: Arc::new(std::collections::HashMap::new()),
+            profiles: Arc::new(Default::default()),
         })
     }
 
@@ -193,10 +193,7 @@ impl IpcServer {
 
     /// Set the named profiles from config for profile-based pane spawning
     /// (tn-ar79).
-    pub fn set_profiles(
-        &mut self,
-        profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
-    ) {
+    pub fn set_profiles(&mut self, profiles: Arc<therminal_core::config::profiles::ProfileSource>) {
         self.profiles = profiles;
     }
 
@@ -303,7 +300,7 @@ async fn handle_connection(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: Option<Arc<HookPushSink>>,
     escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
-    profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
     conn_id: u64,
 ) -> Result<()> {
     // Read the first 4 bytes. For binary protocols this is the length prefix.
@@ -388,7 +385,7 @@ async fn handle_ipc_connection(
     session_mgr: Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: Option<Arc<HookPushSink>>,
     escalation_responses: Arc<crate::mcp::EscalationResponseMap>,
-    profiles: Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
     conn_id: u64,
     first_msg: IpcMessage,
 ) -> Result<()> {
@@ -492,7 +489,7 @@ async fn process_ipc_message(
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: &Option<Arc<HookPushSink>>,
     escalation_responses: &Arc<crate::mcp::EscalationResponseMap>,
-    profiles: &Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
+    profiles: &Arc<therminal_core::config::profiles::ProfileSource>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -545,7 +542,7 @@ async fn dispatch_ipc(
     session_mgr: &Arc<tokio::sync::Mutex<SessionManager>>,
     hook_push_sink: &Option<Arc<HookPushSink>>,
     escalation_responses: &Arc<crate::mcp::EscalationResponseMap>,
-    profiles: &Arc<std::collections::HashMap<String, therminal_core::config::ProfileConfig>>,
+    profiles: &Arc<therminal_core::config::profiles::ProfileSource>,
     subscribed_kinds: &mut HashSet<EventKind>,
     event_rx: &mut Option<broadcast::Receiver<DaemonEvent>>,
     conn_id: u64,
@@ -709,11 +706,7 @@ async fn dispatch_ipc(
             let (profile_shell, profile_cwd, profile_env, profile_args, profile_skip_si) =
                 if let Some(name) = profile {
                     let inherit_cwd = mgr.pane_cwd(*pane_id).unwrap_or_default();
-                    match therminal_core::config::profiles::resolve_profile(
-                        profiles,
-                        name,
-                        &inherit_cwd,
-                    ) {
+                    match profiles.resolve(name, &inherit_cwd) {
                         Ok(resolved) => (
                             Some(resolved.shell),
                             Some(resolved.cwd),

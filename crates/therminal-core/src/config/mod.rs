@@ -38,8 +38,25 @@ fn merged_toml_with_existing(
 ) -> Result<String, toml_edit::TomlError> {
     let mut existing_doc: DocumentMut = existing.parse()?;
     let replacement_doc: DocumentMut = replacement.parse()?;
+    // Profile rename/removal and clearing optional launch fields must remove
+    // old keys too. Keep comments on retained keys through the usual merge.
+    if let (Some(Item::Table(dst)), Some(Item::Table(src))) = (
+        existing_doc.get_mut("profiles"),
+        replacement_doc.get("profiles"),
+    ) {
+        prune_removed_profile_keys(dst, src);
+    }
     merge_table(existing_doc.as_table_mut(), replacement_doc.as_table());
     Ok(existing_doc.to_string())
+}
+
+fn prune_removed_profile_keys(dst: &mut Table, src: &Table) {
+    dst.retain(|key, _| src.contains_key(key));
+    for (key, item) in dst.iter_mut() {
+        if let (Item::Table(dst), Some(Item::Table(src))) = (item, src.get(key.get())) {
+            prune_removed_profile_keys(dst, src);
+        }
+    }
 }
 
 fn merge_table(dst: &mut Table, src: &Table) {

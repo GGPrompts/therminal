@@ -215,11 +215,7 @@ impl TherminalMcpServer {
             // inherit_cwd, matching the IPC server path in server.rs.
             let mut spawn_options = if let Some(ref profile_name) = params.profile {
                 let inherit_cwd = mgr.pane_cwd(split_from_id).unwrap_or_default();
-                match therminal_core::config::profiles::resolve_profile(
-                    &self.profiles,
-                    profile_name,
-                    &inherit_cwd,
-                ) {
+                match self.profiles.resolve(profile_name, &inherit_cwd) {
                     Ok(resolved) => SpawnOptions {
                         shell: resolved.shell,
                         shell_args: resolved.shell_args,
@@ -313,11 +309,7 @@ impl TherminalMcpServer {
             // split_from pane exists, use params.cwd as inherit_cwd.
             let mut spawn_options = if let Some(ref profile_name) = params.profile {
                 let inherit_cwd = params.cwd.as_deref().unwrap_or("");
-                match therminal_core::config::profiles::resolve_profile(
-                    &self.profiles,
-                    profile_name,
-                    inherit_cwd,
-                ) {
+                match self.profiles.resolve(profile_name, inherit_cwd) {
                     Ok(resolved) => SpawnOptions {
                         shell: resolved.shell,
                         shell_args: resolved.shell_args,

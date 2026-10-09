@@ -25,6 +25,7 @@
 //! - [`renderer`] — `draw_settings_overlay` and its private helpers.
 
 mod nav;
+mod profiles;
 mod renderer;
 mod sections;
 mod state;
@@ -33,6 +34,7 @@ mod tests;
 mod theme;
 mod types;
 
+pub(crate) use profiles::apply_profile_command;
 pub(crate) use renderer::draw_settings_overlay;
 pub(crate) use sections::{
     BACKGROUND_OPACITY_OPTIONS, FONT_FAMILY_OPTIONS, SCROLLBACK_OPTIONS, SettingsRenderValues,

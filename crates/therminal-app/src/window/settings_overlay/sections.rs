@@ -5,7 +5,7 @@ use super::state::SettingsOverlayState;
 use super::types::{ControlBinding, ControlType, SettingsControl, SettingsSection, ThemePreset};
 
 /// Snapshot of in-progress editing state for a single control.
-enum ControlSnapshot {
+pub(super) enum ControlSnapshot {
     SelectEditing {
         selected: usize,
         expanded: bool,
@@ -24,7 +24,7 @@ enum ControlSnapshot {
 
 /// Capture editing state for every control in a section so we can restore
 /// it after rebuilding the controls vector from config values.
-fn snapshot_control_states(controls: &[SettingsControl]) -> Vec<ControlSnapshot> {
+pub(super) fn snapshot_control_states(controls: &[SettingsControl]) -> Vec<ControlSnapshot> {
     controls
         .iter()
         .map(|c| match &c.control_type {
@@ -58,7 +58,10 @@ fn snapshot_control_states(controls: &[SettingsControl]) -> Vec<ControlSnapshot>
 }
 
 /// Restore in-progress editing state that was captured before a rebuild.
-fn restore_control_states(controls: &mut [SettingsControl], snapshots: &[ControlSnapshot]) {
+pub(super) fn restore_control_states(
+    controls: &mut [SettingsControl],
+    snapshots: &[ControlSnapshot],
+) {
     for (control, snapshot) in controls.iter_mut().zip(snapshots.iter()) {
         match (&mut control.control_type, snapshot) {
             (
@@ -220,6 +223,7 @@ pub(crate) fn font_family_index(family: &str) -> Option<usize> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsRenderValues {
+    pub profiles: std::collections::HashMap<String, therminal_core::config::ProfileConfig>,
     pub editor_chain: Vec<String>,
     pub folder_pane_command: Vec<String>,
     pub folder_opener: Vec<String>,
@@ -327,6 +331,7 @@ impl SettingsOverlayState {
         }
         self.rebuild_appearance_section(values);
         self.rebuild_shell_section(values);
+        self.rebuild_profiles_section(values);
         self.rebuild_terminal_section(values);
         self.rebuild_hotspots_section(values);
         self.rebuild_notifications_section(values);
@@ -686,6 +691,7 @@ impl SettingsOverlayState {
         // Accessibility. Theme presets are action buttons inside Appearance.
         self.register_section(SettingsSection::new("appearance", "Appearance", vec![]));
         self.register_section(SettingsSection::new("shell", "Shell", vec![]));
+        self.register_section(SettingsSection::new("profiles", "Profiles", vec![]));
         self.register_section(SettingsSection::new("terminal", "Terminal", vec![]));
         self.register_section(SettingsSection::new("hotspots", "Hotspots", vec![]));
         self.register_section(SettingsSection::new(

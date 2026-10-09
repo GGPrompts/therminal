@@ -228,7 +228,14 @@ pub(super) fn build_text_buffers(
         let label_width = row_width * 0.52;
         let value_col_x = content_x + 28.0 + row_width * 0.55;
         let value_width = row_width * 0.42;
-        for (i, control) in section.controls.iter().enumerate() {
+        let visible = layout.visible_controls(section.controls.len(), state.active_control_index());
+        for (i, control) in section
+            .controls
+            .iter()
+            .enumerate()
+            .take(visible.end)
+            .skip(visible.start)
+        {
             let selected = i == state.active_control_index();
             let marker = if selected { ">" } else { " " };
             let row_color = if selected && state.focus() == SettingsFocus::Controls {
@@ -239,7 +246,7 @@ pub(super) fn build_text_buffers(
             } else {
                 ink
             };
-            let row_y = panel_y + 118.0 + i as f32 * 36.0;
+            let row_y = layout.ctrl_start_y + 6.0 + (i - visible.start) as f32 * layout.ctrl_row_h;
             match &control.control_type {
                 ControlType::Toggle { value } => {
                     add_text(

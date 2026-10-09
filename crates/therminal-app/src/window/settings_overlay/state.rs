@@ -7,6 +7,7 @@ use super::types::{ControlType, SettingsFocus, SettingsSection, ThemePreset};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SettingsOverlayState {
+    pub(crate) selected_profile: Option<String>,
     pub(super) sections: Vec<SettingsSection>,
     pub(super) selected_section: usize,
     pub(super) selected_control_by_section: Vec<usize>,
@@ -19,6 +20,7 @@ impl SettingsOverlayState {
     pub(crate) fn new() -> Self {
         let mut s = Self {
             sections: Vec::new(),
+            selected_profile: None,
             selected_section: 0,
             selected_control_by_section: Vec::new(),
             focus: SettingsFocus::Navigation,

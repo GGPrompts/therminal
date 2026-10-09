@@ -233,6 +233,7 @@ impl App {
     pub(super) fn build_settings_render_values(&self) -> settings_overlay::SettingsRenderValues {
         use therminal_core::config::NewPaneCwd;
         settings_overlay::SettingsRenderValues {
+            profiles: self.config.profiles.clone(),
             editor_chain: self.config.hotspots.editor_chain.clone(),
             folder_pane_command: self.config.hotspots.folder_pane_command.clone(),
             folder_opener: self.config.hotspots.folder_opener.clone(),
@@ -292,7 +293,26 @@ impl App {
     }
 
     pub(super) fn apply_settings_command(&mut self, command: SettingsCommand) {
+        if let Some(result) = settings_overlay::apply_profile_command(
+            &mut self.config.profiles,
+            &mut self.settings_overlay.selected_profile,
+            &command,
+        ) {
+            match result {
+                Ok(()) if !matches!(command, SettingsCommand::SelectProfile(_)) => {
+                    self.persist_settings_overlay_edits()
+                }
+                Ok(()) => {}
+                Err(message) => self.show_toast(message),
+            }
+            return;
+        }
         match command {
+            SettingsCommand::SelectProfile(_)
+            | SettingsCommand::SetProfileMode(_)
+            | SettingsCommand::AddProfile
+            | SettingsCommand::RemoveProfile
+            | SettingsCommand::SetProfileText(_, _) => unreachable!(),
             SettingsCommand::ApplyThemePreset(preset) => {
                 settings_overlay::apply_theme_preset(&mut self.config.colors, preset);
                 if let Some(renderer) = self.grid_renderer.as_mut() {

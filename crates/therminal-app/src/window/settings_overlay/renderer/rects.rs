@@ -92,8 +92,13 @@ pub(super) fn build_rect_vertices(
         chrome_palette.focus_border[2],
         0.6,
     ];
+    let visible = layout.visible_controls(
+        state.active_section().map_or(0, |s| s.controls.len()),
+        state.active_control_index(),
+    );
     if state.focus() == SettingsFocus::Controls {
-        let y = ctrl_start_y + state.active_control_index() as f32 * ctrl_row_h;
+        let y = ctrl_start_y
+            + state.active_control_index().saturating_sub(visible.start) as f32 * ctrl_row_h;
         let row_x = content_x + 22.0;
         let row_w = panel_w - nav_w - 44.0;
         let row_h = ctrl_row_h - 3.0;
@@ -160,8 +165,14 @@ pub(super) fn build_rect_vertices(
             // caret inside the field when the value overflows.
             value_col_x + 4.0 + off.min(field_w - 8.0).max(0.0)
         };
-        for (i, control) in section.controls.iter().enumerate() {
-            let row_y = ctrl_start_y + i as f32 * ctrl_row_h;
+        for (i, control) in section
+            .controls
+            .iter()
+            .enumerate()
+            .take(visible.end)
+            .skip(visible.start)
+        {
+            let row_y = ctrl_start_y + (i - visible.start) as f32 * ctrl_row_h;
             match &control.control_type {
                 ControlType::Toggle { value } => {
                     let pill_w = 48.0_f32;

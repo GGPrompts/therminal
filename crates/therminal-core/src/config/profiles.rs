@@ -18,6 +18,8 @@ pub enum ProfileResolveError {
     /// The requested profile name does not exist in the config.
     #[error("unknown profile: {0:?}")]
     NotFound(String),
+    #[error("could not read saved profiles: {0}")]
+    Config(String),
 }
 
 /// Resolved spawn parameters produced from a [`ProfileConfig`].
@@ -275,5 +277,77 @@ mod tests {
         assert!(resolved.env.is_empty());
         assert_eq!(resolved.cwd, "/home/user");
         assert!(!resolved.skip_shell_integration);
+    }
+}
+
+/// Source of named profiles. Production daemons read the saved configuration
+/// for each launch; fixed maps keep embedded callers and tests self-contained.
+#[derive(Debug, Default)]
+pub struct ProfileSource {
+    fixed: HashMap<String, ProfileConfig>,
+    path: Option<std::path::PathBuf>,
+}
+
+impl ProfileSource {
+    pub fn from_path(path: std::path::PathBuf) -> Self {
+        Self {
+            fixed: HashMap::new(),
+            path: Some(path),
+        }
+    }
+
+    pub fn resolve(
+        &self,
+        name: &str,
+        inherit_cwd: &str,
+    ) -> Result<ResolvedProfile, ProfileResolveError> {
+        if let Some(path) = &self.path {
+            // Fail explicitly on unreadable/invalid edits rather than launching
+            // stale commands or silently substituting the default shell.
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| ProfileResolveError::Config(e.to_string()))?;
+            let config: super::TherminalConfig =
+                toml::from_str(&text).map_err(|e| ProfileResolveError::Config(e.to_string()))?;
+            resolve_profile(&config.profiles, name, inherit_cwd)
+        } else {
+            resolve_profile(&self.fixed, name, inherit_cwd)
+        }
+    }
+}
+
+impl From<HashMap<String, ProfileConfig>> for ProfileSource {
+    fn from(fixed: HashMap<String, ProfileConfig>) -> Self {
+        Self { fixed, path: None }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[test]
+    fn saved_profile_updates_and_removals_take_effect_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("therminal.toml");
+        let source = ProfileSource::from_path(path.clone());
+        std::fs::write(&path, "[profiles.dev]\nshell = 'first'\n").unwrap();
+        assert_eq!(source.resolve("dev", "/tmp").unwrap().shell, "first");
+        std::fs::write(
+            &path,
+            "[profiles.dev]\nshell = 'second'\nshell_args = ['a b']\n",
+        )
+        .unwrap();
+        let resolved = source.resolve("dev", "/tmp").unwrap();
+        assert_eq!(resolved.shell, "second");
+        assert_eq!(resolved.shell_args, ["a b"]);
+        std::fs::write(&path, "[profiles]\n").unwrap();
+        assert!(matches!(
+            source.resolve("dev", "/tmp"),
+            Err(ProfileResolveError::NotFound(_))
+        ));
+        std::fs::write(&path, "invalid [").unwrap();
+        assert!(matches!(
+            source.resolve("dev", "/tmp"),
+            Err(ProfileResolveError::Config(_))
+        ));
     }
 }

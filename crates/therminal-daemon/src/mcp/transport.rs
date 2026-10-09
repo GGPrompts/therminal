@@ -6,7 +6,6 @@
 //! - **Windows**: named pipe at `\\.\pipe\therminal-mcp` with one instance per
 //!   accepted connection.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,7 +17,7 @@ use tokio::net::UnixListener;
 use tracing::warn;
 use tracing::{debug, error, info};
 
-use therminal_core::config::{ProfileConfig, TrustConfig};
+use therminal_core::config::TrustConfig;
 
 use therminal_harness_claude::jsonl_tailer::TaggedAgentEvent;
 
@@ -49,7 +48,7 @@ pub async fn start_mcp_server(
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
-    profiles: Arc<HashMap<String, ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
 ) -> Result<()> {
     if !config.enabled {
         info!("MCP server disabled by config");
@@ -110,7 +109,7 @@ fn spawn_mcp_connection<R, W>(
     agent_events: Option<tokio::sync::broadcast::Sender<TaggedAgentLifecycleEvent>>,
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
-    profiles: Arc<HashMap<String, ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
 ) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
@@ -152,7 +151,7 @@ async fn start_mcp_server_unix(
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
-    profiles: Arc<HashMap<String, ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
 ) -> Result<()> {
     // Clean stale socket
     match std::fs::remove_file(socket_path) {
@@ -259,7 +258,7 @@ async fn start_mcp_server_windows(
     pattern_engine: Option<Arc<PatternEngine>>,
     event_bus: Option<Arc<crate::event_bus::EventBus>>,
     shutdown: Arc<tokio::sync::Notify>,
-    profiles: Arc<HashMap<String, ProfileConfig>>,
+    profiles: Arc<therminal_core::config::profiles::ProfileSource>,
 ) -> Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 

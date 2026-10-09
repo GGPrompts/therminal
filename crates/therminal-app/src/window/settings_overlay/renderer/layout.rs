@@ -48,3 +48,32 @@ impl PanelLayout {
         }
     }
 }
+
+impl PanelLayout {
+    pub(super) fn visible_controls(&self, count: usize, selected: usize) -> std::ops::Range<usize> {
+        let capacity = ((self.panel_y + self.panel_h - 24.0 - self.ctrl_start_y) / self.ctrl_row_h)
+            .floor()
+            .max(1.0) as usize;
+        let start = selected
+            .saturating_add(1)
+            .saturating_sub(capacity)
+            .min(count.saturating_sub(capacity));
+        start..(start + capacity).min(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn selected_profile_control_stays_visible_in_small_window() {
+        let panel = PanelLayout::compute(800, 500);
+        let visible = panel.visible_controls(10, 9);
+        assert!(visible.contains(&9));
+        assert!(visible.start > 0);
+        assert!(
+            panel.ctrl_start_y + visible.len() as f32 * panel.ctrl_row_h
+                <= panel.panel_y + panel.panel_h - 24.0
+        );
+    }
+}

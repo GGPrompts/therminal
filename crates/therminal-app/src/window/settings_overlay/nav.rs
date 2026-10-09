@@ -120,6 +120,9 @@ impl SettingsOverlayState {
                         if *editing {
                             *editing = false;
                             Some(match &control.binding {
+                                ControlBinding::ProfileText(field) => {
+                                    SettingsCommand::SetProfileText(*field, value.clone())
+                                }
                                 ControlBinding::FolderPaneCommand => {
                                     SettingsCommand::SetFolderPaneCommand(value.clone())
                                 }
@@ -527,6 +530,8 @@ impl SettingsOverlayState {
         options: &[String],
     ) -> SettingsCommand {
         match binding {
+            ControlBinding::ProfileSelect => SettingsCommand::SelectProfile(selected),
+            ControlBinding::ProfileMode => SettingsCommand::SetProfileMode(selected),
             ControlBinding::NewPaneCwd => SettingsCommand::SetNewPaneCwd(selected),
             ControlBinding::UiTextScale => SettingsCommand::SetUiTextScale(selected),
             ControlBinding::FontFamily => {
