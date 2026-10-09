@@ -11,6 +11,7 @@ use therminal_core::geometry::Rect;
 use therminal_core::palette::{ChromePalette, Color as PaletteColor};
 
 use super::colors::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
+use super::icons::{Icon, append_icon};
 use super::render_pass::with_chrome_render_pass;
 use super::text_cache::{cached_buf, ensure_shaped};
 
@@ -212,7 +213,7 @@ pub(crate) fn draw_pane_header(
         snapshot.git_state.as_ref(),
     );
     let layout = HeaderButtonLayout::compute(vp, is_zoomed);
-    let slots = HeaderTextSlots::new(pane.id, &strings, vp, is_focused, is_zoomed);
+    let slots = HeaderTextSlots::new(pane.id, &strings, vp, is_focused);
 
     let font_size = renderer.chrome_font_size((header_h * 0.6).max(9.0));
     let metrics = Metrics::new(font_size, header_h);
@@ -220,7 +221,6 @@ pub(crate) fn draw_pane_header(
     shape_pane_header_text(&strings, &slots, &style, metrics, vp, header_h, renderer);
     draw_pane_header_text(
         vp,
-        is_zoomed,
         &strings,
         &slots,
         &style,
@@ -233,6 +233,88 @@ pub(crate) fn draw_pane_header(
         surface_width,
         surface_height,
     );
+    draw_header_icons(
+        vp,
+        is_zoomed,
+        is_focused,
+        &layout,
+        renderer,
+        device,
+        encoder,
+        view,
+        [sw, sh],
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_header_icons(
+    vp: Rect,
+    is_zoomed: bool,
+    is_focused: bool,
+    layout: &HeaderButtonLayout,
+    renderer: &GridRenderer,
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    surface: [f32; 2],
+) {
+    let mut vertices = Vec::new();
+    for (icon, x) in [
+        (Icon::SplitColumns, layout.btn_x_hsplit),
+        (Icon::SplitRows, layout.btn_x_vsplit),
+        (
+            if is_zoomed {
+                Icon::Restore
+            } else {
+                Icon::Maximize
+            },
+            layout.btn_x_zoom,
+        ),
+        (Icon::Close, layout.btn_x_close),
+    ] {
+        if is_zoomed && matches!(icon, Icon::SplitColumns | Icon::SplitRows) {
+            continue;
+        }
+        // Tiny panes can have control slots extending beyond their left edge.
+        if x < vp.x() {
+            continue;
+        }
+        let mut color = if matches!(icon, Icon::Close) {
+            renderer.chrome_palette.chrome_fg_alert.to_f32_array()
+        } else {
+            renderer.chrome_palette.chrome_fg_muted.to_f32_array()
+        };
+        color[3] = if is_focused {
+            230.0 / 255.0
+        } else {
+            170.0 / 255.0
+        };
+        append_icon(
+            &mut vertices,
+            icon,
+            [
+                x,
+                vp.y(),
+                HEADER_BUTTON_WIDTH,
+                crate::pane::PANE_HEADER_HEIGHT,
+            ],
+            surface,
+            color,
+        );
+    }
+    if vertices.is_empty() {
+        return;
+    }
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("header_icons"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    with_chrome_render_pass(encoder, view, "header_icons", |pass| {
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..vertices.len() as u32, 0..1);
+    });
 }
 
 /// Snapshot of `PaneState::status` fields needed by header rendering.
@@ -405,8 +487,6 @@ struct HeaderTextStyle {
     process_color: GlyphColor,
     git_branch_color: GlyphColor,
     claude_badge_color: GlyphColor,
-    close_color: GlyphColor,
-    button_color: GlyphColor,
 }
 
 impl HeaderTextStyle {
@@ -436,15 +516,11 @@ impl HeaderTextStyle {
             None => index_color,
         };
         let claude_badge_color = glyph(palette.chrome_fg_focus, if is_focused { 230 } else { 170 });
-        let close_color = glyph(palette.chrome_fg_alert, if is_focused { 230 } else { 160 });
-        let button_color = glyph(palette.chrome_fg_muted, if is_focused { 230 } else { 170 });
         Self {
             index_color,
             process_color,
             git_branch_color,
             claude_badge_color,
-            close_color,
-            button_color,
         }
     }
 }
@@ -506,29 +582,11 @@ struct HeaderTextSlots {
     git_key: String,
     claude_slot: String,
     claude_key: String,
-    close_slot: String,
-    close_key: String,
-    zoom_slot: String,
-    zoom_key: String,
-    zoom_label: &'static str,
-    vsplit_slot: String,
-    vsplit_key: String,
-    hsplit_slot: String,
-    hsplit_key: String,
 }
 
 impl HeaderTextSlots {
-    fn new(
-        pane_id: PaneId,
-        strings: &HeaderTextStrings,
-        vp: Rect,
-        is_focused: bool,
-        is_zoomed: bool,
-    ) -> Self {
+    fn new(pane_id: PaneId, strings: &HeaderTextStrings, vp: Rect, is_focused: bool) -> Self {
         let focus_tag = if is_focused { "f" } else { "u" };
-        let zoom_tag = if is_zoomed { "z" } else { "n" };
-        // Filled square when zoomed (restore), empty square when normal (maximize).
-        let zoom_label: &'static str = if is_zoomed { " \u{25a3}" } else { " \u{25a1}" };
         Self {
             idx_slot: format!("hdr_idx_{pane_id}"),
             idx_key: format!("{}|{:.0}|{focus_tag}", strings.index_text, vp.width()),
@@ -544,15 +602,6 @@ impl HeaderTextSlots {
                 strings.claude_badge_text,
                 vp.width()
             ),
-            close_slot: format!("hdr_close_{pane_id}"),
-            close_key: format!("X|{focus_tag}"),
-            zoom_slot: format!("hdr_zoom_{pane_id}"),
-            zoom_key: format!("{zoom_label}|{focus_tag}|{zoom_tag}"),
-            zoom_label,
-            vsplit_slot: format!("hdr_vsplit_{pane_id}"),
-            vsplit_key: format!("V|{focus_tag}"),
-            hsplit_slot: format!("hdr_hsplit_{pane_id}"),
-            hsplit_key: format!("H|{focus_tag}"),
         }
     }
 }
@@ -663,54 +712,6 @@ fn shape_pane_header_text(
             &mut renderer.overlay_cache,
         );
     }
-    ensure_shaped(
-        &slots.close_slot,
-        &slots.close_key,
-        metrics,
-        HEADER_BUTTON_WIDTH,
-        header_h,
-        " X",
-        attrs(style.close_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    ensure_shaped(
-        &slots.zoom_slot,
-        &slots.zoom_key,
-        metrics,
-        HEADER_BUTTON_WIDTH,
-        header_h,
-        slots.zoom_label,
-        attrs(style.button_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    // Split buttons disappear when the pane is zoomed (no room to split).
-    let is_zoomed = slots.zoom_label == " \u{25a3}";
-    if !is_zoomed {
-        ensure_shaped(
-            &slots.vsplit_slot,
-            &slots.vsplit_key,
-            metrics,
-            HEADER_BUTTON_WIDTH,
-            header_h,
-            " V",
-            attrs(style.button_color),
-            &mut renderer.font_system,
-            &mut renderer.overlay_cache,
-        );
-        ensure_shaped(
-            &slots.hsplit_slot,
-            &slots.hsplit_key,
-            metrics,
-            HEADER_BUTTON_WIDTH,
-            header_h,
-            " H",
-            attrs(style.button_color),
-            &mut renderer.font_system,
-            &mut renderer.overlay_cache,
-        );
-    }
 }
 
 /// Phase 2: build TextArea references against the cached buffers, prepare
@@ -718,7 +719,6 @@ fn shape_pane_header_text(
 #[allow(clippy::too_many_arguments)]
 fn draw_pane_header_text(
     vp: Rect,
-    is_zoomed: bool,
     strings: &HeaderTextStrings,
     slots: &HeaderTextSlots,
     style: &HeaderTextStyle,
@@ -748,7 +748,6 @@ fn draw_pane_header_text(
 
     let text_areas = match build_header_text_areas(
         vp,
-        is_zoomed,
         strings,
         slots,
         style,
@@ -790,7 +789,6 @@ fn draw_pane_header_text(
 #[allow(clippy::too_many_arguments)]
 fn build_header_text_areas<'cache>(
     vp: Rect,
-    is_zoomed: bool,
     strings: &HeaderTextStrings,
     slots: &HeaderTextSlots,
     style: &HeaderTextStyle,
@@ -876,70 +874,7 @@ fn build_header_text_areas<'cache>(
             custom_glyphs: &[],
         });
     }
-    if !is_zoomed {
-        push_button_area(
-            &mut text_areas,
-            cache,
-            &slots.hsplit_slot,
-            layout.btn_x_hsplit,
-            vp.y(),
-            bounds,
-            style.button_color,
-        );
-        push_button_area(
-            &mut text_areas,
-            cache,
-            &slots.vsplit_slot,
-            layout.btn_x_vsplit,
-            vp.y(),
-            bounds,
-            style.button_color,
-        );
-    }
-    push_button_area(
-        &mut text_areas,
-        cache,
-        &slots.zoom_slot,
-        layout.btn_x_zoom,
-        vp.y(),
-        bounds,
-        style.button_color,
-    );
-    push_button_area(
-        &mut text_areas,
-        cache,
-        &slots.close_slot,
-        layout.btn_x_close,
-        vp.y(),
-        bounds,
-        style.close_color,
-    );
-
     Some(text_areas)
-}
-
-/// Push a TextArea for one of the right-side header buttons, skipping
-/// silently if the cached buffer is missing.
-fn push_button_area<'cache>(
-    text_areas: &mut Vec<TextArea<'cache>>,
-    cache: &'cache super::text_cache::ChromeTextCache,
-    slot: &str,
-    left: f32,
-    top: f32,
-    bounds: TextBounds,
-    color: GlyphColor,
-) {
-    if let Some(buf) = cached_buf(cache, slot) {
-        text_areas.push(TextArea {
-            buffer: buf,
-            left,
-            top,
-            scale: 1.0,
-            bounds,
-            default_color: color,
-            custom_glyphs: &[],
-        });
-    }
 }
 
 /// Sum the glyph advance widths of the first layout run in `buf`.

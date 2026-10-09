@@ -9,6 +9,7 @@
 mod colors;
 mod csd;
 mod delegate_summary;
+mod icons;
 mod overlays;
 mod pane_header;
 mod render_pass;

@@ -1,12 +1,11 @@
 //! Client-side decoration (CSD) window control buttons.
 
-use glyphon::{Attrs, Color as GlyphColor, Family, Metrics, Resolution, TextArea, TextBounds};
 use wgpu::util::DeviceExt;
 
 use crate::grid_renderer::{ColorVertex, GridRenderer};
 
+use super::icons::{Icon, append_icon};
 use super::render_pass::with_chrome_render_pass;
-use super::text_cache::{cached_buf, ensure_shaped};
 
 /// Actions triggered by CSD window control buttons.
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +47,7 @@ pub(crate) fn csd_button_hit_test(px: f32, bar_h: f32, surface_width: f32) -> Op
 pub(crate) fn draw_csd_buttons(
     renderer: &mut GridRenderer,
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    _queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
     surface_width: u32,
@@ -67,13 +66,12 @@ pub(crate) fn draw_csd_buttons(
         &layout, hovered, renderer, device, encoder, view, sw, sh, bar_h,
     );
 
-    // ── 2. Button icons (shape + prepare + render text) ────────────────
+    // ── 2. Font-independent button icons ─────────────────────────────
     draw_csd_button_icons(
         &layout,
         hovered,
         renderer,
         device,
-        queue,
         encoder,
         view,
         surface_width,
@@ -203,279 +201,51 @@ fn draw_csd_hover_bg(
     });
 }
 
-/// Slot identifiers and label glyphs for the four CSD button icons.
-struct CsdButtonIcons {
-    settings_slot: &'static str,
-    settings_label: &'static str,
-    min_slot: &'static str,
-    min_label: &'static str,
-    max_slot: &'static str,
-    max_label: &'static str,
-    close_slot: &'static str,
-    close_label: &'static str,
-}
-
-impl CsdButtonIcons {
-    const fn new() -> Self {
-        // CSD button glyphs chosen for maximum font coverage:
-        //
-        // - Settings ≡ (U+2261, Mathematical Operators) — visually reads
-        //   as "menu / hamburger", the same icon shape Material uses.
-        // - Minimize ─ (U+2500, Box Drawing) — horizontal line.
-        // - Maximize □ (U+25A1, Geometric Shapes) — hollow square.
-        // - Close × (U+00D7, Latin-1 Supplement, MULTIPLICATION SIGN) —
-        //   present in virtually every font including minimal monospace
-        //   faces.  The previous glyph ✕ (U+2715, Dingbats) was missing
-        //   from many monospace fonts and rendered as "?".
-        //
-        // All four glyphs are rendered with `Family::SansSerif` (see
-        // `shape_csd_icons`) so cosmic-text resolves to the system
-        // sans-serif font (Noto Sans / DejaVu Sans / Segoe UI / SF Pro)
-        // which covers all four codepoints reliably across platforms.
-        Self {
-            settings_slot: "csd_settings",
-            settings_label: "\u{2261}",
-            min_slot: "csd_min",
-            min_label: "\u{2500}",
-            max_slot: "csd_max",
-            max_label: "\u{25A1}",
-            close_slot: "csd_close",
-            close_label: "\u{00D7}",
-        }
-    }
-}
-
-/// Shape, prepare, and render the four CSD button icon glyphs.
+/// Draw control strokes directly so missing fonts cannot turn buttons into tofu.
 #[allow(clippy::too_many_arguments)]
 fn draw_csd_button_icons(
     layout: &CsdButtonLayout,
     hovered: Option<usize>,
-    renderer: &mut GridRenderer,
+    renderer: &GridRenderer,
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
     surface_width: u32,
     surface_height: u32,
     bar_h: f32,
 ) {
-    let icons = CsdButtonIcons::new();
-    let font_size = renderer.chrome_font_size((bar_h * 0.45).max(10.0));
-    let metrics = Metrics::new(font_size, bar_h);
-    let bounds = TextBounds {
-        left: 0,
-        top: 0,
-        right: surface_width as i32,
-        bottom: surface_height as i32,
-    };
-
-    // Theme-aware (tn-g7oo): CSD icons use the chrome_fg role so a light
-    // theme can re-skin them.
-    let chrome_fg = renderer.chrome_palette.chrome_fg;
-    let icon_color = GlyphColor::rgba(chrome_fg.r, chrome_fg.g, chrome_fg.b, 200);
-    let close_icon_color = if hovered == Some(0) {
-        GlyphColor::rgba(255, 255, 255, 255)
-    } else {
-        icon_color
-    };
-
-    shape_csd_icons(
-        &icons,
-        hovered,
-        metrics,
-        bar_h,
-        icon_color,
-        close_icon_color,
-        renderer,
-    );
-
-    renderer.viewport.update(
-        queue,
-        Resolution {
-            width: surface_width,
-            height: surface_height,
-        },
-    );
-
-    let areas = build_csd_text_areas(
-        &icons,
-        layout,
-        bounds,
-        icon_color,
-        close_icon_color,
-        &renderer.overlay_cache,
-    );
-
-    if let Err(e) = renderer.overlay_text_renderer.prepare(
-        device,
-        queue,
-        &mut renderer.font_system,
-        &mut renderer.overlay_atlas,
-        &renderer.viewport,
-        areas,
-        &mut renderer.swash_cache,
-    ) {
-        tracing::warn!("CSD button text prepare failed: {e}");
+    let mut color = renderer.chrome_palette.chrome_fg.to_f32_array();
+    color[3] = 200.0 / 255.0;
+    let mut vertices = Vec::new();
+    for (icon, x) in [
+        (Icon::Settings, layout.settings_x),
+        (Icon::Minimize, layout.min_x),
+        (Icon::Maximize, layout.max_x),
+        (Icon::Close, layout.close_x),
+    ] {
+        let color = if matches!(icon, Icon::Close) && hovered == Some(0) {
+            [1.0; 4]
+        } else {
+            color
+        };
+        append_icon(
+            &mut vertices,
+            icon,
+            [x, 0.0, CSD_BTN_W, bar_h],
+            [surface_width as f32, surface_height as f32],
+            color,
+        );
     }
-
-    with_chrome_render_pass(encoder, view, "csd_text_pass", |pass| {
-        if let Err(e) =
-            renderer
-                .overlay_text_renderer
-                .render(&renderer.overlay_atlas, &renderer.viewport, pass)
-        {
-            tracing::warn!("CSD button text render failed: {e}");
-        }
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("csd_icons"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
     });
-}
-
-/// Phase 1: shape every CSD button icon glyph into the chrome cache.
-#[allow(clippy::too_many_arguments)]
-fn shape_csd_icons(
-    icons: &CsdButtonIcons,
-    hovered: Option<usize>,
-    metrics: Metrics,
-    bar_h: f32,
-    icon_color: GlyphColor,
-    close_icon_color: GlyphColor,
-    renderer: &mut GridRenderer,
-) {
-    // CSD button icons (≡ ─ □ ×) use `Family::SansSerif` so cosmic-text
-    // resolves to the system sans-serif font (Noto Sans, DejaVu Sans,
-    // Segoe UI, SF Pro) which has broad Unicode coverage including
-    // Mathematical Operators, Box Drawing, and Geometric Shapes blocks.
-    // This decouples icons from both the user's grid font AND the
-    // generic `Family::Monospace` alias (which `build_font_system`
-    // remaps to the user's configured family — a font that may lack
-    // these glyphs).
-    let attrs = |c: GlyphColor| -> Attrs<'_> { Attrs::new().family(Family::SansSerif).color(c) };
-
-    ensure_shaped(
-        icons.settings_slot,
-        icons.settings_label,
-        metrics,
-        CSD_BTN_W,
-        bar_h,
-        icons.settings_label,
-        attrs(icon_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    ensure_shaped(
-        icons.min_slot,
-        icons.min_label,
-        metrics,
-        CSD_BTN_W,
-        bar_h,
-        icons.min_label,
-        attrs(icon_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    ensure_shaped(
-        icons.max_slot,
-        icons.max_label,
-        metrics,
-        CSD_BTN_W,
-        bar_h,
-        icons.max_label,
-        attrs(icon_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-    let close_key = format!(
-        "{}|{}",
-        icons.close_label,
-        if hovered == Some(0) { "h" } else { "n" }
-    );
-    ensure_shaped(
-        icons.close_slot,
-        &close_key,
-        metrics,
-        CSD_BTN_W,
-        bar_h,
-        icons.close_label,
-        attrs(close_icon_color),
-        &mut renderer.font_system,
-        &mut renderer.overlay_cache,
-    );
-}
-
-/// Phase 2: build TextAreas for the four CSD icons centered in their
-/// respective buttons.
-fn build_csd_text_areas<'cache>(
-    icons: &CsdButtonIcons,
-    layout: &CsdButtonLayout,
-    bounds: TextBounds,
-    icon_color: GlyphColor,
-    close_icon_color: GlyphColor,
-    cache: &'cache super::text_cache::ChromeTextCache,
-) -> Vec<TextArea<'cache>> {
-    let center_x = |slot: &str, btn_x: f32| -> f32 {
-        let tw = cached_buf(cache, slot)
-            .and_then(|b| b.layout_runs().next())
-            .map(|run| run.glyphs.iter().map(|g| g.w).sum::<f32>())
-            .unwrap_or(0.0);
-        btn_x + ((CSD_BTN_W - tw) / 2.0).max(0.0)
-    };
-
-    let mut areas: Vec<TextArea<'cache>> = Vec::with_capacity(4);
-    push_csd_icon(
-        &mut areas,
-        cache,
-        icons.settings_slot,
-        center_x(icons.settings_slot, layout.settings_x),
-        bounds,
-        icon_color,
-    );
-    push_csd_icon(
-        &mut areas,
-        cache,
-        icons.min_slot,
-        center_x(icons.min_slot, layout.min_x),
-        bounds,
-        icon_color,
-    );
-    push_csd_icon(
-        &mut areas,
-        cache,
-        icons.max_slot,
-        center_x(icons.max_slot, layout.max_x),
-        bounds,
-        icon_color,
-    );
-    push_csd_icon(
-        &mut areas,
-        cache,
-        icons.close_slot,
-        center_x(icons.close_slot, layout.close_x),
-        bounds,
-        close_icon_color,
-    );
-    areas
-}
-
-/// Push a TextArea for one CSD icon, skipping silently if the cached
-/// buffer is missing.
-fn push_csd_icon<'cache>(
-    areas: &mut Vec<TextArea<'cache>>,
-    cache: &'cache super::text_cache::ChromeTextCache,
-    slot: &str,
-    left: f32,
-    bounds: TextBounds,
-    color: GlyphColor,
-) {
-    if let Some(buf) = cached_buf(cache, slot) {
-        areas.push(TextArea {
-            buffer: buf,
-            left,
-            top: 0.0,
-            scale: 1.0,
-            bounds,
-            default_color: color,
-            custom_glyphs: &[],
-        });
-    }
+    with_chrome_render_pass(encoder, view, "csd_icons", |pass| {
+        pass.set_pipeline(&renderer.rect_pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..vertices.len() as u32, 0..1);
+    });
 }
 
 #[cfg(test)]
