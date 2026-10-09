@@ -53,9 +53,6 @@ const DEFAULT_MAX_ROWS: usize = 1000;
 /// growth on long-running subagent tails (tn-kyr3).
 const MAX_EVENTS: usize = 2000;
 
-/// Default max lines shown for collapsed assistant text.
-const COLLAPSED_ASSISTANT_LINES: usize = 4;
-
 /// Default max lines shown for collapsed user messages.
 const COLLAPSED_USER_LINES: usize = 5;
 
@@ -210,8 +207,21 @@ impl JsonlTailState {
 
                     match serde_json::from_str::<Value>(trimmed) {
                         Ok(val) => {
-                            // Parse structured events from the CC JSONL format.
+                            // Bookkeeping is not transcript content. In particular, an
+                            // intentionally ignored record must not fall through to raw JSON.
+                            if is_transcript_bookkeeping(&val) {
+                                continue;
+                            }
                             let structured = parse_jsonl_event(trimmed);
+                            if structured.is_empty()
+                                && val.get("message").is_some_and(Value::is_object)
+                                && matches!(
+                                    val.get("type").and_then(Value::as_str),
+                                    Some("assistant" | "user")
+                                )
+                            {
+                                continue;
+                            }
                             if !structured.is_empty() {
                                 for event in structured {
                                     let idx = self.events.len();
@@ -631,6 +641,21 @@ struct RawLine {
     status: Option<String>,
 }
 
+/// Claude bookkeeping records have no user-facing transcript content.
+fn is_transcript_bookkeeping(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some(
+            "attachment"
+                | "permission-mode"
+                | "last-prompt"
+                | "file-history-snapshot"
+                | "queue-operation"
+                | "summary"
+        )
+    )
+}
+
 /// Parse a single JSONL line into structured events.
 ///
 /// A single line may produce multiple events because CC nests multiple
@@ -998,50 +1023,18 @@ fn render_event(
         }
 
         EventKind::AssistantText => {
+            // Prose is the primary content, including the end of long final reports.
+            // Tool details remain collapsible, but answers are always readable.
             let indent = if compact { " " } else { "  " };
-            let max_lines = if expanded {
-                200
-            } else {
-                COLLAPSED_ASSISTANT_LINES
-            };
-            let mut line_count = 0;
             for line in event.content.lines() {
-                if line_count >= max_lines {
-                    break;
-                }
-                let wrapped = wrap_text(line, content_width);
-                for w in &wrapped {
-                    if line_count >= max_lines {
-                        break;
-                    }
-                    rows.push(DisplayRow {
-                        formatted: format!("{}{}{}{}", indent, ansi::MAGENTA, w, ansi::RESET),
-                        event_index: event_idx,
-                        is_expandable: false,
-                    });
-                    line_count += 1;
-                }
-            }
-            let total = event.content.lines().count();
-            if total > max_lines {
-                let remaining = total - max_lines;
-                rows.push(DisplayRow {
-                    formatted: format!(
-                        "{}{}\u{25b8} +{} more{}",
-                        indent,
-                        ansi::CYAN,
-                        remaining,
-                        ansi::RESET
-                    ),
-                    event_index: event_idx,
-                    is_expandable: true,
-                });
-            } else if expanded && total > COLLAPSED_ASSISTANT_LINES {
-                rows.push(DisplayRow {
-                    formatted: format!("{}{}\u{25be} collapse{}", indent, ansi::CYAN, ansi::RESET),
-                    event_index: event_idx,
-                    is_expandable: true,
-                });
+                push_wrapped(
+                    &mut rows,
+                    line,
+                    content_width,
+                    indent,
+                    ansi::RESET,
+                    event_idx,
+                );
             }
             if !compact {
                 rows.push(DisplayRow {
@@ -1093,155 +1086,57 @@ fn render_event(
             }
         }
 
-        EventKind::ToolUse => {
+        EventKind::ToolUse | EventKind::ToolResult => {
             let indent = if compact { " " } else { "  " };
-            let tool = event.tool_name.as_deref().unwrap_or("?");
-            let tool_color = tool_ansi_color(tool);
-            // "▸ Tool " costs indent + 2 + tool.len() + 1
-            let summary_width = content_width.saturating_sub(tool.len() + 3);
-            let summary = extract_tool_summary(tool, &event.content, summary_width);
-
-            if compact && summary.is_empty() {
-                rows.push(DisplayRow {
-                    formatted: format!(
-                        "{}{}{}\u{25b8} {}{}",
-                        indent,
-                        ansi::BOLD,
-                        tool_color,
-                        tool,
-                        ansi::RESET
-                    ),
-                    event_index: event_idx,
-                    is_expandable: false,
-                });
-            } else if compact {
-                // Tool on first line, summary wrapped below.
-                rows.push(DisplayRow {
-                    formatted: format!(
-                        "{}{}{}\u{25b8} {}{}",
-                        indent,
-                        ansi::BOLD,
-                        tool_color,
-                        tool,
-                        ansi::RESET
-                    ),
-                    event_index: event_idx,
-                    is_expandable: false,
-                });
-                push_wrapped(
-                    &mut rows,
-                    &summary,
-                    content_width,
-                    &format!("{} ", indent),
+            let is_call = event.kind == EventKind::ToolUse;
+            let tool = event.tool_name.as_deref().unwrap_or("Tool");
+            let (icon, color, summary) = if is_call {
+                let summary = extract_tool_summary(tool, &event.content, content_width);
+                ("▸", tool_ansi_color(tool), format!("{tool} {summary}"))
+            } else if event.is_error {
+                (
+                    "✗",
+                    ansi::RED,
+                    format!("Error: {}", event.content.lines().next().unwrap_or("")),
+                )
+            } else {
+                (
+                    "✓",
                     ansi::DIM,
-                    event_idx,
-                );
-            } else {
-                rows.push(DisplayRow {
-                    formatted: format!(
-                        "{}{}{}\u{25b8} {}{} {}{}{}",
-                        indent,
-                        ansi::BOLD,
-                        tool_color,
-                        tool,
-                        ansi::RESET,
-                        ansi::DIM,
-                        summary,
-                        ansi::RESET
-                    ),
-                    event_index: event_idx,
-                    is_expandable: false,
-                });
-            }
-        }
-
-        EventKind::ToolResult => {
-            let indent = if compact { " " } else { "  " };
-            let sub_indent = if compact { "  " } else { "    " };
-            let (icon, color) = if event.is_error {
-                ("\u{2717}", ansi::RED)
-            } else {
-                ("\u{2713}", ansi::GREEN)
+                    format!("Result ({} lines)", event.content.lines().count()),
+                )
             };
-
-            let total_lines = event.content.lines().count();
-            let preview_width = content_width.saturating_sub(3); // "✓ " = 2 chars + space
-            let first_line = event.content.lines().next().unwrap_or("");
-
-            // First line: icon + preview, wrapped.
-            let first_wrapped = wrap_text(first_line, preview_width);
-            for (i, w) in first_wrapped.iter().enumerate() {
-                if i == 0 {
-                    let line_info = if total_lines > 1 && !expanded {
-                        format!(" {}+{}{}", ansi::DIM, total_lines - 1, ansi::RESET)
-                    } else {
-                        String::new()
-                    };
+            let summary = truncate_str(
+                &summary.replace(['\n', '\r'], " "),
+                content_width.saturating_sub(2),
+            );
+            rows.push(DisplayRow {
+                formatted: format!("{indent}{color}{icon} {summary}{}", ansi::RESET),
+                event_index: event_idx,
+                is_expandable: true,
+            });
+            if expanded {
+                // Bound tool output, not the agent's written answer. The full
+                // original event remains retained for subsequent inspection.
+                let detail_indent = format!("{indent}  ");
+                for line in event.content.lines().take(50) {
+                    push_wrapped(
+                        &mut rows,
+                        line,
+                        content_width.saturating_sub(2),
+                        &detail_indent,
+                        ansi::DIM,
+                        event_idx,
+                    );
+                }
+                let remaining = event.content.lines().count().saturating_sub(50);
+                if remaining > 0 {
                     rows.push(DisplayRow {
-                        formatted: format!(
-                            "{}{}{} {}{}{}{}",
-                            indent,
-                            color,
-                            icon,
-                            ansi::RESET,
-                            ansi::DIM,
-                            w,
-                            ansi::RESET
-                        ),
-                        event_index: event_idx,
-                        is_expandable: total_lines > 1,
-                    });
-                    if !line_info.is_empty() {
-                        // Append line count hint to the last formatted row.
-                        let last = rows.last_mut().unwrap();
-                        last.formatted.push_str(&line_info);
-                    }
-                } else {
-                    rows.push(DisplayRow {
-                        formatted: format!("{}  {}{}{}", indent, ansi::DIM, w, ansi::RESET),
+                        formatted: format!("{detail_indent}... {remaining} more lines"),
                         event_index: event_idx,
                         is_expandable: false,
                     });
                 }
-            }
-
-            // Expanded content lines.
-            if expanded && total_lines > 1 {
-                let max_expanded = 50;
-                let expanded_width = content_width.saturating_sub(sub_indent.len());
-                for (count, line) in event.content.lines().skip(1).enumerate() {
-                    if count >= max_expanded {
-                        break;
-                    }
-                    for w in wrap_text(line, expanded_width) {
-                        rows.push(DisplayRow {
-                            formatted: format!("{}{}{}{}", sub_indent, ansi::DIM, w, ansi::RESET),
-                            event_index: event_idx,
-                            is_expandable: false,
-                        });
-                    }
-                }
-                if total_lines - 1 > max_expanded {
-                    rows.push(DisplayRow {
-                        formatted: format!(
-                            "{}{}... {} more{}",
-                            sub_indent,
-                            ansi::DIM,
-                            total_lines - 1 - max_expanded,
-                            ansi::RESET
-                        ),
-                        event_index: event_idx,
-                        is_expandable: false,
-                    });
-                }
-            }
-
-            if !compact {
-                rows.push(DisplayRow {
-                    formatted: String::new(),
-                    event_index: event_idx,
-                    is_expandable: false,
-                });
             }
         }
 
@@ -1914,6 +1809,82 @@ mod tests {
         assert!(content.contains("x"));
         // Should contain header + rows + footer.
         assert!(content.matches('\n').count() >= 2);
+    }
+
+    #[test]
+    fn transcript_policy_hides_bookkeeping_without_hiding_generic_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.jsonl");
+        let lines = [
+            r#"{"type":"attachment","attachment":{"type":"total_tokens_reminder","text":"INTERNAL_BUDGET"}}"#,
+            r#"{"type":"attachment","content":"INTERNAL_CONTEXT"}"#,
+            r#"{"type":"permission-mode","permissionMode":"default"}"#,
+            r#"{"type":"assistant","message":{"content":[]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Readable update"}]}}"#,
+            r#"{"type":"custom_log","message":"Generic log preserved"}"#,
+        ].join("\n") + "\n";
+        std::fs::write(&path, lines).unwrap();
+        let mut state = JsonlTailState::new(path, 80);
+        state.poll_file();
+        assert_eq!(state.events.len(), 2);
+        let rendered = state
+            .display
+            .iter()
+            .map(|r| r.formatted.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("Readable update"));
+        assert!(rendered.contains("Generic log preserved"));
+        assert!(!rendered.contains("INTERNAL_"));
+        state.poll_file();
+        assert_eq!(
+            state.events.len(),
+            2,
+            "ignored records must still advance the file offset"
+        );
+        state.reformat_all();
+        assert!(!state.formatted_content().contains("INTERNAL_"));
+    }
+
+    #[test]
+    fn transcript_policy_keeps_long_wrapped_answers_visible() {
+        let event = StructuredEvent {
+            kind: EventKind::AssistantText,
+            timestamp: String::new(),
+            content: format!("{} FINAL_FINDING", "word ".repeat(100)),
+            tool_name: None,
+            tool_use_id: None,
+            is_error: false,
+        };
+        for cols in [25, 80] {
+            let rows = render_event(&event, cols, false, 0);
+            let rendered = rows
+                .iter()
+                .map(|r| r.formatted.as_str())
+                .collect::<String>();
+            assert!(rendered.contains("FINAL_FINDING"));
+            assert!(!rows.iter().any(|r| r.is_expandable));
+        }
+    }
+
+    #[test]
+    fn transcript_policy_tools_stay_compact_but_expand_to_details() {
+        for kind in [EventKind::ToolUse, EventKind::ToolResult] {
+            let event = StructuredEvent {
+                kind,
+                timestamp: String::new(),
+                content: format!("{}\nDETAIL_END", "output ".repeat(60)),
+                tool_name: Some("Bash".into()),
+                tool_use_id: Some("tool-1".into()),
+                is_error: false,
+            };
+            for cols in [25, 80] {
+                let collapsed = render_event(&event, cols, false, 0);
+                assert_eq!(collapsed.len(), 1);
+                assert!(collapsed[0].is_expandable);
+                let expanded = render_event(&event, cols, true, 0);
+                assert!(expanded.iter().any(|r| r.formatted.contains("DETAIL_END")));
+            }
+        }
     }
 
     // ── Structured parsing tests ──────────────────────────────────────
