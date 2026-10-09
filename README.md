@@ -274,8 +274,9 @@ Click **+** after the last tab to create a default-shell workspace. Right-click
 the configured new-tab shortcut; the existing nine-workspace limit still applies.
 Tabs stay visible with one workspace, except in focus mode.
 
-Each tab summarizes applications across its panes, grouping duplicates by app and
-environment. Hover a tab to see pane identities and working directories or website
+Each tab shows compact application/profile icons across its panes, with duplicate
+counts and no environment text. Groups stay distinct by app and environment.
+Hover a tab to see full pane identities and working directories or website
 URLs; click a row to switch to that workspace and focus its pane. Scroll the pane
 list if it exceeds the window height. Profile identity is the fallback when live
 process metadata is unavailable; unknown or stale observations are labeled in the

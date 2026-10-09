@@ -15,7 +15,8 @@ pub(super) struct PaneRow {
 }
 
 /// Preserve pane order and group only identical app/environment identities.
-/// Two shells on different hosts must never collapse into one ambiguous icon.
+/// Keep different hosts separate; their full identities live in the hover list.
+/// Tab labels stay icon-only so every pane group has room to be seen.
 pub(super) fn summarize(rows: &[PaneRow]) -> String {
     let mut groups: Vec<(&str, &str, &str, usize)> = Vec::new();
     for row in rows {
@@ -30,26 +31,11 @@ pub(super) fn summarize(rows: &[PaneRow]) -> String {
     }
     groups
         .into_iter()
-        .map(|(icon, _, environment, count)| {
-            let count = if count > 1 {
-                format!("×{count}")
+        .map(|(icon, _, _, count)| {
+            if count > 1 {
+                format!("{icon}×{count}")
             } else {
-                String::new()
-            };
-            if environment.is_empty() {
-                format!("{icon}{count}")
-            } else {
-                format!(
-                    "{icon}{count} [{}]",
-                    compact(
-                        if environment == "Unknown environment" {
-                            "?"
-                        } else {
-                            environment
-                        },
-                        12
-                    )
-                )
+                icon.to_string()
             }
         })
         .collect::<Vec<_>>()
@@ -90,7 +76,8 @@ pub(super) fn app_icon(app: &str) -> &'static str {
     match app.to_ascii_lowercase().as_str() {
         "claude" | "claude-code" => "✳",
         "codex" => "◈",
-        "aider" | "copilot" => "◆",
+        "aider" | "copilot" | "agy" => "◆",
+        "tfe" => "📁",
         "browser" => "◎",
         "powershell" | "windows powershell" | "pwsh" | "powershell.exe" | "pwsh.exe" => ">_",
         "command prompt" | "cmd" => "C>",
@@ -222,7 +209,7 @@ mod tests {
             row(3, "codex", "Windows"),
             row(4, "browser", ""),
         ];
-        assert_eq!(summarize(&rows), "◈×2 [Ubuntu] ◈ [Windows] ◎");
+        assert_eq!(summarize(&rows), "◈×2 ◈ ◎");
     }
     #[test]
     fn popup_targets_stable_pane_ids_even_after_scrolling() {
@@ -241,8 +228,8 @@ mod tests {
     #[test]
     fn summary_preserves_workspace_number_and_name() {
         let rows = vec![row(1, "bash", "Ubuntu")];
-        assert_eq!(decorate_label(3, "3: Work", &rows), "3 $ [Ubuntu] · Work");
-        assert_eq!(decorate_label(3, "3", &rows), "3 $ [Ubuntu]");
+        assert_eq!(decorate_label(3, "3: Work", &rows), "3 $ · Work");
+        assert_eq!(decorate_label(3, "3", &rows), "3 $");
     }
 
     #[test]
