@@ -36,6 +36,7 @@ use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi as vte_ansi;
@@ -333,11 +334,36 @@ impl JsonlTailState {
     /// Re-render all display rows (e.g. after a column width change or
     /// expansion toggle).
     pub fn reformat_all(&mut self) {
+        let anchor = self.display.get(self.scroll).map(|row| {
+            let first = self
+                .display
+                .iter()
+                .position(|r| r.event_index == row.event_index)
+                .unwrap_or(self.scroll);
+            (row.event_index, self.scroll - first)
+        });
         self.display.clear();
         for (i, event) in self.events.iter().enumerate() {
             let expanded = self.all_expanded || self.expanded_events.contains(&i);
             let new_rows = render_event(event, self.cols, expanded, i);
             self.display.extend(new_rows);
+        }
+        if self.following {
+            self.scroll_to_bottom();
+        } else if let Some((event_index, offset)) = anchor {
+            if let Some(first) = self
+                .display
+                .iter()
+                .position(|row| row.event_index == event_index)
+            {
+                let count = self.display[first..]
+                    .iter()
+                    .take_while(|row| row.event_index == event_index)
+                    .count();
+                self.scroll = (first + offset.min(count.saturating_sub(1))).min(self.max_scroll());
+            } else {
+                self.scroll = self.scroll.min(self.max_scroll());
+            }
         }
         // Also reformat legacy rows.
         for row in &mut self.rows {
@@ -348,64 +374,78 @@ impl JsonlTailState {
     /// Return the formatted content for display, joining visible rows
     /// with newlines. Shows the structured view with scroll position.
     pub fn formatted_content(&self) -> String {
-        let mut out = String::new();
-
-        // Header line.
-        let event_count = self.events.len();
-        let follow_indicator = if self.following { " [follow]" } else { "" };
-        out.push_str(&format!(
-            "{}{} events{}{}\r\n",
+        let height = self.visible_rows.max(3);
+        let total = self.display.len();
+        let start = self.scroll.min(self.max_scroll());
+        let end = (start + height - 2).min(total);
+        let mode = if self.following { "live" } else { "paused" };
+        let header = format!(
+            "{} events [{mode}] {}-{end}/{total}",
+            self.events.len(),
+            if total == 0 { 0 } else { start + 1 }
+        );
+        let mut rows = vec![format!(
+            "{}{}{}",
             ansi::DIM,
-            event_count,
-            follow_indicator,
+            truncate_str(&header, self.cols),
+            ansi::RESET
+        )];
+        rows.extend(
+            self.display[start..end]
+                .iter()
+                .map(|row| row.formatted.clone()),
+        );
+        rows.resize(height - 1, String::new());
+        let hints = if self.cols < 35 {
+            "↑↓:scroll f:live"
+        } else if self.cols < 65 {
+            "Wheel/↑↓:scroll PgUp/Dn Enter:details f:live"
+        } else {
+            "Wheel/↑↓/PgUp/Dn:scroll Enter:details e:all f:follow G:end"
+        };
+        rows.push(format!(
+            "{}{}{}",
+            ansi::CYAN,
+            truncate_str(hints, self.cols),
             ansi::RESET
         ));
+        // No trailing newline: at the last grid row it would scroll the header away.
+        rows.join("\r\n")
+    }
 
-        // Visible display rows.
-        let total = self.display.len();
-        let start = self.scroll.min(total);
-        let end = (start + self.visible_rows.saturating_sub(2)).min(total);
-        for row in &self.display[start..end] {
-            out.push_str(&row.formatted);
-            out.push_str("\r\n");
+    /// Scroll transcript rows, never the shadow terminal's scrollback.
+    pub fn scroll_display(&mut self, scroll: Scroll) {
+        let page = self.visible_rows.saturating_sub(2);
+        match scroll {
+            Scroll::Delta(0) => (),
+            Scroll::Delta(lines) if lines > 0 => {
+                self.scroll = self.scroll.saturating_sub(lines as usize);
+                self.following = false;
+            }
+            Scroll::Delta(lines) => {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(lines.unsigned_abs() as usize)
+                    .min(self.max_scroll());
+                self.following = self.scroll == self.max_scroll();
+            }
+            Scroll::PageUp => {
+                self.scroll = self.scroll.saturating_sub(page);
+                self.following = false;
+            }
+            Scroll::PageDown => {
+                self.scroll = (self.scroll + page).min(self.max_scroll());
+                self.following = self.scroll == self.max_scroll();
+            }
+            Scroll::Top => {
+                self.scroll = 0;
+                self.following = false;
+            }
+            Scroll::Bottom => {
+                self.scroll_to_bottom();
+                self.following = true;
+            }
         }
-
-        // Footer with keybinding hints (compact at narrow widths).
-        let footer = if self.cols < 50 {
-            format!(
-                "{}\u{2191}\u{2193}{} {}Ent{} {}e{} {}f{} {}G{}{}",
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::RESET
-            )
-        } else {
-            format!(
-                "{}\u{2191}\u{2193}{}:scroll  {}Enter{}:expand  {}e{}:all  {}f{}:follow  {}G{}:bottom{}",
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::CYAN,
-                ansi::DIM,
-                ansi::RESET
-            )
-        };
-        out.push_str(&footer);
-        out.push_str("\r\n");
-
-        out
     }
 
     /// Total number of display rows.
@@ -592,11 +632,16 @@ impl JsonlTailState {
         let mut guard = term.lock();
 
         // Clear the grid: cursor to home + erase entire display.
-        let clear = b"\x1b[H\x1b[2J";
+        guard.scroll_display(Scroll::Bottom);
+        // Disable auto-wrap while painting fixed rows; the renderer already wraps prose.
+        // Erasing the primary grid can move its old contents into scrollback.
+        // This is a projection of the transcript, so discard that synthetic history.
+        let clear = b"\x1b[?7l\x1b[H\x1b[2J\x1b[3J";
         processor.advance(&mut *guard, clear);
 
         // Write the formatted content.
         processor.advance(&mut *guard, content.as_bytes());
+        processor.advance(&mut *guard, b"\x1b[?7h");
     }
 }
 
@@ -1026,15 +1071,12 @@ fn render_event(
             // Prose is the primary content, including the end of long final reports.
             // Tool details remain collapsible, but answers are always readable.
             let indent = if compact { " " } else { "  " };
-            for line in event.content.lines() {
-                push_wrapped(
-                    &mut rows,
-                    line,
-                    content_width,
-                    indent,
-                    ansi::RESET,
-                    event_idx,
-                );
+            for line in super::transcript_markdown::render(&event.content, content_width) {
+                rows.push(DisplayRow {
+                    formatted: format!("{indent}{line}"),
+                    event_index: event_idx,
+                    is_expandable: false,
+                });
             }
             if !compact {
                 rows.push(DisplayRow {
@@ -1885,6 +1927,88 @@ mod tests {
                 assert!(expanded.iter().any(|r| r.formatted.contains("DETAIL_END")));
             }
         }
+    }
+
+    #[test]
+    fn watcher_footer_stays_on_last_row_without_a_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        for cols in [20, 40, 80] {
+            let mut state = JsonlTailState::new(dir.path().join("empty.jsonl"), cols);
+            state.visible_rows = 12;
+            let content = state.formatted_content();
+            assert_eq!(content.split("\r\n").count(), 12);
+            assert!(!content.ends_with("\n"));
+            assert!(content.split("\r\n").last().unwrap().contains("scroll"));
+        }
+    }
+
+    #[test]
+    fn transcript_scroll_pauses_follow_and_keeps_position_on_update_and_reflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scroll.jsonl");
+        let line = |i| {
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":format!("Report {i}: a sufficiently long paragraph to wrap in a small pane.")}]}}).to_string()
+        };
+        std::fs::write(&path, (0..30).map(|i| line(i) + "\n").collect::<String>()).unwrap();
+        let mut state = JsonlTailState::new(path.clone(), 80);
+        state.visible_rows = 10;
+        state.poll_file();
+        assert!(state.following);
+        state.scroll_display(Scroll::Delta(5));
+        assert!(!state.following);
+        let before = state.scroll;
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            line(30)
+        )
+        .unwrap();
+        state.poll_file();
+        assert_eq!(state.scroll, before);
+        let event = state.display[state.scroll].event_index;
+        state.cols = 30;
+        state.reformat_all();
+        assert_eq!(state.display[state.scroll].event_index, event);
+        state.scroll_display(Scroll::Top);
+        assert_eq!(state.scroll, 0);
+        state.scroll_display(Scroll::PageDown);
+        assert_eq!(state.scroll, 8);
+        state.scroll_display(Scroll::Bottom);
+        assert!(state.following);
+        assert_eq!(state.scroll, state.max_scroll());
+    }
+
+    #[test]
+    fn shadow_grid_keeps_header_and_footer_without_creating_scrollback() {
+        use alacritty_terminal::{
+            grid::Dimensions,
+            index::{Column, Line},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = JsonlTailState::new(dir.path().join("empty.jsonl"), 30);
+        state.visible_rows = 8;
+        let term = Arc::new(FairMutex::new(Term::new(
+            alacritty_terminal::term::Config::default(),
+            &crate::pane::state::PaneTermSize {
+                columns: 30,
+                screen_lines: 8,
+            },
+            PaneListener::new(),
+        )));
+        for _ in 0..3 {
+            state.refresh_shadow_term(&term);
+        }
+        let guard = term.lock();
+        assert_eq!(guard.grid().history_size(), 0);
+        assert_eq!(guard.grid()[Line(0)][Column(0)].c, '0');
+        let footer: String = (0..30)
+            .map(|col| guard.grid()[Line(7)][Column(col)].c)
+            .collect();
+        assert!(footer.contains("scroll"));
     }
 
     // ── Structured parsing tests ──────────────────────────────────────

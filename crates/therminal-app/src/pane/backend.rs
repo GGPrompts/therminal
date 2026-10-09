@@ -344,6 +344,19 @@ impl PaneBackend for PaneBackendKind {
 }
 
 impl PaneBackendKind {
+    /// Returns true when a JSONL viewer owns this scroll action.
+    pub fn scroll_transcript(&self, scroll: alacritty_terminal::grid::Scroll) -> bool {
+        if let Self::JsonlTail { state, term, .. } = self {
+            if let Ok(mut state) = state.lock() {
+                state.scroll_display(scroll);
+                state.refresh_shadow_term(term);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns the terminal term for backends that support GPU rendering.
     /// `None` only for WebView (which has no term).
     pub fn term(&self) -> Option<&Arc<FairMutex<Term<PaneListener>>>> {

@@ -14,6 +14,7 @@ pub mod remote_spawn;
 pub mod spawn;
 pub mod state;
 pub mod swarm_watcher;
+mod transcript_markdown;
 pub mod webview;
 pub mod workspace;
 

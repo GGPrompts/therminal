@@ -657,6 +657,17 @@ impl App {
             return;
         }
 
+        if let Some(pane) = self
+            .get_layout()
+            .and_then(|layout| layout.find_pane(target_pane))
+            && pane
+                .backend
+                .scroll_transcript(Scroll::Delta((lines * 3.0).round() as i32))
+        {
+            self.request_redraw();
+            return;
+        }
+
         let mode = self.pane_term_mode(target_pane);
         let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
             || mode.contains(TermMode::MOUSE_DRAG)

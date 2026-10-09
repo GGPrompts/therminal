@@ -11,6 +11,8 @@ name = "therminal"
 path = "src/main.rs"
 
 [dependencies]
+pulldown-cmark = { workspace = true }
+unicode-width = { workspace = true }
 therminal-protocol = { workspace = true }
 therminal-terminal = { workspace = true }
 therminal-core = { workspace = true }

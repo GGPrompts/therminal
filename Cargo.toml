@@ -22,6 +22,8 @@ license = "MIT"
 repository = "https://github.com/GGPrompts/therminal"
 
 [workspace.dependencies]
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-width = "0.2"
 # Workspace crates
 therminal-protocol = { path = "crates/therminal-protocol" }
 therminal-terminal = { path = "crates/therminal-terminal" }

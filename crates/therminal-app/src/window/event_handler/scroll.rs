@@ -21,6 +21,12 @@ impl App {
                 Some(p) => p,
                 None => return,
             };
+            if pane.backend.scroll_transcript(scroll) {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return;
+            }
             match pane.backend.term() {
                 Some(t) => std::sync::Arc::clone(t),
                 None => return,
