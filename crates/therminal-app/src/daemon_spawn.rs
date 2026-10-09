@@ -158,9 +158,13 @@ pub fn spawn_daemon_detached(binary: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // Create a windowless console from the outset. Allocating a console
+        // later can open a Windows Terminal tab which GetConsoleWindow cannot
+        // hide. Do not combine CREATE_NO_WINDOW with DETACHED_PROCESS: Windows
+        // ignores CREATE_NO_WINDOW in that combination.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
 
     cmd.spawn()
