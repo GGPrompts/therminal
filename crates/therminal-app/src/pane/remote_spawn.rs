@@ -987,9 +987,6 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn apply_remote_resize(term: &Arc<FairMutex<Term<PaneListener>>>, cols: usize, rows: usize) {
     let mut guard = term.lock();
-    if guard.columns() == cols && guard.screen_lines() == rows {
-        return;
-    }
     resize_remote_term_without_scrollback_pollution(&mut guard, cols, rows);
 }
 
@@ -1068,6 +1065,14 @@ pub(crate) fn resize_remote_term_without_scrollback_pollution(
     rows: usize,
 ) {
     use alacritty_terminal::term::TermMode;
+
+    // Relayout also runs on workspace switches, even at unchanged dimensions.
+    // Keep this check in the shared helper: RemotePty::resize calls it directly.
+    // Clearing here would erase the shell without a size change to trigger a
+    // PTY repaint, leaving every visited workspace blank.
+    if guard.columns() == cols && guard.screen_lines() == rows {
+        return;
+    }
 
     // Alt-screen TUIs don't touch primary-screen scrollback, so the
     // bug doesn't fire and blanking would actively destroy content
@@ -1202,6 +1207,45 @@ mod tests {
         let guard = term.lock();
         assert_eq!(guard.columns(), 120);
         assert_eq!(guard.screen_lines(), 40);
+    }
+
+    #[test]
+    fn unchanged_remote_resize_preserves_shell_content() {
+        use alacritty_terminal::index::{Column, Line};
+
+        let size = TermSize {
+            columns: 80,
+            screen_lines: 24,
+        };
+        let mut term = Term::new(TermConfig::default(), &size, PaneListener::new());
+        let (mut interceptor, _event_rx) = TherminalInterceptor::new(InterceptorConfig::default());
+        let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+        processor.advance_with_interceptor(
+            &mut term,
+            &mut interceptor,
+            b"previous output\r\nshell$ partially typed command",
+        );
+        let cursor = term.grid().cursor.point;
+        let history = term.grid().history_size();
+
+        // Workspace switches call this helper directly via RemotePty::resize,
+        // so a check only in apply_remote_resize would not protect them. No
+        // repaint follows when the underlying PTY size has not changed.
+        for _ in 0..4 {
+            resize_remote_term_without_scrollback_pollution(&mut term, 80, 24);
+        }
+
+        for (row, expected) in [
+            (0, "previous output"),
+            (1, "shell$ partially typed command"),
+        ] {
+            let content: String = (0..term.columns())
+                .map(|col| term.grid()[Line(row)][Column(col)].c)
+                .collect();
+            assert_eq!(content.trim_end(), expected);
+        }
+        assert_eq!(term.grid().cursor.point, cursor);
+        assert_eq!(term.grid().history_size(), history);
     }
 
     /// tn-ebdu regression: resize must not duplicate visible streaming-TUI
