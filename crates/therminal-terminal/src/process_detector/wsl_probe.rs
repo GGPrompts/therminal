@@ -13,8 +13,7 @@ use super::classifier::classify_wsl_process;
 /// Used internally by `scan_wsl` and exposed for the daemon's
 /// stdout-caching path (tn-ttie).
 pub(super) fn fetch_wsl_ps_stdout(distro: &str) -> Option<String> {
-    use std::process::Command;
-    let output = match Command::new("wsl.exe")
+    let output = match therminal_runtime::process::background_command("wsl.exe")
         .args(["-d", distro, "-e", "ps", "-eo", "pid=,ppid=,comm=,args="])
         .output()
     {

@@ -206,9 +206,10 @@ fn find_first_non_docker_distro(lxss: &winreg::RegKey) -> Option<String> {
 /// interleaved NUL bytes are stripped before parsing.
 #[cfg(windows)]
 fn detect_distro_from_wsl_exe() -> Option<String> {
-    use std::process::Command;
-
-    let output = Command::new("wsl.exe").args(["-l", "-q"]).output().ok()?;
+    let output = crate::process::background_command("wsl.exe")
+        .args(["-l", "-q"])
+        .output()
+        .ok()?;
     if !output.status.success() {
         tracing::debug!(
             status = ?output.status,
@@ -262,8 +263,7 @@ pub fn detect_wsl_home() -> Option<String> {
     {
         WSL_HOME
             .get_or_init(|| {
-                use std::process::Command;
-                let output = Command::new("wsl.exe")
+                let output = crate::process::background_command("wsl.exe")
                     .args(["-e", "sh", "-c", r#"printf %s "$HOME""#])
                     .output()
                     .ok()?;

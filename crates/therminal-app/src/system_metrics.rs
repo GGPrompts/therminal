@@ -199,9 +199,7 @@ fn probe_wsl_metrics() -> (Option<f32>, Option<u64>, Option<u64>) {
 /// Actual WSL probe implementation (Windows only).
 #[cfg(windows)]
 fn probe_wsl_metrics_impl() -> (Option<f32>, Option<u64>, Option<u64>) {
-    use std::process::Command;
-
-    let output = match Command::new("wsl.exe")
+    let output = match therminal_runtime::process::background_command("wsl.exe")
         .args([
             "-e",
             "sh",
