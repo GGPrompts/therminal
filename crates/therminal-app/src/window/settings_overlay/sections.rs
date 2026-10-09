@@ -590,7 +590,7 @@ impl SettingsOverlayState {
                 ControlType::toggle(values.agent_waiting),
             ),
             SettingsControl::with_type(
-                "Desktop notifications (OSC 9)",
+                "Desktop notifications",
                 ControlBinding::ToggleOsc9Enabled,
                 ControlType::toggle(values.osc9_enabled),
             ),

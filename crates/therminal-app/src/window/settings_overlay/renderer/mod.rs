@@ -21,6 +21,25 @@ use crate::grid_renderer::GridRenderer;
 use super::state::SettingsOverlayState;
 use super::types::ControlType;
 
+/// Resolve the selection surface once so text contrast uses the drawn color.
+fn focus_background(base: [f32; 4], accent: [f32; 4]) -> [f32; 4] {
+    [
+        base[0] * 0.8 + accent[0] * 0.2,
+        base[1] * 0.8 + accent[1] * 0.2,
+        base[2] * 0.8 + accent[2] * 0.2,
+        1.0,
+    ]
+}
+
+/// Opaque pill surfaces shared by geometry and text contrast selection.
+fn toggle_background(enabled: bool) -> [f32; 4] {
+    if enabled {
+        [0.22, 0.78, 0.45, 1.0]
+    } else {
+        [0.35, 0.38, 0.44, 1.0]
+    }
+}
+
 /// Pixel-space caret offsets keyed by `(section_index, control_index)`.
 ///
 /// Built once per frame for editing TextInput/ListRow controls so the

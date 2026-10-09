@@ -1,9 +1,12 @@
 //! Build the glyphon text buffers + placement metadata for the settings
 //! overlay (pass 2): title, hint, nav labels, per-control labels.
 
-use glyphon::{Attrs, Buffer, Color as GlyphColor, Family, Metrics, Shaping, TextBounds, Weight};
+use glyphon::{
+    Attrs, Buffer, Color as GlyphColor, Family, Metrics, Shaping, TextBounds, Weight, Wrap,
+};
 
 use crate::grid_renderer::GridRenderer;
+use crate::window::overlay_colors::{panel, readable_text};
 use therminal_core::palette::ChromePalette;
 
 use super::super::state::SettingsOverlayState;
@@ -83,6 +86,8 @@ fn add_text(
     weight: Weight,
 ) {
     let mut buf = Buffer::new(&mut renderer.font_system, m);
+    // Every settings row is single-line; clipped wrap tails look like stray glyphs.
+    buf.set_wrap(&mut renderer.font_system, Wrap::None);
     buf.set_size(
         &mut renderer.font_system,
         Some(width.max(1.0)),
@@ -135,30 +140,11 @@ pub(super) fn build_text_buffers(
     let metrics = Metrics::new(18.0, 24.0);
     let title_metrics = Metrics::new(22.0, 28.0);
 
-    let ink = GlyphColor::rgba(
-        chrome_palette.chrome_fg.r,
-        chrome_palette.chrome_fg.g,
-        chrome_palette.chrome_fg.b,
-        242,
-    );
-    let muted = GlyphColor::rgba(
-        chrome_palette.chrome_fg_muted.r,
-        chrome_palette.chrome_fg_muted.g,
-        chrome_palette.chrome_fg_muted.b,
-        220,
-    );
-    let accent = GlyphColor::rgba(
-        (chrome_palette.focus_border[0] * 255.0) as u8,
-        (chrome_palette.focus_border[1] * 255.0) as u8,
-        (chrome_palette.focus_border[2] * 255.0) as u8,
-        255,
-    );
-    let signal = GlyphColor::rgba(
-        chrome_palette.chrome_fg_focus.r,
-        chrome_palette.chrome_fg_focus.g,
-        chrome_palette.chrome_fg_focus.b,
-        255,
-    );
+    let background = panel(chrome_palette);
+    let ink = readable_text(background, chrome_palette.chrome_fg);
+    let muted = readable_text(background, chrome_palette.chrome_fg_muted);
+    let accent = readable_text(background, chrome_palette.chrome_fg_focus);
+    let signal = accent;
 
     let mut buffers: Vec<Buffer> = Vec::new();
     let mut placements: Vec<TextPlacement> = Vec::new();
@@ -203,12 +189,12 @@ pub(super) fn build_text_buffers(
         } else {
             " "
         };
-        let color =
-            if idx == state.active_section_index() && state.focus() == SettingsFocus::Navigation {
-                accent
-            } else {
-                ink
-            };
+        let nav_bg = if idx == state.active_section_index() {
+            super::focus_background(chrome_palette.status_bar_bg, chrome_palette.focus_border)
+        } else {
+            chrome_palette.status_bar_bg
+        };
+        let color = readable_text(nav_bg, chrome_palette.chrome_fg);
         add_text(
             &mut buffers,
             &mut placements,
@@ -246,7 +232,10 @@ pub(super) fn build_text_buffers(
             let selected = i == state.active_control_index();
             let marker = if selected { ">" } else { " " };
             let row_color = if selected && state.focus() == SettingsFocus::Controls {
-                accent
+                readable_text(
+                    super::focus_background(background, chrome_palette.focus_border),
+                    chrome_palette.chrome_fg,
+                )
             } else {
                 ink
             };
@@ -267,7 +256,8 @@ pub(super) fn build_text_buffers(
                         Weight::NORMAL,
                     );
                     let pill_text = if *value { " ON " } else { " OFF" };
-                    let pill_color = if *value { signal } else { muted };
+                    let pill_color =
+                        readable_text(super::toggle_background(*value), chrome_palette.chrome_fg);
                     add_text(
                         &mut buffers,
                         &mut placements,

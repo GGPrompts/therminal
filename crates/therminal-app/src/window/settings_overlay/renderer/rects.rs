@@ -36,26 +36,16 @@ pub(super) fn build_rect_vertices(
         chrome_palette.header_bg[0],
         chrome_palette.header_bg[1],
         chrome_palette.header_bg[2],
-        0.97,
+        1.0,
     ];
     let nav_bg = [
         chrome_palette.status_bar_bg[0],
         chrome_palette.status_bar_bg[1],
         chrome_palette.status_bar_bg[2],
-        0.94,
+        1.0,
     ];
-    let nav_focus = [
-        chrome_palette.focus_border[0],
-        chrome_palette.focus_border[1],
-        chrome_palette.focus_border[2],
-        0.24,
-    ];
-    let item_focus = [
-        chrome_palette.focus_border[0],
-        chrome_palette.focus_border[1],
-        chrome_palette.focus_border[2],
-        0.28,
-    ];
+    let nav_focus = super::focus_background(nav_bg, chrome_palette.focus_border);
+    let item_focus = super::focus_background(panel_bg, chrome_palette.focus_border);
     let divider = [
         chrome_palette.separator[0],
         chrome_palette.separator[1],
@@ -150,8 +140,6 @@ pub(super) fn build_rect_vertices(
     }
 
     if let Some(section) = state.active_section() {
-        let toggle_on_bg = [0.22, 0.78, 0.45, 0.85];
-        let toggle_off_bg = [0.35, 0.38, 0.44, 0.65];
         let text_field_bg = [0.0, 0.0, 0.0, 0.30];
         let text_field_editing_bg = [0.0, 0.0, 0.0, 0.50];
         let text_cursor_color = [
@@ -179,7 +167,7 @@ pub(super) fn build_rect_vertices(
                     let pill_w = 48.0_f32;
                     let pill_h = 22.0_f32;
                     let pill_y = row_y + (ctrl_row_h - pill_h) * 0.5;
-                    let bg = if *value { toggle_on_bg } else { toggle_off_bg };
+                    let bg = super::toggle_background(*value);
                     verts.extend_from_slice(&pixel_rect_to_ndc(
                         value_col_x,
                         pill_y,
