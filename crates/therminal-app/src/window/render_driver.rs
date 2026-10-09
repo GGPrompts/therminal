@@ -94,12 +94,8 @@ impl App {
         // Clear to background color (respects config overrides + opacity).
         let resolved_bg = renderer.resolved_bg();
         let opacity = self.config.colors.background_opacity() as f64;
-        let clear_color = wgpu::Color {
-            r: resolved_bg[0] as f64 * opacity,
-            g: resolved_bg[1] as f64 * opacity,
-            b: resolved_bg[2] as f64 * opacity,
-            a: opacity,
-        };
+        let clear_color =
+            crate::color_mapping::background_clear_color(resolved_bg, opacity, gpu.config.format);
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),

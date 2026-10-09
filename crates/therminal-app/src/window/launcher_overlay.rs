@@ -10,10 +10,10 @@ use std::collections::HashMap;
 
 use wgpu::util::DeviceExt;
 
+use super::overlay_colors::{opaque, panel, readable_text};
 use crate::color_mapping::pixel_rect_to_ndc;
 use crate::grid_renderer::{ColorVertex, GridRenderer};
 use therminal_core::config::ProfileConfig;
-use therminal_core::palette::Color as PaletteColor;
 
 use glyphon::{
     Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea, TextBounds,
@@ -24,17 +24,6 @@ use glyphon::{
 
 /// Semi-transparent dark background for the overlay scrim.
 const SCRIM_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
-
-/// Panel background (PLATE from palette with high alpha).
-const PANEL_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::PLATE;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.95,
-    ]
-};
 
 /// Tile dimensions.
 const TILE_W: f32 = 120.0;
@@ -228,7 +217,7 @@ pub(crate) fn draw_launcher_overlay(
         panel_h,
         sw,
         sh,
-        PANEL_BG_COLOR,
+        panel(&renderer.chrome_palette),
     ));
 
     // ── Tiles ──────────────────────────────────────────────────────────
@@ -254,6 +243,17 @@ pub(crate) fn draw_launcher_overlay(
             ));
         }
 
+        // Main tile body.
+        all_verts.extend_from_slice(&pixel_rect_to_ndc(
+            tx,
+            ty,
+            TILE_W,
+            TILE_H,
+            sw,
+            sh,
+            opaque(entry.color),
+        ));
+
         // Bevel: lighter top edge.
         let top_edge = lighten(entry.color, 0.15);
         all_verts.extend_from_slice(&pixel_rect_to_ndc(
@@ -276,17 +276,6 @@ pub(crate) fn draw_launcher_overlay(
             sw,
             sh,
             bottom_edge,
-        ));
-
-        // Main tile body.
-        all_verts.extend_from_slice(&pixel_rect_to_ndc(
-            tx,
-            ty,
-            TILE_W,
-            TILE_H,
-            sw,
-            sh,
-            entry.color,
         ));
     }
 
@@ -319,17 +308,9 @@ pub(crate) fn draw_launcher_overlay(
     }
 
     // ── Text content ───────────────────────────────────────────────────
-    let text_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
-        240,
-    );
-    let accent_color = GlyphColor::rgba(
-        PaletteColor::FOCUS.r,
-        PaletteColor::FOCUS.g,
-        PaletteColor::FOCUS.b,
-        255,
+    let text_color = readable_text(
+        panel(&renderer.chrome_palette),
+        renderer.chrome_palette.chrome_fg,
     );
 
     let panel_bounds = TextBounds {
@@ -386,6 +367,7 @@ pub(crate) fn draw_launcher_overlay(
         let ty = grid_y + row as f32 * (TILE_H + TILE_GAP);
 
         // Icon glyph (centered in tile, upper portion).
+        let tile_text = readable_text(opaque(entry.color), renderer.chrome_palette.chrome_fg);
         let mut icon_buf = Buffer::new(&mut renderer.font_system, icon_metrics);
         icon_buf.set_size(&mut renderer.font_system, Some(TILE_W), Some(36.0));
         icon_buf.set_text(
@@ -394,7 +376,7 @@ pub(crate) fn draw_launcher_overlay(
             &Attrs::new()
                 .family(Family::Name(renderer.font_config.chrome_font_family()))
                 .weight(Weight::NORMAL)
-                .color(GlyphColor::rgba(255, 255, 255, 230)),
+                .color(tile_text),
             Shaping::Advanced,
             None,
         );
@@ -404,16 +386,12 @@ pub(crate) fn draw_launcher_overlay(
             buf_idx: buffers.len() - 1,
             x: tx,
             y: ty + 16.0,
-            color: GlyphColor::rgba(255, 255, 255, 230),
+            color: tile_text,
         });
 
-        // Label text (below icon).
+        // Selection uses the outline and weight; text stays readable.
         let is_selected = idx == state.selected;
-        let label_color = if is_selected {
-            accent_color
-        } else {
-            GlyphColor::rgba(255, 255, 255, 200)
-        };
+        let label_color = tile_text;
         let mut label_buf = Buffer::new(&mut renderer.font_system, label_metrics);
         label_buf.set_size(&mut renderer.font_system, Some(TILE_W), Some(16.0));
         label_buf.set_text(

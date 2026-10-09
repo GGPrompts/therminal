@@ -4,23 +4,15 @@
 //! tier escalation from an MCP agent. Styled like browser permission prompts.
 //! Keyboard navigation: Enter to approve, Escape to deny.
 
+use super::overlay_colors::{panel, readable_text};
 use crate::color_mapping::pixel_rect_to_ndc;
 use crate::grid_renderer::{ColorVertex, GridRenderer};
-use therminal_core::palette::Color as PaletteColor;
 use wgpu::util::DeviceExt;
 
 // ── Colors ──────────────────────────────────────────────────────────────
 
 const SCRIM_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.65];
-const PANEL_BG: [f32; 4] = {
-    let c = PaletteColor::PLATE;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.97,
-    ]
-};
+
 const APPROVE_BG: [f32; 4] = [0.18, 0.55, 0.34, 1.0]; // green
 const DENY_BG: [f32; 4] = [0.65, 0.22, 0.22, 1.0]; // red
 const FOCUSED_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
@@ -65,8 +57,7 @@ pub(crate) fn draw_trust_escalation_overlay(
     surface_height: u32,
 ) {
     use glyphon::{
-        Attrs, Buffer, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea,
-        TextBounds, Weight,
+        Attrs, Buffer, Family, Metrics, Resolution, Shaping, TextArea, TextBounds, Weight,
     };
 
     let sw = surface_width as f32;
@@ -90,7 +81,15 @@ pub(crate) fn draw_trust_escalation_overlay(
 
     // ── Background quads ────────────────────────────────────────────────
     let scrim_verts = pixel_rect_to_ndc(0.0, 0.0, sw, sh, sw, sh, SCRIM_COLOR);
-    let panel_verts = pixel_rect_to_ndc(panel_x, panel_y, panel_w, panel_h, sw, sh, PANEL_BG);
+    let panel_verts = pixel_rect_to_ndc(
+        panel_x,
+        panel_y,
+        panel_w,
+        panel_h,
+        sw,
+        sh,
+        panel(&renderer.chrome_palette),
+    );
 
     // Buttons
     let btn_w = (panel_w - padding_h * 2.0 - button_gap) / 2.0;
@@ -186,19 +185,11 @@ pub(crate) fn draw_trust_escalation_overlay(
     let metrics = Metrics::new(font_size, row_h);
     let title_metrics = Metrics::new(font_size + 4.0, title_h);
 
-    let text_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
-        240,
-    );
-    let muted_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
-        220,
-    );
-    let white = GlyphColor::rgba(255, 255, 255, 255);
+    let background = panel(&renderer.chrome_palette);
+    let text_color = readable_text(background, renderer.chrome_palette.chrome_fg);
+    let muted_color = readable_text(background, renderer.chrome_palette.chrome_fg_muted);
+    let approve_text = readable_text(APPROVE_BG, renderer.chrome_palette.chrome_fg);
+    let deny_text = readable_text(DENY_BG, renderer.chrome_palette.chrome_fg);
 
     let inner_left = panel_x + padding_h;
     let inner_right = panel_x + panel_w - padding_h;
@@ -271,7 +262,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         &Attrs::new()
             .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(Weight::BOLD)
-            .color(white),
+            .color(approve_text),
         Shaping::Basic,
         None,
     );
@@ -286,7 +277,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         &Attrs::new()
             .family(Family::Name(renderer.font_config.chrome_font_family()))
             .weight(Weight::BOLD)
-            .color(white),
+            .color(deny_text),
         Shaping::Basic,
         None,
     );
@@ -329,7 +320,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         top: y,
         scale: 1.0,
         bounds,
-        default_color: white,
+        default_color: approve_text,
         custom_glyphs: &[],
     });
 
@@ -340,7 +331,7 @@ pub(crate) fn draw_trust_escalation_overlay(
         top: y,
         scale: 1.0,
         bounds,
-        default_color: white,
+        default_color: deny_text,
         custom_glyphs: &[],
     });
 

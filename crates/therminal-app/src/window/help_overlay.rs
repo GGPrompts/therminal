@@ -15,25 +15,14 @@ use std::collections::{BTreeMap, HashSet};
 
 use wgpu::util::DeviceExt;
 
+use super::overlay_colors::{panel, readable_text};
 use crate::grid_renderer::{ColorVertex, GridRenderer};
 use therminal_core::config::KeybindingsConfig;
-use therminal_core::palette::Color as PaletteColor;
 
 // ── Overlay colors ────────────────────────────────────────────────────
 
 /// Semi-transparent dark background for the overlay scrim.
 const SCRIM_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
-
-/// Panel background (PLATE from palette with high alpha).
-const PANEL_BG_COLOR: [f32; 4] = {
-    let c = PaletteColor::PLATE;
-    [
-        c.r as f32 / 255.0,
-        c.g as f32 / 255.0,
-        c.b as f32 / 255.0,
-        0.95,
-    ]
-};
 
 // ── Section order ─────────────────────────────────────────────────────
 
@@ -187,7 +176,15 @@ pub(crate) fn draw_help_overlay(
     let panel_x = (sw - panel_w) / 2.0;
     let panel_y = (sh - panel_h) / 2.0;
 
-    let panel_verts = pixel_rect_to_ndc(panel_x, panel_y, panel_w, panel_h, sw, sh, PANEL_BG_COLOR);
+    let panel_verts = pixel_rect_to_ndc(
+        panel_x,
+        panel_y,
+        panel_w,
+        panel_h,
+        sw,
+        sh,
+        panel(&renderer.chrome_palette),
+    );
 
     // ── Draw background rects ───────────────────────────────────────────
     let mut all_verts: Vec<ColorVertex> = Vec::new();
@@ -228,24 +225,10 @@ pub(crate) fn draw_help_overlay(
     let header_metrics = Metrics::new(font_size + 2.0, header_row_h);
     let title_metrics = Metrics::new(font_size + 4.0, row_h + 4.0);
 
-    let text_color = GlyphColor::rgba(
-        PaletteColor::INK.r,
-        PaletteColor::INK.g,
-        PaletteColor::INK.b,
-        240,
-    );
-    let muted_color = GlyphColor::rgba(
-        PaletteColor::INK_MUTED.r,
-        PaletteColor::INK_MUTED.g,
-        PaletteColor::INK_MUTED.b,
-        220,
-    );
-    let accent_color = GlyphColor::rgba(
-        PaletteColor::FOCUS.r,
-        PaletteColor::FOCUS.g,
-        PaletteColor::FOCUS.b,
-        255,
-    );
+    let background = panel(&renderer.chrome_palette);
+    let text_color = readable_text(background, renderer.chrome_palette.chrome_fg);
+    let muted_color = readable_text(background, renderer.chrome_palette.chrome_fg_muted);
+    let accent_color = readable_text(background, renderer.chrome_palette.chrome_fg_focus);
 
     // Inner panel bounds for static text (title/footer), plus a dedicated
     // scroll viewport for binding rows so the list cannot overlap header/footer.

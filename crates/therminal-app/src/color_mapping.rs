@@ -7,6 +7,32 @@ use therminal_terminal::hotspot_detection::HotspotKind;
 
 use crate::grid_renderer::{ColorVertex, RenderCell, TERM_BG};
 
+/// Clear values bypass the rect shader. Decode sRGB before premultiplying alpha
+/// on sRGB targets, matching both the rect pipeline and glyphon text.
+pub(crate) fn background_clear_color(
+    rgb: [f32; 4],
+    opacity: f64,
+    format: wgpu::TextureFormat,
+) -> wgpu::Color {
+    let channel = |value: f32| {
+        let value = value as f64;
+        let value = if !format.is_srgb() {
+            value
+        } else if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        };
+        value * opacity
+    };
+    wgpu::Color {
+        r: channel(rgb[0]),
+        g: channel(rgb[1]),
+        b: channel(rgb[2]),
+        a: opacity,
+    }
+}
+
 /// Map an alacritty_terminal ANSI Color to an [f32; 4] RGBA array.
 pub(crate) fn ansi_to_glyphon_fg(color: &AnsiColor) -> [f32; 4] {
     match color {
@@ -332,6 +358,22 @@ pub(crate) fn line_to_rect_verts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clear_color_decodes_srgb_before_premultiplying_alpha() {
+        use wgpu::TextureFormat::*;
+        for format in [Rgba8UnormSrgb, Bgra8UnormSrgb] {
+            let c = super::background_clear_color([0.5, 0.04, 1.0, 1.0], 0.5, format);
+            assert!((c.r - 0.1070205702).abs() < 1e-8);
+            assert!((c.g - 0.0015479876).abs() < 1e-8);
+            assert_eq!(c.b, 0.5);
+            assert_eq!(c.a, 0.5);
+        }
+        for format in [Rgba8Unorm, Bgra8Unorm] {
+            let c = super::background_clear_color([0.5, 0.0, 1.0, 1.0], 0.5, format);
+            assert_eq!((c.r, c.g, c.b, c.a), (0.25, 0.0, 0.5, 0.5));
+        }
+    }
+
     use super::*;
 
     fn rgba_to_palette_color(rgba: [f32; 4]) -> PaletteColor {

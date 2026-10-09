@@ -324,6 +324,7 @@ struct CellShapeKey {
 // ── Rect rendering (for cursor and cell backgrounds) ───────────────────────
 
 const RECT_SHADER: &str = r#"
+override SRGB_TARGET: bool = false;
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) color: vec4<f32>,
@@ -341,6 +342,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 }
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Theme and ANSI colors arrive as sRGB, just like glyphon text colors.
+    // An sRGB attachment encodes the output, so decode RGB first. Alpha is linear.
+    if SRGB_TARGET {
+        let rgb = in.color.rgb;
+        let linear = select(pow((rgb + 0.055) / 1.055, vec3<f32>(2.4)),
+                            rgb / 12.92, rgb <= vec3<f32>(0.04045));
+        return vec4<f32>(linear, in.color.a);
+    }
     return in.color;
 }
 "#;
@@ -662,7 +671,13 @@ impl GridRenderer {
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[(
+                        "SRGB_TARGET",
+                        if surface_format.is_srgb() { 1.0 } else { 0.0 },
+                    )],
+                    ..Default::default()
+                },
             }),
             multiview_mask: None,
             cache: None,

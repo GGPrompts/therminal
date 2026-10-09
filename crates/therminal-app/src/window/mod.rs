@@ -23,6 +23,7 @@ mod init;
 mod keybindings;
 mod launcher_overlay;
 mod mouse;
+mod overlay_colors;
 mod pane_ops;
 mod reconcile;
 mod render;
