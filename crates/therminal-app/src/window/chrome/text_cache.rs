@@ -29,6 +29,34 @@ pub(super) fn ensure_shaped(
     font_system: &mut FontSystem,
     cache: &mut HashMap<String, (String, Buffer)>,
 ) {
+    ensure_shaped_colored(
+        slot,
+        cache_key,
+        metrics,
+        width,
+        height,
+        text,
+        attrs,
+        &[],
+        font_system,
+        cache,
+    );
+}
+
+/// Shape text with optional per-character icon colors.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn ensure_shaped_colored(
+    slot: &str,
+    cache_key: &str,
+    metrics: Metrics,
+    width: f32,
+    height: f32,
+    text: &str,
+    attrs: Attrs<'_>,
+    colors: &[(usize, [u8; 3])],
+    font_system: &mut FontSystem,
+    cache: &mut ChromeTextCache,
+) {
     let needs_reshape = cache
         .get(slot)
         .map(|(k, _)| k.as_str() != cache_key)
@@ -37,7 +65,23 @@ pub(super) fn ensure_shaped(
     if needs_reshape {
         let mut buf = Buffer::new(font_system, metrics);
         buf.set_size(font_system, Some(width), Some(height));
-        buf.set_text(font_system, text, &attrs, Shaping::Basic, None);
+        if colors.is_empty() {
+            buf.set_text(font_system, text, &attrs, Shaping::Basic, None);
+        } else {
+            let spans = text.char_indices().enumerate().map(|(i, (byte, ch))| {
+                let attr = colors
+                    .iter()
+                    .find(|(pos, _)| *pos == i)
+                    .map(|(_, rgb)| {
+                        attrs
+                            .clone()
+                            .color(glyphon::Color::rgb(rgb[0], rgb[1], rgb[2]))
+                    })
+                    .unwrap_or_else(|| attrs.clone());
+                (&text[byte..byte + ch.len_utf8()], attr)
+            });
+            buf.set_rich_text(font_system, spans, &attrs, Shaping::Basic, None);
+        }
         buf.shape_until_scroll(font_system, false);
         cache.insert(slot.to_string(), (cache_key.to_string(), buf));
     }
@@ -56,6 +100,40 @@ pub(super) fn cached_buf<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_color_does_not_leak_to_neighboring_text() {
+        let mut font_system = FontSystem::new();
+        let mut cache = ChromeTextCache::new();
+        let base = glyphon::Color::rgb(240, 240, 240);
+        let orange = glyphon::Color::rgb(229, 139, 74);
+        ensure_shaped_colored(
+            "tab",
+            "colored",
+            Metrics::new(12.0, 16.0),
+            200.0,
+            20.0,
+            "1 R name",
+            Attrs::new().color(base),
+            &[(2, [229, 139, 74]), (99, [65, 190, 183])],
+            &mut font_system,
+            &mut cache,
+        );
+        let buffer = cached_buf(&cache, "tab").unwrap();
+        let glyphs: Vec<_> = buffer.layout_runs().flat_map(|r| r.glyphs).collect();
+        assert!(!glyphs.is_empty());
+        assert!(
+            glyphs
+                .iter()
+                .any(|g| g.start == 2 && g.color_opt == Some(orange))
+        );
+        assert!(
+            glyphs
+                .iter()
+                .filter(|g| g.start != 2)
+                .all(|g| g.color_opt == Some(base))
+        );
+    }
 
     /// Build a minimal cache by constructing the HashMap directly without
     /// calling `ensure_shaped` (which requires a real FontSystem + glyphon).

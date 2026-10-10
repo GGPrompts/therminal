@@ -479,7 +479,25 @@ impl App {
                 }
             }
 
+            let icon_colors = workspace_ids
+                .iter()
+                .map(|id| {
+                    if self
+                        .rename_state
+                        .as_ref()
+                        .is_some_and(|r| r.workspace_id == *id)
+                    {
+                        vec![]
+                    } else {
+                        tab_identity_rows
+                            .get(id)
+                            .map(|rows| super::tab_identity::icon_colors(*id, rows))
+                            .unwrap_or_default()
+                    }
+                })
+                .collect();
             let tab_info = chrome::TabBarInfo {
+                icon_colors,
                 workspace_ids,
                 active_workspace,
                 tab_labels,

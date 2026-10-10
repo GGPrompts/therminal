@@ -9,13 +9,14 @@ use crate::grid_renderer::{ColorVertex, GridRenderer};
 use crate::pane::TabBarGeometry;
 
 use super::render_pass::with_chrome_render_pass;
-use super::text_cache::{cached_buf, ensure_shaped};
+use super::text_cache::{cached_buf, ensure_shaped, ensure_shaped_colored};
 
 /// Data collected for the workspace tab bar.
 pub(crate) struct TabBarInfo {
     pub workspace_ids: Vec<usize>,
     pub active_workspace: usize,
     pub tab_labels: Vec<String>,
+    pub icon_colors: Vec<Vec<(usize, [u8; 3])>>,
 }
 
 const TAB_PADDING: f32 = 16.0;
@@ -179,10 +180,25 @@ pub(crate) fn draw_tab_bar(
         let active_tag = if is_active { "a" } else { "i" };
         let slot = format!("tab_{ws_id}");
 
+        let background = if is_active { tab_active_bg } else { tab_bar_bg };
+        let light = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2] > 0.5;
+        let colors: Vec<_> = info.icon_colors[i]
+            .iter()
+            .map(|(pos, rgb)| {
+                (
+                    *pos,
+                    if light {
+                        rgb.map(|c| (f32::from(c) * 0.5) as u8)
+                    } else {
+                        *rgb
+                    },
+                )
+            })
+            .collect();
         let mut label = full_label.clone();
         loop {
-            let key = format!("{label}|{active_tag}");
-            ensure_shaped(
+            let key = format!("{label}|{active_tag}|{colors:?}");
+            ensure_shaped_colored(
                 &slot,
                 &key,
                 metrics,
@@ -190,6 +206,7 @@ pub(crate) fn draw_tab_bar(
                 bar_h,
                 &label,
                 Attrs::new().family(Family::Name(&family)).color(color),
+                &colors,
                 &mut renderer.font_system,
                 &mut renderer.overlay_cache,
             );
@@ -219,8 +236,8 @@ pub(crate) fn draw_tab_bar(
             };
             if take == 0 {
                 label = TAB_ELLIPSIS.to_string();
-                let key = format!("{label}|{active_tag}");
-                ensure_shaped(
+                let key = format!("{label}|{active_tag}|{colors:?}");
+                ensure_shaped_colored(
                     &slot,
                     &key,
                     metrics,
@@ -228,6 +245,7 @@ pub(crate) fn draw_tab_bar(
                     bar_h,
                     &label,
                     Attrs::new().family(Family::Name(&family)).color(color),
+                    &colors,
                     &mut renderer.font_system,
                     &mut renderer.overlay_cache,
                 );

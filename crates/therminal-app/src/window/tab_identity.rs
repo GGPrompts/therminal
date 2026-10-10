@@ -8,6 +8,7 @@ pub(super) struct PaneRow {
     pub pane_id: PaneId,
     pub icon: String,
     pub app: String,
+    pub icon_color: Option<[u8; 3]>,
     pub environment: String,
     pub shell: String,
     pub detail: String,
@@ -17,29 +18,70 @@ pub(super) struct PaneRow {
 /// Preserve pane order and group only identical app/environment identities.
 /// Keep different hosts separate; their full identities live in the hover list.
 /// Tab labels stay icon-only so every pane group has room to be seen.
-pub(super) fn summarize(rows: &[PaneRow]) -> String {
-    let mut groups: Vec<(&str, &str, &str, usize)> = Vec::new();
+fn groups(rows: &[PaneRow]) -> Vec<(&PaneRow, usize)> {
+    let mut groups: Vec<(&PaneRow, usize)> = Vec::new();
     for row in rows {
-        if let Some(group) = groups
-            .iter_mut()
-            .find(|g| g.0 == row.icon && g.1 == row.app && g.2 == row.environment)
-        {
-            group.3 += 1;
+        if let Some(group) = groups.iter_mut().find(|(r, _)| {
+            r.icon == row.icon
+                && r.app == row.app
+                && r.environment == row.environment
+                && r.icon_color == row.icon_color
+        }) {
+            group.1 += 1;
         } else {
-            groups.push((&row.icon, &row.app, &row.environment, 1));
+            groups.push((row, 1));
         }
     }
     groups
+}
+
+pub(super) fn summarize(rows: &[PaneRow]) -> String {
+    groups(rows)
         .into_iter()
-        .map(|(icon, _, _, count)| {
+        .map(|(row, count)| {
             if count > 1 {
-                format!("{icon}×{count}")
+                format!("{}×{count}", row.icon)
             } else {
-                icon.to_string()
+                row.icon.clone()
             }
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Character positions, not byte offsets: these survive the tab bar's trimming.
+/// Only the compact summary is colored, never a custom workspace name.
+pub(super) fn icon_colors(workspace_id: usize, rows: &[PaneRow]) -> Vec<(usize, [u8; 3])> {
+    let prefix = format!("{workspace_id} ").chars().count();
+    let summary_len = summarize(rows).chars().count();
+    let limit = if summary_len > 32 { 31 } else { summary_len };
+    let mut offset = 0;
+    let mut colors = Vec::new();
+    for (row, count) in groups(rows) {
+        for i in 0..row.icon.chars().count() {
+            if offset + i < limit
+                && let Some(color) = row.icon_color
+            {
+                colors.push((prefix + offset + i, color));
+            }
+        }
+        offset += row.icon.chars().count() + 1;
+        if count > 1 {
+            offset += format!("×{count}").chars().count();
+        }
+    }
+    colors
+}
+
+pub(super) const ROBOT_ICON: &str = "\u{f06a9}";
+const WATCH_ICON: &str = "\u{f06e}";
+
+fn agent_color(app: &str) -> Option<[u8; 3]> {
+    match app.to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" => Some([229, 139, 74]),
+        "codex" => Some([65, 190, 183]),
+        _ => None,
+    }
 }
 
 /// Keep the workspace number first even when a narrow tab clips the name.
@@ -74,8 +116,7 @@ pub(super) fn compact(text: &str, limit: usize) -> String {
 
 pub(super) fn app_icon(app: &str) -> &'static str {
     match app.to_ascii_lowercase().as_str() {
-        "claude" | "claude-code" => "✳",
-        "codex" => "◈",
+        "claude" | "claude-code" | "codex" => ROBOT_ICON,
         "aider" | "copilot" | "agy" => "◆",
         "tfe" => "\u{f07b}",
         "browser" => "◎",
@@ -196,6 +237,7 @@ mod tests {
             pane_id: id,
             icon: app_icon(app).into(),
             app: app.into(),
+            icon_color: agent_color(app),
             environment: env.into(),
             shell: "bash".into(),
             detail: "/tmp".into(),
@@ -210,8 +252,38 @@ mod tests {
             row(3, "codex", "Windows"),
             row(4, "browser", ""),
         ];
-        assert_eq!(summarize(&rows), "◈×2 ◈ ◎");
+        assert_eq!(summarize(&rows), format!("{ROBOT_ICON}×2 {ROBOT_ICON} ◎"));
     }
+    #[test]
+    fn agent_colors_follow_grouped_icons_not_counts_or_custom_names() {
+        let mut watcher = row(3, "Claude subagent", "WSL");
+        watcher.icon = WATCH_ICON.into();
+        watcher.icon_color = agent_color("claude");
+        let rows = vec![
+            row(1, "claude", "WSL"),
+            row(2, "claude", "WSL"),
+            watcher,
+            row(4, "codex", "WSL"),
+        ];
+        let label = decorate_label(12, "12: My agents", &rows);
+        let colors = icon_colors(12, &rows);
+        assert_eq!(
+            colors,
+            vec![
+                (3, [229, 139, 74]),
+                (7, [229, 139, 74]),
+                (9, [65, 190, 183])
+            ]
+        );
+        for (pos, _) in colors {
+            assert!(matches!(
+                label.chars().nth(pos),
+                Some('\u{f06a9}' | '\u{f06e}')
+            ));
+        }
+        assert!(label.ends_with(" · My agents"));
+    }
+
     #[test]
     fn popup_targets_stable_pane_ids_even_after_scrolling() {
         let rows = vec![
@@ -284,10 +356,50 @@ impl super::App {
                         pane_id,
                         icon: identity.icon.unwrap_or_else(|| app_icon("browser").into()),
                         app: "Browser".into(),
+                        icon_color: None,
                         environment: identity.environment.unwrap_or_default(),
                         shell: identity.shell.unwrap_or_else(|| "Web".into()),
                         detail: url,
                         status: None,
+                    });
+                }
+                if let crate::pane::backend::PaneBackendKind::JsonlTail { path, .. } = &pane.backend
+                {
+                    // The swarm watcher currently follows Claude transcripts. Generic
+                    // JSONL viewers must not be misidentified as Claude subagents.
+                    let agent_id = self
+                        .swarm_panes
+                        .iter()
+                        .find_map(|(agent, id)| (*id == pane_id).then_some(agent.as_str()));
+                    let claude_subagent = agent_id.is_some()
+                        || (path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .is_some_and(|p| p == "subagents")
+                            && path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .is_some_and(|s| s.starts_with("agent-")));
+                    return Some(PaneRow {
+                        pane_id,
+                        icon: WATCH_ICON.into(),
+                        icon_color: if claude_subagent {
+                            agent_color("claude")
+                        } else {
+                            None
+                        },
+                        app: if claude_subagent {
+                            "Claude subagent"
+                        } else {
+                            "Transcript"
+                        }
+                        .into(),
+                        environment: identity.environment.unwrap_or_default(),
+                        shell: "Read-only".into(),
+                        detail: agent_id
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| path.display().to_string()),
+                        status: Some("following".into()),
                     });
                 }
                 let app = identity
@@ -329,8 +441,10 @@ impl super::App {
                 };
                 Some(PaneRow {
                     pane_id,
-                    icon: if identity.application.is_some()
-                        && identity.application != status.launch_identity.application
+                    icon_color: agent_color(&app),
+                    icon: if agent_color(&app).is_some()
+                        || (identity.application.is_some()
+                            && identity.application != status.launch_identity.application)
                     {
                         app_icon(&app).into()
                     } else {
