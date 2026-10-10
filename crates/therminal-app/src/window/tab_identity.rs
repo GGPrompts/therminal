@@ -77,7 +77,7 @@ pub(super) fn app_icon(app: &str) -> &'static str {
         "claude" | "claude-code" => "✳",
         "codex" => "◈",
         "aider" | "copilot" | "agy" => "◆",
-        "tfe" => "📁",
+        "tfe" => "\u{f07b}",
         "browser" => "◎",
         "powershell" | "windows powershell" | "pwsh" | "powershell.exe" | "pwsh.exe" => ">_",
         "command prompt" | "cmd" => "C>",
