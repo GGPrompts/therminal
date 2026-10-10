@@ -163,6 +163,27 @@ impl App {
         // contribute entries that persist until the next frame.
         renderer.clear_frame_maps();
 
+        // Cursor focus is independent of decorative pane focus borders: a
+        // single-pane window still has an active cursor. Menus and WebViews
+        // receive keyboard focus without leaving a terminal blinking behind them.
+        let focused_cursor_pane = focused.filter(|id| {
+            self.window.as_ref().is_some_and(|w| w.has_focus())
+                && self.overlay_mode.is_none()
+                && self.active_menu.is_none()
+                && self.pane_picker.is_none()
+                && self.rename_state.is_none()
+                && self.navigate_state.is_none()
+                && layout.find_pane(*id).is_some_and(|p| !p.is_webview())
+        });
+        if renderer.focused_cursor_pane != focused_cursor_pane {
+            self.cursor_blink_visible = true;
+            self.last_cursor_blink = Instant::now();
+        }
+        renderer.focused_cursor_pane = focused_cursor_pane;
+        let blink_enabled = focused_cursor_pane.is_some()
+            && self.config.cursor.blink
+            && !self.config.accessibility.reduced_motion;
+
         // ── Cursor blink timer tick (tn-ya01) ───────────────────────────
         // Toggle cursor visibility every ~530ms when blink is enabled and
         // reduced_motion is off. Sync the config cursor shape each frame.
@@ -175,8 +196,6 @@ impl App {
                 CursorStyle::Beam => CursorShape::Beam,
                 CursorStyle::HollowBlock => CursorShape::HollowBlock,
             };
-            let blink_enabled =
-                self.config.cursor.blink && !self.config.accessibility.reduced_motion;
             if blink_enabled {
                 let elapsed = self.last_cursor_blink.elapsed();
                 if elapsed.as_millis() >= 530 {
@@ -786,10 +805,7 @@ impl App {
 
         // tn-ya01: Keep the event loop ticking when cursor blink is active
         // so the blink timer can toggle visibility each frame.
-        if self.config.cursor.blink
-            && !self.config.accessibility.reduced_motion
-            && let Some(w) = self.window.as_ref()
-        {
+        if blink_enabled && let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
     }

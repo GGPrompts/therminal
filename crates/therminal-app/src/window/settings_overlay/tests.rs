@@ -986,7 +986,8 @@ fn appearance_section_contains_font_and_cursor() {
     // Theme presets (5) + Font family + Background opacity + Cursor style + Cursor blink
     assert_eq!(appearance.controls.len(), 9);
     assert_eq!(appearance.controls[5].label, "Font family");
-    assert_eq!(appearance.controls[7].label, "Cursor style");
+    assert_eq!(appearance.controls[7].label, "Focused cursor style");
+    assert_eq!(appearance.controls[8].label, "Blink focused cursor");
 }
 
 #[test]

@@ -412,12 +412,12 @@ impl SettingsOverlayState {
             ),
             // Cursor
             SettingsControl::with_type(
-                "Cursor style",
+                "Focused cursor style",
                 ControlBinding::CursorStyle,
                 ControlType::select(style_options, values.cursor_style_index),
             ),
             SettingsControl::with_type(
-                "Cursor blink",
+                "Blink focused cursor",
                 ControlBinding::ToggleCursorBlink,
                 ControlType::toggle(values.cursor_blink),
             ),

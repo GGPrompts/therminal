@@ -28,6 +28,26 @@ use crate::color_mapping::*;
 use crate::pane::PaneId;
 use tracing::debug;
 
+/// Resolve cursor presentation once for both its geometry and cell text.
+fn presented_cursor_shape(
+    program: CursorShape,
+    configured: CursorShape,
+    focused: bool,
+    blink_visible: bool,
+) -> CursorShape {
+    if program == CursorShape::Hidden {
+        CursorShape::Hidden
+    } else if !focused {
+        CursorShape::HollowBlock
+    } else if !blink_visible {
+        CursorShape::Hidden
+    } else if program == CursorShape::Block {
+        configured
+    } else {
+        program
+    }
+}
+
 // ── Font configuration ────────────────────────────────────────────────────
 
 /// Font configuration for the grid renderer.
@@ -540,6 +560,9 @@ pub struct GridRenderer {
     /// Whether cursor blink is currently in the "visible" phase (tn-ya01).
     /// When false and blinking is active, the cursor rect is suppressed.
     pub(crate) cursor_blink_visible: bool,
+
+    /// Only this pane receives the active cursor style and blink phase.
+    pub(crate) focused_cursor_pane: Option<PaneId>,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -747,6 +770,7 @@ impl GridRenderer {
             ui_text_scale: 1.0,
             config_cursor_shape: CursorShape::Block,
             cursor_blink_visible: true,
+            focused_cursor_pane: None,
         }
     }
 
@@ -1426,36 +1450,28 @@ impl GridRenderer {
         }
     }
 
-    /// Append the cursor rect(s) to `bg_rects`. Block / underline / beam /
-    /// hollow-block all share the same anchor formula but emit different
-    /// geometry. Hidden cursors emit nothing.
-    ///
-    /// Applies the config default cursor shape (tn-ya01): when the cursor
-    /// shape is `Block` (the alacritty default, meaning no program sent
-    /// DECSCUSR), the renderer substitutes `config_cursor_shape` instead.
-    /// Cursor blink visibility is also checked here — when blinking and in
-    /// the "invisible" phase, the cursor rect is suppressed entirely.
+    /// Use the same focus and visibility policy for cursor geometry and text.
+    fn presented_cursor_shape(&self, program: CursorShape) -> CursorShape {
+        presented_cursor_shape(
+            program,
+            self.config_cursor_shape,
+            self.focused_cursor_pane.is_some() && self.current_pane == self.focused_cursor_pane,
+            self.cursor_blink_visible,
+        )
+    }
+
+    /// Append the cursor geometry. Hidden cursors emit nothing; inactive
+    /// cursors retain their position as a steady hollow outline.
     fn add_cursor_rects(
         &self,
         cursor: &RenderableCursor,
         screen_lines: usize,
         bg_rects: &mut Vec<([f32; 4], [f32; 4])>,
     ) {
-        if cursor.shape == CursorShape::Hidden {
+        let shape = self.presented_cursor_shape(cursor.shape);
+        if shape == CursorShape::Hidden {
             return;
         }
-        // Suppress cursor during blink's invisible phase (tn-ya01).
-        if !self.cursor_blink_visible {
-            return;
-        }
-        // Apply config default cursor shape: when alacritty reports the
-        // default Block (no DECSCUSR override from the running program),
-        // substitute the user's configured shape.
-        let shape = if cursor.shape == CursorShape::Block {
-            self.config_cursor_shape
-        } else {
-            cursor.shape
-        };
         let cursor_line = cursor.point.line.0;
         if cursor_line < 0 || (cursor_line as usize) >= screen_lines {
             return;
@@ -1860,15 +1876,8 @@ impl GridRenderer {
                 continue;
             }
 
-            // Apply the same config-default shape mapping as add_cursor_rects:
-            // when alacritty reports Block (no DECSCUSR), use config shape.
-            let effective_shape = if cursor.shape == CursorShape::Block {
-                self.config_cursor_shape
-            } else {
-                cursor.shape
-            };
+            let effective_shape = self.presented_cursor_shape(cursor.shape);
             let is_block_cursor = effective_shape == CursorShape::Block
-                && self.cursor_blink_visible
                 && cursor_col == cell.col
                 && cursor_row == cell.row;
             let fg = if is_block_cursor {
@@ -2294,6 +2303,39 @@ fn build_grid_text_areas<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_presentation_respects_focus_hidden_state_and_blink() {
+        use super::presented_cursor_shape;
+        use alacritty_terminal::vte::ansi::CursorShape::*;
+        for configured in [Block, Beam, Underline, HollowBlock] {
+            for blink_visible in [false, true] {
+                for focused in [false, true] {
+                    assert_eq!(
+                        presented_cursor_shape(Hidden, configured, focused, blink_visible),
+                        Hidden
+                    );
+                }
+                for program in [Block, Beam, Underline, HollowBlock] {
+                    assert_eq!(
+                        presented_cursor_shape(program, configured, false, blink_visible),
+                        HollowBlock
+                    );
+                    let expected = if !blink_visible {
+                        Hidden
+                    } else if program == Block {
+                        configured
+                    } else {
+                        program
+                    };
+                    assert_eq!(
+                        presented_cursor_shape(program, configured, true, blink_visible),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
     use super::FontConfig;
     use super::cell_display_text;
     use super::resolve_fg_color;

@@ -274,6 +274,9 @@ Click **+** after the last tab to create a default-shell workspace. Right-click
 the configured new-tab shortcut; the existing nine-workspace limit still applies.
 Tabs stay visible with one workspace, except in focus mode. A thin outer window
 outline follows the theme accent when focused and its muted colors when inactive.
+Cursor style and blinking apply only to the focused terminal in the active window;
+inactive cursors are steady outlines. Reduced motion disables blinking, and
+application-hidden cursors remain hidden.
 
 Each tab shows compact application/profile icons across its panes, with duplicate
 counts and no environment text. Groups stay distinct by app and environment.

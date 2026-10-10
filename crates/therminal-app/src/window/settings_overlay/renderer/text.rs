@@ -166,6 +166,17 @@ pub(super) fn build_text_buffers(
         "Type to edit, Enter confirm, Esc cancel, Del remove"
     } else if state.is_select_expanded() {
         "Arrows change value, Enter/Space confirm, Esc cancel"
+    } else if state
+        .active_section()
+        .and_then(|section| section.controls.get(state.active_control_index()))
+        .is_some_and(|control| {
+            matches!(
+                control.binding,
+                ControlBinding::CursorStyle | ControlBinding::ToggleCursorBlink
+            )
+        })
+    {
+        "Inactive cursors are steady outlines. Reduced motion disables blinking."
     } else {
         "Tab/Shift+Tab focus, Arrows move, Enter edit, Del remove, Esc close"
     };
