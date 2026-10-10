@@ -176,7 +176,7 @@ pub(super) fn build_text_buffers(
             )
         })
     {
-        "Inactive cursors are steady outlines. Reduced motion disables blinking."
+        "Inactive: same shape, steady and dimmed. Reduced motion disables blinking."
     } else {
         "Tab/Shift+Tab focus, Arrows move, Enter edit, Del remove, Esc close"
     };

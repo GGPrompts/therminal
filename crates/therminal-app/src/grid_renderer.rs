@@ -35,11 +35,7 @@ fn presented_cursor_shape(
     focused: bool,
     blink_visible: bool,
 ) -> CursorShape {
-    if program == CursorShape::Hidden {
-        CursorShape::Hidden
-    } else if !focused {
-        CursorShape::HollowBlock
-    } else if !blink_visible {
+    if program == CursorShape::Hidden || (focused && !blink_visible) {
         CursorShape::Hidden
     } else if program == CursorShape::Block {
         configured
@@ -901,7 +897,14 @@ impl GridRenderer {
     /// Get the resolved cursor color as `[f32; 4]`, sourced from
     /// `chrome_palette.cursor` (theme-aware, tn-g7oo).
     pub fn resolved_cursor_color(&self) -> [f32; 4] {
-        self.chrome_palette.cursor
+        let mut color = self.chrome_palette.cursor;
+        if self.focused_cursor_pane.is_none() || self.current_pane != self.focused_cursor_pane {
+            let background = self.resolved_bg();
+            for i in 0..3 {
+                color[i] = color[i] * 0.6 + background[i] * 0.4;
+            }
+        }
+        color
     }
 
     /// Get the resolved selection highlight color as `[f32; 4]`, sourced
@@ -1461,7 +1464,7 @@ impl GridRenderer {
     }
 
     /// Append the cursor geometry. Hidden cursors emit nothing; inactive
-    /// cursors retain their position as a steady hollow outline.
+    /// cursors retain their normal shape with a steady, muted color.
     fn add_cursor_rects(
         &self,
         cursor: &RenderableCursor,
@@ -2318,7 +2321,11 @@ mod tests {
                 for program in [Block, Beam, Underline, HollowBlock] {
                     assert_eq!(
                         presented_cursor_shape(program, configured, false, blink_visible),
-                        HollowBlock
+                        if program == Block {
+                            configured
+                        } else {
+                            program
+                        }
                     );
                     let expected = if !blink_visible {
                         Hidden

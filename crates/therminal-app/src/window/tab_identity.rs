@@ -82,7 +82,8 @@ pub(super) fn app_icon(app: &str) -> &'static str {
         "powershell" | "windows powershell" | "pwsh" | "powershell.exe" | "pwsh.exe" => ">_",
         "command prompt" | "cmd" => "C>",
         "bash" | "zsh" | "fish" | "sh" => "$",
-        _ => "▣",
+        "htop" | "btop" | "top" => "\u{f080}",
+        _ => "\u{f120}",
     }
 }
 
