@@ -255,7 +255,10 @@ async fn build_reconcile_result(
 
     // 3b. Fetch pane summaries so we can restore per-pane state (e.g.
     //     pinned flag, tn-tl6u) when building new PaneStates.
-    let pinned_map: HashMap<therminal_protocol::PaneId, bool> = {
+    let pane_summaries: HashMap<
+        therminal_protocol::PaneId,
+        therminal_protocol::daemon::PaneSummary,
+    > = {
         match tokio::time::timeout(
             DAEMON_OP_TIMEOUT,
             client.send_request(IpcRequest::ListPanes {
@@ -265,21 +268,21 @@ async fn build_reconcile_result(
         .await
         {
             Ok(Ok(IpcResponse::Panes { panes })) => {
-                panes.into_iter().map(|s| (s.pane_id, s.pinned)).collect()
+                panes.into_iter().map(|s| (s.pane_id, s)).collect()
             }
             Ok(Ok(other)) => {
                 warn!(
                     ?other,
-                    "reconcile: unexpected response to ListPanes — pinned state will default to false"
+                    "reconcile: unexpected response to ListPanes — pane metadata will be unavailable"
                 );
                 HashMap::new()
             }
             Ok(Err(e)) => {
-                warn!(error = %e, "reconcile: ListPanes failed — pinned state will default to false");
+                warn!(error = %e, "reconcile: ListPanes failed — pane metadata will be unavailable");
                 HashMap::new()
             }
             Err(_) => {
-                warn!("reconcile: ListPanes timed out — pinned state will default to false");
+                warn!("reconcile: ListPanes timed out — pane metadata will be unavailable");
                 HashMap::new()
             }
         }
@@ -331,7 +334,9 @@ async fn build_reconcile_result(
         let socket_for_build = daemon_socket.clone();
         let icfg = interceptor_config.clone();
         // tn-tl6u: look up pinned state before moving into the blocking closure.
-        let is_pinned = pinned_map.get(&daemon_pane_id).copied().unwrap_or(false);
+        let summary = pane_summaries.get(&daemon_pane_id);
+        let is_pinned = summary.is_some_and(|s| s.pinned);
+        let initial_cwd = summary.and_then(|s| s.cwd.clone());
         let result = tokio::task::spawn_blocking(move || {
             crate::pane::remote_spawn::build_remote_pane_state(
                 local_id,
@@ -345,7 +350,7 @@ async fn build_reconcile_result(
                 handle_for_build,
                 socket_for_build,
                 callbacks,
-                None,
+                initial_cwd,
                 // tn-alpb: reconcile runs in an async task without access
                 // to the App's agent_registry. PaneStatus.agent_name is
                 // still updated by the forwarder's AgentChanged handler;

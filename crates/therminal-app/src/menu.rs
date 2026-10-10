@@ -506,6 +506,7 @@ fn is_git_commit_hash(text: &str) -> bool {
 /// `available_git_tools` order. An empty slice (or a `GitRef` that
 /// looks like a branch name) suppresses tool entries.
 pub(crate) fn build_hotspot_palette(
+    pane_id: PaneId,
     kind: therminal_terminal::hotspot_detection::HotspotKind,
     text: String,
     is_dir: bool,
@@ -645,7 +646,7 @@ pub(crate) fn build_hotspot_palette(
         sections,
         position,
         selected_index: None,
-        context: MenuContext::Pane { pane_id: 0 },
+        context: MenuContext::Pane { pane_id },
     }
 }
 
@@ -1142,6 +1143,7 @@ mod tests {
         let pane_item_count = pane_menu.item_count();
 
         let hotspot = build_hotspot_palette(
+            42,
             HotspotKind::FilePath,
             "src/main.rs:42".to_string(),
             false,
@@ -1202,12 +1204,14 @@ mod tests {
     fn directory_hotspot_palette_uses_folder_actions() {
         use therminal_terminal::hotspot_detection::HotspotKind;
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::FilePath,
             "/home/me/projects".to_string(),
             true,
             &[],
             (0.0, 0.0),
         );
+        assert!(matches!(menu.context, MenuContext::Pane { pane_id: 42 }));
         let labels: Vec<&str> = menu.flat_items().iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(
             labels,
@@ -1237,6 +1241,7 @@ mod tests {
     fn file_hotspot_palette_unchanged_when_is_dir_false() {
         use therminal_terminal::hotspot_detection::HotspotKind;
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::FilePath,
             "src/main.rs:42".to_string(),
             false,
@@ -1255,6 +1260,7 @@ mod tests {
         // editor menu so the user can jump to the offending line.
         use therminal_terminal::hotspot_detection::HotspotKind;
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::ErrorLocation,
             "src/lib.rs:10:5".to_string(),
             true,
@@ -1291,6 +1297,7 @@ mod tests {
     fn git_ref_palette_with_no_tools_only_copies_hash() {
         use therminal_terminal::hotspot_detection::HotspotKind;
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::GitRef,
             "abc1234".to_string(),
             false,
@@ -1316,6 +1323,7 @@ mod tests {
             "tig".to_string(),
         ];
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::GitRef,
             "deadbeef".to_string(),
             false,
@@ -1352,6 +1360,7 @@ mod tests {
         use therminal_terminal::hotspot_detection::HotspotKind;
         let tools = vec!["tig".to_string(), "lazygit".to_string()];
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::GitRef,
             "abc1234".to_string(),
             false,
@@ -1371,6 +1380,7 @@ mod tests {
         use therminal_terminal::hotspot_detection::HotspotKind;
         let tools = vec!["lazygit".to_string()];
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::GitRef,
             "feature/foo".to_string(),
             false,
@@ -1389,6 +1399,7 @@ mod tests {
         // first so the hover default matches the plain-click default.
         use therminal_terminal::hotspot_detection::HotspotKind;
         let menu = build_hotspot_palette(
+            42,
             HotspotKind::Url,
             "https://example.com/path?q=1".to_string(),
             false,

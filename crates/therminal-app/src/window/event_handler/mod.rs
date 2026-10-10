@@ -396,6 +396,7 @@ impl App {
                 // worktree hops.
                 let effective = resolved.unwrap_or(text);
                 Some(crate::menu::build_hotspot_palette(
+                    pane_id,
                     kind,
                     effective.to_string(),
                     is_dir,
@@ -409,6 +410,7 @@ impl App {
                     .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
                     .map(|url| {
                         crate::menu::build_hotspot_palette(
+                            pane_id,
                             therminal_terminal::hotspot_detection::HotspotKind::Url,
                             url.to_string(),
                             false,
@@ -473,6 +475,25 @@ impl App {
                 w.request_redraw();
             }
             return;
+        }
+
+        // File/folder actions must resolve against the pane that opened the
+        // menu, including right-clicks on an unfocused WSL terminal.
+        if matches!(
+            action,
+            KeyAction::HotspotOpenInEditor(_)
+                | KeyAction::HotspotOpenFolderInPane(_)
+                | KeyAction::HotspotOpenFolderInFileManager(_)
+        ) && let Some(pane_id) = menu_pane_id
+        {
+            if self
+                .get_layout()
+                .is_none_or(|layout| layout.find_pane(pane_id).is_none())
+            {
+                self.show_toast("The source pane is no longer available");
+                return;
+            }
+            self.set_focused_pane(Some(pane_id));
         }
 
         match action {

@@ -866,6 +866,7 @@ impl App {
             None => return false,
         };
         let menu = crate::menu::build_hotspot_palette(
+            pane_id,
             kind,
             text.to_string(),
             is_dir,

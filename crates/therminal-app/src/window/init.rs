@@ -941,7 +941,10 @@ impl App {
 
         // 2b. Fetch pane summaries to restore per-pane state (e.g. pinned
         //     flag, tn-tl6u) when building local PaneStates from daemon data.
-        let pinned_map: std::collections::HashMap<therminal_protocol::PaneId, bool> = {
+        let pane_summaries: std::collections::HashMap<
+            therminal_protocol::PaneId,
+            therminal_protocol::daemon::PaneSummary,
+        > = {
             let lp_resp = tokio_handle.block_on(async {
                 tokio::time::timeout(
                     rpc_timeout,
@@ -953,25 +956,25 @@ impl App {
             });
             match lp_resp {
                 Ok(Ok(IpcResponse::Panes { panes })) => {
-                    panes.into_iter().map(|s| (s.pane_id, s.pinned)).collect()
+                    panes.into_iter().map(|s| (s.pane_id, s)).collect()
                 }
                 Ok(Ok(other)) => {
                     tracing::warn!(
                         ?other,
-                        "attach: unexpected response to ListPanes — pinned state will default to false"
+                        "attach: unexpected response to ListPanes — pane metadata will be unavailable"
                     );
                     std::collections::HashMap::new()
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
                         error = %e,
-                        "attach: ListPanes failed — pinned state will default to false"
+                        "attach: ListPanes failed — pane metadata will be unavailable"
                     );
                     std::collections::HashMap::new()
                 }
                 Err(_) => {
                     tracing::warn!(
-                        "attach: ListPanes timed out — pinned state will default to false"
+                        "attach: ListPanes timed out — pane metadata will be unavailable"
                     );
                     std::collections::HashMap::new()
                 }
@@ -1025,7 +1028,9 @@ impl App {
                         }),
                     };
                     // tn-tl6u: restore pinned state from daemon summary.
-                    let is_pinned = pinned_map.get(&daemon_pane_id).copied().unwrap_or(false);
+                    let summary = pane_summaries.get(&daemon_pane_id);
+                    let is_pinned = summary.is_some_and(|s| s.pinned);
+                    let initial_cwd = summary.and_then(|s| s.cwd.clone());
                     match crate::pane::remote_spawn::build_remote_pane_state(
                         local_id,
                         daemon_pane_id,
@@ -1038,7 +1043,7 @@ impl App {
                         handle_for_leaf.clone(),
                         socket_for_leaf.clone(),
                         callbacks,
-                        None,
+                        initial_cwd,
                         Some(Arc::clone(&registry_for_leaf)),
                         None, // tn-s8w3: swarm_tx wired after App construction
                         None, // swarm_wake
