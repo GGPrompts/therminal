@@ -105,6 +105,17 @@ impl SettingsOverlayState {
                 if field == ProfileField::Arguments && mode(profile) != 0 {
                     continue;
                 }
+                // Web pages have no terminal working directory or shell identity.
+                if mode(profile) == 2
+                    && matches!(
+                        field,
+                        ProfileField::Directory
+                            | ProfileField::Environment
+                            | ProfileField::ShellLabel
+                    )
+                {
+                    continue;
+                }
                 controls.push(SettingsControl::with_type(
                     label,
                     ControlBinding::ProfileText(field),
