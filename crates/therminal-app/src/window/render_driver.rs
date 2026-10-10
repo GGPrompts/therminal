@@ -42,6 +42,11 @@ impl App {
     /// Render a frame: render all panes and separators.
     pub(super) fn render(&mut self) {
         let mut new_status_bar_hit_areas = chrome::StatusBarHitAreas::default();
+        let show_window_border = self.config.general.use_csd
+            && self
+                .window
+                .as_ref()
+                .is_some_and(|w| w.fullscreen().is_none());
 
         // tn-ztv3.4: Compute the delegate sibling summary before borrowing
         // `grid_renderer` mutably — the scan needs mutable access to
@@ -228,6 +233,21 @@ impl App {
                     if let Some(pane) = layout.find_pane(wv_pane_id) {
                         let content_rect =
                             crate::pane::webview::webview_content_rect(pane.viewport, header_h);
+                        // Native child windows otherwise cover the GPU outline.
+                        let content_rect = if show_window_border {
+                            let x = content_rect.x().max(1.0);
+                            let y = content_rect.y().max(1.0);
+                            let right = content_rect.right().min(gpu.config.width as f32 - 1.0);
+                            let bottom = content_rect.bottom().min(gpu.config.height as f32 - 1.0);
+                            therminal_core::geometry::Rect::new(
+                                x,
+                                y,
+                                (right - x).max(0.0),
+                                (bottom - y).max(0.0),
+                            )
+                        } else {
+                            content_rect
+                        };
                         self.webview_manager.set_bounds(wv_pane_id, content_rect);
                     }
                     self.webview_manager.set_visible(wv_pane_id, true);
@@ -698,6 +718,16 @@ impl App {
                 &view,
                 gpu.config.width,
                 gpu.config.height,
+                &mut chrome_overlay,
+            );
+        }
+
+        if show_window_border {
+            chrome::push_window_border(
+                gpu.config.width,
+                gpu.config.height,
+                self.window.as_ref().is_some_and(|w| w.has_focus()),
+                &renderer.chrome_palette,
                 &mut chrome_overlay,
             );
         }

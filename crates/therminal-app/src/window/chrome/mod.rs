@@ -23,7 +23,7 @@ mod text_cache;
 pub(crate) use colors::{HEADER_BUTTON_MARGIN, HEADER_BUTTON_WIDTH};
 pub(crate) use csd::{CsdAction, csd_button_hit_test, draw_csd_buttons};
 pub(crate) use delegate_summary::{DelegateState, DelegateSummaryState};
-pub(crate) use overlays::push_visual_bell_overlay;
+pub(crate) use overlays::{push_visual_bell_overlay, push_window_border};
 pub(crate) use pane_header::{draw_pane_focus_border, draw_pane_header, draw_split_separator};
 pub(crate) use status_bar::{
     StatusBarHit, StatusBarHitAreas, StatusBarInfo, draw_status_bar, status_bar_hit_test,

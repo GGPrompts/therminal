@@ -264,3 +264,36 @@ mod tests {
         assert_eq!(overlay.quad_count(), 1);
     }
 }
+
+/// An opaque one-physical-pixel outline, independent of background opacity.
+/// Blend theme roles rather than imposing a dark-only or fixed-color frame.
+pub(crate) fn push_window_border(
+    width: u32,
+    height: u32,
+    focused: bool,
+    palette: &ChromePalette,
+    overlay: &mut OverlayLayer,
+) {
+    let (w, h) = (width as f32, height as f32);
+    if w < 2.0 || h < 2.0 {
+        return;
+    }
+    let source = if focused {
+        palette.focus_border
+    } else {
+        palette.chrome_fg_muted.to_f32_array()
+    };
+    let strength = if focused { 0.65 } else { 0.45 };
+    let mut color = [0.0, 0.0, 0.0, 1.0];
+    for i in 0..3 {
+        color[i] = palette.header_bg[i] * (1.0 - strength) + source[i] * strength;
+    }
+    for (x, y, width, height) in [
+        (0.0, 0.0, w, 1.0),
+        (0.0, h - 1.0, w, 1.0),
+        (0.0, 1.0, 1.0, h - 2.0),
+        (w - 1.0, 1.0, 1.0, h - 2.0),
+    ] {
+        overlay.push_rect(x, y, width, height, color, OverlayTier::Modal);
+    }
+}

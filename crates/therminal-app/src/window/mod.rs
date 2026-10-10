@@ -1746,6 +1746,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => {
                 self.handle_redraw_requested(event_loop);
             }
+            WindowEvent::Focused(_) => {
+                self.request_redraw();
+            }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers;
             }

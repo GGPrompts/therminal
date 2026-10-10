@@ -272,7 +272,8 @@ MIT
 Click **+** after the last tab to create a default-shell workspace. Right-click
 **+** to choose a launcher profile for a new workspace. The button's tooltip shows
 the configured new-tab shortcut; the existing nine-workspace limit still applies.
-Tabs stay visible with one workspace, except in focus mode.
+Tabs stay visible with one workspace, except in focus mode. A thin outer window
+outline follows the theme accent when focused and its muted colors when inactive.
 
 Each tab shows compact application/profile icons across its panes, with duplicate
 counts and no environment text. Groups stay distinct by app and environment.
