@@ -280,8 +280,8 @@ application-hidden cursors remain hidden.
 
 Each tab shows compact application/profile icons across its panes, with duplicate
 counts and no environment text. Groups stay distinct by app and environment.
-Hover a tab to see full pane identities and working directories or website
-URLs; click a row to switch to that workspace and focus its pane. Scroll the pane
+Hover a tab to see one numbered entry per pane, with its identity and working
+directory or website URL; click an entry to switch to that workspace and focus its pane. Scroll the pane
 list if it exceeds the window height. Profile identity is the fallback when live
 process metadata is unavailable; unknown or stale observations are labeled in the
 pane list. Merely detecting an agent does not imply that it is working or waiting.

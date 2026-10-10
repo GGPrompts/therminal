@@ -103,7 +103,7 @@ impl PanePicker {
         width: f32,
         height: f32,
     ) -> Self {
-        let page_size = (((height - position.1 - 16.0) / 64.0) as usize).max(1);
+        let page_size = (((height - position.1 - 16.0) / 28.0) as usize).max(1);
         let mut picker = Self {
             workspace_id,
             rows,
@@ -124,51 +124,53 @@ impl PanePicker {
         // The common menu renderer estimates glyph widths conservatively.
         // Budget bytes as well as chars so icon glyphs cannot push it offscreen.
         let budget = ((width - 28.0) / 12.6).max(8.0) as usize;
-        self.menu.sections = self
-            .rows
-            .iter()
-            .skip(self.offset)
-            .take(self.page_size)
-            .enumerate()
-            .map(|(i, row)| {
-                let status = row
-                    .status
-                    .as_ref()
-                    .map(|s| format!(" · {s}"))
-                    .unwrap_or_default();
-                let text = format!(
-                    "{} {} · {} / {}{}",
-                    row.icon, row.app, row.environment, row.shell, status
-                );
-                let fit = |text: &str| {
-                    let mut label = compact(text, budget);
-                    if label.len() > budget {
-                        while label.len() + '…'.len_utf8() > budget {
-                            label.pop();
+        self.menu.sections = vec![MenuSection(
+            self.rows
+                .iter()
+                .skip(self.offset)
+                .take(self.page_size)
+                .enumerate()
+                .map(|(i, row)| {
+                    let status = row
+                        .status
+                        .as_ref()
+                        .map(|s| format!(" · {s}"))
+                        .unwrap_or_default();
+                    let detail =
+                        if row.detail.is_empty() || row.detail == format!("Pane {}", row.pane_id) {
+                            String::new()
+                        } else {
+                            format!(" · {}", row.detail)
+                        };
+                    let text = format!(
+                        "{}) {} {} · {} / {}{}{}",
+                        row.pane_id, row.icon, row.app, row.environment, row.shell, status, detail
+                    );
+                    let fit = |text: &str| {
+                        let mut label = compact(text, budget);
+                        if label.len() > budget {
+                            while label.len() + '…'.len_utf8() > budget {
+                                label.pop();
+                            }
+                            label.push('…');
                         }
-                        label.push('…');
+                        label
+                    };
+                    let has_more = self.rows.len() > self.page_size;
+                    let identity = if has_more && i == 0 {
+                        format!("↕ {text}")
+                    } else {
+                        text
+                    };
+                    MenuItem {
+                        label: fit(&identity).into(),
+                        hotkey_hint: None,
+                        action: KeyAction::FocusNext,
+                        enabled: true,
                     }
-                    label
-                };
-                let has_more = self.rows.len() > self.page_size;
-                let identity = if has_more && i == 0 {
-                    format!("↕ {text}")
-                } else {
-                    text
-                };
-                MenuSection(
-                    [identity, row.detail.clone()]
-                        .into_iter()
-                        .map(|label| MenuItem {
-                            label: fit(&label).into(),
-                            hotkey_hint: None,
-                            action: KeyAction::FocusNext,
-                            enabled: true,
-                        })
-                        .collect(),
-                )
-            })
-            .collect();
+                })
+                .collect(),
+        )];
         self.menu.selected_index = None;
     }
 
@@ -177,9 +179,7 @@ impl PanePicker {
         let index =
             self.menu
                 .item_at_position(x, y, g.x, g.y, g.width, g.item_height, g.section_gap)?;
-        self.rows
-            .get(self.offset + index / 2)
-            .map(|row| row.pane_id)
+        self.rows.get(self.offset + index).map(|row| row.pane_id)
     }
 
     pub fn contains(&self, x: f32, y: f32, width: f32, height: f32) -> bool {
@@ -234,13 +234,16 @@ mod tests {
     }
 
     #[test]
-    fn browser_only_panes_group_and_both_row_lines_select_the_same_pane() {
+    fn browser_only_panes_have_one_numbered_entry_each() {
         let rows = vec![row(42, "browser", ""), row(91, "browser", "")];
         assert_eq!(summarize(&rows), "◎×2");
         let picker = PanePicker::new(1, rows, (0.0, 28.0), 800.0, 400.0);
         assert_eq!(picker.row_at(10.0, 40.0, 800.0, 400.0), Some(42));
-        assert_eq!(picker.row_at(10.0, 70.0, 800.0, 400.0), Some(42));
-        assert_eq!(picker.row_at(10.0, 105.0, 800.0, 400.0), Some(91));
+        assert_eq!(picker.row_at(10.0, 70.0, 800.0, 400.0), Some(91));
+        assert_eq!(picker.row_at(10.0, 105.0, 800.0, 400.0), None);
+        assert_eq!(picker.menu.item_count(), 2);
+        assert!(picker.menu.sections[0].0[0].label.starts_with("42)"));
+        assert!(picker.menu.sections[0].0[1].label.starts_with("91)"));
     }
 
     #[test]
